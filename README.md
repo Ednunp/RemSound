@@ -50,6 +50,12 @@ After that, RemSound updates itself. Help → Check for updates pulls the next v
 * **Another person running RemSound** on their own Windows machine.
 * **A way for the two machines to reach each other on the network.** Both on the same Wi-Fi works. Both on the same [Tailscale](https://tailscale.com) network works (free and easy to set up). Or both pointed at the public RemSound relay (also free, no setup).
 
+## RemSound on Android
+
+There's a companion **Android receiver**, so a phone or tablet can pick up RemSound audio — handy for listening on the move while a Windows machine does the sending. It's a separate community project, built and maintained by **[Aryan Choudhary](https://github.com/aryanchoudharypro)**, who is a screen-reader user himself and has tuned the app for TalkBack. It isn't part of RemSound and isn't maintained by us, but it speaks the same protocol and we're glad to point you to it.
+
+**Get it:** [RemSound Android — Releases](https://github.com/aryanchoudharypro/RemSoundAndroid/releases) — download the latest `app-release.apk`.
+
 ## Learn how to use it
 
 The full user manual is right here on GitHub: **[Read the user manual](MANUAL.md)**. It covers getting connected for the first time, every setting and what it does, troubleshooting tips, and a glossary at the end. It's the same manual you can press F1 to read from inside RemSound, so you can read it before installing if you want to see what you're getting.
