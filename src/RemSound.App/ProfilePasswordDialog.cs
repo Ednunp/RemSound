@@ -13,7 +13,7 @@ namespace RemSound.App;
 /// </summary>
 internal static class ProfilePasswordDialog
 {
-    public static string? Show(IWin32Window owner, string profileTitle, string currentPassword)
+    public static string? Show(IWin32Window owner, string profileTitle, string currentPassword, bool requireNonEmpty = false)
     {
         using var dialog = new Form
         {
@@ -45,16 +45,45 @@ internal static class ProfilePasswordDialog
             AutoSize = true,
         };
 
-        var okButton = new Button { Text = "OK", AutoSize = true, DialogResult = DialogResult.OK };
+        var okButton = new Button { Text = "OK", AutoSize = true };
         var cancelButton = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
+
+        // OK is validated by hand (no auto-close DialogResult) so we can block an empty entry when
+        // a password is being REQUIRED. The trigger is the OK/Enter action, not typing — and
+        // deliberately clearing an already-set password to blank is still allowed, because that
+        // path passes requireNonEmpty: false. So this only catches "was asked for a password,
+        // entered nothing, pressed OK", which used to silently leave audio dead.
+        void TryAccept()
+        {
+            if (requireNonEmpty && textBox.Text.Trim().Length == 0)
+            {
+                var page = new TaskDialogPage
+                {
+                    Caption = "Password required",
+                    Heading = "Enter a password",
+                    Text = "A password is required before audio can flow. You and the person you're connecting to must use the same one.",
+                    Icon = TaskDialogIcon.Warning,
+                    Buttons = { TaskDialogButton.OK },
+                    DefaultButton = TaskDialogButton.OK,
+                    AllowCancel = true,
+                };
+                TaskDialog.ShowDialog(dialog, page);
+                textBox.Focus();
+                textBox.SelectAll();
+                return;
+            }
+            dialog.DialogResult = DialogResult.OK;
+            dialog.Close();
+        }
+
+        okButton.Click += (_, _) => TryAccept();
         textBox.KeyDown += (_, args) =>
         {
             if (args.KeyCode == Keys.Enter)
             {
-                dialog.DialogResult = DialogResult.OK;
-                dialog.Close();
                 args.Handled = true;
                 args.SuppressKeyPress = true;
+                TryAccept();
             }
         };
 

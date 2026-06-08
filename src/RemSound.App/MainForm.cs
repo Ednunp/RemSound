@@ -97,6 +97,9 @@ public sealed class MainForm : Form
     private readonly Label asioSendDevicesStatusLabel = new() { AutoSize = true, Text = "No ASIO send channel selected." };
     private readonly CheckedListBox asioReceiveOutputDevicesList = new() { CheckOnClick = true, Width = 430, Height = 90 };
     private readonly Label asioReceiveOutputDevicesStatusLabel = new() { AutoSize = true, Text = "No ASIO receive channel selected." };
+    // One-press "clear every device tick" — sits above the ASIO driver picker on the I/O tab.
+    // The device lists can get long; this is the quick reset when you've lost track of what's on.
+    private readonly Button uncheckAllDevicesButton = new() { AutoSize = true, Anchor = AnchorStyles.Left };
     // Labels paired with the ASIO lists; held as fields so the layout can show/hide them as a
     // unit when the user toggles "Enable ASIO".
     private MnemonicLabel? asioSendDevicesLabel;
@@ -329,6 +332,7 @@ public sealed class MainForm : Form
     // Save As; Profile fires immediately after a profile finishes loading in MainForm.
     private CuePlayer? saveSound;
     private CuePlayer? profileSwitchSound;
+    private CuePlayer? profileMenuOpenSound;
     private CuePlayer? updateSound;
     // Labels for the three send/receive device lists, captured at layout time so they can be
     // re-titled when the user toggles between WASAPI mode (Windows devices) and ASIO mode
@@ -362,21 +366,23 @@ public sealed class MainForm : Form
     private readonly Dictionary<CheckedListBox, int> lastFocusedListIndices = [];
 
     private readonly System.Windows.Forms.Timer statusTimer = new() { Interval = 1000 };
-    // Periodic re-enumeration of WASAPI devices so USB hot-plug/unplug shows up in the lists
-    // within a second of plugging. Cost per tick in the no-change case is just two COM
-    // enumerations + a string compare — a few ms on the UI thread, no impact on the audio
-    // threads (which run on separate MMCSS-boosted threads). The listbox itself is only
-    // rebuilt when the (id, name) signature actually changes, so NVDA isn't pestered on every
-    // tick — only when a device truly came or went.
-    // 3 s interval (was 1 s pre-2026-05-23). Item 4 of RemSoundefficiency.md — when an ASIO
-    // driver is configured, each tick calls AsioDeviceProbe.ProbeDriverInfo which briefly
-    // opens the driver to enumerate channel names. That's measurable CPU (~1.6 % of one core
-    // in the test we ran) for a check that only matters when a USB audio device is hot-
-    // plugged. 3 s is the value the existing RefreshAudioDeviceLists docstring already
-    // claimed; the actual timer just hadn't been bumped to match. Hot-plug latency goes from
-    // up-to-1 s to up-to-3 s, which is fine for the device-list-refresh use case (nobody
-    // pulls a device and stares at the menu in the next second waiting for it to drop off).
-    private readonly System.Windows.Forms.Timer deviceRefreshTimer = new() { Interval = 3000 };
+    // Device-list refresh. As of v3.4 this is EVENT-DRIVEN, not polled: an
+    // AudioDeviceChangeNotifier registers for Windows audio endpoint-change notifications and
+    // pokes this timer when the device set actually changes (USB hot-plug / unplug, default-device
+    // change). The timer then acts as a one-shot DEBOUNCE — a burst of add/remove/default-changed
+    // callbacks collapses into a single RefreshAudioDeviceLists ~750 ms after the last one, so the
+    // listboxes (and NVDA) are only touched when something truly changed, and zero work happens
+    // while nothing is being plugged or unplugged. If notification registration ever fails we fall
+    // back to the pre-v3.4 periodic poll (deviceRefreshOneShot = false, 3 s). This replaces the old
+    // 3-second poll that re-enumerated every WASAPI device — and re-opened the ASIO driver — on
+    // every tick regardless of whether anything had changed.
+    private readonly System.Windows.Forms.Timer deviceRefreshTimer = new() { Interval = 750 };
+    // True when deviceRefreshTimer is a one-shot debounce (notification-driven — the normal case);
+    // false when it's the periodic-poll fallback. Controls whether the Tick handler stops the timer.
+    private bool deviceRefreshOneShot = true;
+    // Windows audio endpoint-change notifier — drives the debounced device-list refresh. Null until
+    // wired in the constructor; disposed in FormClosing (which unregisters the COM callback).
+    private AudioDeviceChangeNotifier? deviceChangeNotifier;
     // Debounce timer for ASIO driver listbox selection. See SelectedIndexChanged handler
     // wiring for the full rationale. 300 ms is long enough to coalesce arrow-key bursts
     // (NVDA users typically press a few keys in quick succession to scan through items),
@@ -387,6 +393,17 @@ public sealed class MainForm : Form
     private string receiveOutputDevicesSignature = string.Empty;
     private string asioSendDevicesSignature = string.Empty;
     private string asioReceiveOutputDevicesSignature = string.Empty;
+    private string? cachedAsioProbeDriverName;
+    private AsioDriverProbeResult? cachedAsioProbeResult;
+    private bool cachedAsioProbeFailed;
+    // ASIO drivers RemSound must never touch (e.g. the handle-leaking Realtek ASIO driver),
+    // mirrored from AppConfig.DisabledAsioDrivers at startup so the device refresh can check
+    // without disk I/O. Updated when the user disables/enables via the warning or Options menu.
+    private readonly HashSet<string> disabledAsioDrivers = new(StringComparer.OrdinalIgnoreCase);
+    // Realtek ASIO drivers found installed at startup (name contains "Realtek"). Drives the
+    // one-time compatibility warning and the Options-menu enable/disable toggle.
+    private List<string> realtekAsioDriverNames = new();
+    private ToolStripMenuItem? realtekAsioToggleItem;
     // True while we're rebuilding a CheckedListBox programmatically — suppresses the per-item
     // ItemCheck handler so re-adding pre-checked items doesn't fire ApplyAudioRuntime per item.
     private bool suppressDeviceCheckChange;
@@ -394,6 +411,21 @@ public sealed class MainForm : Form
     private DateTime connectedSinceUtc = DateTime.MinValue;
     private DateTime lastSnapshotUtc = DateTime.MinValue;
     private DateTime lastCaptureZeroLogUtc = DateTime.MinValue;
+
+    // Full set of selected send endpoints (one per resolved peer address). The heartbeat pings
+    // ALL of these; the audio sender is armed with the subset that isn't long-unreachable — see
+    // RefreshAudioReceivers. Stored so the per-tick re-filter doesn't re-resolve addresses.
+    private IPEndPoint[] allSendEndpoints = [];
+    // Cached "ip:port|ip:port" signature of the endpoints currently armed for AUDIO, so the
+    // per-tick refresh only calls SetReceivers when the armed set actually changes. null forces
+    // a re-push (set when the selected-peer set changes).
+    private string? activeAudioReceiverSignature;
+    // How long an endpoint must be continuously unreachable before we stop sending the audio
+    // stream to it. Well beyond the heartbeat's 5s UnreachableWindow so a transient blip never
+    // interrupts audio to a healthy peer. The endpoint stays in the heartbeat's tracked set, so
+    // when it recovers it's automatically re-armed. Stops the "peer hostname resolves to a live
+    // LAN IP plus a dead Tailscale IP, so we upload the whole stream twice" waste.
+    private static readonly TimeSpan AudioPruneUnreachableAfter = TimeSpan.FromSeconds(30);
     private bool firstCaptureCallbackLogged;
     private bool firstSenderPacketLogged;
     private bool firstReceiverPacketLogged;
@@ -402,6 +434,9 @@ public sealed class MainForm : Form
     // snapshot tick (~1 Hz) and triggers a forced gen2 + finalizer flush every 300 ticks
     // (~5 minutes). See the inline comment in SnapshotLogIfDue for the full rationale.
     private int nativeReaperTickCount;
+    // Counts status ticks (~1 Hz) so the heavier handle-TYPE probe runs on a slow cadence
+    // (~once a minute) rather than every diag line. 2026-06-07, for the receiver handle leak.
+    private int handleProbeTickCount;
 
     // Previous-tick values for the per-second deltas surfaced in the diag log line. Each is
     // the receiver-side cumulative counter snapshot at the previous SnapshotLogIfDue tick;
@@ -648,7 +683,8 @@ public sealed class MainForm : Form
             // fixed by Windows. Hold the hotkey for bigger jumps.
             () => SendRemoteControl(RemoteControlKind.SystemVolumeUp, 0),
             () => SendRemoteControl(RemoteControlKind.SystemVolumeDown, 0),
-            () => SendRemoteControl(RemoteControlKind.SystemMuteToggle, 0));
+            () => SendRemoteControl(RemoteControlKind.SystemMuteToggle, 0),
+            ShowQuickProfileSwitch);
         // Pipe hotkey controller diagnostics into the main log so we can see, e.g.,
         // "capture send-system-volume-down: OK = Ctrl+Shift+Alt+J" and
         // "register send-system-volume-down: FAILED = Ctrl+Shift+Alt+J (Win32 error 1409:
@@ -663,7 +699,12 @@ public sealed class MainForm : Form
         // a binding, close, get no prompt, launch again — and find their new binding
         // wasn't in the profile JSON. (The settings cache holds it, but the cache is
         // copied to the profile only on Save / Update, not on close.)
-        hotkeyController.OnHotkeyChanged = MarkProfileDirty;
+        hotkeyController.OnHotkeyChanged = () =>
+        {
+            MarkProfileDirty();
+            // Keep the spoken "press X anywhere" hints in sync with the new binding.
+            UpdateHotkeyAnnouncements();
+        };
         trayController = new MainFormTrayController(
             this,
             // getSending / toggleSending — the tray's "Enable sending" checkable item reads
@@ -720,6 +761,13 @@ public sealed class MainForm : Form
         // (now File menu items in BuildFileMenu).
         asioDriverBox.AccessibleName = "ASIO driver (Alt+D)";
 
+        // "Uncheck all inputs and outputs on all soundcards" — clears every device tick in one
+        // press. Button owns its own &-mnemonic (Alt+U), so AccessibleName stays clean per Ed's
+        // mnemonic convention.
+        uncheckAllDevicesButton.Text = "Uncheck all inputs and outputs on all soundcards (Alt+&U)";
+        uncheckAllDevicesButton.AccessibleName = "Uncheck all inputs and outputs on all soundcards";
+        uncheckAllDevicesButton.Click += (_, _) => UncheckAllDevices();
+
         // Populate ASIO driver list at startup. Discovers all ASIO drivers via NAudio + a
         // registry scan covering 32-bit + 64-bit + HKLM + HKCU views (some drivers register in
         // unusual places). The "(none)" sentinel is always row 0 so the user can return to
@@ -727,9 +775,23 @@ public sealed class MainForm : Form
         // driver picker is hidden entirely in BuildAudioIOTab and the form runs WASAPI-only.
         var asioDriverNames = AsioDeviceProbe.EnumerateDriverNames();
         hasAnyAsioDriverInstalled = asioDriverNames.Count > 0;
-        logFile.Event($"asio drivers enumerated at startup: [{string.Join(", ", asioDriverNames.Select(n => $"\"{n}\""))}]");
+        // Mirror the per-machine "never touch this driver" list (global config) so the picker can
+        // hide disabled drivers and the device refresh can skip them without disk I/O.
+        var realtekStartupConfig = AppConfig.Load();
+        disabledAsioDrivers.Clear();
+        foreach (var d in realtekStartupConfig.DisabledAsioDrivers) disabledAsioDrivers.Add(d);
+        // Realtek's bundled ASIO driver leaks OS handles on every open — flag any installed Realtek
+        // ASIO driver so OnShown can offer to disable it and the Options menu can toggle it.
+        realtekAsioDriverNames = asioDriverNames.Where(n => AppConfig.IsRealtekAsioDriver(n)).ToList();
+        logFile.Event($"asio drivers enumerated at startup: [{string.Join(", ", asioDriverNames.Select(n => $"\"{n}\""))}]"
+            + (disabledAsioDrivers.Count > 0 ? $"; disabled in RemSound: [{string.Join(", ", disabledAsioDrivers)}]" : "")
+            + (realtekAsioDriverNames.Count > 0 ? $"; realtek detected: [{string.Join(", ", realtekAsioDriverNames)}]" : ""));
         asioDriverBox.Items.Add(NoAsioDriverSentinel);
-        foreach (var name in asioDriverNames) asioDriverBox.Items.Add(name);
+        foreach (var name in asioDriverNames)
+        {
+            if (disabledAsioDrivers.Contains(name)) continue; // hidden — RemSound won't touch it
+            asioDriverBox.Items.Add(name);
+        }
 
         // Restore the previously-chosen driver if it's still installed; otherwise land on the
         // "(none)" sentinel. We deliberately do NOT auto-pick the first real driver — the user
@@ -769,6 +831,7 @@ public sealed class MainForm : Form
             settings.SaveAsioDriverName(newDriver);
             var driverActuallyChanged = !string.Equals(previousDriver, newDriver, StringComparison.OrdinalIgnoreCase);
             if (driverActuallyChanged) MarkProfileDirty();
+            if (driverActuallyChanged) ClearAsioProbeCache();
 
             // When the driver actually changes (including switching to/from "(none)"), clear
             // ASIO ticks. The synthetic device-id "asio:N" is a pair-index into whichever
@@ -916,6 +979,7 @@ public sealed class MainForm : Form
         TryLoadCueSound(CueId.RecordStop, "record stop.wav", out recordStopSound);
         TryLoadCueSound(CueId.Save, "save.wav", out saveSound);
         TryLoadCueSound(CueId.ProfileSwitch, "profile.wav", out profileSwitchSound);
+        TryLoadCueSound(CueId.ProfileMenuOpen, "profile menu open.wav", out profileMenuOpenSound);
         TryLoadCueSound(CueId.Update, "update.wav", out updateSound);
 
         LoadAudioDevices();
@@ -1038,7 +1102,11 @@ public sealed class MainForm : Form
         };
 
         // --- Hot-swap device watcher ---
-        deviceRefreshTimer.Tick += (_, _) => RefreshAudioDeviceLists();
+        deviceRefreshTimer.Tick += (_, _) =>
+        {
+            if (deviceRefreshOneShot) deviceRefreshTimer.Stop(); // debounce: one refresh per change burst
+            RefreshAudioDeviceLists();
+        };
 
         BuildLayout();
         LoadRememberedPeersFromSettings();
@@ -1047,6 +1115,9 @@ public sealed class MainForm : Form
         // Tailscale/VPN where broadcast doesn't traverse).
         PushDiscoveryUnicastHints();
         hotkeyController.Initialize(this);
+        // Announce each configurable global hotkey on the control / menu item it drives, so NVDA
+        // reads "… press Control+Shift+Alt+R anywhere" when you land on it.
+        UpdateHotkeyAnnouncements();
 
         // Hook system sleep/resume so we can rebuild the audio backend after wake (USB
         // audio devices often come back wedged). The handler routes back through
@@ -1066,6 +1137,7 @@ public sealed class MainForm : Form
             continuousTuneTimer.Stop();
             updateCheckTimer.Stop();
             asioDriverChangeDebounce.Stop();
+            try { deviceChangeNotifier?.Dispose(); } catch { }
             try { powerResumeHandler?.Dispose(); } catch { }
             try { routerPortMapper?.Dispose(); } catch { }
             // Reverse every Win32 lever PerformanceMode applied. The kernel would clean
@@ -1191,9 +1263,32 @@ public sealed class MainForm : Form
             // If the user opted in, show the About box once on the first launch after an update
             // installed, so they see what's new. BeginInvoke so it opens after Shown completes.
             BeginInvoke(new Action(MaybeShowWhatsNewAfterUpdate));
+
+            // Offer once to disable a handle-leaking Realtek ASIO driver if one is installed.
+            // BeginInvoke so the TaskDialog opens after Shown completes (and after the what's-new
+            // box, if that fired).
+            BeginInvoke(new Action(MaybeWarnAboutRealtekAsio));
         };
 
         statusTimer.Start();
+
+        // Hot-plug detection is event-driven (see the deviceRefreshTimer comment): register for
+        // Windows audio endpoint-change notifications and refresh the device lists only when the
+        // device set actually changes. If that registration fails, fall back to the pre-v3.4
+        // periodic poll.
+        try
+        {
+            deviceChangeNotifier = new AudioDeviceChangeNotifier(OnAudioEndpointsChanged);
+        }
+        catch (Exception ex)
+        {
+            logFile.Event($"device-change notifier failed, using periodic poll: {ex.GetType().Name}: {ex.Message}");
+            deviceRefreshOneShot = false;
+            deviceRefreshTimer.Interval = 3000;
+        }
+        // Kick one refresh shortly after launch to populate the ASIO channel lists (LoadAudioDevices
+        // only fills the WASAPI lists). After this it's notification-driven; in one-shot mode the
+        // Tick handler stops the timer, in the poll fallback it's the first of the periodic ticks.
         deviceRefreshTimer.Start();
     }
 
@@ -1473,15 +1568,28 @@ public sealed class MainForm : Form
         };
         profilePasswordsItem.Click += (_, _) => OpenProfilePasswordManager();
 
-        optionsMenu.DropDownItems.AddRange(new ToolStripItem[]
+        // Realtek ASIO enable/disable toggle — only present when a Realtek ASIO driver is actually
+        // installed. Lets the user reverse the disable decision (or disable a driver they kept).
+        ToolStripMenuItem? realtekToggle = null;
+        if (realtekAsioDriverNames.Count > 0)
+        {
+            realtekToggle = new ToolStripMenuItem { AccessibleName = "Toggle Realtek ASIO driver in RemSound" };
+            realtekToggle.Click += (_, _) => ToggleRealtekAsio();
+            realtekAsioToggleItem = realtekToggle;
+            UpdateRealtekAsioMenuItemText();
+        }
+
+        var optionItems = new List<ToolStripItem>
         {
             recordingSettingsItem,
             keyboardItem,
             startupBehaviourItem,
             profilePasswordsItem,
-            new ToolStripSeparator(),
-            prefsItem,
-        });
+        };
+        if (realtekToggle is not null) optionItems.Add(realtekToggle);
+        optionItems.Add(new ToolStripSeparator());
+        optionItems.Add(prefsItem);
+        optionsMenu.DropDownItems.AddRange(optionItems.ToArray());
 
         // Help menu — separate from File so users with their hand on Alt + arrow keys can
         // walk straight to it. F1 is the global "open the manual" key; the menu mirrors it
@@ -1605,6 +1713,50 @@ public sealed class MainForm : Form
         NextProfileTitleToLoad = title;
         AppendLogEntry($"profile switch via Recent profiles: \"{title}\" from {path}");
         Close();
+    }
+
+    /// <summary>
+    /// Opens the Quick profile switch popup (bound to the global quick-switch hotkey): an
+    /// NVDA-friendly, foreground-activated list of every profile with the current one marked.
+    /// Plays the "profile menu open" cue as it appears (honouring its mute toggle); choosing a
+    /// profile reloads into it — which plays the profile-switch cue on the relaunch. Escape, Close,
+    /// or picking the already-current profile does nothing.
+    /// </summary>
+    private void ShowQuickProfileSwitch()
+    {
+        try
+        {
+            var store = profileStore;
+            if (store is null) return;
+            var titles = store.ListProfileTitles();
+            if (titles.Count == 0) return;
+
+            var entries = new List<QuickProfileSwitchDialog.ProfileEntry>(titles.Count);
+            foreach (var title in titles)
+            {
+                var path = store.PathFor(title);
+                var isCurrent = !string.IsNullOrEmpty(currentProfilePath)
+                    && string.Equals(path, currentProfilePath, StringComparison.OrdinalIgnoreCase);
+                entries.Add(new QuickProfileSwitchDialog.ProfileEntry(title, path, isCurrent));
+            }
+
+            if (settings.LoadEnableProfileMenuOpenCue())
+            {
+                profileMenuOpenSound?.Play();
+            }
+
+            var chosen = QuickProfileSwitchDialog.Show(entries);
+            if (!string.IsNullOrEmpty(chosen))
+            {
+                // No-ops if it's already the current profile; otherwise reloads into the chosen one,
+                // which plays the profile-switch cue on the relaunch.
+                SwitchToRecentProfile(chosen);
+            }
+        }
+        catch (Exception ex)
+        {
+            logFile.Event($"quick profile switch failed: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     /// <summary>Build the Record menu — Start/stop recording (toggling label), recording
@@ -2401,7 +2553,7 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
             ColumnCount = 2,
-            RowCount = 10,
+            RowCount = 11,
             AutoScroll = true,
         };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -2422,12 +2574,17 @@ public sealed class MainForm : Form
         // brings the ASIO half of the form to life; selecting "(none)" hides it again. On
         // machines with no ASIO drivers installed the driver picker is hidden entirely (there
         // is nothing to switch to) and the form runs WASAPI-only.
+        // Row 0: "Uncheck all inputs and outputs on all soundcards", spanning both columns,
+        // sitting just above the ASIO driver picker. Always present (independent of ASIO).
+        panel.Controls.Add(uncheckAllDevicesButton, 0, 0);
+        panel.SetColumnSpan(uncheckAllDevicesButton, 2);
+
         if (hasAnyAsioDriverInstalled)
         {
             asioDriverLabel = new MnemonicLabel { Text = "ASIO driver (Alt+&D)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = asioDriverBox };
             asioDriverLabel.Click += (_, _) => asioDriverBox.Focus();
-            panel.Controls.Add(asioDriverLabel, 0, 0);
-            panel.Controls.Add(asioDriverBox, 1, 0);
+            panel.Controls.Add(asioDriverLabel, 0, 1);
+            panel.Controls.Add(asioDriverBox, 1, 1);
         }
         else
         {
@@ -2441,16 +2598,16 @@ public sealed class MainForm : Form
         // suppresses them; the FlowLayoutPanel wrapper restores the announcement chain).
         var receiveCheckboxPanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         receiveCheckboxPanel.Controls.Add(receiveAudioCheckbox);
-        panel.Controls.Add(receiveCheckboxPanel, 1, 1);
-        receiveOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 2, "WASAPI outputs for received sound (Alt+&3)", receiveOutputDevicesList, receiveOutputDevicesStatusLabel, FocusListControl);
-        asioReceiveOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 3, "ASIO outputs for received sound (Alt+&1)", asioReceiveOutputDevicesList, asioReceiveOutputDevicesStatusLabel, FocusListControl);
-        FormLayoutRows.AddRow(panel, 4, "Set volume for all received audio (Alt+&V)", volumeBar, FocusControl);
+        panel.Controls.Add(receiveCheckboxPanel, 1, 2);
+        receiveOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 3, "WASAPI outputs for received sound (Alt+&3)", receiveOutputDevicesList, receiveOutputDevicesStatusLabel, FocusListControl);
+        asioReceiveOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 4, "ASIO outputs for received sound (Alt+&1)", asioReceiveOutputDevicesList, asioReceiveOutputDevicesStatusLabel, FocusListControl);
+        FormLayoutRows.AddRow(panel, 5, "Set volume for all received audio (Alt+&V)", volumeBar, FocusControl);
         var sendCheckboxPanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         sendCheckboxPanel.Controls.Add(sendMyAudioCheckbox);
-        panel.Controls.Add(sendCheckboxPanel, 1, 5);
-        sendOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 6, "WASAPI outputs to send (Alt+&4)", sendOutputDevicesList, sendOutputDevicesStatusLabel, FocusListControl);
-        sendInputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 7, "WASAPI inputs to send (Alt+&5)", sendInputDevicesList, sendInputDevicesStatusLabel, FocusListControl);
-        asioSendDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 8, "ASIO inputs to send (Alt+&2)", asioSendDevicesList, asioSendDevicesStatusLabel, FocusListControl);
+        panel.Controls.Add(sendCheckboxPanel, 1, 6);
+        sendOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 7, "WASAPI outputs to send (Alt+&4)", sendOutputDevicesList, sendOutputDevicesStatusLabel, FocusListControl);
+        sendInputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 8, "WASAPI inputs to send (Alt+&5)", sendInputDevicesList, sendInputDevicesStatusLabel, FocusListControl);
+        asioSendDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 9, "ASIO inputs to send (Alt+&2)", asioSendDevicesList, asioSendDevicesStatusLabel, FocusListControl);
 
         audioIOTabPage.Controls.Add(panel);
     }
@@ -2887,7 +3044,8 @@ public sealed class MainForm : Form
             sb.AppendLine("Uptime: 0 seconds.");
         }
 
-        sb.Append($"Receiving {rxKbs:0.0} kB/s; sending {txKbs:0.0} kB/s.");
+        sb.AppendLine($"Receiving {rxKbs:0.0} kB/s; sending {txKbs:0.0} kB/s.");
+        sb.Append($"Total received {receiver.BytesReceived / 1048576.0:0.0} MB; sent {sender.BytesSent / 1048576.0:0.0} MB.");
         return sb.ToString();
     }
 
@@ -3250,12 +3408,19 @@ public sealed class MainForm : Form
     {
         if (!connected) return;
 
-        var endpoints = SelectedSendEndpoints();
-        sender.SetReceivers(endpoints);
+        var endpoints = SelectedSendEndpoints().ToArray();
+        allSendEndpoints = endpoints;
         // Single-port heartbeat: tracked peers' audio endpoints ARE the heartbeat target.
         // HeartbeatService sends via sender.SendVia (wired in Connect) so heartbeat shares
-        // the audio NAT pinhole on the audio port — no separate socket, no +2 port.
+        // the audio NAT pinhole on the audio port — no separate socket, no +2 port. The
+        // heartbeat tracks the FULL set so a recovered endpoint is detected and re-armed.
         heartbeatService?.SetTrackedPeers(endpoints);
+        // Arm the audio sender with the full set initially (nothing is known-dead yet). The
+        // 1 Hz tick (RefreshAudioReceivers) then drops any endpoint that stays unreachable,
+        // so we don't blast the stream at a dead address. Clear the cached signature so the
+        // refresh re-pushes against the new peer set.
+        activeAudioReceiverSignature = null;
+        RefreshAudioReceivers();
 
         // Push the current profile-password key + fingerprint down to the sender and receiver so
         // audio is encrypted/decrypted with it. Cheap when the password hasn't changed.
@@ -3327,6 +3492,62 @@ public sealed class MainForm : Form
         }
     }
 
+    /// <summary>
+    /// Re-arm the audio sender's destination list from the full selected-peer set
+    /// (<see cref="allSendEndpoints"/>), dropping any endpoint the heartbeat reports as
+    /// continuously unreachable for longer than <see cref="AudioPruneUnreachableAfter"/>. The
+    /// heartbeat keeps pinging dropped endpoints (they stay in SetTrackedPeers), so a recovered
+    /// endpoint is automatically re-added on a later tick. This stops RemSound blasting the full
+    /// audio stream at a dead address — e.g. a peer hostname resolving to both a live LAN IP and
+    /// a long-dead Tailscale IP, where half the upload went into a black hole. Called once per
+    /// second from <see cref="SnapshotLogIfDue"/>; only touches the sender when the armed set
+    /// actually changes, so it's cheap to run per tick.
+    /// </summary>
+    private void RefreshAudioReceivers()
+    {
+        if (!connected) return;
+        var all = allSendEndpoints;
+
+        // Endpoints the heartbeat currently considers long-dead, keyed by "ip:port".
+        HashSet<string>? dead = null;
+        if (all.Length > 0 && heartbeatService is { } hb)
+        {
+            foreach (var ph in hb.GetAllPeerHealth())
+            {
+                if (ph.State == PeerHealthState.Unreachable
+                    && ph.AgeOfLastPong is { } age
+                    && age > AudioPruneUnreachableAfter)
+                {
+                    (dead ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase))
+                        .Add($"{ph.AudioEndpoint.Address}:{ph.AudioEndpoint.Port}");
+                }
+            }
+        }
+
+        var armed = dead is null
+            ? all
+            : all.Where(ep => !dead.Contains($"{ep.Address}:{ep.Port}")).ToArray();
+
+        // Safety net: never silence EVERY peer through pruning. If the whole set looks dead (a
+        // total network drop), keep sending to all — the wasted SendTo per dead endpoint is
+        // cheaper than masking a global outage or missing the recovery.
+        if (armed.Length == 0) armed = all;
+
+        var signature = string.Join("|", armed.Select(ep => $"{ep.Address}:{ep.Port}").OrderBy(s => s, StringComparer.OrdinalIgnoreCase));
+        if (signature == activeAudioReceiverSignature) return;
+        activeAudioReceiverSignature = signature;
+        sender.SetReceivers(armed);
+        var pruned = all.Length - armed.Length;
+        if (pruned > 0)
+        {
+            logFile.Event($"audio receivers updated: {armed.Length} active, {pruned} pruned (unreachable >{AudioPruneUnreachableAfter.TotalSeconds:0}s); heartbeat still probing all");
+        }
+        else
+        {
+            logFile.Event($"audio receivers updated: {armed.Length} active");
+        }
+    }
+
     private bool HasCheckedSendDevice() =>
         sendOutputDevicesList.CheckedItems.OfType<AudioDeviceChoice>().Any(c => c.DeviceId is not null)
         || sendInputDevicesList.CheckedItems.OfType<AudioDeviceChoice>().Any(c => c.DeviceId is not null)
@@ -3389,12 +3610,33 @@ public sealed class MainForm : Form
     }
 
     /// <summary>
+    /// Called (on a COM thread) by <see cref="deviceChangeNotifier"/> whenever Windows reports an
+    /// audio endpoint change. Marshals to the UI thread and (re)starts the debounce timer, so a
+    /// burst of add / remove / default-changed callbacks collapses into a single refresh.
+    /// </summary>
+    private void OnAudioEndpointsChanged()
+    {
+        if (IsDisposed) return;
+        try
+        {
+            BeginInvoke(new Action(() =>
+            {
+                if (IsDisposed) return;
+                deviceRefreshTimer.Stop();
+                deviceRefreshTimer.Start();
+            }));
+        }
+        catch { /* handle gone / form closing — nothing to refresh */ }
+    }
+
+    /// <summary>
     /// Re-enumerates active audio endpoints and rebuilds any list whose set of devices changed.
-    /// Driven by <see cref="deviceRefreshTimer"/> at 3 s intervals so USB hot-plug / unplug
-    /// shows up without an app restart. Each list is rebuilt only when its (id, name) signature
-    /// changes — the no-op fast path leaves NVDA's focus and the listbox state untouched.
-    /// Check state is preserved by DeviceId across rebuilds; if a checked device disappeared,
-    /// the relevant runtime <c>Apply*</c> is called so the engine sees the change.
+    /// As of v3.4 this is driven by <see cref="deviceChangeNotifier"/> (Windows endpoint-change
+    /// notifications), debounced through <see cref="deviceRefreshTimer"/>, rather than polled — so
+    /// it runs only when the device set actually changes. Each list is rebuilt only when its
+    /// (id, name) signature changes — the no-op fast path leaves NVDA's focus and the listbox state
+    /// untouched. Check state is preserved by DeviceId across rebuilds; if a checked device
+    /// disappeared, the relevant runtime <c>Apply*</c> is called so the engine sees the change.
     /// </summary>
     private void RefreshAudioDeviceLists()
     {
@@ -3425,16 +3667,16 @@ public sealed class MainForm : Form
             wasapiInputs = AudioDeviceCatalog.LoadInputs();
 
             var currentMode = settings.LoadAudioMode();
-            if (ModeUsesAsio(currentMode) && settings.LoadAsioDriverName() is { } asioDriver && !string.IsNullOrWhiteSpace(asioDriver))
+            if (ModeUsesAsio(currentMode) && settings.LoadAsioDriverName() is { } asioDriver && !string.IsNullOrWhiteSpace(asioDriver) && !disabledAsioDrivers.Contains(asioDriver))
             {
-                var info = AsioDeviceProbe.ProbeDriverInfo(asioDriver);
-                if (info.InputChannelCount >= 0 && info.OutputChannelCount >= 0)
+                var info = GetCachedAsioProbeInfo(asioDriver, out var probeFailed);
+                if (info is not null)
                 {
                     LogAsioChannelNamesIfChanged(asioDriver, info);
                     asioInputChoices = BuildAsioChannelPairChoices(asioDriver, info.InputChannelNames);
                     asioOutputChoices = BuildAsioChannelPairChoices(asioDriver, info.OutputChannelNames);
                 }
-                else
+                else if (probeFailed)
                 {
                     // Probe came back -1/-1 — driver is configured but can't enumerate right
                     // now. Treat as transient; preserve current list state and try again on
@@ -3481,6 +3723,161 @@ public sealed class MainForm : Form
         {
             ApplyReceiveDevices();
         }
+    }
+
+    private void ClearAsioProbeCache()
+    {
+        cachedAsioProbeDriverName = null;
+        cachedAsioProbeResult = null;
+        cachedAsioProbeFailed = false;
+    }
+
+    private AsioDriverProbeResult? GetCachedAsioProbeInfo(string driverName, out bool probeFailed)
+    {
+        probeFailed = false;
+        if (string.Equals(cachedAsioProbeDriverName, driverName, StringComparison.OrdinalIgnoreCase))
+        {
+            if (cachedAsioProbeResult is not null) return cachedAsioProbeResult;
+            if (cachedAsioProbeFailed)
+            {
+                probeFailed = true;
+                return null;
+            }
+        }
+
+        // Opening some ASIO drivers is not a passive metadata read. On Andre's Realtek
+        // driver (rthdasio64.dll), every AsioOut construction leaks Event+Mutant handles.
+        // The 3-second device refresh timer only needs stable channel metadata, so probe
+        // once per selected driver and reuse the result until the driver changes or resume
+        // forces a backend refresh.
+        var info = AsioDeviceProbe.ProbeDriverInfo(driverName);
+        cachedAsioProbeDriverName = driverName;
+        if (info.InputChannelCount >= 0 && info.OutputChannelCount >= 0)
+        {
+            cachedAsioProbeResult = info;
+            cachedAsioProbeFailed = false;
+            return info;
+        }
+
+        cachedAsioProbeResult = null;
+        cachedAsioProbeFailed = true;
+        probeFailed = true;
+        return null;
+    }
+
+    /// <summary>
+    /// On startup, if a Realtek ASIO driver is installed and we haven't already disabled it or
+    /// shown the warning, offer (once) to disable it — Realtek's ASIO driver leaks OS handles on
+    /// every open. "Yes" adds it to the global never-touch list; "No" is remembered so we don't nag.
+    /// Shown from the Shown handler so the TaskDialog has a visible owner window.
+    /// </summary>
+    private void MaybeWarnAboutRealtekAsio()
+    {
+        if (realtekAsioDriverNames.Count == 0) return;
+        var cfg = AppConfig.Load();
+        var changed = false;
+        foreach (var driver in realtekAsioDriverNames)
+        {
+            if (cfg.IsAsioDriverDisabled(driver)) continue;     // already disabled
+            if (cfg.HasWarnedAboutAsioDriver(driver)) continue; // already asked; user kept it
+            var disable = ShowRealtekAsioWarning(driver);
+            cfg.MarkAsioDriverWarned(driver);
+            changed = true;
+            if (disable)
+            {
+                cfg.SetAsioDriverDisabled(driver, true);
+                disabledAsioDrivers.Add(driver);
+                RemoveDisabledDriverFromPicker(driver);
+                logFile.Event($"realtek asio disabled in RemSound via startup warning: \"{driver}\"");
+            }
+            else
+            {
+                logFile.Event($"realtek asio kept (user declined disable): \"{driver}\"");
+            }
+        }
+        if (changed)
+        {
+            try { cfg.Save(); } catch { /* best-effort */ }
+            UpdateRealtekAsioMenuItemText();
+        }
+    }
+
+    private bool ShowRealtekAsioWarning(string driver)
+    {
+        var page = new TaskDialogPage
+        {
+            Caption = "RemSound — ASIO driver warning",
+            Heading = "A Realtek ASIO driver was detected",
+            Text = $"RemSound has detected you have a Realtek ASIO driver installed (\"{driver}\").\n\n"
+                 + "This driver is known to cause compatibility issues with ASIO software, including "
+                 + "RemSound — it leaks system resources and can make audio unstable.\n\n"
+                 + "Would you like to disable it in RemSound? RemSound will then never touch this "
+                 + "driver. You can re-enable it any time from the Options menu.",
+            Icon = TaskDialogIcon.Warning,
+        };
+        var yes = new TaskDialogButton("&Yes, disable it (recommended)");
+        var no = new TaskDialogButton("&No, keep using it");
+        page.Buttons.Add(yes);
+        page.Buttons.Add(no);
+        page.DefaultButton = yes;
+        return TaskDialog.ShowDialog(this, page) == yes;
+    }
+
+    /// <summary>Options-menu handler: flip every installed Realtek ASIO driver between disabled and
+    /// enabled in RemSound. If any are currently disabled, the action re-enables them all; otherwise
+    /// it disables them all.</summary>
+    private void ToggleRealtekAsio()
+    {
+        if (realtekAsioDriverNames.Count == 0) return;
+        var anyDisabled = realtekAsioDriverNames.Exists(d => disabledAsioDrivers.Contains(d));
+        var disable = !anyDisabled;
+        var cfg = AppConfig.Load();
+        foreach (var driver in realtekAsioDriverNames)
+        {
+            cfg.SetAsioDriverDisabled(driver, disable);
+            cfg.MarkAsioDriverWarned(driver);
+            if (disable)
+            {
+                disabledAsioDrivers.Add(driver);
+                RemoveDisabledDriverFromPicker(driver);
+            }
+            else
+            {
+                disabledAsioDrivers.Remove(driver);
+                AddDriverToPickerIfMissing(driver);
+            }
+        }
+        try { cfg.Save(); } catch { /* best-effort */ }
+        UpdateRealtekAsioMenuItemText();
+        logFile.Event($"realtek asio {(disable ? "disabled" : "enabled")} in RemSound via Options menu: [{string.Join(", ", realtekAsioDriverNames)}]");
+    }
+
+    private void UpdateRealtekAsioMenuItemText()
+    {
+        if (realtekAsioToggleItem is null || realtekAsioDriverNames.Count == 0) return;
+        var anyDisabled = realtekAsioDriverNames.Exists(d => disabledAsioDrivers.Contains(d));
+        realtekAsioToggleItem.Text = anyDisabled
+            ? "&Enable Realtek ASIO driver in RemSound"
+            : "&Disable Realtek ASIO driver in RemSound";
+    }
+
+    private void RemoveDisabledDriverFromPicker(string driver)
+    {
+        var idx = asioDriverBox.Items.IndexOf(driver);
+        if (idx < 0) return;
+        var wasSelected = string.Equals(asioDriverBox.SelectedItem as string, driver, StringComparison.OrdinalIgnoreCase);
+        asioDriverBox.Items.RemoveAt(idx);
+        if (wasSelected)
+        {
+            asioDriverBox.SelectedIndex = 0; // "(none)" — back to WASAPI-only
+            settings.SaveAsioDriverName(null);
+            ClearAsioProbeCache();
+        }
+    }
+
+    private void AddDriverToPickerIfMissing(string driver)
+    {
+        if (!asioDriverBox.Items.Contains(driver)) asioDriverBox.Items.Add(driver);
     }
 
     /// <summary>
@@ -3865,6 +4262,44 @@ public sealed class MainForm : Form
     }
 
     /// <summary>
+    /// Unchecks every input and output on every soundcard — WASAPI and ASIO, send and receive —
+    /// in a single press. Idempotent: it only ever clears ticks, so pressing it again when things
+    /// are already unchecked is a harmless no-op. Provided because the device lists can run long
+    /// enough that it's hard to remember what's selected; this is the quick "start from nothing".
+    /// Suppresses the per-item ItemCheck handler during the sweep, then applies the now-empty
+    /// selection once so audio actually stops, marks the profile dirty, and resets the status
+    /// labels so a screen reader hears the cleared state.
+    /// </summary>
+    private void UncheckAllDevices()
+    {
+        var lists = new[]
+        {
+            receiveOutputDevicesList, asioReceiveOutputDevicesList,
+            sendOutputDevicesList, sendInputDevicesList, asioSendDevicesList,
+        };
+        try
+        {
+            suppressDeviceCheckChange = true;
+            foreach (var list in lists)
+                for (var i = 0; i < list.Items.Count; i++)
+                    if (list.GetItemChecked(i)) list.SetItemChecked(i, false);
+        }
+        finally { suppressDeviceCheckChange = false; }
+
+        ApplyAudioRuntime();
+        ApplyReceiveDevices();
+        MarkProfileDirty();
+
+        receiveOutputDevicesStatusLabel.Text = "No output device selected.";
+        sendOutputDevicesStatusLabel.Text = "No output device selected.";
+        sendInputDevicesStatusLabel.Text = "No input device selected.";
+        asioReceiveOutputDevicesStatusLabel.Text = "No ASIO receive channel selected.";
+        asioSendDevicesStatusLabel.Text = "No ASIO send channel selected.";
+
+        logFile.Event("user pressed 'Uncheck all inputs and outputs on all soundcards'");
+    }
+
+    /// <summary>
     /// Called by <see cref="PowerResumeHandler"/> on a background thread after the system has
     /// woken from sleep / hibernate (plus a short USB-settle delay). Marshals onto the UI
     /// thread and runs the audio-backend re-init. Swallows the form-already-torn-down race —
@@ -3917,6 +4352,7 @@ public sealed class MainForm : Form
             // re-pushes the audio-runtime + receive-device configuration. The receiver's
             // SetAudioMode call inside it does an unconditional render-backend rebuild; the
             // sender's, post-bounce, recreates its persistent ASIO from scratch.
+            ClearAsioProbeCache();
             ApplyAsioMode();
             logFile.Event("power: audio backend re-initialised");
 
@@ -4463,6 +4899,10 @@ public sealed class MainForm : Form
         // serialised on the network-thread lock inside the receiver, so doing it from the UI
         // tick is safe.
         receiver.PruneIdleSessions();
+        // Re-evaluate which selected peers are reachable enough to receive the audio stream.
+        // Drops long-unreachable endpoints from the high-rate send list (heartbeat keeps probing
+        // them so they auto-recover). Cheap no-op when nothing changed. 1 Hz is plenty.
+        RefreshAudioReceivers();
         // Refresh the tray icon's hover tooltip so it reflects the current peer count and
         // send / receive routing (WASAPI / ASIO / both). 1 Hz cadence is fine — the user is
         // hovering, not staring at a counter — and BuildTrayTooltip is allocation-cheap.
@@ -4504,6 +4944,29 @@ public sealed class MainForm : Form
         // data. The logFile.Snapshot and logFile.Event calls below are themselves cheap
         // no-ops when logFile.Enabled is false, so we don't need to wrap individual writes.
         if (!DiagnosticsGate.Enabled) return;
+
+        // Handle-TYPE breakdown — names which kind of handle is leaking (Event / Section / Key /
+        // Thread / …), the piece the plain handles= count can't give us. It walks the whole
+        // system handle table, so it's far heavier than the per-tick meter: run it about once a
+        // minute, only when logging is actually on (the diag gate can be open for auto-tune with
+        // logging off), and off the UI thread. logFile.Event is thread-safe. 2026-06-07.
+        handleProbeTickCount++;
+        if (handleProbeTickCount >= 60 && logFile.Enabled)
+        {
+            handleProbeTickCount = 0;
+            Task.Run(() =>
+            {
+                try
+                {
+                    // Always log — Summarize returns a "probe-error …" string on failure rather
+                    // than empty, so a blank build vs a silently-failing probe can never again be
+                    // confused (that cost us a run on 2026-06-07).
+                    logFile.Event($"handle-types: {HandleTypeProbe.Summarize()}");
+                }
+                catch { /* probe is best-effort — never let it disturb the tick */ }
+            });
+        }
+
         // SNAP latency columns: in classic modes the legacy MaxLatencyMs / TargetLatencyMs
         // pair holds the only route's value (Mixed). In BothIndependent we map them to the
         // WASAPI lane (= the lane the existing slider drives) and emit the ASIO lane in the
@@ -4519,7 +4982,7 @@ public sealed class MainForm : Form
             connected: connected,
             sendRunning: sender.IsRunning,
             receiveRunning: receiver.IsRunning,
-            codec: sender.Codec.ToString(),
+            codec: SnapshotCodecLabel(),
             maxLatencyMs: primaryMaxMs,
             targetLatencyMs: primaryTargetMs,
             bufferMs: receiver.CurrentBufferMs,
@@ -4765,6 +5228,7 @@ public sealed class MainForm : Form
                     $"emitMs={emitMs} sndCallMs={sendCallMs} rxDispMs={rxDispatchMs} rxNetGapMs={rxNetGapMs} " +
                     $"gc0Δ={gc0Delta} gc1Δ={gc1Delta} gc2Δ={gc2Delta} " +
                     $"cpu={selfMeter.CpuPercentOneCore:0.0}% memMB={selfMeter.ManagedHeapMb:0.0} wsMB={selfMeter.WorkingSetMb:0.0} allocKBps={selfMeter.AllocatedKbPerSecond:0.0} " +
+                    $"privMB={selfMeter.PrivateBytesMb:0.0} gcHeapMB={selfMeter.GcHeapMb:0.0} gcFragMB={selfMeter.GcFragmentedMb:0.0} gcCommitMB={selfMeter.GcCommittedMb:0.0} handles={selfMeter.HandleCount} threads={selfMeter.ThreadCount} " +
                     $"captureMs={captureMs:0.0} sendMs={sendMs:0.0} recvMs={recvMs:0.0} renderMs={renderMs:0.0} " +
                     $"trimB={trimBytes} trimN={trimFires} trimΔ={trimDelta} drainB={drainBytes} ovfB={ovfBytes} pktRej={pktRej} " +
                     $"concealΔ={concealDelta} shortReadΔ={shortReadDelta} " +
@@ -4838,6 +5302,7 @@ public sealed class MainForm : Form
                     $"stepPreEncAsiXB={stepPreEncAsiXB:0.000} stepPreEncAsiWB={stepPreEncAsiWB:0.000} " +
                     $"gc0Δ={gc0Delta} gc1Δ={gc1Delta} gc2Δ={gc2Delta} " +
                     $"cpu={selfMeter.CpuPercentOneCore:0.0}% memMB={selfMeter.ManagedHeapMb:0.0} wsMB={selfMeter.WorkingSetMb:0.0} allocKBps={selfMeter.AllocatedKbPerSecond:0.0} " +
+                    $"privMB={selfMeter.PrivateBytesMb:0.0} gcHeapMB={selfMeter.GcHeapMb:0.0} gcFragMB={selfMeter.GcFragmentedMb:0.0} gcCommitMB={selfMeter.GcCommittedMb:0.0} handles={selfMeter.HandleCount} threads={selfMeter.ThreadCount} " +
                     $"captureMs={captureMs:0.0} sendMs={sendMs:0.0} " +
                     $"clipΔ={clippedDelta} packets={sender.PacketsSent} captureCallbacks={sender.CaptureCallbacks}");
             }
@@ -5149,11 +5614,12 @@ public sealed class MainForm : Form
             catch { /* baseline failure shouldn't block save */ }
             unsavedChanges = false;
             // A freshly created profile has no password yet, and encryption is always on — so
-            // ask for one now and write it straight into the file we just saved. Skipping (empty
-            // or Cancel) leaves it passwordless; the streaming gate will ask again when needed.
+            // ask for one now and write it straight into the file we just saved. OK requires a
+            // non-empty password (requireNonEmpty); Cancel still leaves it passwordless and the
+            // streaming gate will ask again when needed.
             if (string.IsNullOrEmpty(currentProfilePassword))
             {
-                var pw = ProfilePasswordDialog.Show(this, title, "");
+                var pw = ProfilePasswordDialog.Show(this, title, "", requireNonEmpty: true);
                 if (!string.IsNullOrEmpty(pw))
                 {
                     currentProfilePassword = pw;
@@ -5440,7 +5906,7 @@ public sealed class MainForm : Form
         if (!string.IsNullOrEmpty(currentProfilePassword)) return true; // already have one
 
         var label = string.IsNullOrEmpty(currentProfileTitle) ? "this session" : currentProfileTitle;
-        var entered = ProfilePasswordDialog.Show(this, label, "");
+        var entered = ProfilePasswordDialog.Show(this, label, "", requireNonEmpty: true);
         if (string.IsNullOrEmpty(entered))
         {
             // No password → can't stream. Put the box back without re-firing this gate.
@@ -5761,6 +6227,7 @@ public sealed class MainForm : Form
         public const string RecordStop = "record-stop";
         public const string Save = "save";
         public const string ProfileSwitch = "profile-switch";
+        public const string ProfileMenuOpen = "profile-menu-open";
         public const string Update = "update";
     }
 
@@ -5823,6 +6290,7 @@ public sealed class MainForm : Form
         TryLoadCueSound(CueId.RecordStop, "record stop.wav", out recordStopSound);
         TryLoadCueSound(CueId.Save, "save.wav", out saveSound);
         TryLoadCueSound(CueId.ProfileSwitch, "profile.wav", out profileSwitchSound);
+        TryLoadCueSound(CueId.ProfileMenuOpen, "profile menu open.wav", out profileMenuOpenSound);
         TryLoadCueSound(CueId.Update, "update.wav", out updateSound);
     }
 
@@ -5906,6 +6374,35 @@ public sealed class MainForm : Form
     /// no sound came out. 2026-06-02.</summary>
     private static string CueOutcome(bool enabled, CuePlayer? sound) =>
         !enabled ? "muted in settings" : sound is null ? "enabled but sound not loaded" : "played";
+
+    /// <summary>
+    /// Append each configurable global hotkey to the accessible description of the control or menu
+    /// item it drives, so NVDA reads e.g. "Start recording … press Control+Shift+Alt+R anywhere"
+    /// when you land on it. Unset hotkeys clear the hint. Re-run whenever a hotkey is rebound (via
+    /// hotkeyController.OnHotkeyChanged) so the announcement always matches the current binding.
+    /// NVDA reads AccessibleDescription after the name/role/state by default. Hotkeys with no
+    /// dedicated on-screen control (tray show/hide, the remote-control and system-volume keys) have
+    /// no place to announce and are simply listed in the Keyboard shortcuts dialog.
+    /// </summary>
+    private void UpdateHotkeyAnnouncements()
+    {
+        sendMyAudioCheckbox.AccessibleDescription = DescribeHotkey(hotkeyController.SendMuteHotkey);
+        receiveAudioCheckbox.AccessibleDescription = DescribeHotkey(hotkeyController.ReceiveMuteHotkey);
+        if (startStopRecordingMenuItem is not null)
+        {
+            startStopRecordingMenuItem.AccessibleDescription = DescribeHotkey(hotkeyController.ToggleRecordingHotkey);
+        }
+        // The received-sound volume slider is driven by two hotkeys (up and down).
+        var up = hotkeyController.VolumeUpHotkey;
+        var down = hotkeyController.VolumeDownHotkey;
+        var parts = new List<string>(2);
+        if (!up.IsUnset) parts.Add($"press {up} anywhere for volume up");
+        if (!down.IsUnset) parts.Add($"press {down} anywhere for volume down");
+        volumeBar.AccessibleDescription = parts.Count == 0 ? "" : string.Join("; ", parts);
+    }
+
+    private static string DescribeHotkey(HotkeyInfo hotkey) =>
+        hotkey.IsUnset ? "" : $"press {hotkey} anywhere";
 
     private void NudgeVolume(int deltaPercent)
     {
@@ -6103,6 +6600,27 @@ public sealed class MainForm : Form
             AudioTransportCodec.Pcm => "PCM",
             _ => codec.ToString(),
         };
+    }
+
+    /// <summary>
+    /// Codec value for the SNAP log's Codec column. Reports the codec actually in use rather
+    /// than the dormant send-codec setting: when receiving, the incoming stream's wire codec
+    /// (what we're decoding); when sending only, the send codec; and "tx=…/rx=…" when a
+    /// full-duplex node is sending and receiving with different codecs. This fixes the old
+    /// behaviour where a receive-only node logged its idle send setting (e.g. "Pcm") while
+    /// actually decoding "PCM over Opus" — which is exactly what masked a receive session as
+    /// PCM during the 2026-06 memory-leak investigation.
+    /// </summary>
+    private string SnapshotCodecLabel()
+    {
+        var rx = receiver.IsRunning ? receiver.ActiveReceiveCodec : null;
+        if (rx is AudioTransportCodec rxCodec)
+        {
+            return sender.IsRunning && sender.Codec != rxCodec
+                ? $"tx={sender.Codec} rx={rxCodec}"
+                : rxCodec.ToString();
+        }
+        return sender.Codec.ToString();
     }
 
     /// <summary>Snap an integer to the nearest 5. Used to keep RTT chatter in the per-peer

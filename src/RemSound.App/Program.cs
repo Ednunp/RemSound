@@ -24,6 +24,11 @@ internal static class Program
 
         ApplicationConfiguration.Initialize();
 
+        // Relocate any pre-2026-06-07 config/profiles into config\ before anything reads them.
+        // Idempotent and best-effort; also upgrades users coming from an older build. The result
+        // is shown to the user once (after the single-instance guard) if files actually moved.
+        var layoutMigration = RemSound.Core.AppConfig.MigrateLegacyLayoutIfNeeded();
+
         // Single-instance guard. RemSound must never run as two copies at once: with the
         // auto-updater relaunching the app, a copy that didn't exit cleanly used to leave two
         // (then more) copies running, each playing received audio — Andre's "stacked and
@@ -73,6 +78,14 @@ internal static class Program
         // it works on the profile picker (the very first thing the user sees). The filter
         // is per-thread and modifier-aware: bare F1 only, so Shift/Ctrl/Alt+F1 stay free.
         HelpLauncher.Install();
+
+        // One-time "your settings moved" notice — only the launch that actually relocated files
+        // shows it (idempotent migration ⇒ MovedAnything is false on every later launch). Shown
+        // here, after the guard and before the profile picker, so the user reads it once up front.
+        if (layoutMigration.MovedAnything)
+        {
+            ShowLayoutMigrationNotice(layoutMigration);
+        }
 
         // Outer loop: lets ProfileManagementDialog change the profiles folder mid-session.
         // When that happens, MainForm sets ReloadFromScratch=true, we re-read AppConfig, build
@@ -228,5 +241,31 @@ internal static class Program
 
             if (!reloadFromScratch) return;
         }
+    }
+
+    /// <summary>One-time, Windows-native notice telling the user their config/profiles were moved
+    /// into the new <c>config\</c> folder. Only called when a real migration happened. TaskDialog
+    /// (not a hand-rolled Form) so a screen reader reads the whole message automatically.</summary>
+    private static void ShowLayoutMigrationNotice(RemSound.Core.AppConfig.LayoutMigrationResult migration)
+    {
+        var moved = new System.Collections.Generic.List<string>();
+        if (migration.MovedGlobalConfig) moved.Add("- Your settings are now in: config\\global config.json");
+        if (migration.MovedProfiles) moved.Add("- Your saved profiles are now in: config\\profiles\\");
+
+        var page = new TaskDialogPage
+        {
+            Caption = "RemSound settings location",
+            Heading = "Your settings now live in a \"config\" folder",
+            Text = "To keep the RemSound folder tidy, this update moved your existing settings into a new "
+                 + "\"config\" folder inside RemSound:\n\n"
+                 + string.Join("\n", moved)
+                 + "\n\nNothing was lost and RemSound works exactly as before. You will only see this message once.",
+            Icon = TaskDialogIcon.Information,
+            Buttons = { TaskDialogButton.OK },
+            DefaultButton = TaskDialogButton.OK,
+            AllowCancel = true,
+        };
+        try { TaskDialog.ShowDialog(page); }
+        catch { /* a notice must never stop RemSound from starting */ }
     }
 }

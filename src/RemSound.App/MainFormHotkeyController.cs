@@ -30,6 +30,7 @@ internal sealed class MainFormHotkeyController : IDisposable
     private readonly Action sendSystemVolumeUp;
     private readonly Action sendSystemVolumeDown;
     private readonly Action sendSystemMuteToggle;
+    private readonly Action quickProfileSwitch;
     private Form? owner;
     private HotkeyInfo sendMuteHotkey;
     private HotkeyInfo receiveMuteHotkey;
@@ -43,6 +44,7 @@ internal sealed class MainFormHotkeyController : IDisposable
     private HotkeyInfo systemVolumeUpHotkey;
     private HotkeyInfo systemVolumeDownHotkey;
     private HotkeyInfo systemMuteToggleHotkey;
+    private HotkeyInfo quickProfileSwitchHotkey;
     private GlobalHotkey? sendMuteGlobalHotkey;
     private GlobalHotkey? receiveMuteGlobalHotkey;
     private GlobalHotkey? trayGlobalHotkey;
@@ -55,6 +57,7 @@ internal sealed class MainFormHotkeyController : IDisposable
     private GlobalHotkey? systemVolumeUpGlobalHotkey;
     private GlobalHotkey? systemVolumeDownGlobalHotkey;
     private GlobalHotkey? systemMuteToggleGlobalHotkey;
+    private GlobalHotkey? quickProfileSwitchGlobalHotkey;
 
     /// <summary>Optional log sink. MainForm wires this to <c>logFile.Event(...)</c> so each
     /// hotkey change writes a clear trail of "user opened capture", "captured X", "registered X
@@ -83,7 +86,8 @@ internal sealed class MainFormHotkeyController : IDisposable
         Action sendRemoteMuteToggle,
         Action sendSystemVolumeUp,
         Action sendSystemVolumeDown,
-        Action sendSystemMuteToggle)
+        Action sendSystemMuteToggle,
+        Action quickProfileSwitch)
     {
         this.settingsStore = settingsStore;
         this.toggleSend = toggleSend;
@@ -98,6 +102,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         this.sendSystemVolumeUp = sendSystemVolumeUp;
         this.sendSystemVolumeDown = sendSystemVolumeDown;
         this.sendSystemMuteToggle = sendSystemMuteToggle;
+        this.quickProfileSwitch = quickProfileSwitch;
         sendMuteHotkey = settingsStore.LoadSendMuteHotkey();
         receiveMuteHotkey = settingsStore.LoadReceiveMuteHotkey();
         trayHotkey = settingsStore.LoadTrayHotkey();
@@ -110,6 +115,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         systemVolumeUpHotkey = settingsStore.LoadSystemVolumeUpHotkey();
         systemVolumeDownHotkey = settingsStore.LoadSystemVolumeDownHotkey();
         systemMuteToggleHotkey = settingsStore.LoadSystemMuteToggleHotkey();
+        quickProfileSwitchHotkey = settingsStore.LoadQuickProfileSwitchHotkey();
     }
 
     public void Initialize(Form ownerForm)
@@ -127,6 +133,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         systemVolumeUpGlobalHotkey = new GlobalHotkey(ownerForm);
         systemVolumeDownGlobalHotkey = new GlobalHotkey(ownerForm);
         systemMuteToggleGlobalHotkey = new GlobalHotkey(ownerForm);
+        quickProfileSwitchGlobalHotkey = new GlobalHotkey(ownerForm);
         sendMuteGlobalHotkey.Pressed += () => InvokeOnOwner(toggleSend);
         receiveMuteGlobalHotkey.Pressed += () => InvokeOnOwner(toggleReceive);
         trayGlobalHotkey.Pressed += () => InvokeOnOwner(toggleTray);
@@ -139,6 +146,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         systemVolumeUpGlobalHotkey.Pressed += () => InvokeOnOwner(sendSystemVolumeUp);
         systemVolumeDownGlobalHotkey.Pressed += () => InvokeOnOwner(sendSystemVolumeDown);
         systemMuteToggleGlobalHotkey.Pressed += () => InvokeOnOwner(sendSystemMuteToggle);
+        quickProfileSwitchGlobalHotkey.Pressed += () => InvokeOnOwner(quickProfileSwitch);
         RegisterSendMuteHotkey();
         RegisterReceiveMuteHotkey();
         RegisterTrayHotkey();
@@ -151,6 +159,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         RegisterSystemVolumeUpHotkey();
         RegisterSystemVolumeDownHotkey();
         RegisterSystemMuteToggleHotkey();
+        RegisterQuickProfileSwitchHotkey();
     }
 
     public void ShowKeyboardShortcutsDialog(IWin32Window dialogOwner)
@@ -259,6 +268,7 @@ internal sealed class MainFormHotkeyController : IDisposable
             list.Items.Add($"Send Windows global volume up to peers: {systemVolumeUpHotkey}");
             list.Items.Add($"Send Windows global volume down to peers: {systemVolumeDownHotkey}");
             list.Items.Add($"Send Windows global mute toggle to peers: {systemMuteToggleHotkey}");
+            list.Items.Add($"Quick profile switch (open a list of all profiles): {quickProfileSwitchHotkey}");
             if (prev >= 0 && prev < list.Items.Count)
             {
                 list.SelectedIndex = prev;
@@ -295,6 +305,7 @@ internal sealed class MainFormHotkeyController : IDisposable
                 case 9: ChangeSystemVolumeUpHotkey(dialog); break;
                 case 10: ChangeSystemVolumeDownHotkey(dialog); break;
                 case 11: ChangeSystemMuteToggleHotkey(dialog); break;
+                case 12: ChangeQuickProfileSwitchHotkey(dialog); break;
                 default: return;
             }
             RefreshList();
@@ -326,6 +337,7 @@ internal sealed class MainFormHotkeyController : IDisposable
                 case 9: ApplyUnset("send-system-volume-up", h => systemVolumeUpHotkey = h, RegisterSystemVolumeUpHotkey, settingsStore.SaveSystemVolumeUpHotkey); break;
                 case 10: ApplyUnset("send-system-volume-down", h => systemVolumeDownHotkey = h, RegisterSystemVolumeDownHotkey, settingsStore.SaveSystemVolumeDownHotkey); break;
                 case 11: ApplyUnset("send-system-mute-toggle", h => systemMuteToggleHotkey = h, RegisterSystemMuteToggleHotkey, settingsStore.SaveSystemMuteToggleHotkey); break;
+                case 12: ApplyUnset("quick-profile-switch", h => quickProfileSwitchHotkey = h, RegisterQuickProfileSwitchHotkey, settingsStore.SaveQuickProfileSwitchHotkey); break;
                 default: return;
             }
             RefreshList();
@@ -405,6 +417,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         systemVolumeUpGlobalHotkey?.Dispose();
         systemVolumeDownGlobalHotkey?.Dispose();
         systemMuteToggleGlobalHotkey?.Dispose();
+        quickProfileSwitchGlobalHotkey?.Dispose();
     }
 
     public HotkeyInfo SendMuteHotkey => sendMuteHotkey;
@@ -419,6 +432,7 @@ internal sealed class MainFormHotkeyController : IDisposable
     public HotkeyInfo SystemVolumeUpHotkey => systemVolumeUpHotkey;
     public HotkeyInfo SystemVolumeDownHotkey => systemVolumeDownHotkey;
     public HotkeyInfo SystemMuteToggleHotkey => systemMuteToggleHotkey;
+    public HotkeyInfo QuickProfileSwitchHotkey => quickProfileSwitchHotkey;
 
     /// <summary>Open the capture dialog, log what came back, and (on a successful capture)
     /// run <paramref name="apply"/> with the captured hotkey. Centralises the boilerplate
@@ -550,6 +564,13 @@ internal sealed class MainFormHotkeyController : IDisposable
         settingsStore.SaveSystemMuteToggleHotkey(h);
     });
 
+    private void ChangeQuickProfileSwitchHotkey(IWin32Window dialogOwner) => ChangeHotkey(dialogOwner, "quick-profile-switch", h =>
+    {
+        quickProfileSwitchHotkey = h;
+        RegisterQuickProfileSwitchHotkey();
+        settingsStore.SaveQuickProfileSwitchHotkey(h);
+    });
+
     // Hotkeys come in two flavours and need different Windows-side registration:
     //   * Toggle hotkeys (mute, tray show/hide) — re-firing on hold would flip state back
     //     and forth. Registered with MOD_NOREPEAT (allowRepeat=false). One press, one fire.
@@ -575,6 +596,9 @@ internal sealed class MainFormHotkeyController : IDisposable
     private void RegisterSystemVolumeUpHotkey() => RegisterIfSet(systemVolumeUpGlobalHotkey, systemVolumeUpHotkey, "send Windows global volume up", allowRepeat: true);
     private void RegisterSystemVolumeDownHotkey() => RegisterIfSet(systemVolumeDownGlobalHotkey, systemVolumeDownHotkey, "send Windows global volume down", allowRepeat: true);
     private void RegisterSystemMuteToggleHotkey() => RegisterIfSet(systemMuteToggleGlobalHotkey, systemMuteToggleHotkey, "send Windows global mute toggle");
+    // Quick profile switch is a one-shot (press → open the popup); MOD_NOREPEAT (the default) keeps
+    // a held key from re-opening it repeatedly.
+    private void RegisterQuickProfileSwitchHotkey() => RegisterIfSet(quickProfileSwitchGlobalHotkey, quickProfileSwitchHotkey, "quick profile switch");
 
     private void RegisterIfSet(GlobalHotkey? globalHotkey, HotkeyInfo hotkey, string description, bool allowRepeat = false)
     {

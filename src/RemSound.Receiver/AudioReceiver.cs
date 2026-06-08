@@ -832,6 +832,36 @@ public sealed class AudioReceiver : IDisposable
         return null;
     }
 
+    /// <summary>
+    /// The wire codec of the freshest currently-active receive session across all peers, or
+    /// null when nothing is being received. Surfaced in the SNAP log's Codec column so a
+    /// receive-only node reports what it is actually decoding rather than its dormant send-codec
+    /// setting (the old behaviour logged "Pcm" for a node receiving "PCM over Opus"). Lockless
+    /// scan for the freshest session, then a short lock to read its codec.
+    /// </summary>
+    public AudioTransportCodec? ActiveReceiveCodec
+    {
+        get
+        {
+            var now = DateTime.UtcNow;
+            SessionPlayout? freshest = null;
+            foreach (var sp in playoutEngine.ActiveSessions)
+            {
+                if (now - sp.LastWriteUtc > SessionIdleTimeout) continue;
+                if (freshest is null || sp.LastWriteUtc > freshest.LastWriteUtc) freshest = sp;
+            }
+            if (freshest is null) return null;
+            lock (sessionsLock)
+            {
+                if (sessions.TryGetValue((freshest.Endpoint, freshest.StreamId), out var session))
+                {
+                    return session.Codec;
+                }
+            }
+            return null;
+        }
+    }
+
     // === Packet routing (called on network thread) ===
 
     /// <summary>Hook for Heartbeat packets that arrive on the audio receiver's socket. The

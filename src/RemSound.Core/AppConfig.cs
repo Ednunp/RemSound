@@ -160,7 +160,104 @@ public sealed class AppConfig
         }
     }
 
-    private static string ConfigPath => Path.Combine(AppContext.BaseDirectory, "remsound.config.json");
+    /// <summary>Friendly names of ASIO drivers RemSound must never touch — it won't probe them,
+    /// won't list them in the driver picker, and won't open them for streaming. Global (not
+    /// per-profile) because "this driver is broken on this machine" is about the hardware/driver
+    /// install, not any one profile. Populated when the user answers "yes" to the Realtek-ASIO
+    /// compatibility warning, or toggles the Options-menu entry. Matched case-insensitively.</summary>
+    public List<string> DisabledAsioDrivers { get; set; } = new();
+
+    /// <summary>Friendly names of ASIO drivers RemSound has already shown its compatibility warning
+    /// for, so a user who answered "no, keep using it" isn't nagged on every launch. Independent of
+    /// <see cref="DisabledAsioDrivers"/>: a driver can be warned-about-but-still-enabled.</summary>
+    public List<string> AsioDriversWarnedAbout { get; set; } = new();
+
+    /// <summary>True if RemSound should refuse to interact with the named ASIO driver in any way.</summary>
+    public bool IsAsioDriverDisabled(string? driverName) =>
+        !string.IsNullOrWhiteSpace(driverName)
+        && DisabledAsioDrivers.Exists(d => string.Equals(d, driverName, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Disable or re-enable the named ASIO driver. Caller must <see cref="Save"/> after.</summary>
+    public void SetAsioDriverDisabled(string driverName, bool disabled)
+    {
+        if (string.IsNullOrWhiteSpace(driverName)) return;
+        DisabledAsioDrivers.RemoveAll(d => string.Equals(d, driverName, StringComparison.OrdinalIgnoreCase));
+        if (disabled) DisabledAsioDrivers.Add(driverName);
+    }
+
+    /// <summary>True once the compatibility warning has been shown for this driver. Case-insensitive.</summary>
+    public bool HasWarnedAboutAsioDriver(string driverName) =>
+        AsioDriversWarnedAbout.Exists(d => string.Equals(d, driverName, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Record that the compatibility warning has been shown for this driver (so we don't
+    /// re-nag a user who chose to keep it). Caller must <see cref="Save"/> after.</summary>
+    public void MarkAsioDriverWarned(string driverName)
+    {
+        if (string.IsNullOrWhiteSpace(driverName)) return;
+        if (!HasWarnedAboutAsioDriver(driverName)) AsioDriversWarnedAbout.Add(driverName);
+    }
+
+    /// <summary>True if the named ASIO driver looks like a Realtek HD Audio ASIO driver (its name
+    /// or description contains "Realtek"). Realtek's bundled ASIO driver (rthdasio64.dll) leaks OS
+    /// handles on every open and is broadly known to misbehave with ASIO hosts; ASUS and other OEMs
+    /// ship the same Realtek driver under their own branding, so we match "Realtek" anywhere in the
+    /// name. RemSound uses this to proactively offer to disable the driver.</summary>
+    public static bool IsRealtekAsioDriver(string? driverName) =>
+        !string.IsNullOrWhiteSpace(driverName)
+        && driverName.Contains("Realtek", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The config folder next to the exe (<c>&lt;exe&gt;\config\</c>). Holds the global
+    /// config file and the <c>profiles\</c> subfolder. 2026-06-07: everything non-recording config
+    /// moved in here from loose files beside the exe, so the install root stays tidy.</summary>
+    public static string ConfigDirectory => Path.Combine(AppContext.BaseDirectory, "config");
+
+    private static string ConfigPath => Path.Combine(ConfigDirectory, "global config.json");
+
+    /// <summary>
+    /// One-time, idempotent relocation of the pre-2026-06-07 layout into <c>config\</c>:
+    ///   * <c>&lt;exe&gt;\remsound.config.json</c> → <c>&lt;exe&gt;\config\global config.json</c>
+    ///   * <c>&lt;exe&gt;\profiles\</c>             → <c>&lt;exe&gt;\config\profiles\</c>
+    /// Run once at startup BEFORE anything reads config or profiles. Each move only happens when
+    /// the old item exists and the new one doesn't, so it's safe to call every launch and it
+    /// upgrades anyone coming from an older build without losing a profile or a setting. A custom
+    /// <see cref="ProfilesDirectory"/> is untouched — it isn't in the default location.
+    /// </summary>
+    /// <summary>What <see cref="MigrateLegacyLayoutIfNeeded"/> actually relocated this launch.
+    /// <see cref="MovedAnything"/> is true only on the one launch where an upgrade's old files
+    /// were found and moved — the caller uses it to show a one-time "your settings moved" notice.</summary>
+    public readonly record struct LayoutMigrationResult(bool MovedGlobalConfig, bool MovedProfiles)
+    {
+        public bool MovedAnything => MovedGlobalConfig || MovedProfiles;
+    }
+
+    public static LayoutMigrationResult MigrateLegacyLayoutIfNeeded()
+    {
+        var movedGlobal = false;
+        var movedProfiles = false;
+        try
+        {
+            Directory.CreateDirectory(ConfigDirectory);
+            var oldGlobal = Path.Combine(AppContext.BaseDirectory, "remsound.config.json");
+            if (File.Exists(oldGlobal) && !File.Exists(ConfigPath))
+            {
+                File.Move(oldGlobal, ConfigPath);
+                movedGlobal = true;
+            }
+            var oldProfiles = Path.Combine(AppContext.BaseDirectory, "profiles");
+            var newProfiles = Path.Combine(ConfigDirectory, "profiles");
+            if (Directory.Exists(oldProfiles) && !Directory.Exists(newProfiles))
+            {
+                Directory.Move(oldProfiles, newProfiles);
+                movedProfiles = true;
+            }
+        }
+        catch
+        {
+            // Best-effort: a failed move (permissions, file in use) just means the app falls
+            // back to defaults / an empty profiles list rather than crashing on launch.
+        }
+        return new LayoutMigrationResult(movedGlobal, movedProfiles);
+    }
 
     /// <summary>Reads the app config from disk. Always returns a non-null instance — a missing
     /// or malformed file becomes a defaults-only AppConfig rather than throwing.</summary>
@@ -185,6 +282,7 @@ public sealed class AppConfig
     /// surface a MessageBox — failure to persist a directory choice is user-visible).</summary>
     public void Save()
     {
+        Directory.CreateDirectory(ConfigDirectory);
         var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
         File.WriteAllText(ConfigPath, json);
     }

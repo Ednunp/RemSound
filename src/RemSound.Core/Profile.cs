@@ -115,6 +115,9 @@ public sealed class Profile
     public bool? EnableRecordStopCue { get; set; }
     public bool? EnableSaveCue { get; set; }
     public bool? EnableProfileSwitchCue { get; set; }
+    /// <summary>When true (the default), the "profile menu open" cue plays as the Quick profile
+    /// switch popup opens. Per-profile so each setup can mute it independently.</summary>
+    public bool? EnableProfileMenuOpenCue { get; set; }
     /// <summary>Plays the update cue just before an update starts installing (manual or
     /// silent). Null = unset → defaults to on, so a silent background update still gives an
     /// audible heads-up. Added 2026-05-31.</summary>
@@ -206,6 +209,9 @@ public sealed class Profile
     /// <summary>Hotkey that sends a "toggle Windows default-output-device mute" command to
     /// every connected peer.</summary>
     public HotkeyRecord? SystemMuteToggleHotkey { get; set; }
+    /// <summary>Global hotkey that opens the Quick profile switch popup — a list of all profiles you
+    /// can arrow through and press Enter to switch to, from anywhere in Windows. Unset by default.</summary>
+    public HotkeyRecord? QuickProfileSwitchHotkey { get; set; }
     /// <summary>When true, this machine honours incoming Control packets from connected
     /// peers — adjusts the local volume slider or toggles mute. Default false: receiving
     /// remote control is opt-in even though the audio allow-list already gates who's

@@ -134,6 +134,16 @@ public sealed class RemSoundSettingsStore
         Save(s);
     }
 
+    public HotkeyInfo LoadQuickProfileSwitchHotkey() =>
+        Try(() => Load()?.QuickProfileSwitchHotkey?.ToHotkeyInfo()) ?? HotkeyInfo.Unset;
+
+    public void SaveQuickProfileSwitchHotkey(HotkeyInfo hotkey)
+    {
+        var s = Load() ?? new Settings();
+        s.QuickProfileSwitchHotkey = HotkeySetting.From(hotkey);
+        Save(s);
+    }
+
     public bool LoadAcceptRemoteVolumeCommands(bool defaultValue = false) =>
         Try(() => Load()?.AcceptRemoteVolumeCommands) ?? defaultValue;
 
@@ -428,6 +438,16 @@ public sealed class RemSoundSettingsStore
         Save(s);
     }
 
+    public bool LoadEnableProfileMenuOpenCue() =>
+        Try(() => Load()?.EnableProfileMenuOpenCue) ?? true;
+
+    public void SaveEnableProfileMenuOpenCue(bool value)
+    {
+        var s = Load() ?? new Settings();
+        s.EnableProfileMenuOpenCue = value;
+        Save(s);
+    }
+
     public bool LoadEnableUpdateCue() =>
         Try(() => Load()?.EnableUpdateCue) ?? true;
 
@@ -572,6 +592,7 @@ public sealed class RemSoundSettingsStore
             SystemVolumeUpHotkey = profile.SystemVolumeUpHotkey is null ? null : HotkeySettingFromRecord(profile.SystemVolumeUpHotkey),
             SystemVolumeDownHotkey = profile.SystemVolumeDownHotkey is null ? null : HotkeySettingFromRecord(profile.SystemVolumeDownHotkey),
             SystemMuteToggleHotkey = profile.SystemMuteToggleHotkey is null ? null : HotkeySettingFromRecord(profile.SystemMuteToggleHotkey),
+            QuickProfileSwitchHotkey = profile.QuickProfileSwitchHotkey is null ? null : HotkeySettingFromRecord(profile.QuickProfileSwitchHotkey),
             AcceptRemoteVolumeCommands = profile.AcceptRemoteVolumeCommands,
             MaxLatencyMs = profile.MaxLatencyMs,
             Codec = profile.Codec,
@@ -597,6 +618,7 @@ public sealed class RemSoundSettingsStore
             EnableRecordStopCue = profile.EnableRecordStopCue,
             EnableSaveCue = profile.EnableSaveCue,
             EnableProfileSwitchCue = profile.EnableProfileSwitchCue,
+            EnableProfileMenuOpenCue = profile.EnableProfileMenuOpenCue,
             EnableUpdateCue = profile.EnableUpdateCue,
             // Defensive copy so cache mutations don't leak into the in-memory Profile graph
             // (and vice-versa). Profile is loaded once at startup; the cache evolves through
@@ -626,6 +648,7 @@ public sealed class RemSoundSettingsStore
         profile.SystemVolumeUpHotkey = s.SystemVolumeUpHotkey is null ? null : HotkeyRecordFromSetting(s.SystemVolumeUpHotkey);
         profile.SystemVolumeDownHotkey = s.SystemVolumeDownHotkey is null ? null : HotkeyRecordFromSetting(s.SystemVolumeDownHotkey);
         profile.SystemMuteToggleHotkey = s.SystemMuteToggleHotkey is null ? null : HotkeyRecordFromSetting(s.SystemMuteToggleHotkey);
+        profile.QuickProfileSwitchHotkey = s.QuickProfileSwitchHotkey is null ? null : HotkeyRecordFromSetting(s.QuickProfileSwitchHotkey);
         if (s.AcceptRemoteVolumeCommands is bool arvc) profile.AcceptRemoteVolumeCommands = arvc;
         if (s.MaxLatencyMs is int ml) profile.MaxLatencyMs = ml;
         if (s.Codec is AudioTransportCodec c) profile.Codec = c;
@@ -654,6 +677,7 @@ public sealed class RemSoundSettingsStore
         profile.EnableRecordStopCue = s.EnableRecordStopCue;
         profile.EnableSaveCue = s.EnableSaveCue;
         profile.EnableProfileSwitchCue = s.EnableProfileSwitchCue;
+        profile.EnableProfileMenuOpenCue = s.EnableProfileMenuOpenCue;
         profile.EnableUpdateCue = s.EnableUpdateCue;
         profile.CustomCuePaths = s.CustomCuePaths is null
             ? new Dictionary<string, string>()
@@ -691,6 +715,7 @@ public sealed class RemSoundSettingsStore
         public HotkeySetting? SystemVolumeUpHotkey { get; set; }
         public HotkeySetting? SystemVolumeDownHotkey { get; set; }
         public HotkeySetting? SystemMuteToggleHotkey { get; set; }
+        public HotkeySetting? QuickProfileSwitchHotkey { get; set; }
         public bool? AcceptRemoteVolumeCommands { get; set; }
         public int? MaxLatencyMs { get; set; }
         public AudioTransportCodec? Codec { get; set; }
@@ -725,6 +750,7 @@ public sealed class RemSoundSettingsStore
         public bool? EnableRecordStopCue { get; set; }
         public bool? EnableSaveCue { get; set; }
         public bool? EnableProfileSwitchCue { get; set; }
+        public bool? EnableProfileMenuOpenCue { get; set; }
         public bool? EnableUpdateCue { get; set; }
         public Dictionary<string, string>? CustomCuePaths { get; set; }
         public RecordingSettings? RecordingSettings { get; set; }

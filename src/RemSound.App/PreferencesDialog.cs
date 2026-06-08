@@ -102,6 +102,8 @@ internal sealed class PreferencesDialog : Form
             s => s.LoadEnableSaveCue(), (s, v) => s.SaveEnableSaveCue(v)),
         new("Profile switched sound", MainForm.CueId.ProfileSwitch,
             s => s.LoadEnableProfileSwitchCue(), (s, v) => s.SaveEnableProfileSwitchCue(v)),
+        new("Profile menu open sound", MainForm.CueId.ProfileMenuOpen,
+            s => s.LoadEnableProfileMenuOpenCue(), (s, v) => s.SaveEnableProfileMenuOpenCue(v)),
         new("Update sound", MainForm.CueId.Update,
             s => s.LoadEnableUpdateCue(), (s, v) => s.SaveEnableUpdateCue(v)),
     ];
@@ -615,6 +617,7 @@ internal sealed class PreferencesDialog : Form
             MainForm.CueId.RecordStop => "record stop.wav",
             MainForm.CueId.Save => "save.wav",
             MainForm.CueId.ProfileSwitch => "profile.wav",
+            MainForm.CueId.ProfileMenuOpen => "profile menu open.wav",
             MainForm.CueId.Update => "update.wav",
             _ => null,
         };

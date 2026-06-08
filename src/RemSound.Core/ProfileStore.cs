@@ -24,7 +24,9 @@ public sealed class ProfileStore
     public ProfileStore()
     {
         var machineFolder = SanitiseFsName(Environment.MachineName);
-        baseDir = Path.Combine(AppContext.BaseDirectory, "profiles", machineFolder);
+        // 2026-06-07: profiles live under config\profiles\<machine>\ (was <exe>\profiles\<machine>\).
+        // AppConfig.MigrateLegacyLayoutIfNeeded moves any pre-existing profiles here at startup.
+        baseDir = Path.Combine(AppContext.BaseDirectory, "config", "profiles", machineFolder);
         try { Directory.CreateDirectory(baseDir); }
         catch { /* permissions; List/Save will surface this when actually used */ }
     }

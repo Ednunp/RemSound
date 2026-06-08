@@ -44,12 +44,35 @@ internal sealed class ProcessSelfMeter
     /// a leak somewhere in the hot path.</param>
     /// <param name="ElapsedMs">Wall-clock milliseconds since the previous sample, so the
     /// caller can sanity-check the delta calculation. Roughly 1000 in steady state.</param>
+    /// <param name="PrivateBytesMb">Private committed bytes (PrivateMemorySize64) — managed heap
+    /// PLUS native heap allocations, minus shared/file-backed pages. The honest "how much memory
+    /// is this process actually holding" figure. If this climbs while ManagedHeapMb stays flat,
+    /// the leak is native (NAudio / a driver), not .NET objects.</param>
+    /// <param name="GcHeapMb">Managed heap size the GC reports right now
+    /// (GCMemoryInfo.HeapSizeBytes), including free gaps. Climbing here = a managed leak.</param>
+    /// <param name="GcFragmentedMb">Free-but-uncompacted bytes inside the managed heap
+    /// (GCMemoryInfo.FragmentedBytes). Under SustainedLowLatency (no gen2 compaction) this is the
+    /// signal for "the leak is GC fragmentation" — it would grow while GcHeapMb roughly tracks it
+    /// and ManagedHeapMb (live set) stays flat. A compacting GC would reclaim it.</param>
+    /// <param name="GcCommittedMb">Total bytes the GC has committed from the OS
+    /// (GCMemoryInfo.TotalCommittedBytes). The managed share of the working set.</param>
+    /// <param name="HandleCount">Open OS handle count. A steady climb here = a handle leak
+    /// (e.g. audio clients / events created and never released), which inflates native memory
+    /// without touching the managed heap.</param>
+    /// <param name="ThreadCount">Process thread count. A climb = a thread leak (each thread costs
+    /// ~1 MB of stack), another way native/working-set memory grows with the managed heap flat.</param>
     public readonly record struct Snapshot(
         double CpuPercentOneCore,
         double ManagedHeapMb,
         double WorkingSetMb,
         double AllocatedKbPerSecond,
-        double ElapsedMs);
+        double ElapsedMs,
+        double PrivateBytesMb,
+        double GcHeapMb,
+        double GcFragmentedMb,
+        double GcCommittedMb,
+        int HandleCount,
+        int ThreadCount);
 
     public Snapshot Take()
     {
@@ -69,6 +92,21 @@ internal sealed class ProcessSelfMeter
         // GetTotalMemory(false) doesn't trigger a collection; we just want the current
         // size of the heap as the GC knows it.
         var managedHeapBytes = GC.GetTotalMemory(false);
+
+        // Leak-classification extras (added 2026-06-06 for the ONJTOP unmanaged-growth hunt).
+        // All cheap, all read once per second, all behind the diag/log gate via the caller.
+        //   * PrivateMemorySize64 — committed managed + native, the "is the process really
+        //     holding more" number. Native leak ⇒ this climbs with the managed heap flat.
+        //   * GCMemoryInfo — HeapSize / Fragmented / Committed distinguish a managed leak or
+        //     SustainedLowLatency fragmentation from a genuine native leak.
+        //   * Handle / thread counts — catch a handle or thread leak (e.g. WASAPI clients/events
+        //     created per glitch and never released) that grows native memory off-heap.
+        var privateBytes = selfProcess.PrivateMemorySize64;
+        var gcInfo = GC.GetGCMemoryInfo();
+        int handleCount;
+        try { handleCount = selfProcess.HandleCount; } catch { handleCount = 0; }
+        int threadCount;
+        try { threadCount = selfProcess.Threads.Count; } catch { threadCount = 0; }
 
         double cpuPercent = 0;
         double allocKbps = 0;
@@ -94,6 +132,12 @@ internal sealed class ProcessSelfMeter
             ManagedHeapMb: managedHeapBytes / (1024.0 * 1024.0),
             WorkingSetMb: workingSet / (1024.0 * 1024.0),
             AllocatedKbPerSecond: allocKbps,
-            ElapsedMs: elapsedMs);
+            ElapsedMs: elapsedMs,
+            PrivateBytesMb: privateBytes / (1024.0 * 1024.0),
+            GcHeapMb: gcInfo.HeapSizeBytes / (1024.0 * 1024.0),
+            GcFragmentedMb: gcInfo.FragmentedBytes / (1024.0 * 1024.0),
+            GcCommittedMb: gcInfo.TotalCommittedBytes / (1024.0 * 1024.0),
+            HandleCount: handleCount,
+            ThreadCount: threadCount);
     }
 }
