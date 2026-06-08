@@ -48,6 +48,8 @@ Step| What happens
 
 There is no central server, no account, and nothing stored online. The sound goes straight from one computer to the other.
 
+> **RemSound on Android (receiver):** there is a companion app that lets a phone or tablet _receive_ RemSound audio — handy for listening on the move. It's a separate community project built and maintained by Aryan Choudhary, who is a screen-reader user himself and has tuned the app for TalkBack; it is not part of RemSound and is not maintained by us. Get the signed app from its releases page (download the latest **app-release.apk**): [RemSound Android — Releases](https://github.com/aryanchoudharypro/RemSoundAndroid/releases).
+
 ## 2. Quick start
 
 Let's assume you and a friend both have RemSound running, and that your two computers can reach each other on the network (the same Wi-Fi, the same Tailscale account, and so on).
@@ -109,10 +111,12 @@ Action| How
 
 ### Where profiles are stored
 
-Each profile is one small file on your computer. By default they live at:
+Each profile is one small file on your computer. By default they live in a `config` folder inside RemSound, at:
 
 
-    <RemSound folder>\profiles\<your computer name>\<profile name>
+    <RemSound folder>\config\profiles\<your computer name>\<profile name>
+
+(If you're upgrading from an older version, RemSound moves your existing settings and profiles into this `config` folder automatically the first time you run this version, and tells you once that it's done it. Nothing is lost.)
 
 The folder named after your computer keeps each machine's profiles separate. If you used the **Browse …** button on the startup dialog to pick a different folder (for example, one inside Dropbox), the profiles are stored directly in that folder — with no per-computer subfolder — so two computers pointed at the same shared folder see exactly the same list.
 
@@ -418,6 +422,8 @@ ASIO doesn't list “devices” the way Windows does. Instead it gives you a lis
 RemSound has no buffer-size control of its own. To change the ASIO buffer size, open the control panel program that came with your audio interface (such as NI's Komplete Audio Control Panel or the Audient EVO software) and set it there. The driver remembers its buffer size between sessions; RemSound simply uses whatever the driver is set to.
 
 > **About Realtek ASIO:** if you see “Realtek ASIO” in the driver list, be careful with it. Despite the name, it isn't tied to Realtek hardware — it's a generic driver that opens whatever Windows treats as the default sound device. On a computer that has a real audio interface (Audient, Komplete, and so on), choosing Realtek ASIO will often grab _that_ interface and end up fighting both your real ASIO driver and your screen reader for the same hardware. It's usually best to ignore Realtek ASIO completely.
+
+> **RemSound watches for it for you (new in v3.4):** if a Realtek ASIO driver is installed, RemSound spots it on startup and offers, just once, to disable it — partly for the device-grabbing reason above, and partly because it leaks Windows resources every time it's opened. Say yes and RemSound adds it to a never-touch list and takes it out of the driver picker, so it can't be chosen by accident. You can reverse that — or disable it later if you kept it — any time from **Options → Enable / Disable Realtek ASIO driver in RemSound**. Once you've answered the startup question, RemSound won't ask again.
 
 ### Same driver, sending and receiving, on one computer
 
@@ -742,6 +748,7 @@ Hotkey| Action| Default
 Receive mute| Mute / unmute incoming sound (this computer)| Ctrl+Shift+Alt+R
 Send mute| Mute / unmute outgoing sound (this computer)| Ctrl+Shift+Alt+S
 Tray toggle| Show / hide the main window| Ctrl+Shift+F10
+Quick profile switch| Pop up a list of all your profiles and switch to one — works from anywhere, even with RemSound in the tray (where it stays after the switch). See _Quick profile switch_ below.| Unset
 Volume up / down| Adjust this computer's received-sound volume| Unset
 Start / Stop recording| Start or stop a recording on this computer. The same toggle as the Record menu's start/stop item and the in-app Ctrl+R, but it works system-wide (RemSound doesn't need to be the active window). See Recording to a file for what gets captured.| Unset
 Send remote volume up to peers| Tell every connected peer to raise their RemSound volume slider by 5 points (only obeyed by peers that have ticked “Accept remote volume commands”). It doesn't change your own volume. See Remote control.| Unset
@@ -752,6 +759,16 @@ Send Windows global volume down to peers| The same, but lowering.| Unset
 Send Windows global mute toggle to peers| Tell every connected peer to toggle their Windows mute.| Unset
 
 You can change any of these to whatever combination you prefer. Each accepts modifiers (Ctrl, Shift, Alt) plus one ordinary key.
+
+### Quick profile switch
+
+Once you've given **Quick profile switch** a key, pressing it anywhere pops up a small list of every profile you have. Arrow to the one you want and press Enter (or click it) to switch straight to it. The profile you're currently on is marked in the list. A sound plays as the list opens, and the profile-switch sound plays the moment you pick one. Press Escape to close the list without switching.
+
+If RemSound was minimised to the system tray when you pressed the hotkey, it switches the profile and **stays in the tray** — the window doesn't jump up in front of whatever you're doing. So you can change profiles mid-task without losing your place.
+
+### Your screen reader reads out the hotkeys
+
+Once a hotkey is set, your screen reader reads it out whenever you land on the menu item or control it's tied to — for example, moving onto **File → Open profile** announces “Ctrl+O”, and a control with a global hotkey announces “press [your key] anywhere”. So you can learn and confirm your shortcuts just by arrowing around the window, without coming back to this dialog.
 
 ## 16. Remote control: adjusting a peer's listening volume from your end
 
@@ -824,7 +841,7 @@ Toggle| What it does
 
 ## 18. Audio cue sounds
 
-RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called **cue sounds**. Seven events have a cue:
+RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called **cue sounds**. Eight events have a cue:
 
 Cue| Plays when
 ---|---
@@ -833,14 +850,15 @@ Cue| Plays when
 **Recording start sound**|  You start a recording.
 **Recording stop sound**|  You stop a recording.
 **Profile saved sound**|  A profile is saved — whether via File → Save or File → Save as.
-**Profile switched sound**|  A profile finishes loading. Plays at startup if you started with a profile, and after every profile switch — using the new profile's cue, not the old one's.
+**Profile switched sound**|  You switch to a different profile — from the Recent profiles menu, the Quick profile switch popup, or File → Open profile. It plays the moment you pick the new profile. It deliberately does _not_ play on a fresh start into your first profile, so it isn't layered on top of the connect sound at launch.
+**Profile menu open sound**|  The Quick profile switch popup opens.
 **Update sound**|  An update is about to install — it plays just before RemSound closes to update itself. Handy when updates install silently in the background, so you're not caught off guard when RemSound restarts. Plays whether you ran the update by hand or it installed on its own.
 
-All seven cues play through your default Windows sound output, which is separate from the audio RemSound is sending or receiving. They don't appear in a normal recording. (The exception: if your sending side is capturing the very output device the cues play through, then they get captured along with everything else from that device.)
+All eight cues play through your default Windows sound output, which is separate from the audio RemSound is sending or receiving. They don't appear in a normal recording. (The exception: if your sending side is capturing the very output device the cues play through, then they get captured along with everything else from that device.)
 
 ### Turning each cue on or off
 
-Open **File → Preferences** (or Ctrl+P). The **Audio cue sounds (Alt+N)** list shows all seven cues with a tickbox next to each. Tick to play the cue when the corresponding event happens; untick to silence it.
+Open **File → Preferences** (or Ctrl+P). The **Audio cue sounds (Alt+N)** list shows all eight cues with a tickbox next to each. Tick to play the cue when the corresponding event happens; untick to silence it.
 
 Use the up and down arrow keys to move between cues; press **Space** to toggle the highlighted cue's tick on or off.
 
@@ -873,6 +891,8 @@ The default WAV files are in the `sounds` folder next to `RemSound.exe`. If you 
   * `sounds\record stop.wav` — recording stop cue
   * `sounds\save.wav` — profile saved cue
   * `sounds\profile.wav` — profile switched cue
+  * `sounds\profile menu open.wav` — profile menu open cue
+  * `sounds\update.wav` — update cue
 
 
 

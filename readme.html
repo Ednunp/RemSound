@@ -137,9 +137,11 @@ ul, ol { padding-left: 1.4em; }
 
 <h3>Where profiles are stored</h3>
 
-<p>Each profile is one small file on your computer. By default they live at:</p>
+<p>Each profile is one small file on your computer. By default they live in a <code>config</code> folder inside RemSound, at:</p>
 
-<pre>&lt;RemSound folder&gt;\profiles\&lt;your computer name&gt;\&lt;profile name&gt;</pre>
+<pre>&lt;RemSound folder&gt;\config\profiles\&lt;your computer name&gt;\&lt;profile name&gt;</pre>
+
+<p>(If you're upgrading from an older version, RemSound moves your existing settings and profiles into this <code>config</code> folder automatically the first time you run this version, and tells you once that it's done it. Nothing is lost.)</p>
 
 <p>The folder named after your computer keeps each machine's profiles separate. If you used the <strong>Browse&hellip;</strong> button on the startup dialog to pick a different folder (for example, one inside Dropbox), the profiles are stored directly in that folder &mdash; with no per-computer subfolder &mdash; so two computers pointed at the same shared folder see exactly the same list.</p>
 
@@ -460,6 +462,10 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 
 <div class="warn">
 <strong>About Realtek ASIO:</strong> if you see &ldquo;Realtek ASIO&rdquo; in the driver list, be careful with it. Despite the name, it isn't tied to Realtek hardware &mdash; it's a generic driver that opens whatever Windows treats as the default sound device. On a computer that has a real audio interface (Audient, Komplete, and so on), choosing Realtek ASIO will often grab <em>that</em> interface and end up fighting both your real ASIO driver and your screen reader for the same hardware. It's usually best to ignore Realtek ASIO completely.
+</div>
+
+<div class="warn">
+<strong>RemSound watches for it for you (new in v3.4):</strong> if a Realtek ASIO driver is installed, RemSound spots it on startup and offers, just once, to disable it &mdash; partly for the device-grabbing reason above, and partly because it leaks Windows resources every time it's opened. Say yes and RemSound adds it to a never-touch list and takes it out of the driver picker, so it can't be chosen by accident. You can reverse that &mdash; or disable it later if you kept it &mdash; any time from <strong>Options &rarr; Enable / Disable Realtek ASIO driver in RemSound</strong>. Once you've answered the startup question, RemSound won't ask again.
 </div>
 
 <h3>Same driver, sending and receiving, on one computer</h3>
@@ -786,6 +792,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <tr><td>Receive mute</td><td>Mute / unmute incoming sound (this computer)</td><td>Ctrl+Shift+Alt+R</td></tr>
 <tr><td>Send mute</td><td>Mute / unmute outgoing sound (this computer)</td><td>Ctrl+Shift+Alt+S</td></tr>
 <tr><td>Tray toggle</td><td>Show / hide the main window</td><td>Ctrl+Shift+F10</td></tr>
+<tr><td>Quick profile switch</td><td>Pop up a list of all your profiles and switch to one &mdash; works from anywhere, even with RemSound in the tray (where it stays after the switch). See <em>Quick profile switch</em> below.</td><td>Unset</td></tr>
 <tr><td>Volume up / down</td><td>Adjust this computer's received-sound volume</td><td>Unset</td></tr>
 <tr><td>Start / Stop recording</td><td>Start or stop a recording on this computer. The same toggle as the Record menu's start/stop item and the in-app Ctrl+R, but it works system-wide (RemSound doesn't need to be the active window). See <a href="#recording">Recording to a file</a> for what gets captured.</td><td>Unset</td></tr>
 <tr><td>Send remote volume up to peers</td><td>Tell every connected peer to raise their RemSound volume slider by 5 points (only obeyed by peers that have ticked &ldquo;Accept remote volume commands&rdquo;). It doesn't change your own volume. See <a href="#remote-control">Remote control</a>.</td><td>Unset</td></tr>
@@ -797,6 +804,16 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 </table>
 
 <p>You can change any of these to whatever combination you prefer. Each accepts modifiers (Ctrl, Shift, Alt) plus one ordinary key.</p>
+
+<h3>Quick profile switch</h3>
+
+<p>Once you've given <strong>Quick profile switch</strong> a key, pressing it anywhere pops up a small list of every profile you have. Arrow to the one you want and press Enter (or click it) to switch straight to it. The profile you're currently on is marked in the list. A sound plays as the list opens, and the profile-switch sound plays the moment you pick one. Press Escape to close the list without switching.</p>
+
+<p>If RemSound was minimised to the system tray when you pressed the hotkey, it switches the profile and <strong>stays in the tray</strong> &mdash; the window doesn't jump up in front of whatever you're doing. So you can change profiles mid-task without losing your place.</p>
+
+<h3>Your screen reader reads out the hotkeys</h3>
+
+<p>Once a hotkey is set, your screen reader reads it out whenever you land on the menu item or control it's tied to &mdash; for example, moving onto <strong>File &rarr; Open profile</strong> announces &ldquo;Ctrl+O&rdquo;, and a control with a global hotkey announces &ldquo;press [your key] anywhere&rdquo;. So you can learn and confirm your shortcuts just by arrowing around the window, without coming back to this dialog.</p>
 
 <h2 id="remote-control">16. Remote control: adjusting a peer's listening volume from your end</h2>
 
@@ -879,7 +896,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <h2 id="audio-cues">18. Audio cue sounds</h2>
 
-<p>RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called <strong>cue sounds</strong>. Seven events have a cue:</p>
+<p>RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called <strong>cue sounds</strong>. Eight events have a cue:</p>
 
 <table>
 <tr><th>Cue</th><th>Plays when</th></tr>
@@ -888,15 +905,16 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <tr><td><strong>Recording start sound</strong></td><td>You start a recording.</td></tr>
 <tr><td><strong>Recording stop sound</strong></td><td>You stop a recording.</td></tr>
 <tr><td><strong>Profile saved sound</strong></td><td>A profile is saved &mdash; whether via File &rarr; Save or File &rarr; Save as.</td></tr>
-<tr><td><strong>Profile switched sound</strong></td><td>A profile finishes loading. Plays at startup if you started with a profile, and after every profile switch &mdash; using the new profile's cue, not the old one's.</td></tr>
+<tr><td><strong>Profile switched sound</strong></td><td>You switch to a different profile &mdash; from the Recent profiles menu, the Quick profile switch popup, or File &rarr; Open profile. It plays the moment you pick the new profile. It deliberately does <em>not</em> play on a fresh start into your first profile, so it isn't layered on top of the connect sound at launch.</td></tr>
+<tr><td><strong>Profile menu open sound</strong></td><td>The Quick profile switch popup opens.</td></tr>
 <tr><td><strong>Update sound</strong></td><td>An update is about to install &mdash; it plays just before RemSound closes to update itself. Handy when updates install silently in the background, so you're not caught off guard when RemSound restarts. Plays whether you ran the update by hand or it installed on its own.</td></tr>
 </table>
 
-<p>All seven cues play through your default Windows sound output, which is separate from the audio RemSound is sending or receiving. They don't appear in a normal recording. (The exception: if your sending side is capturing the very output device the cues play through, then they get captured along with everything else from that device.)</p>
+<p>All eight cues play through your default Windows sound output, which is separate from the audio RemSound is sending or receiving. They don't appear in a normal recording. (The exception: if your sending side is capturing the very output device the cues play through, then they get captured along with everything else from that device.)</p>
 
 <h3>Turning each cue on or off</h3>
 
-<p>Open <strong>File &rarr; Preferences</strong> (or Ctrl+P). The <strong>Audio cue sounds (Alt+N)</strong> list shows all seven cues with a tickbox next to each. Tick to play the cue when the corresponding event happens; untick to silence it.</p>
+<p>Open <strong>File &rarr; Preferences</strong> (or Ctrl+P). The <strong>Audio cue sounds (Alt+N)</strong> list shows all eight cues with a tickbox next to each. Tick to play the cue when the corresponding event happens; untick to silence it.</p>
 
 <p>Use the up and down arrow keys to move between cues; press <strong>Space</strong> to toggle the highlighted cue's tick on or off.</p>
 
@@ -930,6 +948,8 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <li><code>sounds\record stop.wav</code> &mdash; recording stop cue</li>
 <li><code>sounds\save.wav</code> &mdash; profile saved cue</li>
 <li><code>sounds\profile.wav</code> &mdash; profile switched cue</li>
+<li><code>sounds\profile menu open.wav</code> &mdash; profile menu open cue</li>
+<li><code>sounds\update.wav</code> &mdash; update cue</li>
 </ul>
 
 <p>If a cue's WAV file is missing &mdash; either the default file doesn't exist or a custom path points at a file you've since deleted &mdash; the cue stays silent rather than producing an error. RemSound logs a note in the diagnostic log (if logging is on) so you can see what happened.</p>

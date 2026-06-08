@@ -1180,17 +1180,10 @@ public sealed class MainForm : Form
             // blank-template case (no pendingProfile) we schedule it here.
             if (pendingProfile is null) ScheduleBaselineCapture();
             ApplyPendingProfileToControls();
-            // Profile-switch cue (2026-05-28): fires once after the profile finishes loading
-            // into the UI. Covers BOTH startup (user picks a profile from the picker) and
-            // mid-session switch (user picks a different profile from the menu — Program.Main
-            // re-creates MainForm under the new profile). Skipped when the user is on the
-            // blank template, where there's no profile to announce. Honours the per-profile
-            // EnableProfileSwitchCue flag set in Preferences.
-            if (pendingProfile is not null
-                && settings.LoadEnableProfileSwitchCue())
-            {
-                profileSwitchSound?.Play();
-            }
+            // The profile-switch cue is played ON CLICK by the switch entry points (Recent menu,
+            // quick switch, File open) — NOT here. A fresh launch into the first profile must stay
+            // silent: hearing the switch cue and then the connect cue at startup is confusing
+            // (Ed, 2026-06-08). So the rebuilt form never replays it.
             // Show/hide the Update vs Save-as buttons based on whether we're on a loaded
             // profile or the blank template.
             UpdateProfileButtonsVisibility();
@@ -1210,7 +1203,9 @@ public sealed class MainForm : Form
             // some virtual-machine drivers throw a redraw exception). The pending-profile
             // apply path above is unaffected — settings/devices/peers are already wired
             // up before we hide the window.
-            if (AppConfig.Load().StartMinimised)
+            var minimizeThisInstance = AppConfig.Load().StartMinimised || startNextInstanceMinimized;
+            startNextInstanceMinimized = false;
+            if (minimizeThisInstance)
             {
                 BeginInvoke(() => trayController.Minimize());
             }
@@ -1260,14 +1255,14 @@ public sealed class MainForm : Form
                 });
             }
 
-            // If the user opted in, show the About box once on the first launch after an update
-            // installed, so they see what's new. BeginInvoke so it opens after Shown completes.
-            BeginInvoke(new Action(MaybeShowWhatsNewAfterUpdate));
-
-            // Offer once to disable a handle-leaking Realtek ASIO driver if one is installed.
-            // BeginInvoke so the TaskDialog opens after Shown completes (and after the what's-new
-            // box, if that fired).
-            BeginInvoke(new Action(MaybeWarnAboutRealtekAsio));
+            // Post-launch notices, shown ONE AT A TIME via a single BeginInvoke that runs them in
+            // sequence — NOT one BeginInvoke per notice. Separate BeginInvokes NEST: the second
+            // dialog opens inside the first's modal message loop, the two stack on top of each
+            // other, and that nesting tangles their modal state so the boxes stop closing cleanly
+            // (the bug where the what's-new About box wouldn't close after the Realtek warning).
+            // RunStartupNotices shows each notice, waits for the user to close it, THEN shows the
+            // next — every one modal to the main window, never nested.
+            BeginInvoke(new Action(RunStartupNotices));
         };
 
         statusTimer.Start();
@@ -1290,6 +1285,21 @@ public sealed class MainForm : Form
         // only fills the WASAPI lists). After this it's notification-driven; in one-shot mode the
         // Tick handler stops the timer, in the poll fallback it's the first of the periodic ticks.
         deviceRefreshTimer.Start();
+    }
+
+    /// <summary>
+    /// Runs the post-launch notices one at a time — each ShowDialog blocks until the user closes it,
+    /// so the next never opens on top of a still-open one. Order: the what's-new About box (after an
+    /// update), then the Realtek-ASIO compatibility warning. The config-migration notice is handled
+    /// separately in Program.Main (shown before the profile picker), so it's already outside this
+    /// sequence and can't stack with these.
+    /// </summary>
+    private void RunStartupNotices()
+    {
+        if (IsDisposed) return;
+        MaybeShowWhatsNewAfterUpdate();
+        if (IsDisposed) return;
+        MaybeWarnAboutRealtekAsio();
     }
 
     /// <summary>If the user opted in (<see cref="AppConfig.ShowWhatsNewAfterUpdate"/>) and the
@@ -1573,7 +1583,9 @@ public sealed class MainForm : Form
         ToolStripMenuItem? realtekToggle = null;
         if (realtekAsioDriverNames.Count > 0)
         {
-            realtekToggle = new ToolStripMenuItem { AccessibleName = "Toggle Realtek ASIO driver in RemSound" };
+            // AccessibleName is set (alongside Text) by UpdateRealtekAsioMenuItemText so the screen
+            // reader hears "Enable"/"Disable", matching what's shown — never "Toggle".
+            realtekToggle = new ToolStripMenuItem();
             realtekToggle.Click += (_, _) => ToggleRealtekAsio();
             realtekAsioToggleItem = realtekToggle;
             UpdateRealtekAsioMenuItemText();
@@ -1689,6 +1701,12 @@ public sealed class MainForm : Form
         }
     }
 
+    // Carried across the close-and-relaunch profile switch (static so the NEXT MainForm instance,
+    // built by Program.Main after this one closes, can read it). A switch done while RemSound was
+    // in the tray should land back in the tray; internal so Program.Main can also skip the
+    // "loading audio driver" splash in that case.
+    internal static bool startNextInstanceMinimized;
+
     /// <summary>Switch to the profile at <paramref name="path"/> via the same close-and-relaunch
     /// flow OpenProfileFromPicker uses. The active profile gets pushed to the front of the
     /// recents list by the next MainForm constructor when it sees the loaded path.</summary>
@@ -1709,8 +1727,20 @@ public sealed class MainForm : Form
         }
         var title = Path.GetFileNameWithoutExtension(path);
         if (string.IsNullOrEmpty(title)) return;
+        // Play the switch cue NOW, on click, for immediate feedback — CuePlayer.Play is fire-and-
+        // forget on its own thread + device, so it survives the form rebuild that follows. Covers
+        // BOTH the Recent-profiles menu and the quick-switch popup (both route through here). The
+        // rebuilt form deliberately does NOT replay it, so startup into the first profile is silent.
+        if (settings.LoadEnableProfileSwitchCue())
+        {
+            profileSwitchSound?.Play();
+        }
         NextProfilePathToLoad = path;
         NextProfileTitleToLoad = title;
+        // If the switch was triggered while the window was minimised / in the tray (the quick-
+        // switch hotkey can fire from anywhere), keep the rebuilt instance in the tray too rather
+        // than popping the window up in front of whatever the user is doing.
+        startNextInstanceMinimized = !Visible || WindowState == FormWindowState.Minimized;
         AppendLogEntry($"profile switch via Recent profiles: \"{title}\" from {path}");
         Close();
     }
@@ -1748,8 +1778,8 @@ public sealed class MainForm : Form
             var chosen = QuickProfileSwitchDialog.Show(entries);
             if (!string.IsNullOrEmpty(chosen))
             {
-                // No-ops if it's already the current profile; otherwise reloads into the chosen one,
-                // which plays the profile-switch cue on the relaunch.
+                // SwitchToRecentProfile plays the switch cue on click, keeps the window in the
+                // tray if it was there, and no-ops if the chosen profile is already current.
                 SwitchToRecentProfile(chosen);
             }
         }
@@ -1897,6 +1927,11 @@ public sealed class MainForm : Form
         var picked = Path.GetFileNameWithoutExtension(pickedPath);
         if (string.IsNullOrEmpty(picked)) return;
         if (string.Equals(pickedPath, currentProfilePath, StringComparison.OrdinalIgnoreCase)) return; // already loaded
+        // Switch cue on click (same rationale as SwitchToRecentProfile).
+        if (settings.LoadEnableProfileSwitchCue())
+        {
+            profileSwitchSound?.Play();
+        }
         // Always pass the full path through. Program.cs deserialises directly from this
         // path, so profiles saved outside the active BaseDirectory still load correctly.
         NextProfilePathToLoad = pickedPath;
@@ -3856,9 +3891,14 @@ public sealed class MainForm : Form
     {
         if (realtekAsioToggleItem is null || realtekAsioDriverNames.Count == 0) return;
         var anyDisabled = realtekAsioDriverNames.Exists(d => disabledAsioDrivers.Contains(d));
+        // Set BOTH the visible Text (with the mnemonic) and the AccessibleName (no mnemonic) to the
+        // same Enable/Disable wording, so the screen reader reads exactly what's shown — never "Toggle".
         realtekAsioToggleItem.Text = anyDisabled
             ? "&Enable Realtek ASIO driver in RemSound"
             : "&Disable Realtek ASIO driver in RemSound";
+        realtekAsioToggleItem.AccessibleName = anyDisabled
+            ? "Enable Realtek ASIO driver in RemSound"
+            : "Disable Realtek ASIO driver in RemSound";
     }
 
     private void RemoveDisabledDriverFromPicker(string driver)

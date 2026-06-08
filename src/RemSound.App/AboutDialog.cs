@@ -20,6 +20,41 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v3.4
+
+        Quick profile switch: a new global hotkey pops up a
+        list of all your profiles from anywhere — even when
+        RemSound is in the system tray. Arrow to one, press
+        Enter, and it switches straight away. It marks the
+        profile you're on, plays a sound as the list opens
+        and again when you switch, and stays in the tray if
+        that's where it was. Unset by default; give it a key
+        under Options → Keyboard shortcuts.
+
+        A safety net for the Realtek ASIO driver, which leaks
+        Windows resources and can make audio unstable: RemSound
+        now spots it on startup and offers, just once, to
+        disable it. Re-enable or disable it any time from the
+        Options menu.
+
+        Your screen reader now reads out global hotkeys when
+        you move over the menu item or control they're tied to,
+        so you can learn your shortcuts just by arrowing around
+        — no need to open the shortcuts dialog.
+
+        Smoother long sessions on WASAPI: two machines' sound
+        clocks drift apart by a hair over time, which slowly
+        added delay. RemSound now corrects that continuously,
+        so a WASAPI link stays as tight after three hours as it
+        was at the start. (ASIO already kept itself in step.)
+
+        Also: a new "profile menu open" cue; the profile-switch
+        cue now plays the instant you switch, and no longer on
+        a fresh start; faster reaction when you plug or unplug a
+        device; and your settings now tuck into a "config"
+        folder, moved there automatically the first time you
+        run this version.
+
         RemSound v3.3
 
         Your audio is now encrypted, end to end, so you no

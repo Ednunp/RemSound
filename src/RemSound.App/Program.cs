@@ -186,7 +186,11 @@ internal static class Program
                 // MainForm construction. Show a "Loading audio driver" splash — on its own
                 // thread, so it stays painted while this thread is busy — so startup doesn't
                 // look hung. No-op for WASAPI-only profiles (construction is near-instant).
-                var splash = AsioLoadingSplash.StartIfNeeded(profile);
+                // Skip the loading splash when this rebuild is a quick-profile-switch that's
+                // staying in the tray — popping a splash up in front of the user's current app
+                // defeats the point of keeping RemSound minimised, and the switch cue already
+                // gave them feedback. Normal launches and visible switches still show it.
+                var splash = MainForm.startNextInstanceMinimized ? null : AsioLoadingSplash.StartIfNeeded(profile);
                 using var form = new MainForm(store, profile, title, nextPath);
                 // Expose the live window to the single-instance activation callback (a second
                 // copy choosing "switch to the running copy" signals us to surface this form).
