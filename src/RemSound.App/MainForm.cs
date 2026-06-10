@@ -1010,6 +1010,7 @@ public sealed class MainForm : Form
         sendInputDevicesList.ItemCheck += (_, args) =>
         {
             if (suppressDeviceCheckChange) return;
+            logFile.Event($"ui: capture (WASAPI mic) '{sendInputDevicesList.Items[args.Index]}' {(args.NewValue == CheckState.Checked ? "ticked" : "unticked")}");
             BeginInvoke(ApplyAudioRuntime);
             MarkProfileDirty();
             // Heads-up when the user ticks a WASAPI mic ON but Windows is blocking desktop-app
@@ -1026,7 +1027,7 @@ public sealed class MainForm : Form
         WireCheckedListAccessibility(asioReceiveOutputDevicesList, asioReceiveOutputDevicesStatusLabel, "ASIO receive output channel");
         WireCheckedListAccessibility(asioSendDevicesList, asioSendDevicesStatusLabel, "ASIO send channel");
         asioReceiveOutputDevicesList.ItemCheck += (_, _) => { if (!suppressDeviceCheckChange) { BeginInvoke(ApplyReceiveDevices); MarkProfileDirty(); } };
-        asioSendDevicesList.ItemCheck += (_, _) => { if (!suppressDeviceCheckChange) { BeginInvoke(ApplyAudioRuntime); MarkProfileDirty(); } };
+        asioSendDevicesList.ItemCheck += (_, args) => { if (!suppressDeviceCheckChange) { logFile.Event($"ui: capture (ASIO) '{asioSendDevicesList.Items[args.Index]}' {(args.NewValue == CheckState.Checked ? "ticked" : "unticked")}"); BeginInvoke(ApplyAudioRuntime); MarkProfileDirty(); } };
         // Profile-management button click wirings retired 2026-05-08 — File menu items now
         // call SaveProfileAs() / UpdateExistingProfile() / hotkeyController.ShowKeyboardShortcutsDialog
         // / trayController.Minimize() directly. See BuildFileMenu.
@@ -3672,6 +3673,7 @@ public sealed class MainForm : Form
     private void OnAudioEndpointsChanged()
     {
         if (IsDisposed) return;
+        logFile.Event("device-event: Windows reported an audio endpoint change (refresh queued)");
         try
         {
             BeginInvoke(new Action(() =>
@@ -3821,20 +3823,28 @@ public sealed class MainForm : Form
         return null;
     }
 
-    /// <summary>Reads Windows' microphone privacy setting and returns true when DESKTOP apps (which
-    /// RemSound is) are blocked from the mic. When blocked, WASAPI capture still opens but returns
-    /// pure silence, so the user "sends" but the peer hears nothing. Registry-based: the
-    /// CapabilityAccessManager ConsentStore "Value" is "Allow"/"Deny"; either the general per-user
-    /// gate or the NonPackaged (desktop-app) gate set to Deny blocks us. Best-effort — any failure
-    /// returns false so a registry hiccup never stops the user enabling their mic.</summary>
+    /// <summary>Reads Windows' microphone privacy settings and returns true when desktop apps — or
+    /// THIS app specifically — are blocked from the mic. When blocked, WASAPI capture still opens but
+    /// returns pure silence; ASIO bypasses this gate entirely, which is why the same mic can be live
+    /// in ASIO yet dead here. Checks, in order: the per-user and machine top-level gate and the
+    /// NonPackaged (all desktop apps) gate; a per-app Deny aimed at this exe under
+    /// <c>NonPackaged\&lt;exe&gt;</c> (the case the old single-value check missed, where one app is
+    /// denied while the top-level value still says Allow); and a Group-Policy / MDM force-deny
+    /// (<c>LetAppsAccessMicrophone=2</c>, which the Settings UI doesn't even show). Best-effort — any
+    /// failure returns false so a registry hiccup never stops the user enabling their mic.</summary>
     private static bool IsMicrophoneBlockedByWindowsPrivacy()
     {
         try
         {
             const string consent = @"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
+            const string nonPackaged = consent + @"\NonPackaged";
             return IsConsentDenied(Microsoft.Win32.Registry.CurrentUser, consent)
-                || IsConsentDenied(Microsoft.Win32.Registry.CurrentUser, consent + @"\NonPackaged")
-                || IsConsentDenied(Microsoft.Win32.Registry.LocalMachine, consent);
+                || IsConsentDenied(Microsoft.Win32.Registry.CurrentUser, nonPackaged)
+                || IsConsentDenied(Microsoft.Win32.Registry.LocalMachine, consent)
+                || IsConsentDenied(Microsoft.Win32.Registry.LocalMachine, nonPackaged)
+                || IsThisExeDeniedUnderNonPackaged(Microsoft.Win32.Registry.CurrentUser, nonPackaged)
+                || IsThisExeDeniedUnderNonPackaged(Microsoft.Win32.Registry.LocalMachine, nonPackaged)
+                || IsMicPolicyForceDenied();
         }
         catch
         {
@@ -3845,7 +3855,38 @@ public sealed class MainForm : Form
     private static bool IsConsentDenied(Microsoft.Win32.RegistryKey root, string subKey)
     {
         using var key = root.OpenSubKey(subKey);
+        // The ConsentStore "Value" is a REG_SZ "Allow"/"Deny". `as string` yields null for any other
+        // type or a missing value, so anything that isn't an explicit "Deny" reads as allowed.
         return string.Equals(key?.GetValue("Value") as string, "Deny", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>True if a per-app override under NonPackaged denies THIS exe specifically (its child
+    /// key is named by the exe's full path with '\' replaced by '#'). We match by exe filename rather
+    /// than reconstructing the exact encoding, so a deny on a different app never false-warns us.</summary>
+    private static bool IsThisExeDeniedUnderNonPackaged(Microsoft.Win32.RegistryKey root, string nonPackagedKey)
+    {
+        var exeName = System.IO.Path.GetFileName(Environment.ProcessPath ?? "");
+        if (string.IsNullOrEmpty(exeName)) return false;
+        using var key = root.OpenSubKey(nonPackagedKey);
+        if (key is null) return false;
+        foreach (var childName in key.GetSubKeyNames())
+        {
+            if (childName.IndexOf(exeName, StringComparison.OrdinalIgnoreCase) < 0) continue;
+            using var child = key.OpenSubKey(childName);
+            if (string.Equals(child?.GetValue("Value") as string, "Deny", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>True if a Group Policy / MDM rule force-denies microphone access to apps
+    /// (<c>HKLM\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy\LetAppsAccessMicrophone == 2</c>). This
+    /// sits below the Settings toggles, so the user can't see or undo it without policy access — and
+    /// the old check never looked here at all.</summary>
+    private static bool IsMicPolicyForceDenied()
+    {
+        using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Policies\Microsoft\Windows\AppPrivacy");
+        return key?.GetValue("LetAppsAccessMicrophone") is int v && v == 2;
     }
 
     /// <summary>One-shot, OK-only message telling the user Windows is blocking desktop-app mic
@@ -3873,13 +3914,16 @@ public sealed class MainForm : Form
     private void MaybeWarnMicBlockedOnStartup()
     {
         if (IsDisposed) return;
-        if (!IsMicrophoneBlockedByWindowsPrivacy()) return;
+        var blocked = IsMicrophoneBlockedByWindowsPrivacy();
         var anyWasapiMicChecked = false;
         for (var i = 0; i < sendInputDevicesList.Items.Count; i++)
         {
             if (sendInputDevicesList.GetItemChecked(i)) { anyWasapiMicChecked = true; break; }
         }
-        if (anyWasapiMicChecked) WarnMicrophoneBlockedByWindowsPrivacy();
+        // Log the detector's verdict every startup so a silent-mic session is no longer ambiguous —
+        // we can see whether RemSound thought Windows was blocking the mic, not just whether it warned.
+        logFile.Event($"mic-privacy: windows-blocks-desktop-mic={blocked} wasapiMicTicked={anyWasapiMicChecked}");
+        if (blocked && anyWasapiMicChecked) WarnMicrophoneBlockedByWindowsPrivacy();
     }
 
     /// <summary>
@@ -5336,6 +5380,7 @@ public sealed class MainForm : Form
                 var stepRawCapXB = sender.TakeMaxSenderRawCaptureStepCrossBuffer();
                 var stepRawCapWB = sender.TakeMaxSenderRawCaptureStepWithinBuffer();
                 var stepRawCap = stepRawCapXB > stepRawCapWB ? stepRawCapXB : stepRawCapWB;
+                var capPeak = sender.TakeMaxSenderPreEncodePeak();
                 var clippedNow = sender.ClippedSampleCount;
                 var clippedDelta = clippedNow - prevDiagClippedSamples; prevDiagClippedSamples = clippedNow;
                 var stepPostDecXB = receiver.TakeMaxPostDecodeStepCrossBuffer();
@@ -5371,7 +5416,7 @@ public sealed class MainForm : Form
                     $"trimB={trimBytes} trimN={trimFires} trimΔ={trimDelta} drainB={drainBytes} ovfB={ovfBytes} pktRej={pktRej} " +
                     $"concealΔ={concealDelta} shortReadΔ={shortReadDelta} " +
                     $"filtErr={filteredErrorFrames:0.0}f " +
-                    $"stepRawCap={stepRawCap:0.000} stepPreEnc={stepPreEnc:0.000} stepPreEncWas={stepPreEncWas:0.000} stepPreEncAsi={stepPreEncAsi:0.000} stepPostDec={stepPostDec:0.000} stepPostRing={stepPostRing:0.000} stepPostRsm={stepPostRsm:0.000} " +
+                    $"capPeak={capPeak:0.000} stepRawCap={stepRawCap:0.000} stepPreEnc={stepPreEnc:0.000} stepPreEncWas={stepPreEncWas:0.000} stepPreEncAsi={stepPreEncAsi:0.000} stepPostDec={stepPostDec:0.000} stepPostRing={stepPostRing:0.000} stepPostRsm={stepPostRsm:0.000} " +
                     $"stepRawCapXB={stepRawCapXB:0.000} stepRawCapWB={stepRawCapWB:0.000} " +
                     $"stepPreEncWasXB={stepPreEncWasXB:0.000} stepPreEncWasWB={stepPreEncWasWB:0.000} " +
                     $"stepPreEncAsiXB={stepPreEncAsiXB:0.000} stepPreEncAsiWB={stepPreEncAsiWB:0.000} " +
@@ -6917,22 +6962,33 @@ public sealed class MainForm : Form
 
         var sampleCount = Math.Min(LookbackSeconds, recentMaxGaps.Count);
         var skip = recentMaxGaps.Count - sampleCount;
-        var observedGap = 0;
+        // Track the TWO highest arrival-gap seconds, not just the worst. A single transient spike —
+        // one bad second from an OS/driver hiccup that doesn't recur — used to drive the whole
+        // recommendation (one 1046ms gap pushed the buffer straight to the 200ms cap and shed a big
+        // trim burst). Using the SECOND-highest requires the jitter to persist across >=2 seconds
+        // before it counts, while still honouring sustained jitter at full speed. The true peak is
+        // still logged for diagnosis; we fall back to the single value when there's only one sample.
+        int gapPeak = 0, gapSecond = 0;
         var i = 0;
         foreach (var gap in recentMaxGaps)
         {
             if (i++ < skip) continue;
-            if (gap > observedGap) observedGap = gap;
+            if (gap > gapPeak) { gapSecond = gapPeak; gapPeak = gap; }
+            else if (gap > gapSecond) { gapSecond = gap; }
         }
+        var observedGap = sampleCount >= 2 ? gapSecond : gapPeak;
 
-        var observedRenderCb = RenderPeriodFloorMs;
+        // Same lone-spike rejection for the render-callback gap.
+        int rcbPeak = RenderPeriodFloorMs, rcbSecond = RenderPeriodFloorMs;
         var rcbSkip = recentRenderCbGaps.Count - sampleCount;
         var rcbI = 0;
         foreach (var rcb in recentRenderCbGaps)
         {
             if (rcbI++ < rcbSkip) continue;
-            if (rcb > observedRenderCb) observedRenderCb = rcb;
+            if (rcb > rcbPeak) { rcbSecond = rcbPeak; rcbPeak = rcb; }
+            else if (rcb > rcbSecond) { rcbSecond = rcb; }
         }
+        var observedRenderCb = sampleCount >= 2 ? rcbSecond : rcbPeak;
 
         var codecFloor = (int)Math.Ceiling(1.5 * frameMs);
         var jitterBased = observedGap + observedRenderCb + SafetyMarginMs;
@@ -6963,7 +7019,7 @@ public sealed class MainForm : Form
             suppressFlag = false;
         }
         var logPrefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
-        logFile.Event($"{logPrefix}: gap-max={observedGap}ms renderCb={observedRenderCb}ms over {sampleCount}s recommended={recommended}ms capped={capped}ms prev={current}ms applied={clamped}ms frame={frameMs}ms");
+        logFile.Event($"{logPrefix}: gap-max={gapPeak}ms gap-used={observedGap}ms renderCb={observedRenderCb}ms over {sampleCount}s recommended={recommended}ms capped={capped}ms prev={current}ms applied={clamped}ms frame={frameMs}ms");
     }
 
     // UpdateTuneButtonEnabled + TuneLatencyAsync retired alongside the one-shot Tune button.

@@ -20,6 +20,28 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v3.7
+
+        Changing audio devices mid-session is smoother. A quick
+        run of device changes now settles for a moment and
+        rebuilds the sound engine once, instead of several times
+        in a row — so reconfiguring no longer crackles.
+
+        The latency auto-tuner keeps its head when the computer
+        hiccups. A single brief stall no longer makes it balloon
+        the buffer; it only raises the cushion when late audio
+        keeps coming.
+
+        The microphone-privacy warning now also catches blocks
+        aimed at RemSound alone, and blocks set by an
+        administrator policy — kinds of block Windows applies
+        without showing you a switch.
+
+        RemSound's log now records the loudness of what you're
+        sending, the mic-privacy check's verdict, and every
+        device change — so if something goes wrong, the log can
+        prove what happened instead of leaving us guessing.
+
         RemSound v3.6
 
         Updating is far more reliable. RemSound now installs its

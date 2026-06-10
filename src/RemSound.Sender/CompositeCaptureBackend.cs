@@ -51,6 +51,15 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
     private List<CaptureSourceSpec> asioSpecs = [];
     private bool started;
 
+    // Coalesces capture-lane rebuilds. A push<->mix backend swap tears down and restarts the whole
+    // WASAPI lane (a brief audible gap); when the capture set flaps, doing that per-change produces a
+    // burst of restarts. We defer the swap by RebuildDebounceMs and re-arm on each change, so a run of
+    // changes collapses into one rebuild. Only the swap path is debounced — in-place source updates
+    // still apply immediately. The timer callback and all of these fields are mutated under `gate`.
+    private System.Threading.Timer? rebuildTimer;
+    private IReadOnlyList<CaptureSourceSpec>? pendingRebuildSpecs;
+    private const int RebuildDebounceMs = 250;
+
     public CompositeCaptureBackend(AudioMode mode, string? asioDriverName, Action<ReadOnlyMemory<float>> onMixedSamples, Action<ReadOnlyMemory<float>>? onAsioLaneSamples, AsioCaptureBackend? injectedAsio, Action<string>? onDiagnostic = null, bool useTightLatencyWasapi = false)
     {
         this.onMixedSamples = onMixedSamples;
@@ -212,30 +221,73 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
             }
             var (newWasapi, newAsio) = SplitSpecs(specs);
 
-            // If push-mode applicability changes (single WASAPI source toggled on/off), the
-            // backend has to swap. PushModeWasapiBackend supports only one source. Full
-            // restart is acceptable here — changing source count mid-session is rare.
+            // A push-mode swap (single WASAPI source toggled on/off) means tearing the whole WASAPI
+            // lane down and rebuilding it — a brief audible gap. When the capture set flaps (a device
+            // coming and going, or a quick reconfiguration), doing that on every change produces a
+            // burst of restarts. Coalesce instead: stash the target and (re)arm a short timer so a run
+            // of changes collapses into ONE rebuild to the final state. PushModeWasapiBackend still
+            // supports only one source; this just defers the swap, it doesn't change the end result.
             var wouldBePush = useTightLatencyWasapi && newWasapi.Count == 1;
             var isPush = wasapi is PushModeWasapiBackend;
             if (wouldBePush != isPush)
             {
-                onDiagnostic?.Invoke($"wasapi backend: source count changed ({wasapiSpecs.Count}→{newWasapi.Count}), restarting to switch backend");
-                StopInternal();
-                Start(specs);
+                pendingRebuildSpecs = specs;
+                (rebuildTimer ??= new System.Threading.Timer(OnRebuildDue)).Change(RebuildDebounceMs, System.Threading.Timeout.Infinite);
+                onDiagnostic?.Invoke($"wasapi backend: source-count change ({wasapiSpecs.Count}→{newWasapi.Count}) — coalescing rebuild in {RebuildDebounceMs}ms");
                 return;
             }
 
-            if (wasapi is not null && !SpecsEqual(wasapiSpecs, newWasapi))
+            // No swap needed: the live backend takes these specs in place (cheap, no glitch). This
+            // also resolves a pending rebuild whose target flapped back to the current backend shape.
+            CancelPendingRebuild();
+            ApplyInPlace(newWasapi, newAsio);
+        }
+    }
+
+    private void ApplyInPlace(List<CaptureSourceSpec> newWasapi, List<CaptureSourceSpec> newAsio)
+    {
+        if (wasapi is not null && !SpecsEqual(wasapiSpecs, newWasapi))
+        {
+            wasapi.UpdateSources(newWasapi);
+            wasapiSpecs = newWasapi;
+        }
+        if (asio is not null && !SpecsEqual(asioSpecs, newAsio))
+        {
+            asio.UpdateSources(newAsio);
+            asioSpecs = newAsio;
+        }
+    }
+
+    /// <summary>Fires ~<see cref="RebuildDebounceMs"/> after the last swap-triggering change. Applies
+    /// the final capture set with a single rebuild — or, if the set flapped back to the current
+    /// backend shape during the window, just an in-place update with no rebuild at all. Holds gate.</summary>
+    private void OnRebuildDue(object? state)
+    {
+        lock (gate)
+        {
+            var specs = pendingRebuildSpecs;
+            pendingRebuildSpecs = null;
+            if (specs is null || !started) return;
+            var (newWasapi, newAsio) = SplitSpecs(specs);
+            var wouldBePush = useTightLatencyWasapi && newWasapi.Count == 1;
+            var isPush = wasapi is PushModeWasapiBackend;
+            if (wouldBePush != isPush)
             {
-                wasapi.UpdateSources(newWasapi);
-                wasapiSpecs = newWasapi;
+                onDiagnostic?.Invoke($"wasapi backend: applying coalesced rebuild → {newWasapi.Count} wasapi source(s)");
+                StopInternal();
+                Start(specs);
             }
-            if (asio is not null && !SpecsEqual(asioSpecs, newAsio))
+            else
             {
-                asio.UpdateSources(newAsio);
-                asioSpecs = newAsio;
+                ApplyInPlace(newWasapi, newAsio);
             }
         }
+    }
+
+    private void CancelPendingRebuild()
+    {
+        pendingRebuildSpecs = null;
+        rebuildTimer?.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
     }
 
     private string ModeLabel() => mode switch
@@ -252,6 +304,7 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
 
     private void StopInternal()
     {
+        CancelPendingRebuild();
         if (!started) return;
         try { wasapi?.Stop(); } catch { /* ignore */ }
         // ASIO child is NEVER stopped here — it's the persistent instance owned by AudioSender
@@ -264,6 +317,7 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
     public void Dispose()
     {
         Stop();
+        try { rebuildTimer?.Dispose(); } catch { /* ignore */ }
         try { wasapi?.Dispose(); } catch { /* ignore */ }
         // ASIO child not disposed — see StopInternal above.
     }

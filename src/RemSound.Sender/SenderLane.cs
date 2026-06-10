@@ -76,6 +76,13 @@ internal sealed class SenderLane
     public float TakeMaxPreEncodeStepCrossBuffer() => preEncodeStepProbe.TakeMaxCrossBuffer();
     public float TakeMaxPreEncodeStepWithinBuffer() => preEncodeStepProbe.TakeMaxWithinBuffer();
 
+    // Loudest absolute sample seen on this lane's pre-encode buffer since the last drain (resets on
+    // read), surfaced on the diag line. ~0 = we are sending silence (mic blocked / muted / wrong
+    // endpoint); a clear non-zero = real audio is reaching the encoder. This is the signal level the
+    // log never had — which is exactly why a "mic sends silence" report couldn't be confirmed from it.
+    private float preEncodePeak;
+    public float TakeMaxPreEncodePeak() { var p = preEncodePeak; preEncodePeak = 0f; return p; }
+
     // Which render route this lane announces in its format packets. The receiver reads the
     // Lane byte on the wire and tags the matching SessionPlayout, which makes PlayoutEngine
     // route the lane's audio to the corresponding per-route IWaveProvider surface (lane
@@ -190,6 +197,14 @@ internal sealed class SenderLane
         // <see cref="preEncodeStepProbe"/> field comment for why this isn't shared with the
         // other lane in BothIndependent.
         preEncodeStepProbe.ScanStereo(span);
+        // Capture-level peak alongside the discontinuity probe — the loudest sample about to be sent.
+        var peak = preEncodePeak;
+        for (var s = 0; s < span.Length; s++)
+        {
+            var a = span[s] < 0f ? -span[s] : span[s];
+            if (a > peak) peak = a;
+        }
+        preEncodePeak = peak;
 
         switch (owner.Codec)
         {

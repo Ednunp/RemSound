@@ -179,6 +179,15 @@ public sealed class AudioSender : IDisposable
     public float TakeMaxPreEncodeStepWasapiLane() => defaultLane.TakeMaxPreEncodeStep();
     public float TakeMaxPreEncodeStepAsioLane() => asioLane.TakeMaxPreEncodeStep();
 
+    /// <summary>Loudest absolute pre-encode sample across both lanes since the last call (resets on
+    /// read). ~0 means we're sending silence; surfaced on the diag line as capPeak.</summary>
+    public float TakeMaxSenderPreEncodePeak()
+    {
+        var a = defaultLane.TakeMaxPreEncodePeak();
+        var b = asioLane.TakeMaxPreEncodePeak();
+        return a > b ? a : b;
+    }
+
     // Cross-buffer (boundary) and within-buffer (content) split — see AudioStepProbe for the
     // diagnostic distinction. Used by the per-second diag logger to emit two extra columns so
     // an offline log inspection can tell a real audio transient apart from a buffer-boundary
