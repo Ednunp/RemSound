@@ -13,8 +13,18 @@ internal static class Program
     private static volatile MainForm? activeMainForm;
 
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        // The auto-updater relaunches a temp copy of the NEW RemSound.exe in this mode to swap the
+        // new files over the install while the old copy exits (see UpdateApplier / RemSoundUpdater).
+        // Handle it first and return: this process is the installer, not a normal launch, so it must
+        // not touch the single-instance lock, audio devices, or the migration steps below.
+        if (args.Length > 0 && Array.Exists(args, a => string.Equals(a, "--apply-update", StringComparison.OrdinalIgnoreCase)))
+        {
+            UpdateApplier.Run(args);
+            return;
+        }
+
         // SustainedLowLatency tells the GC to avoid full (gen 2) collections while audio is streaming.
         // Gen 0/1 collections still happen but are sub-millisecond; the long pauses that were causing
         // the receiver to fall behind in clusters of 4-5 underruns at a time were almost certainly
@@ -33,8 +43,8 @@ internal static class Program
 
         // Remove cue WAVs (and their .sfk peak files) left loose in the install ROOT by pre-
         // 2026-05-28 builds, where the cues lived next to RemSound.exe before they moved into
-        // sounds\. A robocopy update copies the new sounds\ tree but uses /E (not /PURGE), so it
-        // never deletes these orphans — they just linger in the root. Best-effort + idempotent:
+        // sounds\. An update copies the new sounds\ tree but never purges, so it never deletes
+        // these orphans — they just linger in the root. Best-effort + idempotent:
         // a no-op once they're gone. 2026-06-08.
         CleanUpLegacyRootSounds();
 
@@ -66,12 +76,13 @@ internal static class Program
                     // a killed copy is slow to release the abandoned mutex / its audio devices.
                     if (!instance.TryAcquire(TimeSpan.FromSeconds(5)))
                     {
-                        MessageBox.Show(
+                        ForegroundDialog.Show(owner => MessageBox.Show(
+                            owner,
                             cleared
                                 ? "RemSound closed the other copy but couldn't start cleanly. Please launch RemSound again."
                                 : "RemSound couldn't close the copy that's already running — it may be running as administrator. Close it from Task Manager (or restart Windows), then try again.",
                             "RemSound is already running",
-                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning));
                         return;
                     }
                     break;
@@ -82,6 +93,10 @@ internal static class Program
         // route that request to whichever main window is open at the time.
         instance.StartActivationListener();
         instance.ActivateRequested += () => activeMainForm?.RestoreFromTray();
+
+        // Best-effort: clear leftover update temp stages (and any relics of the old batch updater).
+        // We hold the single-instance lock here, so only the live copy does this — no sibling race.
+        RemSoundUpdater.CleanUpUpdateStages();
 
         // F1 anywhere = open the bundled manual. Installed *before* the first ShowDialog so
         // it works on the profile picker (the very first thing the user sees). The filter
@@ -288,8 +303,8 @@ internal static class Program
     }
 
     /// <summary>Delete cue WAVs and their .sfk peak files left loose in the install ROOT by
-    /// pre-2026-05-28 builds (the cues moved into <c>sounds\</c> then; a robocopy update copies
-    /// the new tree but never removes the old root copies). Best-effort and idempotent — runs
+    /// pre-2026-05-28 builds (the cues moved into <c>sounds\</c> then; an update copies the new
+    /// tree but never removes the old root copies). Best-effort and idempotent — runs
     /// every launch and no-ops once the orphans are gone. Only the known default cue names are
     /// touched, never anything else in the folder.</summary>
     private static void CleanUpLegacyRootSounds()

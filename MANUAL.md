@@ -940,13 +940,12 @@ A short countdown picks _Install now_ automatically if you don't choose anything
 
 ### What happens during an install
 
-RemSound can't replace its own program file while it's running, so an install starts a small helper that finishes the job once RemSound has closed:
+RemSound can't replace its own program file while it's running, so it hands the job to a fresh copy of the new version, which does the swap once RemSound has closed:
 
-  1. RemSound downloads the new version into a holding folder next to the running program.
-  2. It writes a tiny helper alongside it that watches for RemSound to close.
-  3. RemSound closes.
-  4. The helper notices, copies the new files over the install folder, deletes the holding folder, and reopens RemSound on the same profile you were running.
-  5. The helper deletes itself.
+  1. RemSound downloads the new version into a temporary folder kept on your own machine, away from the install folder.
+  2. It starts the new copy from that temporary folder, and closes itself.
+  3. The new copy waits for RemSound to close fully, then moves your old program files aside and copies the new ones into place. If a file is briefly in use, it waits and retries rather than giving up.
+  4. It reopens RemSound on the same profile you were running, and clears the temporary folder away.
 
 
 
@@ -962,11 +961,11 @@ If the profile that was running can't be found after the update (you'd renamed o
 
 ### If an install fails
 
-The update download is best-effort: a flaky network, a locked install folder, or a temporarily-unavailable version will pop up a message saying it couldn't finish, and leave your running version untouched. The address of the download page is in that message, so you can get the new version in a browser and install it by hand if you need to. If you installed RemSound into `Program Files` without giving your account permission to write to that folder, the install helper's copy step will fail too — either fix the permission or move RemSound to a folder you can write to (somewhere inside your own user folder, for instance).
+The update download is best-effort: a flaky network, or a temporarily-unavailable version, will pop up a message saying it couldn't finish, and leave your running version untouched. The address of the download page is in that message, so you can get the new version in a browser and install it by hand if you need to. If you installed RemSound into `Program Files` without giving your account permission to write to that folder, the install can't replace the files there — either fix the permission or move RemSound to a folder you can write to (somewhere inside your own user folder, for instance).
 
-**If the helper's copy step itself fails** — most often because Dropbox or another sync app was holding the install folder's files open when the helper tried to replace them — the helper leaves a file called `update-failed.txt` next to the RemSound program, with details, and leaves the new files sitting in an `_update` subfolder. It does _not_ reopen the old version in that case — so the next time you start RemSound by hand, you'll either get the still-old version with that note telling you what to do, or you can copy the contents of the `_update` folder over the install folder yourself. The most reliable fix is: close RemSound, wait 30 seconds for Dropbox to settle, start it again, and try **Help → Check for updates** once more — it almost always works on the second try.
+**If the file swap itself can't finish** — for example because a sync app or another program was holding one of the files open and wouldn't let go — RemSound _puts your previous version back exactly as it was_ and reopens it, rather than leaving you with a half-finished install. It writes a short note called `update-failed.txt` next to the program explaining what happened. Nothing is broken — just try **Help → Check for updates** again, and it almost always goes through on the next attempt. If a sync app like Dropbox is involved, closing RemSound and giving it half a minute to settle before retrying helps.
 
-A step-by-step record of every helper run is kept in a helper log file in the install folder — useful if a failure keeps happening and you want to share it for diagnosis.
+A step-by-step record of every update is kept in a file called `updater.log` in the install folder — useful if a failure keeps happening and you want to share it for diagnosis.
 
 ### The About dialog and release notes
 

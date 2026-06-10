@@ -20,6 +20,20 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v3.6
+
+        Updating is far more reliable. RemSound now installs its
+        own updates, step by step, instead of handing off to a
+        Windows script that could quietly fail. If an update can't
+        finish for any reason, RemSound puts your previous version
+        back exactly as it was and tells you — so a failed update
+        can never leave you stuck or half-installed. Your settings,
+        profiles, logs and sounds are never touched.
+
+        A couple more notices now come to the front too: the
+        "RemSound is already running" message, and the notes shown
+        after an update when RemSound was tucked away in the tray.
+
         RemSound v3.5
 
         Recover a sound card you unplug: if a USB sound card

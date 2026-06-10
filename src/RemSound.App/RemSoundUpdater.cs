@@ -12,18 +12,19 @@ namespace RemSound.App;
 /// to the running assembly's version, and (optionally) downloads and installs the new build.
 ///
 /// Update install flow (Windows-only): RemSound.exe can't overwrite itself while it's running,
-/// so a successful install does the swap via a detached <c>cmd.exe</c> helper:
+/// so a successful install hands off to a SEPARATE copy of the new RemSound.exe (see
+/// <see cref="UpdateApplier"/>):
 /// <list type="number">
-///   <item>Download the release ZIP to <c>%TEMP%\RemSound-update-&lt;tag&gt;.zip</c>.</item>
-///   <item>Extract to <c>&lt;exe&gt;\_update\</c>.</item>
-///   <item>Write a one-shot batch file at <c>&lt;exe&gt;\_apply-update.cmd</c> that waits for
-///         RemSound.exe to exit, robocopies the staged folder over the publish folder, deletes
-///         the staging area, restarts RemSound.exe, and removes itself.</item>
-///   <item>Start the batch with <c>CreateNoWindow</c> + detached, then call
-///         <see cref="Application.Exit"/>.</item>
+///   <item>Download the release ZIP and extract it to a per-user temp stage OFF the install
+///         folder (<c>&lt;LocalAppData&gt;\RemSound\update\&lt;guid&gt;\app</c>).</item>
+///   <item>Launch the staged <c>RemSound.exe --apply-update …</c> from there, then exit.</item>
+///   <item>That process waits for this one to fully exit, then back-up-and-swaps the new files
+///         over the install in plain C# (retry + rename-aside, rolling back on any failure),
+///         restarts RemSound, and the next launch clears the temp stage.</item>
 /// </list>
-/// The batch survives RemSound's exit because <c>cmd.exe</c> is its own process. Robocopy's
-/// retry/wait flags handle the brief moment between RemSound exit and the file unlock.
+/// Running the installer from temp means nothing in the install folder is locked by the updater
+/// itself; doing the copy in C# rather than a generated batch + robocopy removes the whole class
+/// of silent batch/robocopy failures the old helper hit on some machines.
 ///
 /// The GitHub repo to poll is hard-coded — the App was designed to be redistributed from a
 /// single canonical release stream, not to be re-pointed at a fork. If you need to publish
@@ -161,46 +162,43 @@ internal sealed class RemSoundUpdater : IDisposable
     }
 
     /// <summary>Filename of the one-shot "after the update restart, silently load this profile"
-    /// sentinel. Written next to RemSound.exe by <see cref="DownloadAndStageInstallAsync"/>
-    /// when the caller supplies a non-empty <c>activeProfileTitle</c>; read and deleted by
-    /// <c>Program.Main</c> on the next startup. Lives in the install directory (not %TEMP%
-    /// or %APPDATA%) because the helper batch's robocopy step needs to know to skip it —
-    /// see the <c>/XF</c> list in <see cref="BuildInstallScript"/>.</summary>
+    /// sentinel. Written into the install folder by <see cref="UpdateApplier"/> just before it
+    /// relaunches RemSound (the profile title is handed to it via <c>--resume-profile</c>); read
+    /// and deleted by <c>Program.Main</c> on the next startup, so a silent or mid-session update
+    /// drops the user back into the same profile they were running rather than at the picker.</summary>
     public const string ResumeProfileSentinelName = "_resume-after-update.txt";
 
-    /// <summary>Download the update ZIP, stage it next to RemSound.exe, spawn the detached
-    /// install helper, and ask the App to exit so the helper can take over. Returns true if
-    /// the helper was launched (caller should Application.Exit immediately afterwards);
-    /// false on any failure earlier in the pipeline. A false return leaves the running
-    /// instance untouched.
+    /// <summary>Download the update ZIP, stage it to a per-user temp folder, and launch the new
+    /// version's in-app installer (<see cref="UpdateApplier"/>) to take over once this process
+    /// exits. Returns true if the installer was launched (caller should Application.Exit
+    /// immediately afterwards); false on any failure earlier in the pipeline. A false return
+    /// leaves the running instance — and the install — untouched.
     ///
-    /// <paramref name="activeProfileTitle"/> — when non-empty, a one-shot sentinel file
-    /// <see cref="ResumeProfileSentinelName"/> is written next to RemSound.exe just before
-    /// the helper is launched. On the next startup, Program.Main reads it, loads that profile
-    /// silently (skipping the picker), and deletes the sentinel. This makes a silent / manual
-    /// update behave like the session never ended — the user is back in the same profile
-    /// they were running, without having to remember which one it was. When null/empty, no
-    /// sentinel is written and the post-update launch uses whatever startup behaviour
-    /// AppConfig has configured.</summary>
+    /// <paramref name="activeProfileTitle"/> — when non-empty, it's passed to the installer via
+    /// <c>--resume-profile</c>; the installer writes the one-shot <see cref="ResumeProfileSentinelName"/>
+    /// sentinel into the install folder just before it relaunches RemSound. On the next startup,
+    /// Program.Main reads it, loads that profile silently (skipping the picker), and deletes the
+    /// sentinel — so a silent / mid-session update behaves like the session never ended. When
+    /// null/empty, no sentinel is written and the post-update launch uses whatever startup
+    /// behaviour AppConfig has configured.</summary>
     public async Task<bool> DownloadAndStageInstallAsync(UpdateInfo info, string? activeProfileTitle = null, CancellationToken token = default)
     {
         try
         {
-            var baseDir = AppContext.BaseDirectory;
-            var stagingDir = Path.Combine(baseDir, "_update");
-            var zipPath = Path.Combine(Path.GetTempPath(), $"RemSound-update-{info.Tag}.zip");
-            var batchPath = Path.Combine(baseDir, "_apply-update.cmd");
-            var resumeSentinelPath = Path.Combine(baseDir, ResumeProfileSentinelName);
+            var installDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
-            // Tidy any leftover from a previous failed attempt before we start. Also clear
-            // the failure marker — the new attempt starts clean and only re-creates the
-            // marker if THIS run fails. The resume sentinel from a previous run (if any) is
-            // also cleared here; if the caller supplies a profile title, the new sentinel is
-            // written below after staging succeeds.
-            TryDelete(zipPath);
-            TryDeleteDirectory(stagingDir);
-            TryDelete(Path.Combine(baseDir, "update-failed.txt"));
-            TryDelete(resumeSentinelPath);
+            // Stage the new version into a LOCAL, per-user temp folder OUTSIDE the install (and off any
+            // Dropbox/OneDrive folder the install might sit in). The new RemSound.exe is launched FROM
+            // here to do the swap, so nothing in the install folder is locked by the updater itself, and
+            // a sync engine can't hold the staged files mid-update.
+            var stageRoot = Path.Combine(UpdateStageParentDir, Guid.NewGuid().ToString("N"));
+            var appDir = Path.Combine(stageRoot, "app");
+            var zipPath = Path.Combine(stageRoot, $"RemSound-update-{info.Tag}.zip");
+            Directory.CreateDirectory(appDir);
+
+            // This attempt starts clean: clear any stale failure marker / resume sentinel in the install.
+            TryDelete(Path.Combine(installDir, "update-failed.txt"));
+            TryDelete(Path.Combine(installDir, ResumeProfileSentinelName));
 
             Log?.Invoke($"updater: downloading {info.DownloadUrl}");
             await using (var src = await http.GetStreamAsync(info.DownloadUrl, token).ConfigureAwait(false))
@@ -209,47 +207,48 @@ internal sealed class RemSoundUpdater : IDisposable
                 await src.CopyToAsync(dst, token).ConfigureAwait(false);
             }
 
-            Log?.Invoke($"updater: extracting to {stagingDir}");
-            Directory.CreateDirectory(stagingDir);
-            System.IO.Compression.ZipFile.ExtractToDirectory(zipPath, stagingDir, overwriteFiles: true);
+            Log?.Invoke($"updater: extracting to {appDir}");
+            System.IO.Compression.ZipFile.ExtractToDirectory(zipPath, appDir, overwriteFiles: true);
 
-            // Some release zips wrap everything in a single top-level folder
-            // (e.g. "RemSound-v1.1/RemSound.exe"). Flatten if that's the case so the
-            // robocopy step copies the right tree over the install location.
-            var stagingRoot = ResolveStagingRoot(stagingDir);
+            // Some release zips wrap everything in a single top-level folder (e.g. "RemSound-v1.1/").
+            // Flatten to the level that actually holds RemSound.exe.
+            var appRoot = ResolveStagingRoot(appDir);
 
-            Log?.Invoke($"updater: writing install helper {batchPath}");
-            File.WriteAllText(batchPath, BuildInstallScript(stagingRoot, baseDir));
-
-            // Write the resume-after-update sentinel so the post-restart launch loads the
-            // same profile silently (no picker, no missed session). Only when the caller
-            // supplied a title — blank-template sessions and explicit "no profile yet" cases
-            // fall through to the normal startup logic.
-            if (!string.IsNullOrWhiteSpace(activeProfileTitle))
+            var stagedExe = Path.Combine(appRoot, "RemSound.exe");
+            if (!File.Exists(stagedExe))
             {
-                try
-                {
-                    File.WriteAllText(resumeSentinelPath, activeProfileTitle);
-                    Log?.Invoke($"updater: wrote resume sentinel for profile '{activeProfileTitle}'");
-                }
-                catch (Exception ex)
-                {
-                    // Sentinel is best-effort. If we can't write it (disk full, ACL change),
-                    // the update still proceeds; the user gets the picker on relaunch.
-                    Log?.Invoke($"updater: could not write resume sentinel: {ex.GetType().Name}: {ex.Message}");
-                }
+                Log?.Invoke("updater: staged RemSound.exe not found — aborting, install left untouched");
+                TryDeleteDirectory(stageRoot);
+                return false;
             }
 
+            // Hand off to the NEW version's in-app installer (UpdateApplier). It waits for THIS process
+            // to exit, then back-up-and-swaps the files over the install in C# and restarts RemSound.
+            // ArgumentList quotes paths with spaces/odd characters correctly for us — no batch escaping.
             var pid = System.Environment.ProcessId;
             var psi = new System.Diagnostics.ProcessStartInfo
             {
-                FileName = "cmd.exe",
-                Arguments = $"/c \"\"{batchPath}\" {pid}\"",
+                FileName = stagedExe,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-                WorkingDirectory = baseDir,
+                WorkingDirectory = appRoot,
             };
-            Log?.Invoke($"updater: launching install helper, parent PID {pid}");
+            psi.ArgumentList.Add("--apply-update");
+            psi.ArgumentList.Add("--update-source");
+            psi.ArgumentList.Add(appRoot);
+            psi.ArgumentList.Add("--update-target");
+            psi.ArgumentList.Add(installDir);
+            psi.ArgumentList.Add("--update-wait-pid");
+            psi.ArgumentList.Add(pid.ToString());
+            psi.ArgumentList.Add("--update-stage-root");
+            psi.ArgumentList.Add(stageRoot);
+            if (!string.IsNullOrWhiteSpace(activeProfileTitle))
+            {
+                psi.ArgumentList.Add("--resume-profile");
+                psi.ArgumentList.Add(activeProfileTitle);
+            }
+
+            Log?.Invoke($"updater: launching in-app installer from {appRoot}, parent PID {pid}");
             System.Diagnostics.Process.Start(psi);
             return true;
         }
@@ -258,135 +257,6 @@ internal sealed class RemSoundUpdater : IDisposable
             Log?.Invoke($"updater: install failed: {ex.GetType().Name}: {ex.Message}");
             return false;
         }
-    }
-
-    /// <summary>One-shot installer batch. Waits for the supplied PID to exit (so file locks
-    /// release), robocopies the staged folder over the install folder, removes the staging
-    /// area, restarts RemSound.exe, and self-deletes.
-    ///
-    /// History: v1.0 of this helper used <c>/R:5 /W:1</c> on robocopy and unconditionally
-    /// restarted RemSound regardless of whether the copy actually succeeded. On
-    /// Dropbox-installed copies this failed silently — Dropbox held write locks on the
-    /// existing install files for ~10–30 seconds after extraction kicked the sync off, robocopy
-    /// gave up after 5 seconds, and the helper relaunched the OLD binary. The user saw the same
-    /// version after "update".
-    ///
-    /// v1.3 hardening (2026-05-15):
-    ///   * Robocopy retries bumped to <c>/R:60 /W:1</c> — up to 60 seconds per file. Dropbox
-    ///     locks reliably release inside that window.
-    ///   * Robocopy exit code is captured and checked. Anything ≥ 8 is a true failure; the
-    ///     helper writes <c>update-failed.txt</c> to the install dir with diagnostic detail,
-    ///     does NOT relaunch the old binary, and leaves the staging folder intact so the
-    ///     user (or a re-run of the updater) can recover. Codes 0–7 are robocopy's
-    ///     "success-ish" range (0 = nothing changed, 1 = copied, 2 = extras, 3 = both, etc).
-    ///   * Helper writes a step-by-step log to <c>_update-helper.log</c> in the install dir
-    ///     for post-mortem when the copy goes wrong. Robocopy's own output is appended via
-    ///     <c>/LOG+:</c>.
-    ///
-    /// 2026-05-18 changes:
-    ///   * Robocopy now also excludes <c>remsound.config.json</c> (the user's machine-local
-    ///     config) and the <c>logs</c> / <c>profiles</c> / <c>recordings</c> folders, so an
-    ///     update can never overwrite the user's own state — only app files are replaced.
-    ///   * On SUCCESS the helper now also deletes <c>_update-helper.log</c> and any stale
-    ///     <c>update-failed.txt</c> (the <c>_update</c> folder was already removed), leaving
-    ///     a tidy install folder. The FAILURE branch still keeps all of them for diagnosis.
-    ///
-    /// The helper is detached from RemSound at start time, so it survives the parent's exit.</summary>
-    private static string BuildInstallScript(string stagingRoot, string installDir)
-    {
-        var helperLog = Path.Combine(installDir, "_update-helper.log");
-        var failureMarker = Path.Combine(installDir, "update-failed.txt");
-        var stagingDir = Path.Combine(installDir, "_update");
-        var remsoundExe = Path.Combine(installDir, "RemSound.exe");
-        // Robocopy source/destination, with any trailing directory separator stripped.
-        // CRITICAL BUG FIX (2026-05-19): installDir is AppContext.BaseDirectory, which ends
-        // in a backslash. A quoted path that ends in a backslash — "D:\dir\" — is mis-parsed
-        // on the command line: the \" is read as an ESCAPED quote, so robocopy never receives
-        // a valid destination argument and exits immediately with code 16 (no files copied).
-        // That silently broke EVERY auto-update in every release to date. The robocopy line
-        // below MUST use these trimmed forms, never the raw {installDir} / {stagingRoot}.
-        var stagingArg = stagingRoot.TrimEnd('\\', '/');
-        var installArg = installDir.TrimEnd('\\', '/');
-        return $"""
-        @echo off
-        setlocal
-        rem RemSound auto-installer helper. Generated by RemSoundUpdater. Self-deleting on success.
-        set "PID=%~1"
-        set "LOG={helperLog}"
-        set "MARKER={failureMarker}"
-
-        echo. >> "%LOG%"
-        echo === %DATE% %TIME% update helper started, parent PID=%PID% === >> "%LOG%"
-        echo %DATE% %TIME% install dir=[%~dp0] >> "%LOG%"
-
-        :wait_loop
-        tasklist /FI "PID eq %PID%" 2>nul | find "%PID%" >nul
-        if not errorlevel 1 (
-          timeout /t 1 /nobreak >nul
-          goto wait_loop
-        )
-
-        echo %DATE% %TIME% parent exited, starting robocopy (R:60 W:1) >> "%LOG%"
-        rem /XF + /XD keep the update from ever overwriting the USER's own state: everything under
-        rem "user settings and logs" (global config, profiles, logs, sounds — including any custom cue
-        rem WAVs the user dropped in) plus the legacy loose config. An update replaces APP files only.
-        rem build-release.ps1 keeps those out of the release zip; this is the second line of defence so
-        rem a bad zip still can't clobber them. The bare logs/profiles/recordings excludes stay for any
-        rem older layout still mid-migration.
-        robocopy "{stagingArg}" "{installArg}" /E /IS /IT /NFL /NDL /NJH /NJS /R:60 /W:1 /XF _apply-update.cmd /XF _update-helper.log /XF update-failed.txt /XF remsound.config.json /XF {ResumeProfileSentinelName} /XD logs profiles recordings _update "user settings and logs" /LOG+:"%LOG%"
-        set "ROBO_EXIT=%ERRORLEVEL%"
-        rem Guard against an empty exit code (e.g. robocopy never ran / ERRORLEVEL was clobbered):
-        rem an empty %ROBO_EXIT% turns the GEQ test below into a parse error. Default it to a
-        rem clear non-zero so the failure path is taken cleanly and logged with a real number.
-        if not defined ROBO_EXIT set "ROBO_EXIT=99"
-        echo %DATE% %TIME% robocopy exit=%ROBO_EXIT% >> "%LOG%"
-
-        if %ROBO_EXIT% GEQ 8 (
-          echo RemSound could not finish updating. > "%MARKER%"
-          echo. >> "%MARKER%"
-          echo The new version downloaded correctly, but RemSound could not >> "%MARKER%"
-          echo replace its program files with it. Nothing is broken - your >> "%MARKER%"
-          echo current version still works and has been left as it was. >> "%MARKER%"
-          echo. >> "%MARKER%"
-          echo What to do: >> "%MARKER%"
-          echo. >> "%MARKER%"
-          echo   1. Close RemSound completely. >> "%MARKER%"
-          echo   2. Wait about 30 seconds. A file-syncing, backup or antivirus >> "%MARKER%"
-          echo      program may have been using RemSound's files; this gives it >> "%MARKER%"
-          echo      time to finish and let go of them. >> "%MARKER%"
-          echo   3. Start RemSound again, open the Help menu, and choose >> "%MARKER%"
-          echo      Check for updates to try once more. It usually works on the >> "%MARKER%"
-          echo      second attempt. >> "%MARKER%"
-          echo. >> "%MARKER%"
-          echo If it still will not update: the new version's files are ready >> "%MARKER%"
-          echo and waiting in the folder named _update, next to RemSound.exe. >> "%MARKER%"
-          echo You can finish the update yourself by copying everything from >> "%MARKER%"
-          echo inside that _update folder into this folder, replacing the older >> "%MARKER%"
-          echo files when asked. >> "%MARKER%"
-          echo. >> "%MARKER%"
-          echo Once RemSound has updated successfully you can delete this file. >> "%MARKER%"
-          echo Technical details for support are in _update-helper.log in this folder. >> "%MARKER%"
-          rem Drop the resume-after-update sentinel on failure too — there's no restart
-          rem happening, so a stale sentinel would mis-direct the user's next manual launch
-          rem into auto-loading a profile they may have moved on from in the meantime.
-          del "{installArg}\{ResumeProfileSentinelName}" 2>nul
-          echo %DATE% %TIME% FAILURE: robocopy exit=%ROBO_EXIT%, update folder kept, NOT restarting RemSound >> "%LOG%"
-          del "%~f0"
-          exit /b %ROBO_EXIT%
-        )
-
-        rmdir /S /Q "{stagingDir}" 2>nul
-        echo %DATE% %TIME% update applied OK, cleaning up and restarting RemSound >> "%LOG%"
-        del "%MARKER%" 2>nul
-        start "" "{remsoundExe}"
-        rem Success cleanup: the staged _update folder is already gone (rmdir above). Now drop
-        rem the helper log and the failure marker too, so a clean update leaves the install
-        rem folder tidy with no _update / _update-helper.log / update-failed.txt left behind.
-        rem (The FAILURE branch above deliberately keeps all of these for diagnosis.)
-        rem The helper log is deleted last, after the final line is written to it.
-        del "%LOG%" 2>nul
-        del "%~f0"
-        """;
     }
 
     /// <summary>If the zip extracted to a single subfolder (typical when GitHub zips a tag),
@@ -398,6 +268,43 @@ internal sealed class RemSoundUpdater : IDisposable
         var files = Directory.GetFiles(stagingDir);
         if (files.Length == 0 && subdirs.Length == 1) return subdirs[0];
         return stagingDir;
+    }
+
+    /// <summary>Per-user, local temp parent for update staging: &lt;LocalAppData&gt;\RemSound\update.
+    /// Deliberately OFF the install folder (which may be Dropbox/OneDrive-synced) and writable
+    /// without admin, so the new RemSound.exe can run from here to swap files over the install.</summary>
+    internal static string UpdateStageParentDir
+    {
+        get
+        {
+            var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrWhiteSpace(local)) local = Path.GetTempPath();
+            return Path.Combine(local, "RemSound", "update");
+        }
+    }
+
+    /// <summary>Best-effort cleanup of leftover update artefacts, called on a normal launch. The
+    /// in-app installer can't delete the temp stage it's running from, so the next launch clears it;
+    /// this also sweeps away relics of the OLD (pre-3.6) batch updater that staged into the install
+    /// folder (the <c>_update</c> tree, <c>_apply-update.cmd</c>, <c>_update-helper.log</c>).</summary>
+    public static void CleanUpUpdateStages()
+    {
+        try
+        {
+            var parent = UpdateStageParentDir;
+            if (Directory.Exists(parent))
+                foreach (var dir in Directory.GetDirectories(parent)) TryDeleteDirectory(dir);
+        }
+        catch { /* best-effort */ }
+
+        try
+        {
+            var installDir = AppContext.BaseDirectory;
+            TryDeleteDirectory(Path.Combine(installDir, "_update"));
+            TryDelete(Path.Combine(installDir, "_apply-update.cmd"));
+            TryDelete(Path.Combine(installDir, "_update-helper.log"));
+        }
+        catch { /* best-effort */ }
     }
 
     /// <summary>Parses a release tag like <c>v1.2</c> or <c>1.2.3</c> into a <see cref="Version"/>.

@@ -1001,14 +1001,13 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <h3>What happens during an install</h3>
 
-<p>RemSound can't replace its own program file while it's running, so an install starts a small helper that finishes the job once RemSound has closed:</p>
+<p>RemSound can't replace its own program file while it's running, so it hands the job to a fresh copy of the new version, which does the swap once RemSound has closed:</p>
 
 <ol>
-<li>RemSound downloads the new version into a holding folder next to the running program.</li>
-<li>It writes a tiny helper alongside it that watches for RemSound to close.</li>
-<li>RemSound closes.</li>
-<li>The helper notices, copies the new files over the install folder, deletes the holding folder, and reopens RemSound on the same profile you were running.</li>
-<li>The helper deletes itself.</li>
+<li>RemSound downloads the new version into a temporary folder kept on your own machine, away from the install folder.</li>
+<li>It starts the new copy from that temporary folder, and closes itself.</li>
+<li>The new copy waits for RemSound to close fully, then moves your old program files aside and copies the new ones into place. If a file is briefly in use, it waits and retries rather than giving up.</li>
+<li>It reopens RemSound on the same profile you were running, and clears the temporary folder away.</li>
 </ol>
 
 <p>You'll see the window close, then reopen on the new version within a second or two. Anything that was unsaved in the old session (a profile you were partway through editing, for example) is lost &mdash; RemSound will not save it for you before installing. Save first if you've been making changes.</p>
@@ -1023,11 +1022,11 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <h3>If an install fails</h3>
 
-<p>The update download is best-effort: a flaky network, a locked install folder, or a temporarily-unavailable version will pop up a message saying it couldn't finish, and leave your running version untouched. The address of the download page is in that message, so you can get the new version in a browser and install it by hand if you need to. If you installed RemSound into <code>Program Files</code> without giving your account permission to write to that folder, the install helper's copy step will fail too &mdash; either fix the permission or move RemSound to a folder you can write to (somewhere inside your own user folder, for instance).</p>
+<p>The update download is best-effort: a flaky network, or a temporarily-unavailable version, will pop up a message saying it couldn't finish, and leave your running version untouched. The address of the download page is in that message, so you can get the new version in a browser and install it by hand if you need to. If you installed RemSound into <code>Program Files</code> without giving your account permission to write to that folder, the install can't replace the files there &mdash; either fix the permission or move RemSound to a folder you can write to (somewhere inside your own user folder, for instance).</p>
 
-<p><strong>If the helper's copy step itself fails</strong> &mdash; most often because Dropbox or another sync app was holding the install folder's files open when the helper tried to replace them &mdash; the helper leaves a file called <code>update-failed.txt</code> next to the RemSound program, with details, and leaves the new files sitting in an <code>_update</code> subfolder. It does <em>not</em> reopen the old version in that case &mdash; so the next time you start RemSound by hand, you'll either get the still-old version with that note telling you what to do, or you can copy the contents of the <code>_update</code> folder over the install folder yourself. The most reliable fix is: close RemSound, wait 30 seconds for Dropbox to settle, start it again, and try <strong>Help &rarr; Check for updates</strong> once more &mdash; it almost always works on the second try.</p>
+<p><strong>If the file swap itself can't finish</strong> &mdash; for example because a sync app or another program was holding one of the files open and wouldn't let go &mdash; RemSound <em>puts your previous version back exactly as it was</em> and reopens it, rather than leaving you with a half-finished install. It writes a short note called <code>update-failed.txt</code> next to the program explaining what happened. Nothing is broken &mdash; just try <strong>Help &rarr; Check for updates</strong> again, and it almost always goes through on the next attempt. If a sync app like Dropbox is involved, closing RemSound and giving it half a minute to settle before retrying helps.</p>
 
-<p>A step-by-step record of every helper run is kept in a helper log file in the install folder &mdash; useful if a failure keeps happening and you want to share it for diagnosis.</p>
+<p>A step-by-step record of every update is kept in a file called <code>updater.log</code> in the install folder &mdash; useful if a failure keeps happening and you want to share it for diagnosis.</p>
 
 <h3>The About dialog and release notes</h3>
 

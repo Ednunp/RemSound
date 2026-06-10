@@ -20,7 +20,9 @@ internal enum SingleInstanceDecision
 /// can't accidentally kill a healthy session that might be mid-recording. The force-close
 /// option is the deliberate recovery path for a stuck copy (Andre's "make it go away"). Built
 /// as a native TaskDialog to match the rest of RemSound's dialogs and because NVDA reads its
-/// heading, body and buttons cleanly. No owner window — the main window doesn't exist yet.
+/// heading, body and buttons cleanly. Shown through <see cref="ForegroundDialog"/> so it surfaces
+/// front-and-centre with focus even when this copy was relaunched in the background by the updater;
+/// ForegroundDialog supplies its own momentary owner, since the main window doesn't exist yet.
 /// </summary>
 internal static class SingleInstanceDialog
 {
@@ -48,7 +50,11 @@ internal static class SingleInstanceDialog
             AllowCancel = true,
         };
 
-        var clicked = TaskDialog.ShowDialog(page);
+        // Front-and-centre with focus, even when this copy was relaunched in the background by the
+        // auto-updater — a foreground-refused process would otherwise open this behind everything,
+        // dinging away where a screen-reader user can't find it. ForegroundDialog supplies its own
+        // momentary owner, so this works before any main window exists.
+        var clicked = ForegroundDialog.Show(owner => TaskDialog.ShowDialog(owner, page));
         if (clicked == forceButton) return SingleInstanceDecision.ForceClose;
         if (clicked == switchButton) return SingleInstanceDecision.SwitchToRunning;
         return SingleInstanceDecision.Cancel;

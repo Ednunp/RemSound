@@ -14,7 +14,7 @@
          tag_name on the latest GitHub release; bump it on every public release. The
          AssemblyVersion / FileVersion default to this value, and Assembly.GetName().Version
          is what the About dialog and the updater both read. -->
-    <Version>3.5.0</Version>
+    <Version>3.6.0</Version>
   </PropertyGroup>
 
   <ItemGroup>
