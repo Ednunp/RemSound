@@ -206,57 +206,112 @@ public sealed class AppConfig
         !string.IsNullOrWhiteSpace(driverName)
         && driverName.Contains("Realtek", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The config folder next to the exe (<c>&lt;exe&gt;\config\</c>). Holds the global
-    /// config file and the <c>profiles\</c> subfolder. 2026-06-07: everything non-recording config
-    /// moved in here from loose files beside the exe, so the install root stays tidy.</summary>
-    public static string ConfigDirectory => Path.Combine(AppContext.BaseDirectory, "config");
+    /// <summary>The single per-user folder next to the exe — <c>&lt;exe&gt;\user settings and logs\</c> —
+    /// that holds EVERYTHING this machine's user owns: the global config file, the <c>profiles\</c>
+    /// subfolder, <c>logs\</c>, and <c>sounds\</c>. 2026-06-10: consolidated here from the loose files
+    /// / the earlier <c>config\</c> folder so the install root stays tidy and the auto-updater can
+    /// exclude one folder to leave ALL user state (including custom cue WAVs) untouched.</summary>
+    public const string UserDataFolderName = "user settings and logs";
+    public static string UserDataDirectory => Path.Combine(AppContext.BaseDirectory, UserDataFolderName);
 
-    private static string ConfigPath => Path.Combine(ConfigDirectory, "global config.json");
+    /// <summary>Where the per-machine log files are written.</summary>
+    public static string LogsDirectory => Path.Combine(UserDataDirectory, "logs");
+
+    /// <summary>Where the cue WAVs live (seeded from the shipped defaults; see Program.ConsolidateSounds).</summary>
+    public static string SoundsDirectory => Path.Combine(UserDataDirectory, "sounds");
+
+    /// <summary>The base profiles folder (ProfileStore appends the per-machine subfolder).</summary>
+    public static string ProfilesBaseDirectory => Path.Combine(UserDataDirectory, "profiles");
+
+    private static string ConfigPath => Path.Combine(UserDataDirectory, "global config.json");
+
+    /// <summary>What <see cref="MigrateLegacyLayoutIfNeeded"/> relocated this launch. True only on the
+    /// one launch where an older layout was found and moved — the caller uses it to show a one-time
+    /// "everything moved" notice.</summary>
+    public readonly record struct LayoutMigrationResult(bool MovedAnything);
 
     /// <summary>
-    /// One-time, idempotent relocation of the pre-2026-06-07 layout into <c>config\</c>:
-    ///   * <c>&lt;exe&gt;\remsound.config.json</c> → <c>&lt;exe&gt;\config\global config.json</c>
-    ///   * <c>&lt;exe&gt;\profiles\</c>             → <c>&lt;exe&gt;\config\profiles\</c>
-    /// Run once at startup BEFORE anything reads config or profiles. Each move only happens when
-    /// the old item exists and the new one doesn't, so it's safe to call every launch and it
-    /// upgrades anyone coming from an older build without losing a profile or a setting. A custom
-    /// <see cref="ProfilesDirectory"/> is untouched — it isn't in the default location.
+    /// One-time, idempotent consolidation of EVERY older layout into
+    /// <c>&lt;exe&gt;\user settings and logs\</c>. Handles all the field permutations, each move guarded
+    /// by "source exists AND destination doesn't" so it's safe to run every launch and never clobbers
+    /// already-migrated data:
+    ///   * global config: <c>&lt;exe&gt;\remsound.config.json</c> (oldest) OR
+    ///                     <c>&lt;exe&gt;\config\global config.json</c> (the 2026-06-07 interim layout)
+    ///   * profiles:       <c>&lt;exe&gt;\config\profiles\</c> (interim) OR <c>&lt;exe&gt;\profiles\</c> (oldest)
+    ///   * logs:           <c>&lt;exe&gt;\logs\</c>
+    /// → all under <c>...\user settings and logs\</c>. (Sounds are consolidated separately by
+    /// Program.ConsolidateSounds — the shipped default cues need seeding, not a plain move.) Runs
+    /// BEFORE anything reads config/profiles/logs. A custom <see cref="ProfilesDirectory"/> is
+    /// untouched. Directory moves fall back to copy-then-delete across a volume boundary.
     /// </summary>
-    /// <summary>What <see cref="MigrateLegacyLayoutIfNeeded"/> actually relocated this launch.
-    /// <see cref="MovedAnything"/> is true only on the one launch where an upgrade's old files
-    /// were found and moved — the caller uses it to show a one-time "your settings moved" notice.</summary>
-    public readonly record struct LayoutMigrationResult(bool MovedGlobalConfig, bool MovedProfiles)
-    {
-        public bool MovedAnything => MovedGlobalConfig || MovedProfiles;
-    }
-
     public static LayoutMigrationResult MigrateLegacyLayoutIfNeeded()
     {
-        var movedGlobal = false;
-        var movedProfiles = false;
+        var moved = false;
         try
         {
-            Directory.CreateDirectory(ConfigDirectory);
-            var oldGlobal = Path.Combine(AppContext.BaseDirectory, "remsound.config.json");
-            if (File.Exists(oldGlobal) && !File.Exists(ConfigPath))
+            Directory.CreateDirectory(UserDataDirectory);
+            var root = AppContext.BaseDirectory;
+            var interimConfigDir = Path.Combine(root, "config");
+
+            // Global config — interim location wins over the oldest loose file.
+            if (!File.Exists(ConfigPath))
             {
-                File.Move(oldGlobal, ConfigPath);
-                movedGlobal = true;
+                var interimGlobal = Path.Combine(interimConfigDir, "global config.json");
+                var oldestGlobal = Path.Combine(root, "remsound.config.json");
+                if (File.Exists(interimGlobal)) { File.Move(interimGlobal, ConfigPath); moved = true; }
+                else if (File.Exists(oldestGlobal)) { File.Move(oldestGlobal, ConfigPath); moved = true; }
             }
-            var oldProfiles = Path.Combine(AppContext.BaseDirectory, "profiles");
-            var newProfiles = Path.Combine(ConfigDirectory, "profiles");
-            if (Directory.Exists(oldProfiles) && !Directory.Exists(newProfiles))
+
+            // Profiles — interim location wins over the oldest.
+            if (!Directory.Exists(ProfilesBaseDirectory))
             {
-                Directory.Move(oldProfiles, newProfiles);
-                movedProfiles = true;
+                var interimProfiles = Path.Combine(interimConfigDir, "profiles");
+                var oldestProfiles = Path.Combine(root, "profiles");
+                if (Directory.Exists(interimProfiles)) { MoveDirectoryResilient(interimProfiles, ProfilesBaseDirectory); moved = true; }
+                else if (Directory.Exists(oldestProfiles)) { MoveDirectoryResilient(oldestProfiles, ProfilesBaseDirectory); moved = true; }
             }
+
+            // Logs (only ever lived loose in the root).
+            var oldLogs = Path.Combine(root, "logs");
+            if (Directory.Exists(oldLogs) && !Directory.Exists(LogsDirectory)) { MoveDirectoryResilient(oldLogs, LogsDirectory); moved = true; }
+
+            // Remove the now-empty 2026-06-07 interim config\ folder.
+            try
+            {
+                if (Directory.Exists(interimConfigDir) && Directory.GetFileSystemEntries(interimConfigDir).Length == 0)
+                    Directory.Delete(interimConfigDir);
+            }
+            catch { /* leave it if it isn't empty / can't be removed */ }
         }
         catch
         {
             // Best-effort: a failed move (permissions, file in use) just means the app falls
             // back to defaults / an empty profiles list rather than crashing on launch.
         }
-        return new LayoutMigrationResult(movedGlobal, movedProfiles);
+        return new LayoutMigrationResult(moved);
+    }
+
+    /// <summary>Move a directory, falling back to recursive copy-then-delete when a plain
+    /// <see cref="Directory.Move"/> can't cross a volume boundary (e.g. the user-data folder is a
+    /// junction onto another drive). Copy uses overwrite:false so an already-present destination
+    /// file is never clobbered.</summary>
+    private static void MoveDirectoryResilient(string source, string dest)
+    {
+        try { Directory.Move(source, dest); }
+        catch (IOException)
+        {
+            CopyDirectoryRecursive(source, dest);
+            try { Directory.Delete(source, recursive: true); } catch { /* copy succeeded; leaving the source is harmless */ }
+        }
+    }
+
+    private static void CopyDirectoryRecursive(string source, string dest)
+    {
+        Directory.CreateDirectory(dest);
+        foreach (var file in Directory.GetFiles(source))
+            File.Copy(file, Path.Combine(dest, Path.GetFileName(file)), overwrite: false);
+        foreach (var dir in Directory.GetDirectories(source))
+            CopyDirectoryRecursive(dir, Path.Combine(dest, Path.GetFileName(dir)));
     }
 
     /// <summary>Reads the app config from disk. Always returns a non-null instance — a missing
@@ -282,9 +337,22 @@ public sealed class AppConfig
     /// surface a MessageBox — failure to persist a directory choice is user-visible).</summary>
     public void Save()
     {
-        Directory.CreateDirectory(ConfigDirectory);
+        Directory.CreateDirectory(UserDataDirectory);
         var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(ConfigPath, json);
+        // Atomic replace — write a temp then move it over, so a torn write (crash / power-loss /
+        // the updater force-closing us mid-save) can't truncate the file and silently revert config
+        // to defaults.
+        var tmp = ConfigPath + ".tmp";
+        try
+        {
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, ConfigPath, overwrite: true);
+        }
+        catch
+        {
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* ignore */ }
+            throw;
+        }
     }
 
     /// <summary>Convenience: build the appropriate <see cref="ProfileStore"/> for the

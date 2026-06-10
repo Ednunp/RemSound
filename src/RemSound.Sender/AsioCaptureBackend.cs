@@ -330,32 +330,4 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
         // copy + mix loop, or is it encode + sendto".
         if (diag) Interlocked.Add(ref cumulativeCaptureTicks, Stopwatch.GetTimestamp() - workStart);
     }
-
-    /// <summary>Returns the names of all installed ASIO drivers, or an empty list if NAudio
-    /// can't find any. Exposed for the App's driver picker UI.</summary>
-    public static IReadOnlyList<string> EnumerateDriverNames()
-    {
-        try { return AsioOut.GetDriverNames().ToList(); }
-        catch { return []; }
-    }
-
-    /// <summary>
-    /// Briefly opens the named ASIO driver to query its channel counts, then disposes. Single
-    /// driver instance held for ~50 ms while the COM object reads its channel info — does not
-    /// claim the device for streaming. Returns (in,out) = (-1,-1) on any failure (driver not
-    /// installed, busy with another app, etc.). Used by the App to populate channel-pair lists
-    /// in ASIO mode without holding the driver open between user actions.
-    /// </summary>
-    public static (int inputChannels, int outputChannels) ProbeChannelCounts(string driverName)
-    {
-        try
-        {
-            using var asio = new AsioOut(driverName);
-            return (asio.DriverInputChannelCount, asio.DriverOutputChannelCount);
-        }
-        catch
-        {
-            return (-1, -1);
-        }
-    }
 }

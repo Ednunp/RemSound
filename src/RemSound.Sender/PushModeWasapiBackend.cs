@@ -58,6 +58,7 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
     private readonly object gate = new();
 
     private WasapiCapture? capture;
+    private MMDevice? captureDevice; // the device backing capture/keepAlive; WE own it and must dispose it (NAudio's WasapiCapture never does)
     private SilentRenderKeepAlive? keepAlive;
     private CaptureSourceSpec? activeSpec;
     private string? captureFormatDescription;
@@ -140,6 +141,7 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
             {
                 using var enumerator = new MMDeviceEnumerator();
                 var device = enumerator.GetDevice(spec.DeviceId);
+                captureDevice = device; // hold it for disposal in StopInternal — see field comment
 
                 capture = spec.Kind == CaptureKind.Loopback
                     ? new LowLatencyWasapiLoopbackCapture(device, audioBufferMilliseconds: CaptureBufferMs)
@@ -240,6 +242,14 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
         {
             try { keepAlive.Dispose(); } catch { /* ignore */ }
             keepAlive = null;
+        }
+        // Dispose the device AFTER capture + keepAlive (both hold its COM state). NAudio's
+        // WasapiCapture keeps no reference to the MMDevice and never disposes it, so without this the
+        // device's COM/handle state leaks on every start/stop/switch — the WASAPI handle-leak fingerprint.
+        if (captureDevice is not null)
+        {
+            try { captureDevice.Dispose(); } catch { /* ignore */ }
+            captureDevice = null;
         }
         resampler = null;
         activeSpec = null;

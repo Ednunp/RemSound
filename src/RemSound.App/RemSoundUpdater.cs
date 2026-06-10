@@ -317,6 +317,7 @@ internal sealed class RemSoundUpdater : IDisposable
 
         echo. >> "%LOG%"
         echo === %DATE% %TIME% update helper started, parent PID=%PID% === >> "%LOG%"
+        echo %DATE% %TIME% install dir=[%~dp0] >> "%LOG%"
 
         :wait_loop
         tasklist /FI "PID eq %PID%" 2>nul | find "%PID%" >nul
@@ -326,13 +327,18 @@ internal sealed class RemSoundUpdater : IDisposable
         )
 
         echo %DATE% %TIME% parent exited, starting robocopy (R:60 W:1) >> "%LOG%"
-        rem /XF + /XD keep the update from ever overwriting the USER's own state: their
-        rem machine-local config (remsound.config.json — holds the profiles-folder choice and
-        rem startup settings) and their data folders (logs / profiles / recordings). An update
-        rem replaces APP files only. build-release.ps1 already keeps those out of the release
-        rem zip; this is the second line of defence so a bad zip still can't clobber them.
-        robocopy "{stagingArg}" "{installArg}" /E /IS /IT /NFL /NDL /NJH /NJS /R:60 /W:1 /XF _apply-update.cmd /XF _update-helper.log /XF update-failed.txt /XF remsound.config.json /XF {ResumeProfileSentinelName} /XD logs profiles recordings _update /LOG+:"%LOG%"
+        rem /XF + /XD keep the update from ever overwriting the USER's own state: everything under
+        rem "user settings and logs" (global config, profiles, logs, sounds — including any custom cue
+        rem WAVs the user dropped in) plus the legacy loose config. An update replaces APP files only.
+        rem build-release.ps1 keeps those out of the release zip; this is the second line of defence so
+        rem a bad zip still can't clobber them. The bare logs/profiles/recordings excludes stay for any
+        rem older layout still mid-migration.
+        robocopy "{stagingArg}" "{installArg}" /E /IS /IT /NFL /NDL /NJH /NJS /R:60 /W:1 /XF _apply-update.cmd /XF _update-helper.log /XF update-failed.txt /XF remsound.config.json /XF {ResumeProfileSentinelName} /XD logs profiles recordings _update "user settings and logs" /LOG+:"%LOG%"
         set "ROBO_EXIT=%ERRORLEVEL%"
+        rem Guard against an empty exit code (e.g. robocopy never ran / ERRORLEVEL was clobbered):
+        rem an empty %ROBO_EXIT% turns the GEQ test below into a parse error. Default it to a
+        rem clear non-zero so the failure path is taken cleanly and logged with a real number.
+        if not defined ROBO_EXIT set "ROBO_EXIT=99"
         echo %DATE% %TIME% robocopy exit=%ROBO_EXIT% >> "%LOG%"
 
         if %ROBO_EXIT% GEQ 8 (

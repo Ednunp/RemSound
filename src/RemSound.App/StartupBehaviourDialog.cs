@@ -162,8 +162,10 @@ internal sealed class StartupBehaviourDialog : Form
             try { c.Save(); } catch (Exception ex) { ShowSaveWarning("Could not save Start minimised preference: " + ex.Message); }
         };
 
+        var suppressStartWithUserHandler = false;
         startWithUserBox.CheckedChanged += (_, _) =>
         {
+            if (suppressStartWithUserHandler) return;
             // Source of truth for the auto-start state is the registry — we don't keep a
             // duplicate in AppConfig. So this just flips the registry entry directly.
             var ok = startWithUserBox.Checked
@@ -176,21 +178,18 @@ internal sealed class StartupBehaviourDialog : Form
                     "Auto-start change failed",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
-                // Re-read truth and reflect it without re-firing this handler.
+                // Re-read truth and reflect it WITHOUT re-firing this handler. The suppress flag
+                // genuinely gates it; the old detach/re-attach targeted an empty handler that was
+                // never in the invocation list, so it did nothing and the corrective set re-fired.
                 var actual = StartupAutoStart.IsEnabled;
                 if (startWithUserBox.Checked != actual)
                 {
-                    // Temporarily detach the handler to avoid a recursive call.
-                    var savedChecked = actual;
-                    startWithUserBox.CheckedChanged -= AutoStartReentryGuard;
-                    startWithUserBox.Checked = savedChecked;
-                    startWithUserBox.CheckedChanged += AutoStartReentryGuard;
+                    suppressStartWithUserHandler = true;
+                    try { startWithUserBox.Checked = actual; }
+                    finally { suppressStartWithUserHandler = false; }
                 }
             }
         };
-        // Empty handler used as a target-for-removal in the re-entry-guard path above.
-        // Kept so the +=/-= pair is symmetrical even though it does nothing on its own.
-        void AutoStartReentryGuard(object? _, EventArgs __) { }
 
         startWithProfileBox.CheckedChanged += (_, _) =>
         {

@@ -68,7 +68,7 @@ internal sealed class RemSoundLog : IDisposable
         if (fileCreationFailed) return false;
         try
         {
-            var dir = System.IO.Path.Combine(AppContext.BaseDirectory, "logs");
+            var dir = RemSound.Core.AppConfig.LogsDirectory;
             Directory.CreateDirectory(dir);
             var name = $"RemSound-{Sanitize(Environment.MachineName)}-{Environment.ProcessId}-{DateTime.Now:yyyyMMdd-HHmmss}.log";
             Path = System.IO.Path.Combine(dir, name);

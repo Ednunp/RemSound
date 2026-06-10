@@ -13,7 +13,7 @@ namespace RemSound.App;
 /// </summary>
 internal static class ProfilePasswordDialog
 {
-    public static string? Show(IWin32Window owner, string profileTitle, string currentPassword, bool requireNonEmpty = false)
+    public static string? Show(string profileTitle, string currentPassword, bool requireNonEmpty = false)
     {
         using var dialog = new Form
         {
@@ -99,6 +99,12 @@ internal static class ProfilePasswordDialog
         dialog.AcceptButton = okButton;
         dialog.CancelButton = cancelButton;
 
-        return dialog.ShowDialog(owner) == DialogResult.OK ? textBox.Text.Trim() : null;
+        // Run with a foreground 1×1 owner so the prompt jumps to the front even when RemSound is
+        // sitting minimised in the tray — e.g. a quick profile switch to a passwordless-but-
+        // streaming profile trips the password gate mid-switch, and the user must be able to read
+        // and answer it there and then. Centres on screen, forces focus, then closes.
+        return ForegroundDialog.Show(owner => dialog.ShowDialog(owner)) == DialogResult.OK
+            ? textBox.Text.Trim()
+            : null;
     }
 }

@@ -1,51 +1,45 @@
-# RemSound v3.4
+# RemSound v3.5
 
-A round of quality-of-life and reliability improvements: a fast new way to switch profiles from anywhere, a safety net for the troublesome Realtek ASIO driver, your screen reader now reads out global hotkeys, and WASAPI connections stay rock-steady over long sessions.
+A reliability-and-tidiness release: sound cards recover on their own if you unplug them, the audio cushion now sizes itself to each card, everything you own lives in one neat folder that updates can't touch, and a stack of under-the-hood fixes from a top-to-bottom code review.
 
-## Quick profile switch
+## Recover a sound card you unplug
 
-There's a new global hotkey — **Quick profile switch** — that pops up a small list of all your profiles, wherever you are and whatever you're doing. Arrow to the one you want, press Enter, and RemSound switches straight to it.
+If a USB sound card you're listening through is unplugged and plugged back in, **RemSound now re-opens it automatically and the sound resumes** — you don't have to re-tick it. (This works when the card comes back as the same Windows device, which is the usual case when you plug it into the same socket.)
 
-- The profile you're currently on is marked in the list.
-- A sound plays as the list opens, and the switch cue plays the moment you pick one.
-- If RemSound was tucked away in the system tray, **it stays there** — no window jumping up in front of whatever you're working on.
+## The audio cushion sizes itself to each card
 
-It's unset by default. Give it a key under **Options → Keyboard shortcuts**.
+RemSound keeps a small cushion at the sound card to smooth over the tiny timing difference between two machines' sound clocks. It now **sizes that cushion to each card automatically** — a card that moves sound in bigger chunks gets a little more room, a fast interface stays tight — so there's nothing to fiddle with. It just settles on the right amount.
 
-## A safety net for the Realtek ASIO driver
+## A microphone-privacy heads-up
 
-Realtek's bundled ASIO driver leaks Windows resources every time it's opened, and can make audio unstable. RemSound now **spots it on startup and offers, just once, to disable it** — say yes and RemSound will never touch that driver again. If you'd rather keep it, RemSound won't nag you about it after that first time.
+Windows can silently block apps from using your microphone, and when it does, a mic sends silence rather than failing — easy to miss. RemSound now **warns you** when you switch on a mic Windows is blocking (including when a profile loads with one already on), and points you at the exact two Windows settings to turn on.
 
-You can flip it back on, or off, whenever you like from **Options → Enable / Disable Realtek ASIO driver in RemSound**.
+## Warnings always come to the front
 
-## Your screen reader now reads out global hotkeys
+Even when RemSound is minimised to the system tray, an important warning — the "your files have moved" notice, a microphone warning, an update prompt — now **pops up in front with focus**, so your screen reader reads it straight away. RemSound stays in the tray; only the warning comes forward.
 
-When you move over a menu item, or a control that has a global hotkey assigned, your screen reader now reads the hotkey along with everything else — for example, "press Ctrl+Shift+M anywhere". So you can learn and double-check your shortcuts just by arrowing around the window, without opening the shortcuts dialog.
+## One tidy folder for everything
 
-## Smoother long sessions on WASAPI
+Everything this machine keeps for you — your settings, profiles, logs, and cue sounds — now lives together in one folder inside RemSound called **user settings and logs**. It moves there automatically the first time you run v3.5, and RemSound tells you once. Nothing is lost. **From now on, updates never touch that folder** — so any custom cue sounds you put there survive updates.
 
-On WASAPI — the ordinary Windows sound path — two machines' sound clocks run at very slightly different speeds. Over a long session that tiny difference used to add up, and the delay would slowly drift. RemSound now measures and gently corrects that drift the whole time, so a WASAPI connection is as tight at the end of a three-hour session as it was at the start. (ASIO already kept itself in step; this brings WASAPI up to the same standard.)
+## Smaller things
 
-## Smaller improvements
-
-- **A new "profile menu open" cue** sounds when the Quick profile switch popup appears. Like every other cue, it has its own mute toggle and custom-sound option in Preferences.
-- **The profile-switch cue now plays the instant you switch**, and no longer plays on a fresh start into your first profile — so you won't hear it stacked on top of the connect sound at launch.
-- **Faster device detection.** RemSound now reacts the moment you plug in or unplug a sound device, instead of checking every few seconds. This also closed a slow resource leak on the receiving side.
-- **Tidier folder.** Your settings and profiles now live in a `config` folder inside RemSound. The move happens automatically the first time you run v3.4, and RemSound tells you once that it's done it. Nothing is lost, and everything works exactly as before.
+- **Volume and mute** now come back correctly when you load a profile.
+- A round of reliability fixes from a full code review: two resource leaks closed, profile and settings saves are now crash-safe, and a good clear-out of dead code.
 
 ## Compatibility
 
-**v3.4 talks to v3.3 with no trouble** — the over-the-network format hasn't changed, so you don't have to update both ends at once. (You still need everyone on **v3.3 or newer**, because that's where end-to-end encryption came in.)
+**v3.5 talks to v3.3 and v3.4 with no trouble** — the over-the-network format hasn't changed, so you don't have to update both ends at once. (You still need everyone on **v3.3 or newer**, because that's where end-to-end encryption came in.)
 
 ## Install
 
-1. Download `RemSound-v3.4.zip` from this release.
+1. Download `RemSound-v3.5.zip` from this release.
 2. Close RemSound.
-3. Extract the zip **over your existing RemSound folder**, overwriting program files when prompted. The zip is program files only — it won't touch your profiles, settings or recordings.
-4. Run `RemSound.exe`.
+3. Extract the zip **over your existing RemSound folder**, overwriting program files when prompted. The zip is program files only — it won't touch your profiles, settings, recordings, or sounds.
+4. Run `RemSound.exe`. The first launch tidies your files into the new folder and tells you once.
 
 ## Upgrading
 
-**From v1.9 onward:** Help → Check for updates works — it will fetch and install v3.4 automatically. If you've ticked "Check for updates on startup" and "Silently install updates", v3.4 installs itself shortly after launch.
+**From v1.9 onward:** Help → Check for updates works — it will fetch and install v3.5 automatically. If you've ticked "Check for updates on startup" and "Silently install updates", v3.5 installs itself shortly after launch.
 
-**v1.8 and earlier:** the auto-updater in those versions has a fault that prevents it installing updates, so Check for updates will download v3.4 but not apply it. Install v3.4 by hand using the steps above — just this once. From the build you install onward, updates are automatic.
+**v1.8 and earlier:** the auto-updater in those versions has a fault that prevents it installing updates, so Check for updates will download v3.5 but not apply it. Install v3.5 by hand using the steps above — just this once. From the build you install onward, updates are automatic.

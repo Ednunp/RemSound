@@ -24,10 +24,19 @@ internal static class Program
 
         ApplicationConfiguration.Initialize();
 
-        // Relocate any pre-2026-06-07 config/profiles into config\ before anything reads them.
-        // Idempotent and best-effort; also upgrades users coming from an older build. The result
-        // is shown to the user once (after the single-instance guard) if files actually moved.
+        // Consolidate every older layout (loose files, or the interim config\ folder) into the single
+        // "user settings and logs" folder before anything reads config/profiles/logs. Idempotent +
+        // best-effort; upgrades users from any older build. Shown to the user once if files moved.
         var layoutMigration = RemSound.Core.AppConfig.MigrateLegacyLayoutIfNeeded();
+        // Move the cue sounds into that folder too — seeded from the shipped defaults (see method).
+        ConsolidateSounds();
+
+        // Remove cue WAVs (and their .sfk peak files) left loose in the install ROOT by pre-
+        // 2026-05-28 builds, where the cues lived next to RemSound.exe before they moved into
+        // sounds\. A robocopy update copies the new sounds\ tree but uses /E (not /PURGE), so it
+        // never deletes these orphans — they just linger in the root. Best-effort + idempotent:
+        // a no-op once they're gone. 2026-06-08.
+        CleanUpLegacyRootSounds();
 
         // Single-instance guard. RemSound must never run as two copies at once: with the
         // auto-updater relaunching the app, a copy that didn't exit cleanly used to leave two
@@ -84,7 +93,7 @@ internal static class Program
         // here, after the guard and before the profile picker, so the user reads it once up front.
         if (layoutMigration.MovedAnything)
         {
-            ShowLayoutMigrationNotice(layoutMigration);
+            ShowLayoutMigrationNotice();
         }
 
         // Outer loop: lets ProfileManagementDialog change the profiles folder mid-session.
@@ -248,28 +257,94 @@ internal static class Program
     }
 
     /// <summary>One-time, Windows-native notice telling the user their config/profiles were moved
-    /// into the new <c>config\</c> folder. Only called when a real migration happened. TaskDialog
+    /// into the new "user settings and logs" folder. Only called when a real migration happened. TaskDialog
     /// (not a hand-rolled Form) so a screen reader reads the whole message automatically.</summary>
-    private static void ShowLayoutMigrationNotice(RemSound.Core.AppConfig.LayoutMigrationResult migration)
+    private static void ShowLayoutMigrationNotice()
     {
-        var moved = new System.Collections.Generic.List<string>();
-        if (migration.MovedGlobalConfig) moved.Add("- Your settings are now in: config\\global config.json");
-        if (migration.MovedProfiles) moved.Add("- Your saved profiles are now in: config\\profiles\\");
-
         var page = new TaskDialogPage
         {
-            Caption = "RemSound settings location",
-            Heading = "Your settings now live in a \"config\" folder",
-            Text = "To keep the RemSound folder tidy, this update moved your existing settings into a new "
-                 + "\"config\" folder inside RemSound:\n\n"
-                 + string.Join("\n", moved)
-                 + "\n\nNothing was lost and RemSound works exactly as before. You will only see this message once.",
+            Caption = "RemSound files location",
+            Heading = "Your RemSound files have moved into one folder",
+            Text = "To keep the RemSound folder tidy and stop updates from ever touching your own files, "
+                 + "this update moved everything this machine owns into a single folder inside RemSound "
+                 + "called \"user settings and logs\":\n\n"
+                 + "- Your settings (global config)\n"
+                 + "- Your saved profiles\n"
+                 + "- Your logs\n"
+                 + "- Your cue sounds\n\n"
+                 + "Nothing was lost and RemSound works exactly as before. From now on, RemSound updates "
+                 + "leave that folder completely untouched. You will only see this message once.",
             Icon = TaskDialogIcon.Information,
             Buttons = { TaskDialogButton.OK },
             DefaultButton = TaskDialogButton.OK,
             AllowCancel = true,
         };
-        try { TaskDialog.ShowDialog(page); }
+        // Give the notice a momentary top-most, foreground owner so it opens FRONT and CENTRE —
+        // RemSound may have launched straight into the tray (auto-start / start-minimised), and a
+        // parent-less TaskDialog can otherwise open behind everything where a screen-reader user
+        // can't read it.
+        try { ForegroundDialog.Show(owner => TaskDialog.ShowDialog(owner, page)); }
         catch { /* a notice must never stop RemSound from starting */ }
+    }
+
+    /// <summary>Delete cue WAVs and their .sfk peak files left loose in the install ROOT by
+    /// pre-2026-05-28 builds (the cues moved into <c>sounds\</c> then; a robocopy update copies
+    /// the new tree but never removes the old root copies). Best-effort and idempotent — runs
+    /// every launch and no-ops once the orphans are gone. Only the known default cue names are
+    /// touched, never anything else in the folder.</summary>
+    private static void CleanUpLegacyRootSounds()
+    {
+        try
+        {
+            var root = AppContext.BaseDirectory;
+            string[] cueBaseNames =
+            {
+                "connect", "disconnect", "record start", "record stop",
+                "save", "profile", "profile menu open", "update",
+            };
+            foreach (var baseName in cueBaseNames)
+            {
+                foreach (var fileName in new[] { baseName + ".wav", baseName + ".sfk", baseName + ".wav.sfk" })
+                {
+                    try
+                    {
+                        var path = Path.Combine(root, fileName);
+                        if (File.Exists(path)) File.Delete(path);
+                    }
+                    catch { /* a locked / unremovable file must never stop startup */ }
+                }
+            }
+        }
+        catch { /* never let cleanup disturb startup */ }
+    }
+
+    /// <summary>Consolidate the cue WAVs into the per-user sounds folder. The release ships the
+    /// default cues in <c>&lt;exe&gt;\sounds\</c>; this copies any cue MISSING from the per-user
+    /// <c>...\user settings and logs\sounds\</c> across (so a fresh install, or a release that adds a
+    /// new cue, gets seeded) WITHOUT overwriting one already there (so the user's own cue files
+    /// survive), then removes the shipped folder to keep the install root tidy. The app reads cues
+    /// only from the per-user folder, which the updater leaves untouched — so a user's custom cue
+    /// WAVs are no longer clobbered by an update. Best-effort + idempotent. 2026-06-10.</summary>
+    private static void ConsolidateSounds()
+    {
+        try
+        {
+            var userSounds = AppConfig.SoundsDirectory;
+            Directory.CreateDirectory(userSounds);
+            var shippedSounds = Path.Combine(AppContext.BaseDirectory, "sounds");
+            if (!Directory.Exists(shippedSounds)) return;
+            foreach (var src in Directory.GetFiles(shippedSounds))
+            {
+                try
+                {
+                    var dest = Path.Combine(userSounds, Path.GetFileName(src));
+                    if (!File.Exists(dest)) File.Copy(src, dest);
+                }
+                catch { /* one unreadable cue mustn't stop the rest */ }
+            }
+            try { Directory.Delete(shippedSounds, recursive: true); }
+            catch { /* leave it if locked — the app reads the per-user copy anyway */ }
+        }
+        catch { /* never let cue consolidation disturb startup */ }
     }
 }

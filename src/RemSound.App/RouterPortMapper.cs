@@ -130,6 +130,11 @@ internal sealed class RouterPortMapper : IDisposable
         RaiseChanged();
         try
         {
+            // Subscribe-once: Refresh() (fired on every sleep/wake) calls Start() again without a
+            // prior unsubscribe, and DeviceFound is a STATIC Mono.Nat event — a bare += would stack
+            // a new handler every resume (duplicate port-maps + this object kept alive forever).
+            // Remove first so there's only ever one subscription.
+            NatUtility.DeviceFound -= OnDeviceFound;
             NatUtility.DeviceFound += OnDeviceFound;
             NatUtility.StartDiscovery();
             log?.Invoke("UPnP discovery started");

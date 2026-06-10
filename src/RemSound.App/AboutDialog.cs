@@ -20,6 +20,37 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v3.5
+
+        Recover a sound card you unplug: if a USB sound card
+        you're listening through is pulled out and plugged back
+        in, RemSound re-opens it on its own and audio resumes —
+        no need to re-tick it.
+
+        Each sound card now gets the right audio cushion
+        automatically. RemSound sizes it to the card, so one that
+        needs a little more gets it without any fiddling, and a
+        fast card stays tight.
+
+        A microphone-privacy heads-up: if Windows is blocking
+        microphone access and you switch a mic on, RemSound warns
+        you once, so you're not left wondering why no one can
+        hear you.
+
+        Warnings always come to the front now, even when RemSound
+        is tucked away in the system tray — so you never miss one.
+
+        Everything this machine keeps for you — settings,
+        profiles, logs and your cue sounds — now lives in one
+        tidy folder called "user settings and logs". It moves
+        there automatically the first time you run this version.
+        From now on, updates never touch that folder, so any
+        custom cue sounds you put there are safe.
+
+        Also: your volume and mute now come back correctly when
+        you load a profile, plus a batch of under-the-hood
+        reliability and tidy-up work.
+
         RemSound v3.4
 
         Quick profile switch: a new global hotkey pops up a

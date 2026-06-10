@@ -135,13 +135,13 @@ ul, ol { padding-left: 1.4em; }
 <tr><td><strong>Delete a profile</strong></td><td>File &rarr; Open profile, then right-click the entry in the Windows file picker and choose Delete. RemSound lets Windows handle this rather than having its own delete button.</td></tr>
 </table>
 
-<h3>Where profiles are stored</h3>
+<h3>Where your files are stored</h3>
 
-<p>Each profile is one small file on your computer. By default they live in a <code>config</code> folder inside RemSound, at:</p>
+<p>Everything RemSound keeps for you on this computer &mdash; your settings, your profiles, your logs, and your cue sounds &mdash; lives together in one folder inside RemSound called <strong>user settings and logs</strong>. Each profile is one small file, stored at:</p>
 
-<pre>&lt;RemSound folder&gt;\config\profiles\&lt;your computer name&gt;\&lt;profile name&gt;</pre>
+<pre>&lt;RemSound folder&gt;\user settings and logs\profiles\&lt;your computer name&gt;\&lt;profile name&gt;</pre>
 
-<p>(If you're upgrading from an older version, RemSound moves your existing settings and profiles into this <code>config</code> folder automatically the first time you run this version, and tells you once that it's done it. Nothing is lost.)</p>
+<p>(If you're upgrading from an older version, RemSound moves all of this into the <strong>user settings and logs</strong> folder automatically the first time you run this version, and tells you once that it's done it. Nothing is lost.) From this version on, RemSound updates never touch that folder &mdash; so anything of your own in there, including custom cue sounds, stays safe when you update.</p>
 
 <p>The folder named after your computer keeps each machine's profiles separate. If you used the <strong>Browse&hellip;</strong> button on the startup dialog to pick a different folder (for example, one inside Dropbox), the profiles are stored directly in that folder &mdash; with no per-computer subfolder &mdash; so two computers pointed at the same shared folder see exactly the same list.</p>
 
@@ -244,6 +244,8 @@ ul, ol { padding-left: 1.4em; }
 </table>
 
 <p><strong>Keyboard access:</strong> the tray icon is reachable through standard Windows shortcuts &mdash; <strong>Windows + B</strong> moves focus to the notification area, arrow keys navigate, Enter activates, and the application context-menu key (or Shift+F10) opens the right-click menu without a mouse.</p>
+
+<p><strong>Important warnings always come to the front.</strong> Even when RemSound is hidden in the tray, a warning it needs you to read &mdash; such as the &ldquo;your files have moved&rdquo; notice, a microphone-blocked warning, or an update prompt &mdash; pops up in front of whatever you're doing, with focus, so your screen reader reads it straight away. RemSound stays in the tray; only the warning comes forward.</p>
 
 <h3>Only one copy of RemSound runs at a time</h3>
 
@@ -369,6 +371,10 @@ ul, ol { padding-left: 1.4em; }
 
 <div class="note">
 <strong>Capturing your speakers can cause an echo loop.</strong> If you tick the same device both in &ldquo;WASAPI outputs to send&rdquo; and in &ldquo;WASAPI outputs for received sound&rdquo;, then the received sound plays out of that device, gets captured again, and gets sent back. The other person ends up hearing their own voice on a delay. Don't tick the same device on both sides at once.
+</div>
+
+<div class="note">
+<strong>If your microphone sends silence:</strong> Windows can block desktop apps from using the microphone, and when it does, RemSound's mic capture still switches on but only sends silence &mdash; so you look like you're sending, but the other person hears nothing. RemSound watches for this: when you tick a microphone in <strong>WASAPI inputs to send</strong> while Windows is blocking it &mdash; or load a profile that already has one ticked &mdash; a message pops up telling you, with the exact two settings to turn on &mdash; open Windows Settings &rarr; Privacy &amp; security &rarr; Microphone, then turn on both <em>Microphone access</em> and <em>Let desktop apps access your microphone</em>. (ASIO inputs aren't affected, because ASIO talks straight to the hardware and bypasses that Windows privacy gate.) It doesn't change anything you receive &mdash; only sending your own mic.
 </div>
 
 <h2 id="tab-profile">8. Audio profile tab</h2>
@@ -610,6 +616,10 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 </ul>
 
 <p>Plus the codec choice (PCM, Opus broadcast quality, or Opus live latency), also on the Audio profile tab. Most people only need to pick a codec and a smoothness level and leave the rest at the default.</p>
+
+<h3>The sound-card cushion is automatic</h3>
+
+<p>Separately from the controls above &mdash; which manage the cushion against <em>network</em> jitter &mdash; RemSound also keeps a small cushion at the sound card itself, to smooth over the tiny timing differences between your two computers' sound clocks. From this version, RemSound sizes that cushion to each card automatically: a card that moves sound in bigger chunks (some onboard and USB cards do) gets a little more room, while a fast professional interface stays tight. You don't set this or think about it &mdash; it settles on the right amount for whatever card you're using.</p>
 
 <h3>Audio latency control</h3>
 
@@ -935,11 +945,11 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <h3>Going back to the default sound</h3>
 
-<p>To revert a cue to its default sound, <strong>right-click</strong> the <em>Browse for [cue name]&hellip;</em> button and pick <strong>Use default sound</strong>. The custom path is forgotten and the cue goes back to playing the default WAV that ships with RemSound. The right-click option is greyed out when the cue is already using its default. (Alternatively, click <em>Browse</em> and pick a file from inside RemSound's own <code>sounds</code> folder &mdash; RemSound recognises that as &ldquo;use default&rdquo; and clears the override automatically.)</p>
+<p>To revert a cue to its default sound, <strong>right-click</strong> the <em>Browse for [cue name]&hellip;</em> button and pick <strong>Use default sound</strong>. The custom path is forgotten and the cue goes back to playing the default WAV that ships with RemSound. The right-click option is greyed out when the cue is already using its default. (Alternatively, click <em>Browse</em> and pick a file from RemSound's own <code>sounds</code> folder &mdash; inside <strong>user settings and logs</strong> &mdash; and RemSound treats that as &ldquo;use default&rdquo; and clears the override automatically.)</p>
 
-<h3>Where the default sounds live</h3>
+<h3>Where the cue sounds live</h3>
 
-<p>The default WAV files are in the <code>sounds</code> folder next to <code>RemSound.exe</code>. If you don't pick a custom file for a cue, RemSound plays the matching default from there:</p>
+<p>RemSound keeps the cue WAV files in a <code>sounds</code> folder inside <strong>user settings and logs</strong> &mdash; the same folder your settings and profiles live in. It puts the defaults there for you; if you don't pick a custom file for a cue, RemSound plays the matching one from this folder:</p>
 
 <ul>
 <li><code>sounds\connect.wav</code> &mdash; connect cue</li>
@@ -951,6 +961,8 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <li><code>sounds\profile menu open.wav</code> &mdash; profile menu open cue</li>
 <li><code>sounds\update.wav</code> &mdash; update cue</li>
 </ul>
+
+<p>Because this folder is inside <strong>user settings and logs</strong>, RemSound updates never overwrite it. So if you drop your own WAV files in here in place of the defaults, your versions stay put when you update &mdash; you don't have to set them up again.</p>
 
 <p>If a cue's WAV file is missing &mdash; either the default file doesn't exist or a custom path points at a file you've since deleted &mdash; the cue stays silent rather than producing an error. RemSound logs a note in the diagnostic log (if logging is on) so you can see what happened.</p>
 
@@ -1051,7 +1063,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <h3>Start and stop sound cues</h3>
 
-<p>RemSound plays a short ding when a recording starts and another when it stops, so you have an audible confirmation that the toggle actually took effect. These are two of the seven cues described in <a href="#audio-cues">Audio cue sounds</a>. You can turn either or both off, replace them with your own WAV files, and preview them from Preferences. The defaults live at <code>sounds\record start.wav</code> and <code>sounds\record stop.wav</code> next to <code>RemSound.exe</code>.</p>
+<p>RemSound plays a short ding when a recording starts and another when it stops, so you have an audible confirmation that the toggle actually took effect. These are two of the eight cues described in <a href="#audio-cues">Audio cue sounds</a>. You can turn either or both off, replace them with your own WAV files, and preview them from Preferences. The defaults live at <code>sounds\record start.wav</code> and <code>sounds\record stop.wav</code> inside the <strong>user settings and logs</strong> folder.</p>
 
 <h3>Where recordings go</h3>
 
@@ -1090,7 +1102,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <h2 id="logs">21. Logs and diagnostics</h2>
 
-<p>If logging is turned on (the <strong>Enable logs</strong> checkbox in the Preferences dialog &mdash; Options &rarr; Preferences, or Ctrl+P &mdash; on by default), RemSound writes a log file each session into a <code>logs</code> folder next to the RemSound program. One file per launch.</p>
+<p>If logging is turned on (the <strong>Enable logs</strong> checkbox in the Preferences dialog &mdash; Options &rarr; Preferences, or Ctrl+P &mdash; on by default), RemSound writes a log file each session into a <code>logs</code> folder inside <strong>user settings and logs</strong> &mdash; the same folder your settings and profiles live in. One file per launch.</p>
 
 <p>The file contains two kinds of rows:</p>
 
@@ -1126,7 +1138,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <ol>
 <li>Audio inputs and outputs tab: is <strong>Send my audio</strong> ticked?</li>
 <li>Same tab: is at least one capture source ticked across the three send lists?</li>
-<li>If you're using a microphone: is Windows' microphone privacy setting allowing apps to use it? (Settings &rarr; Privacy &rarr; Microphone.)</li>
+<li>If you're using a microphone: is Windows allowing apps to use it? RemSound now pops up a warning when you switch on a microphone Windows is blocking &mdash; including when a profile loads with one already on &mdash; but to check by hand, open Settings &rarr; Privacy &amp; security &rarr; Microphone and make sure both <em>Microphone access</em> and <em>Let desktop apps access your microphone</em> are on. (When Windows blocks it the mic sends silence rather than failing, so it's easy to miss.)</li>
 <li>Have they ticked <em>your</em> name in their Discovered peers list?</li>
 </ol>
 
@@ -1167,10 +1179,13 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <p>You probably picked Realtek ASIO. It's a generic driver, not tied to Realtek hardware, and it tends to grab whatever Windows treats as the default sound device &mdash; usually the same one your screen reader is using. Set the ASIO driver picker back to <em>(none)</em>, or pick a different ASIO driver.</p>
 
 <h3>The device list shows old devices that are no longer plugged in</h3>
-<p>RemSound refreshes its lists every second. If a device has really been unplugged it should disappear within a few seconds. If it lingers, restart RemSound &mdash; Windows' own device list occasionally needs a nudge.</p>
+<p>RemSound reacts the moment a device is plugged in or unplugged, so an unplugged device should disappear within a second or two. If one lingers, restart RemSound &mdash; Windows' own device list occasionally needs a nudge.</p>
 
 <h3>No sound after the computer wakes from sleep</h3>
 <p>RemSound notices when the computer has just woken up, waits a moment for any USB sound devices to come back to life, and rebuilds its audio engine from scratch &mdash; you'll briefly see a small &ldquo;Reconnecting to audio driver&rdquo; window during the rebuild, then sound should resume on its own. If sound still doesn't come back, click on the ASIO driver picker on the Audio inputs and outputs tab and re-pick the same driver (or pick <em>(none)</em> and then re-pick your driver). That triggers the same full rebuild manually. As a last resort, quit and reopen RemSound.</p>
+
+<h3>A sound card you were listening through was unplugged</h3>
+<p>If a sound card you're playing received audio through is unplugged and then plugged back in, RemSound now re-opens it on its own and the sound resumes &mdash; you don't have to re-tick it in the output list. This works when the card comes back as the same Windows device, which is the usual case when you plug it into the same socket. If you move it to a different USB socket and Windows treats it as a brand-new device, just tick it again in the output list.</p>
 
 <h3>UPnP says &ldquo;no router found&rdquo; even though my router supports it</h3>
 <p>The most common reasons:</p>

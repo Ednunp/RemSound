@@ -91,16 +91,6 @@ public static class AsioDeviceProbe
             return new AsioDriverProbeResult(-1, -1, [], []);
         }
     }
-
-    /// <summary>
-    /// Backwards-compatibility shim around <see cref="ProbeDriverInfo"/> for callers that only
-    /// need channel counts.
-    /// </summary>
-    public static (int inputChannels, int outputChannels) ProbeChannelCounts(string driverName)
-    {
-        var info = ProbeDriverInfo(driverName);
-        return (info.InputChannelCount, info.OutputChannelCount);
-    }
 }
 
 public sealed record AsioDriverProbeResult(

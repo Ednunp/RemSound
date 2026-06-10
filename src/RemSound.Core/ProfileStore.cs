@@ -24,9 +24,9 @@ public sealed class ProfileStore
     public ProfileStore()
     {
         var machineFolder = SanitiseFsName(Environment.MachineName);
-        // 2026-06-07: profiles live under config\profiles\<machine>\ (was <exe>\profiles\<machine>\).
+        // 2026-06-10: profiles live under "user settings and logs"\profiles\<machine>\.
         // AppConfig.MigrateLegacyLayoutIfNeeded moves any pre-existing profiles here at startup.
-        baseDir = Path.Combine(AppContext.BaseDirectory, "config", "profiles", machineFolder);
+        baseDir = Path.Combine(AppConfig.ProfilesBaseDirectory, machineFolder);
         try { Directory.CreateDirectory(baseDir); }
         catch { /* permissions; List/Save will surface this when actually used */ }
     }
@@ -128,7 +128,26 @@ public sealed class ProfileStore
         Directory.CreateDirectory(baseDir);
         var path = PathFor(profile.Title);
         var json = JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(path, json);
+        WriteFileAtomic(path, json);
+    }
+
+    /// <summary>Write text crash-safely: write a sibling temp file, then atomically move it over the
+    /// target. A crash, power-loss, or the updater force-closing mid-write then leaves either the old
+    /// file or the complete new one — never a truncated file that the catch-all loaders would
+    /// silently read as a blank profile.</summary>
+    private static void WriteFileAtomic(string path, string contents)
+    {
+        var tmp = path + ".tmp";
+        try
+        {
+            File.WriteAllText(tmp, contents);
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch
+        {
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* ignore */ }
+            throw;
+        }
     }
 
     /// <summary>Deletes the profile by title. Returns true if a file was removed,
@@ -171,7 +190,7 @@ public sealed class ProfileStore
             if (profile is null) return false;
             profile.Title = newTitle;
             var json = JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(newPath, json);
+            WriteFileAtomic(newPath, json);
             if (!string.Equals(oldPath, newPath, StringComparison.OrdinalIgnoreCase))
             {
                 File.Delete(oldPath);

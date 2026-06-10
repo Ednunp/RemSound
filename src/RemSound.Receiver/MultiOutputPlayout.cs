@@ -154,7 +154,19 @@ internal sealed class MultiOutputPlayout : IRenderBackend
             using var enumerator = new MMDeviceEnumerator();
             foreach (var id in deviceIds)
             {
-                if (outputs.ContainsKey(id)) continue;
+                if (outputs.TryGetValue(id, out var existing))
+                {
+                    if (!existing.Faulted) continue; // already live — leave it running, no audio break
+                    // Device faulted mid-stream (unplugged) yet still in the desired set. Tear the dead
+                    // output down so the open below re-creates it. SAFETY NET only: normally an unplug
+                    // also clears the card's tick, so the remove loop above drops it and replug re-opens
+                    // it fresh from the remembered selection (App side) — this branch just covers a fault
+                    // where the same id is still desired (e.g. a transient WASAPI invalidation with no
+                    // device-state change). If the device is still gone the open fails and it stays absent.
+                    onDiagnostic?.Invoke($"output \"{existing.Name}\" faulted — re-opening");
+                    outputs.Remove(id);
+                    DisposeOutput(existing);
+                }
                 MMDevice? device = null;
                 WasapiOut? wasapi = null;
                 try
@@ -176,12 +188,26 @@ internal sealed class MultiOutputPlayout : IRenderBackend
                     // Output device buffer. Request 5 ms; shared-mode WASAPI clamps it up to the
                     // device's minimum period (~10 ms on tested hardware, 2026-06-08) — but ~10 ms
                     // is still ~5 ms tighter than the old 15 ms, a free latency win. The per-device
-                    // drift corrector keeps this buffer fed from its held ~12 ms cushion, so the
-                    // smaller endpoint reserve doesn't risk underruns even on a flaky onboard device.
+                    // drift corrector keeps this buffer fed from its held card-sized cushion (≈12 ms
+                    // on a typical card), so the smaller endpoint reserve doesn't risk underruns.
                     wasapi = new WasapiOut(device, AudioClientShareMode.Shared, useEventSync: true, latency: 5);
+                    var entry = new OutputEntry { Device = device, Output = wasapi, Buffer = buffer, Drift = drift, Name = name };
+                    // Notice the device dying mid-stream (USB card unplugged → WASAPI invalidates the
+                    // endpoint and raises PlaybackStopped WITH an exception). Just flag it — never take
+                    // the gate or dispose from here: this can fire on the device thread during our own
+                    // Stop()/DisposeOutput, so doing real work here could deadlock. The next
+                    // SetOutputDevices (the hot-plug notifier fires one on unplug AND replug) sees the
+                    // flag and tears the dead entry down so the device can be re-opened. A clean stop
+                    // (no exception — we asked for it) is ignored: the entry is being removed anyway.
+                    wasapi.PlaybackStopped += (_, stopArgs) =>
+                    {
+                        if (stopArgs.Exception is not { } stopEx) return;
+                        entry.Faulted = true;
+                        onDiagnostic?.Invoke($"output \"{name}\" lost the device: {stopEx.GetType().Name}: {stopEx.Message}");
+                    };
                     wasapi.Init(drift);
                     wasapi.Play();
-                    outputs[id] = new OutputEntry { Device = device, Output = wasapi, Buffer = buffer, Drift = drift, Name = name };
+                    outputs[id] = entry;
                     onDiagnostic?.Invoke($"output added: \"{name}\"");
                 }
                 catch (Exception ex)
@@ -277,6 +303,11 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         public required BufferedWaveProvider Buffer { get; init; }
         public required DriftResamplingProvider Drift { get; init; }
         public required string Name { get; init; }
+        // Set true (off-thread, from WasapiOut.PlaybackStopped) when this device dies mid-stream —
+        // typically a USB card unplugged, which invalidates the WASAPI endpoint. SetOutputDevices
+        // reads it to know the entry is dead and must be torn down + re-opened rather than skipped.
+        // Volatile: written on the WASAPI thread, read under the gate without a shared write lock.
+        public volatile bool Faulted;
     }
 
     /// <summary>
@@ -304,12 +335,23 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         private const double DriftRatioSmoothingNew = 0.30;
         private const double DriftRatioMin = 0.95;
         private const double DriftRatioMax = 1.05;
-        // Feedback: steer the buffer toward a known, low cushion. Pure rate-matching holds the
-        // buffer wherever the start-up transient left it (~50 ms and climbing in the field) —
-        // SessionPlayout gets away without this because it ARMS at target and has a click-trim
-        // net; the device buffer has neither, so it needs an explicit depth term. The correction
-        // is tiny (≤0.3 % rate, spread over seconds): a sub-audible pitch nudge, never a click.
-        private const int TargetDepthMs = 12;          // operating depth we hold the buffer at
+        // Feedback: steer the buffer toward a cushion. Pure rate-matching holds the buffer wherever
+        // the start-up transient left it (~50 ms and climbing in the field) — SessionPlayout gets
+        // away without this because it ARMS at target and has a click-trim net; the device buffer
+        // has neither, so it needs an explicit depth term. The correction is tiny (≤0.3 % rate,
+        // spread over seconds): a sub-audible pitch nudge, never a click.
+        //
+        // The cushion is sized to the CARD, not hardcoded. A device can't hold a buffer below one
+        // of its own WASAPI pulls — a 10 ms-period card sawtooths by 10 ms, an 18 ms Realtek by 18 —
+        // so the target is the measured pull size × a small margin: a 10 ms card lands at 12 ms (its
+        // long-proven value), an 18 ms card at ~22. Crucially this READS the card and HOLDS: it is
+        // NOT a load-reactive loop, so it never climbs on a CPU/network spike and drops when calm.
+        // The pull is the WINDOW AVERAGE (one coalesced double-pull can't move it), and a hysteresis
+        // band means only a genuine change in the card's pull size ever shifts the target.
+        private const double TargetGulpMultiple = 1.2;  // cushion ≈ this × the card's pull size
+        private const int MinTargetDepthMs = 8;         // floor for a tiny-pull device
+        private const int MaxTargetDepthMs = 50;        // cap so a pathological pull can't run away
+        private const int TargetHysteresisMs = 2;       // only move the target on a real ≥2 ms shift
         private const double DepthCorrectionSec = 15.0; // correct a depth error over ~this long
         private const double MaxDepthBias = 0.003;      // cap the depth nudge at 0.3 % rate
 
@@ -332,6 +374,13 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         private double smoothedRatio = 1.0;
         private bool tracking;
         private bool firstWindowDone;
+        // Adaptive-but-stable target. pullSumBytes/pullCount accumulate the card's pull sizes over a
+        // window; targetMs is set from their average (× the margin) and then HELD — the hysteresis
+        // band keeps it from flitting. Defaults to 12 ms until the first window measures the card.
+        private long pullSumBytes;
+        private long pullCount;
+        private int targetMs = 12;
+        private double lastGulpMs;
 
         // Scratch — grown lazily, persists across calls so the hot path doesn't allocate.
         private byte[] inputBytes = new byte[16384];
@@ -366,6 +415,11 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         {
             var outFrames = count / MixBytesPerFrame;
             if (outFrames <= 0) return 0;
+
+            // Sample the card's pull size for the adaptive target (see UpdateRatioIfDue). Averaged,
+            // so an occasional coalesced double-pull can't distort it.
+            pullSumBytes += count;
+            pullCount++;
 
             UpdateRatioIfDue();
 
@@ -435,6 +489,21 @@ internal sealed class MultiOutputPlayout : IRenderBackend
             windowStartFed = fedNow;
             windowStartDrained = deviceDrainedBytes;
 
+            // Size the target to THIS card from its average pull, then hold it. Done on every path
+            // (including the discarded warm-up window) so the next window's average starts clean.
+            var avgPullBytes = pullCount > 0 ? pullSumBytes / pullCount : 0;
+            pullSumBytes = 0;
+            pullCount = 0;
+            if (avgPullBytes > 0)
+            {
+                lastGulpMs = avgPullBytes / (double)MixBytesPerFrame * 1000.0 / MixSampleRate;
+                var candidateMs = (int)Math.Round(
+                    Math.Clamp(lastGulpMs * TargetGulpMultiple, MinTargetDepthMs, MaxTargetDepthMs));
+                // Hysteresis: only move on a genuine ≥2 ms change in the card's pull, so tiny
+                // averaging wobble never nudges the latency — it settles once and stays put.
+                if (Math.Abs(candidateMs - targetMs) >= TargetHysteresisMs) targetMs = candidateMs;
+            }
+
             // Discard the FIRST completed window. WASAPI primes its endpoint buffer at start-up,
             // which inflates the device-drain count for that window and reads as a large bogus
             // ppm (−1199 ppm observed) that shoves the buffer off target. Start measuring from
@@ -456,12 +525,12 @@ internal sealed class MultiOutputPlayout : IRenderBackend
             }
             if (!tracking) return; // nothing valid measured yet — don't touch the rate.
 
-            // Feedback: nudge the buffer toward TargetDepthMs. depthError > 0 = too deep → bias
+            // Feedback: nudge the buffer toward the adaptive target (targetMs). depthError > 0 = too deep → bias
             // the rate UP so the resampler pulls more per output and drains the buffer faster;
             // < 0 = too shallow → bias down. Clamped + spread over DepthCorrectionSec so it's a
             // gentle, inaudible pitch trim, not a per-sample discontinuity.
             var depthFrames = buffer.BufferedBytes / MixBytesPerFrame;
-            var targetFrames = TargetDepthMs * MixSampleRate / 1000;
+            var targetFrames = targetMs * MixSampleRate / 1000;
             var depthError = depthFrames - targetFrames;
             var depthCorrection = Math.Clamp(
                 depthError / (DepthCorrectionSec * MixSampleRate),
@@ -475,7 +544,7 @@ internal sealed class MultiOutputPlayout : IRenderBackend
             var corrPpm = depthCorrection * 1_000_000.0;
             onDiagnostic?.Invoke(
                 $"\"{name}\": clock={smoothedRatio:F6} ({clockPpm:+0;-0}ppm) depthMs={depthMs} " +
-                $"target={TargetDepthMs} corr={corrPpm:+0;-0}ppm applied={appliedRatio:F6}");
+                $"target={targetMs} gulpMs={lastGulpMs:F0} corr={corrPpm:+0;-0}ppm applied={appliedRatio:F6}");
         }
     }
 }

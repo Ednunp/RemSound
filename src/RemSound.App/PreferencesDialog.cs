@@ -622,7 +622,7 @@ internal sealed class PreferencesDialog : Form
             _ => null,
         };
         if (defaultFileName is null) return null;
-        var defaultPath = Path.Combine(AppContext.BaseDirectory, "sounds", defaultFileName);
+        var defaultPath = Path.Combine(AppConfig.SoundsDirectory, defaultFileName);
         return File.Exists(defaultPath) ? defaultPath : null;
     }
 
@@ -667,7 +667,7 @@ internal sealed class PreferencesDialog : Form
     /// fires on the way out.</summary>
     private void OnBrowseClicked(Button btn, CueRowDescriptor cue, RemSoundSettingsStore settings)
     {
-        var soundsFolder = Path.Combine(AppContext.BaseDirectory, "sounds");
+        var soundsFolder = AppConfig.SoundsDirectory;
         var existing = settings.LoadCustomCuePath(cue.CueId);
         var initialDir = !string.IsNullOrWhiteSpace(existing) && File.Exists(existing)
             ? Path.GetDirectoryName(existing) ?? soundsFolder

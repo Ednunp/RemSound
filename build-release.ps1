@@ -103,10 +103,10 @@ if (Test-Path $syncScript) {
 # Anything matching these must NEVER appear in a release. Folders by name; files by
 # extension / exact name. RemSound.deps.json and RemSound.runtimeconfig.json are
 # legitimate app files and are deliberately NOT matched (different names).
-# 'config' added 2026-06-07: the config\ folder now holds global config (config\global config.json)
-# AND profiles (config\profiles\), so forbidding the whole folder catches both in one rule. The
-# legacy 'profiles' and 'remsound.config.json' rules stay for any pre-migration leftovers.
-$forbiddenFolders = @('logs', 'profiles', 'recordings', 'config')
+# 'user settings and logs' added 2026-06-10: that one folder now holds global config, profiles,
+# logs AND cue sounds, so forbidding it catches all the user state in one rule. The legacy 'config',
+# 'profiles' and 'remsound.config.json' rules stay for any pre-migration leftovers.
+$forbiddenFolders = @('logs', 'profiles', 'recordings', 'config', 'user settings and logs')
 function Test-Forbidden([string]$path) {
     $p = $path -replace '\\', '/'
     foreach ($f in $forbiddenFolders) {

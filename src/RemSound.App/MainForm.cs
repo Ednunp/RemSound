@@ -383,6 +383,11 @@ public sealed class MainForm : Form
     // Windows audio endpoint-change notifier — drives the debounced device-list refresh. Null until
     // wired in the constructor; disposed in FormClosing (which unregisters the COM callback).
     private AudioDeviceChangeNotifier? deviceChangeNotifier;
+
+    // Receive-output device IDs the user/profile selected — kept even while a device is unplugged,
+    // so a card that returns is silently re-ticked and re-opened (issue #5: recover after USB
+    // unplug). Receive-only: the send lists deliberately don't persist selection (AudioDeviceCatalog).
+    private readonly HashSet<string> rememberedReceiveOutputIds = new(StringComparer.OrdinalIgnoreCase);
     // Debounce timer for ASIO driver listbox selection. See SelectedIndexChanged handler
     // wiring for the full rationale. 300 ms is long enough to coalesce arrow-key bursts
     // (NVDA users typically press a few keys in quick succession to scan through items),
@@ -537,13 +542,6 @@ public sealed class MainForm : Form
     /// when non-null — it deserialises the JSON from this exact path, not from the active
     /// store's base directory. Lets Open profile work for files saved outside that folder.</summary>
     public string? NextProfilePathToLoad { get; private set; }
-    // Baseline JSON snapshot of "what the loaded profile was at open / after the last save".
-    // OnFormClosing compares the current state's JSON to this; if they differ, prompt the
-    // user. Captured ~3 s after profile-apply (or app start for blank template) so async
-    // peer-reconnects have settled into the baseline. Null until that timer fires; if it's
-    // null at close (e.g. user closed within 3 s of opening) we skip the prompt — treating
-    // very-fast-close as "user knew what they wanted".
-    private string? baselineProfileJson;
     // Set true by MarkProfileDirty() when the user actively changes something. Used as a
     // fast-path hint — we still do the JSON diff at close to be sure, but this lets us skip
     // the diff entirely when no user action has happened. Cleared on save and on profile load.
@@ -993,11 +991,37 @@ public sealed class MainForm : Form
         sendMyAudioCheckbox.CheckedChanged += (_, _) => OnStreamingCheckboxChanged(sendMyAudioCheckbox);
         volumeBar.Scroll += (_, _) => { receiver.Volume = volumeBar.Value / 100f; MarkProfileDirty(); };
         WireCheckedListAccessibility(receiveOutputDevicesList, receiveOutputDevicesStatusLabel, "receive output device");
-        receiveOutputDevicesList.ItemCheck += (_, _) => { if (!suppressDeviceCheckChange) { BeginInvoke(ApplyReceiveDevices); MarkProfileDirty(); } };
+        receiveOutputDevicesList.ItemCheck += (_, e) =>
+        {
+            if (suppressDeviceCheckChange) return;
+            // Track the user's intent so a card that's later unplugged is re-ticked + re-opened when
+            // it returns (issue #5). See ReapplyRememberedReceiveOutputs.
+            if (receiveOutputDevicesList.Items[e.Index] is AudioDeviceChoice c && c.DeviceId is { } rid)
+            {
+                if (e.NewValue == CheckState.Checked) rememberedReceiveOutputIds.Add(rid);
+                else rememberedReceiveOutputIds.Remove(rid);
+            }
+            BeginInvoke(ApplyReceiveDevices);
+            MarkProfileDirty();
+        };
         WireCheckedListAccessibility(sendOutputDevicesList, sendOutputDevicesStatusLabel, "output device");
         WireCheckedListAccessibility(sendInputDevicesList, sendInputDevicesStatusLabel, "input device");
         sendOutputDevicesList.ItemCheck += (_, _) => { if (!suppressDeviceCheckChange) { BeginInvoke(ApplyAudioRuntime); MarkProfileDirty(); } };
-        sendInputDevicesList.ItemCheck += (_, _) => { if (!suppressDeviceCheckChange) { BeginInvoke(ApplyAudioRuntime); MarkProfileDirty(); } };
+        sendInputDevicesList.ItemCheck += (_, args) =>
+        {
+            if (suppressDeviceCheckChange) return;
+            BeginInvoke(ApplyAudioRuntime);
+            MarkProfileDirty();
+            // Heads-up when the user ticks a WASAPI mic ON but Windows is blocking desktop-app
+            // microphone access — capture would open but silently send nothing. Deferred so the
+            // tick commits first and the modal doesn't re-enter ItemCheck. Skipped while a profile
+            // is being applied: the startup check (MaybeWarnMicBlockedOnStartup) owns the warning
+            // then, so a launch into a blocked-mic profile doesn't pop it twice.
+            if (!applyingProfile && args.NewValue == CheckState.Checked && IsMicrophoneBlockedByWindowsPrivacy())
+            {
+                BeginInvoke(new Action(WarnMicrophoneBlockedByWindowsPrivacy));
+            }
+        };
         // ASIO list accessibility + ItemCheck handlers — same patterns as the WASAPI ones.
         WireCheckedListAccessibility(asioReceiveOutputDevicesList, asioReceiveOutputDevicesStatusLabel, "ASIO receive output channel");
         WireCheckedListAccessibility(asioSendDevicesList, asioSendDevicesStatusLabel, "ASIO send channel");
@@ -1176,17 +1200,11 @@ public sealed class MainForm : Form
             // checkboxes, audio port, volume, ticked peers). Done here AFTER device lists are
             // populated by LoadAudioDevices(). Settings-shaped fields (codec, hotkeys, etc.)
             // were already pushed into the in-memory settings cache in the constructor.
-            // ApplyPendingProfileToControls() schedules its own baseline capture; for the
-            // blank-template case (no pendingProfile) we schedule it here.
-            if (pendingProfile is null) ScheduleBaselineCapture();
             ApplyPendingProfileToControls();
             // The profile-switch cue is played ON CLICK by the switch entry points (Recent menu,
             // quick switch, File open) — NOT here. A fresh launch into the first profile must stay
             // silent: hearing the switch cue and then the connect cue at startup is confusing
             // (Ed, 2026-06-08). So the rebuilt form never replays it.
-            // Show/hide the Update vs Save-as buttons based on whether we're on a loaded
-            // profile or the blank template.
-            UpdateProfileButtonsVisibility();
             // Andre's app gets focus inside the active tab page for free because his form is
             // a MODAL DIALOG (ShowDialog) — WinForms' modal-dialog focus semantics walk the
             // chain TabControl → active TabPage → first child. Our form is the main window,
@@ -1300,6 +1318,8 @@ public sealed class MainForm : Form
         MaybeShowWhatsNewAfterUpdate();
         if (IsDisposed) return;
         MaybeWarnAboutRealtekAsio();
+        if (IsDisposed) return;
+        MaybeWarnMicBlockedOnStartup();
     }
 
     /// <summary>If the user opted in (<see cref="AppConfig.ShowWhatsNewAfterUpdate"/>) and the
@@ -1325,7 +1345,7 @@ public sealed class MainForm : Form
             {
                 logFile.Event($"what's new: opening About after update {cfg.LastWhatsNewVersion} -> {current}");
                 using var dlg = new AboutDialog();
-                dlg.ShowDialog(this);
+                ForegroundDialog.Show(owner => dlg.ShowDialog(owner));
             }
             catch (Exception ex)
             {
@@ -2253,8 +2273,8 @@ public sealed class MainForm : Form
         var summary = string.IsNullOrWhiteSpace(info.ReleaseNotes)
             ? $"RemSound {info.Tag} is available. Install now?"
             : $"RemSound {info.Tag} is available.\n\n{TruncateForDialog(info.ReleaseNotes)}\n\nInstall now?";
-        var choice = MessageBox.Show(this, summary, "Update available",
-            MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1);
+        var choice = ForegroundDialog.Show(owner => MessageBox.Show(owner, summary, "Update available",
+            MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1));
         if (choice == DialogResult.Yes) await InstallUpdateAsync(info).ConfigureAwait(true);
     }
 
@@ -2310,7 +2330,7 @@ public sealed class MainForm : Form
             // "silent" install. UpdateInstallNoticeDialog auto-dismisses after a short
             // countdown but lets the user pick Install now / Skip / Postpone before then.
             using var notice = new UpdateInstallNoticeDialog(info);
-            var choice = notice.ShowDialog(this);
+            var choice = ForegroundDialog.Show(owner => notice.ShowDialog(owner));
             switch (choice)
             {
                 case DialogResult.OK:
@@ -2337,8 +2357,8 @@ public sealed class MainForm : Form
         var summary = string.IsNullOrWhiteSpace(info.ReleaseNotes)
             ? $"RemSound {info.Tag} is available. Install now?"
             : $"RemSound {info.Tag} is available.\n\n{TruncateForDialog(info.ReleaseNotes)}\n\nInstall now?";
-        var pick = MessageBox.Show(this, summary, "Update available",
-            MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1);
+        var pick = ForegroundDialog.Show(owner => MessageBox.Show(owner, summary, "Update available",
+            MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1));
         if (pick == DialogResult.Yes) await InstallUpdateAsync(info).ConfigureAwait(true);
     }
 
@@ -2375,9 +2395,9 @@ public sealed class MainForm : Form
             // Nothing was staged — allow a later attempt rather than wedging the updater off
             // for the rest of the session.
             updateInstallStarted = false;
-            MessageBox.Show(this,
+            ForegroundDialog.Show(owner => MessageBox.Show(owner,
                 $"Could not download or stage the update. Try again later, or visit the release page in your browser:\n\n{info.ReleaseUrl}",
-                "Update failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                "Update failed", MessageBoxButtons.OK, MessageBoxIcon.Warning));
             return;
         }
         // The helper is staged and launched. We MUST now exit cleanly so it can replace our
@@ -3754,6 +3774,7 @@ public sealed class MainForm : Form
         {
             ApplyAudioRuntime();
         }
+        if (receiveOutputChanged) ReapplyRememberedReceiveOutputs();
         if (receiveOutputChanged || asioReceiveChanged)
         {
             ApplyReceiveDevices();
@@ -3798,6 +3819,67 @@ public sealed class MainForm : Form
         cachedAsioProbeFailed = true;
         probeFailed = true;
         return null;
+    }
+
+    /// <summary>Reads Windows' microphone privacy setting and returns true when DESKTOP apps (which
+    /// RemSound is) are blocked from the mic. When blocked, WASAPI capture still opens but returns
+    /// pure silence, so the user "sends" but the peer hears nothing. Registry-based: the
+    /// CapabilityAccessManager ConsentStore "Value" is "Allow"/"Deny"; either the general per-user
+    /// gate or the NonPackaged (desktop-app) gate set to Deny blocks us. Best-effort — any failure
+    /// returns false so a registry hiccup never stops the user enabling their mic.</summary>
+    private static bool IsMicrophoneBlockedByWindowsPrivacy()
+    {
+        try
+        {
+            const string consent = @"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
+            return IsConsentDenied(Microsoft.Win32.Registry.CurrentUser, consent)
+                || IsConsentDenied(Microsoft.Win32.Registry.CurrentUser, consent + @"\NonPackaged")
+                || IsConsentDenied(Microsoft.Win32.Registry.LocalMachine, consent);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool IsConsentDenied(Microsoft.Win32.RegistryKey root, string subKey)
+    {
+        using var key = root.OpenSubKey(subKey);
+        return string.Equals(key?.GetValue("Value") as string, "Deny", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>One-shot, OK-only message telling the user Windows is blocking desktop-app mic
+    /// access (so their mic would send silence) and exactly which two toggles to turn on. Shown
+    /// when they tick a WASAPI mic on while the block is in place.</summary>
+    private void WarnMicrophoneBlockedByWindowsPrivacy()
+    {
+        ForegroundDialog.Show(owner => MessageBox.Show(owner,
+            "Windows is currently blocking desktop apps from using your microphone, so RemSound can "
+                + "switch the mic on but will only send silence - the people you're connected to won't "
+                + "hear you.\n\n"
+                + "To fix it, open Windows Settings, go to Privacy & security, then Microphone, and turn "
+                + "ON both of these:\n\n"
+                + "    - Microphone access\n"
+                + "    - Let desktop apps access your microphone\n\n"
+                + "Then your mic will work. This doesn't affect sound you receive - only sending your "
+                + "own microphone.",
+            "Windows is blocking your microphone",
+            MessageBoxButtons.OK, MessageBoxIcon.Warning));
+    }
+
+    /// <summary>On profile load, if a WASAPI microphone is already ticked but Windows is blocking
+    /// desktop-app mic access, show the warning once — the per-tick warning only fires on a fresh
+    /// tick, so this covers a profile that loads with the mic already on. Same OK-only message.</summary>
+    private void MaybeWarnMicBlockedOnStartup()
+    {
+        if (IsDisposed) return;
+        if (!IsMicrophoneBlockedByWindowsPrivacy()) return;
+        var anyWasapiMicChecked = false;
+        for (var i = 0; i < sendInputDevicesList.Items.Count; i++)
+        {
+            if (sendInputDevicesList.GetItemChecked(i)) { anyWasapiMicChecked = true; break; }
+        }
+        if (anyWasapiMicChecked) WarnMicrophoneBlockedByWindowsPrivacy();
     }
 
     /// <summary>
@@ -3847,7 +3929,10 @@ public sealed class MainForm : Form
                  + "This driver is known to cause compatibility issues with ASIO software, including "
                  + "RemSound — it leaks system resources and can make audio unstable.\n\n"
                  + "Would you like to disable it in RemSound? RemSound will then never touch this "
-                 + "driver. You can re-enable it any time from the Options menu.",
+                 + "driver.\n\n"
+                 + "Whichever you choose now, you can change it at any time: the Options menu has an "
+                 + "\"Enable / Disable Realtek ASIO driver\" item that turns this driver on or off for "
+                 + "RemSound whenever you like.",
             Icon = TaskDialogIcon.Warning,
         };
         var yes = new TaskDialogButton("&Yes, disable it (recommended)");
@@ -3855,7 +3940,7 @@ public sealed class MainForm : Form
         page.Buttons.Add(yes);
         page.Buttons.Add(no);
         page.DefaultButton = yes;
-        return TaskDialog.ShowDialog(this, page) == yes;
+        return ForegroundDialog.Show(owner => TaskDialog.ShowDialog(owner, page)) == yes;
     }
 
     /// <summary>Options-menu handler: flip every installed Realtek ASIO driver between disabled and
@@ -4056,6 +4141,32 @@ public sealed class MainForm : Form
             if (!string.IsNullOrEmpty(c.DeviceId)) ids.Add(c.DeviceId);
         }
         receiver.SetOutputDevices(ids);
+    }
+
+    /// <summary>A receive-output card that was unplugged drops out of the WASAPI list (and its tick
+    /// with it). When it returns, re-tick it from <see cref="rememberedReceiveOutputIds"/> so audio
+    /// resumes automatically (issue #5). Only RE-ticks present-but-unticked remembered devices; it
+    /// never unticks — that's a deliberate user action handled in the ItemCheck handler. Receive-only
+    /// on purpose: the send lists keep their "re-tick each session" behaviour (see AudioDeviceCatalog).</summary>
+    private void ReapplyRememberedReceiveOutputs()
+    {
+        if (rememberedReceiveOutputIds.Count == 0) return;
+        var changed = false;
+        suppressDeviceCheckChange = true;
+        try
+        {
+            for (var i = 0; i < receiveOutputDevicesList.Items.Count; i++)
+            {
+                if (receiveOutputDevicesList.Items[i] is not AudioDeviceChoice c || c.DeviceId is null) continue;
+                if (rememberedReceiveOutputIds.Contains(c.DeviceId) && !receiveOutputDevicesList.GetItemChecked(i))
+                {
+                    receiveOutputDevicesList.SetItemChecked(i, true);
+                    changed = true;
+                }
+            }
+        }
+        finally { suppressDeviceCheckChange = false; }
+        if (changed) logFile.Event("receive output: re-ticked a returning device from the remembered selection");
     }
 
     /// <summary>
@@ -4839,19 +4950,6 @@ public sealed class MainForm : Form
         if (!list.Focused) list.Focus();
     }
 
-    private void RemoveSelectedManualPeer(CheckedListBox list)
-    {
-        if (list.SelectedItem is not PeerListItem selected) return;
-        manualPeers.Remove(selected.Peer.InstanceId);
-        DeselectPeer(selected.Peer.InstanceId);
-        foreach (var pair in rememberedPeerInstanceIds.Where(kv => kv.Value == selected.Peer.InstanceId).ToList())
-        {
-            rememberedPeerInstanceIds.Remove(pair.Key);
-        }
-        RefreshKnownPeers();
-        ApplyAudioRuntime();
-    }
-
     private void RemoveSelectedRememberedPeer(CheckedListBox list)
     {
         if (list.SelectedItem is not RememberedPeerItem selected) return;
@@ -5494,11 +5592,20 @@ public sealed class MainForm : Form
         {
             // Volume first — affects what's audible during the rest of this method.
             volumeBar.Value = Math.Clamp(p.Volume, volumeBar.Minimum, volumeBar.Maximum);
+            // Push volume + mute to the engine. Assigning .Value does NOT fire the Scroll handler, so
+            // without this a profile saved at e.g. 50% would show 50% but play at full volume until
+            // the slider was nudged. Mute is restored from the saved state for the same reason.
+            receiver.Volume = volumeBar.Value / 100f;
+            receiver.IsMuted = p.Muted;
 
             // Tick checkboxes. Order matters: setting Checked fires runtime apply paths
             // (Connect/Disconnect) so the side-effect cascade has to happen here, not in
             // the constructor where the engines aren't fully wired up yet.
             ApplyTicksToList(receiveOutputDevicesList, p.SelectedWasapiReceiveOutputs);
+            // Seed remembered receive-output intent from the profile so a selected card that's
+            // absent now (or unplugged later) is re-ticked + re-opened when it appears (issue #5).
+            rememberedReceiveOutputIds.Clear();
+            foreach (var rid in p.SelectedWasapiReceiveOutputs) rememberedReceiveOutputIds.Add(rid);
             ApplyTicksToList(asioReceiveOutputDevicesList, p.SelectedAsioReceiveOutputs);
             ApplyTicksToList(sendOutputDevicesList, p.SelectedWasapiSendOutputs);
             ApplyTicksToList(sendInputDevicesList, p.SelectedWasapiSendInputs);
@@ -5524,9 +5631,6 @@ public sealed class MainForm : Form
             pendingProfile = null;
             applyingProfile = false;
         }
-        // Schedule baseline capture for the unsaved-changes-on-close check. Done as a
-        // delayed snapshot so async peer-reconnects have settled.
-        ScheduleBaselineCapture();
     }
 
     /// <summary>Tick the items in <paramref name="list"/> whose DeviceId appears in
@@ -5559,21 +5663,6 @@ public sealed class MainForm : Form
         return string.IsNullOrEmpty(loadedTitle)
             ? $"{AppName}{readOnlySuffix}"
             : $"{AppName} — Active profile: {loadedTitle}{readOnlySuffix}";
-    }
-
-    /// <summary>Show/hide the Update button based on whether a profile is currently loaded.
-    /// Update only makes sense when there's an existing profile to overwrite; Save-as is
-    /// always available (and the only way to save from a blank template). Both Visible and
-    /// Enabled are toggled — Visible to keep NVDA / sighted users from seeing it, Enabled
-    /// so the Alt+U hotkey is a no-op even if focus somehow lands on it.</summary>
-    private void UpdateProfileButtonsVisibility()
-    {
-        // Retained as a stub — multiple call sites still poke this on profile load /
-        // save-as / rename. With the Profiles tab retired (2026-05-08) there's no UI to
-        // refresh; the Save / Rename actions on the File menu work for both
-        // blank-template and loaded-profile states because the menu handlers branch on
-        // currentProfileTitle internally. The window title is updated where the profile
-        // title actually changes (SaveProfileTo, RenameCurrentProfile, profile-load).
     }
 
     /// <summary>Update existing profile button. Overwrites the active profile with current
@@ -5647,11 +5736,7 @@ public sealed class MainForm : Form
             }
             Text = FormatWindowTitle(title);
             AccessibleName = Text;
-            UpdateProfileButtonsVisibility();
             AppendLogEntry($"profile saved: \"{title}\" → {path}");
-            // Refresh baseline so the diff against unsaved-changes uses the just-saved state.
-            try { baselineProfileJson = SerializeCurrentStateAsProfile(); }
-            catch { /* baseline failure shouldn't block save */ }
             unsavedChanges = false;
             // A freshly created profile has no password yet, and encryption is always on — so
             // ask for one now and write it straight into the file we just saved. OK requires a
@@ -5659,7 +5744,7 @@ public sealed class MainForm : Form
             // streaming gate will ask again when needed.
             if (string.IsNullOrEmpty(currentProfilePassword))
             {
-                var pw = ProfilePasswordDialog.Show(this, title, "", requireNonEmpty: true);
+                var pw = ProfilePasswordDialog.Show(title, "", requireNonEmpty: true);
                 if (!string.IsNullOrEmpty(pw))
                 {
                     currentProfilePassword = pw;
@@ -5728,11 +5813,6 @@ public sealed class MainForm : Form
             // profile flag; the cue is silent if the user has unticked it in Preferences or if
             // sounds\save.wav doesn't exist and no custom override has been set.
             if (settings.LoadEnableSaveCue()) saveSound?.Play();
-            // Refresh the unsaved-changes baseline so this saved state becomes the new
-            // "no changes" reference. The Title field changes on save-as, so the next
-            // diff comparison must use the new state as baseline, not the pre-save one.
-            try { baselineProfileJson = SerializeCurrentStateAsProfile(); }
-            catch { /* baseline failure shouldn't block save */ }
             unsavedChanges = false;
             if (showConfirmation && !AppConfig.Load().SaveProfileConfirmationSuppressed)
             {
@@ -5778,7 +5858,6 @@ public sealed class MainForm : Form
         currentProfileTitle = title;
         Text = FormatWindowTitle(title);
         AccessibleName = Text;
-        UpdateProfileButtonsVisibility();
     }
 
     /// <summary>Mark the profile as having unsaved user changes. No-op while a profile is
@@ -5829,16 +5908,6 @@ public sealed class MainForm : Form
             profile.ReadOnly = readOnly;
             var newJson = JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(currentProfilePath, newJson);
-            // Refresh the unsaved-changes baseline so any user edits made BEFORE the toggle
-            // remain "unsaved" (still pending a real Save) — the baseline tracks the saved
-            // profile JSON, and we just rewrote it on disk, so the diff has to be against
-            // the new file contents not the old ones. Without this, toggling lock on a
-            // dirty profile would suddenly "clean" the dirty flag from the close path's
-            // POV, even though the user's other edits still aren't persisted. The new
-            // baseline reflects the on-disk truth; the in-memory state still differs by
-            // those other edits, so unsavedChanges-style tracking still works.
-            try { baselineProfileJson = SerializeProfileForDirtyDiff(profile); }
-            catch { /* baseline refresh is best-effort */ }
         }
         catch (Exception ex)
         {
@@ -5850,14 +5919,6 @@ public sealed class MainForm : Form
             AppendLogEntry($"failed to persist read-only flag: {ex.GetType().Name}: {ex.Message}");
         }
     }
-
-    /// <summary>Serialise an arbitrary <see cref="Profile"/> in the same shape
-    /// <see cref="SerializeCurrentStateAsProfile"/> uses for the dirty-diff. Lives here so
-    /// the lock-flag persistence path can refresh the baseline against the rewritten file
-    /// contents (a partial overwrite of the profile file) without flushing the user's
-    /// in-session edits. 2026-05-22.</summary>
-    private static string SerializeProfileForDirtyDiff(Profile profile) =>
-        JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true });
 
     /// <summary>File → Change this profile's password. Shows the current password (plain text,
     /// for the screen reader) in a dialog; on OK, updates the in-memory value and writes JUST
@@ -5874,7 +5935,7 @@ public sealed class MainForm : Form
                 AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        var entered = ProfilePasswordDialog.Show(this, currentProfileTitle, currentProfilePassword);
+        var entered = ProfilePasswordDialog.Show(currentProfileTitle, currentProfilePassword);
         if (entered is null) return; // cancelled
         currentProfilePassword = entered;
         RecomputeAudioCrypto();
@@ -5898,10 +5959,6 @@ public sealed class MainForm : Form
             profile.Password = RemSoundCrypto.Obfuscate(plaintextPassword);
             var newJson = JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(currentProfilePath, newJson);
-            // Refresh the dirty-diff baseline against the rewritten file so the password change
-            // we just persisted doesn't read back as an unsaved change on close.
-            try { baselineProfileJson = SerializeProfileForDirtyDiff(profile); }
-            catch { /* baseline refresh is best-effort */ }
         }
         catch (Exception ex)
         {
@@ -5946,7 +6003,7 @@ public sealed class MainForm : Form
         if (!string.IsNullOrEmpty(currentProfilePassword)) return true; // already have one
 
         var label = string.IsNullOrEmpty(currentProfileTitle) ? "this session" : currentProfileTitle;
-        var entered = ProfilePasswordDialog.Show(this, label, "", requireNonEmpty: true);
+        var entered = ProfilePasswordDialog.Show(label, "", requireNonEmpty: true);
         if (string.IsNullOrEmpty(entered))
         {
             // No password → can't stream. Put the box back without re-firing this gate.
@@ -5960,9 +6017,9 @@ public sealed class MainForm : Form
         // Offer to remember it on the profile (if we're on a saved one).
         if (!string.IsNullOrEmpty(currentProfileTitle) && !string.IsNullOrEmpty(currentProfilePath))
         {
-            var save = MessageBox.Show(this,
+            var save = ForegroundDialog.Show(owner => MessageBox.Show(owner,
                 $"Save this password to profile \"{currentProfileTitle}\" so you don't have to type it next time?",
-                AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question));
             if (save == DialogResult.Yes) PersistPasswordOnly(currentProfilePassword);
         }
         return true;
@@ -6030,31 +6087,6 @@ public sealed class MainForm : Form
             }
             catch { /* benign — worst case the change applies on next load */ }
         }
-    }
-
-    /// <summary>Serializes the current control state as if the user had just clicked Save.
-    /// Used for the unsaved-changes-on-close diff. Mirrors <see cref="SaveCurrentStateToProfileFile"/>
-    /// but doesn't write anywhere.</summary>
-    private string SerializeCurrentStateAsProfile() =>
-        JsonSerializer.Serialize(BuildCurrentProfile(currentProfileTitle ?? ""));
-
-    /// <summary>Capture the "this is what no-changes-since-load looks like" baseline 3 seconds
-    /// after the profile has been applied (or the app has started, for blank template). The
-    /// delay lets async peer-reconnects finish so they're folded into the baseline rather
-    /// than seen as user-initiated changes. If the user closes within those 3 seconds the
-    /// baseline is null and we just close without prompting (treating fast-close as
-    /// confident-close).</summary>
-    private void ScheduleBaselineCapture()
-    {
-        var timer = new System.Windows.Forms.Timer { Interval = 3000 };
-        timer.Tick += (_, _) =>
-        {
-            timer.Stop();
-            timer.Dispose();
-            try { baselineProfileJson = SerializeCurrentStateAsProfile(); }
-            catch { /* ignore — baseline just stays null */ }
-        };
-        timer.Start();
     }
 
     private static List<string> ExtractCheckedDeviceIds(CheckedListBox list)
@@ -6297,7 +6329,7 @@ public sealed class MainForm : Form
             }
             else
             {
-                var defaultPath = Path.Combine(AppContext.BaseDirectory, "sounds", defaultFileName);
+                var defaultPath = Path.Combine(AppConfig.SoundsDirectory, defaultFileName);
                 if (File.Exists(defaultPath))
                 {
                     path = defaultPath;
@@ -6794,11 +6826,6 @@ public sealed class MainForm : Form
         // can't make the ASIO lane's auto-tune defer (and vice versa).
         if (settings.LoadAudioMode() == AudioMode.BothIndependent)
         {
-            // Skip ticking a lane that has no active sessions. The shared recentMaxGaps
-            // window is populated by every incoming packet regardless of lane, so without
-            // this gate a route with no audio would still react to the OTHER route's
-            // gap signal and silently inflate its target before any of its own audio has
-            // arrived.
             // Skip ticking a lane that has no active sessions. The shared recentMaxGaps
             // window is populated by every incoming packet regardless of lane, so without
             // this gate a route with no audio would still react to the OTHER route's
