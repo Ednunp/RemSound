@@ -76,7 +76,7 @@ ul, ol { padding-left: 1.4em; }
 <p>Let's assume you and a friend both have RemSound running, and that your two computers can reach each other on the network (the same Wi-Fi, the same Tailscale account, and so on).</p>
 
 <ol>
-<li>Start RemSound. The first thing you'll see is the <strong>profile picker</strong>. On a brand-new install your only choice is <strong>(Blank template)</strong> &mdash; select it and press Enter or click OK. Later, once you've saved a setup or two of your own, this is the dialog where you choose which one to load. See <a href="#profiles">Profiles</a> for the full story.</li>
+<li>Start RemSound. The first thing you'll see is the <strong>profile picker</strong>. On a brand-new install your only choice is <strong>New profile</strong> &mdash; select it and press Enter or click OK. Later, once you've saved a setup or two of your own, this is the dialog where you choose which one to load. See <a href="#profiles">Profiles</a> for the full story.</li>
 <li>Once the main window opens, go to the <strong>Audio inputs and outputs</strong> tab. Tick <strong>Receive audio (Alt+R)</strong>, then tick the device you want incoming sound played through in <strong>WASAPI outputs for received sound (Alt+3)</strong>.</li>
 <li>On the same tab, tick <strong>Send my audio (Alt+S)</strong> and tick your microphone in <strong>WASAPI inputs to send (Alt+5)</strong>.</li>
 <li>Go to the <strong>Connectivity</strong> tab, find your friend in the <strong>Discovered peers (Alt+D)</strong> list, and tick them. If they aren't showing up, use <strong>Add peer by IP (Alt+A)</strong> and type their address.</li>
@@ -95,12 +95,12 @@ ul, ol { padding-left: 1.4em; }
 
 <h3>The startup picker</h3>
 
-<p>When RemSound starts, the first thing you see is the profile picker. It is a list of your saved profile names, with an extra entry called <strong>(Blank template)</strong> at the top. The keys are deliberately simple:</p>
+<p>When RemSound starts, the first thing you see is the profile picker. It is a list of your saved profile names, with an extra entry called <strong>New profile</strong> at the top. The keys are deliberately simple:</p>
 
 <table>
 <tr><th>Key</th><th>Action</th></tr>
 <tr><td>Up / Down</td><td>Move between profiles in the list.</td></tr>
-<tr><td>Enter</td><td>Load the highlighted profile (or the blank template) and open the main window.</td></tr>
+<tr><td>Enter</td><td>Load the highlighted profile (or a new profile) and open the main window.</td></tr>
 <tr><td>OK button</td><td>Same as Enter.</td></tr>
 <tr><td>Del</td><td>Delete the highlighted profile, after a yes / no confirmation.</td></tr>
 <tr><td>Browse&hellip; button</td><td>Choose a different folder to read profiles from. Handy if you keep your profiles in Dropbox or another sync folder so they follow you between computers. Your choice is remembered next time RemSound starts.</td></tr>
@@ -108,11 +108,13 @@ ul, ol { padding-left: 1.4em; }
 <tr><td>Alt+F4</td><td>Closes the dialog and quits RemSound &mdash; in other words, &ldquo;I don't want to start the program right now.&rdquo;</td></tr>
 </table>
 
-<p>The first profile in the list is highlighted to begin with, so on a fresh install where the only entry is <strong>(Blank template)</strong>, you just press Enter to get going.</p>
+<p>The first profile in the list is highlighted to begin with, so on a fresh install where the only entry is <strong>New profile</strong>, you just press Enter to get going.</p>
 
-<h3>What &ldquo;Blank template&rdquo; means</h3>
+<h3>What &ldquo;New profile&rdquo; means</h3>
 
-<p>The blank template is a one-off session with all the defaults: nothing ticked in any device list, neither Receive nor Send turned on, the standard sound settings, no ASIO driver chosen, no remembered peers, and the standard hotkeys. You'd pick it for a quick session you don't plan to save, or as a clean starting point for a new profile. The Save button is hidden while you're on the blank template &mdash; there's no existing setup to update, only a new one to save.</p>
+<p>A new profile is a one-off session with all the defaults: nothing ticked in any device list, neither Receive nor Send turned on, the standard sound settings, no ASIO driver chosen, no remembered peers, and the standard hotkeys. You'd pick it for a quick session you don't plan to save, or as a clean starting point for a new profile. The Save button is hidden while you're on a new profile &mdash; there's no existing setup to update, only a new one to save.</p>
+
+<p><strong>Starting a new profile later:</strong> the picker only appears at startup, and if you've set RemSound to <em>start in a specific profile</em> you skip straight past it. So to start a brand-new profile at any time, use <strong>File &rarr; New profile</strong> (Ctrl+N, or Alt+F, W) &mdash; it opens a fresh, default session, ready for you to set up and then Save as. If your current profile has unsaved changes, it offers to save them first.</p>
 
 <h3>Saving and updating</h3>
 
@@ -120,8 +122,8 @@ ul, ol { padding-left: 1.4em; }
 
 <table>
 <tr><th>Item</th><th>What it does</th></tr>
-<tr><td><strong>File &rarr; Save (Ctrl+S)</strong></td><td>Updates the current profile with whatever your settings are right now. If you're on the blank template, this turns into Save as instead, because there's no existing profile to update.</td></tr>
-<tr><td><strong>File &rarr; Save as&hellip; (Alt+F, A)</strong></td><td>Always available. Asks you for a name. From the blank template, this is how you create your first profile. From an existing profile, it makes a fresh copy under a new name and switches to that copy.</td></tr>
+<tr><td><strong>File &rarr; Save (Ctrl+S)</strong></td><td>Updates the current profile with whatever your settings are right now. If you're on a new profile, this turns into Save as instead, because there's no existing profile to update.</td></tr>
+<tr><td><strong>File &rarr; Save as&hellip; (Alt+F, A)</strong></td><td>Always available. Asks you for a name. From a new profile, this is how you create your first profile. From an existing profile, it makes a fresh copy under a new name and switches to that copy.</td></tr>
 </table>
 
 <p>The window title bar always shows which profile is in use: <code>RemSound &mdash; Active profile: My session name</code>.</p>
@@ -267,11 +269,12 @@ ul, ol { padding-left: 1.4em; }
 
 <table>
 <tr><th>Item</th><th>Shortcut</th><th>What it does</th></tr>
+<tr><td><strong>New profile</strong></td><td>Ctrl+N, or Alt+F, W</td><td>Starts a brand-new profile from scratch &mdash; a fresh, unsaved session (everything unticked, nothing connected, default settings). This is how you create a profile for a different setup at any time, <em>even when RemSound is set to start straight into a specific profile and you never see the picker</em>. If your current profile has unsaved changes, it offers to save them first. Once you've set things up, use Save as to give the new profile a name.</td></tr>
 <tr><td><strong>Open profile&hellip;</strong></td><td>Ctrl+O, or Alt+F, O</td><td>Opens a Windows file picker showing your profiles folder. Pick a profile, and RemSound reloads using it (the window closes and reopens with all that profile's device choices, peers and settings restored). To delete a profile, right-click its entry inside the file picker and choose Delete &mdash; that lets Windows handle the deletion.</td></tr>
 <tr><td><strong>Recent profiles &rarr;</strong></td><td>Alt+F, R</td><td>A submenu listing the last five profiles you've opened, most recent first. Each row has a single-digit shortcut: while the submenu is open, press <strong>1</strong> for the most recent, <strong>2</strong> for the next, and so on up to <strong>5</strong>. Or just select the one you want. It reloads the profile the same way Open profile does. If a recent profile's file has been deleted or moved away, it's left out of the submenu (it stays in the list in case the file comes back later &mdash; for example when you reconnect an external drive). If the list is empty, you see a greyed-out &ldquo;(No recent profiles)&rdquo; entry. The same list appears in the system-tray icon's <strong>Profiles</strong> submenu, with the same number shortcuts, so you can switch profiles without re-opening the main window.</td></tr>
-<tr><td><strong>Save</strong></td><td>Ctrl+S</td><td>Updates the current profile with your current settings. If there's no current profile (you're on the blank template), this becomes Save as automatically.</td></tr>
-<tr><td><strong>Save as&hellip;</strong></td><td>Alt+F, A</td><td>Asks for a name and saves a copy. Use it to save your current setup under a new name, or to save for the first time from the blank template.</td></tr>
-<tr><td><strong>Rename current profile&hellip;</strong></td><td>Alt+F, M</td><td>Renames the current profile's file and updates the window title. Does nothing on the blank template (there's no profile to rename).</td></tr>
+<tr><td><strong>Save</strong></td><td>Ctrl+S</td><td>Updates the current profile with your current settings. If there's no current profile (you're on a new profile), this becomes Save as automatically.</td></tr>
+<tr><td><strong>Save as&hellip;</strong></td><td>Alt+F, A</td><td>Asks for a name and saves a copy. Use it to save your current setup under a new name, or to save for the first time from a new profile.</td></tr>
+<tr><td><strong>Rename current profile&hellip;</strong></td><td>Alt+F, M</td><td>Renames the current profile's file and updates the window title. Does nothing on a new profile (there's no profile to rename).</td></tr>
 <tr><td><strong>Lock profile (read-only)</strong> (tickable)</td><td>Alt+F, L</td><td>When ticked, the current profile is loaded for use but RemSound will not save any of your changes back to it. The window title shows &ldquo;(read-only)&rdquo; so you can tell at a glance. Save (Ctrl+S) politely refuses with a hint to use Save as instead, and closing RemSound never asks &ldquo;save changes?&rdquo; &mdash; it just closes. Anything you've changed during the session is forgotten when RemSound closes; the file on disk is left exactly as it was. The lock setting is saved on the profile itself, so it sticks across launches. See <a href="#profile-lock">Locking a profile</a> for the full story.</td></tr>
 <tr><td><strong>Minimise to tray</strong></td><td>Alt+F, N</td><td>Hides the window down to the system tray (the small icons near the clock). The tray icon's hover summary tells you what RemSound is doing, and right-clicking it gives you Show RemSound, Enable sending, Enable receiving, your Profiles submenu, and Exit &mdash; see <a href="#main-window">The system tray icon and its menu</a> for the full rundown. To bring the window back, double-click the tray icon, pick &ldquo;Show RemSound&rdquo; from its menu, or use the &ldquo;Show or hide window&rdquo; global hotkey (set in the Keyboard shortcuts dialog, default Ctrl+Shift+F10).</td></tr>
 <tr><td><strong>Exit</strong></td><td>Alt+F, X (or Alt+F4)</td><td>Closes RemSound. If you have unsaved profile changes (and the profile isn't locked), it asks you first.</td></tr>
@@ -341,7 +344,7 @@ ul, ol { padding-left: 1.4em; }
 <tr><td><strong>ASIO inputs to send</strong></td><td>Alt+2</td><td>(Shown when an ASIO driver is chosen.) Tick which ASIO channel pairs to capture and send.</td></tr>
 </table>
 
-<p>All the device lists are checkable lists &mdash; tick or untick an item to include or exclude that device. Profiles save which devices are ticked; the blank template starts with everything unticked.</p>
+<p>All the device lists are checkable lists &mdash; tick or untick an item to include or exclude that device. Profiles save which devices are ticked; a new profile starts with everything unticked.</p>
 
 <h3>Receiving</h3>
 
@@ -489,6 +492,15 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 </table>
 
 <p>There's also the <strong>Add peer by IP (Alt+A)</strong> button, which opens a small box for a computer name or address. It's useful for a first connection over a VPN, where discovery hasn't reached the other computer yet.</p>
+
+<h3>Connecting to one specific IP address (and only that one)</h3>
+<p>RemSound can reach another computer two ways, and the difference matters if a computer has more than one IP address:</p>
+<ul>
+<li><strong>By name</strong> &mdash; ticking someone in <strong>Discovered peers</strong>. RemSound found them from their announcement and the entry shows their computer name. This is the easy, automatic way on an ordinary network.</li>
+<li><strong>By a fixed IP</strong> &mdash; <strong>Add peer by IP (Alt+A)</strong>, then type the exact address, for example <code>10.8.0.1</code>. RemSound talks to <em>that address and nothing else</em>: it doesn't look up a name, so it can never drift to a different IP, and if that address isn't reachable, no connection is made at all.</li>
+</ul>
+<p>So to force a connection to one specific IP &mdash; say a machine that appears under two addresses and you only want one of them &mdash; add it by that IP and tick only that entry. If the same machine also turns up in Discovered peers under its <em>other</em> address, it shows as a separate entry that you simply leave unticked; RemSound keeps the two apart by their actual address, so they never merge.</p>
+<p>Either way, <strong>the profile remembers exactly what you ticked.</strong> Tick a discovered name and the profile reconnects by that name next time; add and tick an IP and the profile reconnects to that exact IP. So the way to make a profile always use one specific IP is simply to add and tick it by that IP, then save the profile.</p>
 
 <h3>You only hear peers you've ticked</h3>
 <p>Even if a peer is sending sound your way, you won't hear it until you've ticked their checkbox. This is deliberate &mdash; connecting is a step where you give your consent. A peer's name appears in Discovered the moment they come online, but they can't make any sound on your speakers until you say yes.</p>
@@ -763,7 +775,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <h3>File menu shortcuts (work from any tab)</h3>
 <table>
 <tr><th>Key</th><th>Action</th></tr>
-<tr><td>Ctrl+S</td><td>Save the current profile (or Save as if on the blank template)</td></tr>
+<tr><td>Ctrl+S</td><td>Save the current profile (or Save as if on a new profile)</td></tr>
 <tr><td>Ctrl+K</td><td>Open the Keyboard shortcuts dialog</td></tr>
 <tr><td>Ctrl+P</td><td>Open the Preferences dialog</td></tr>
 <tr><td>Ctrl+R</td><td>Start or stop recording (toggles)</td></tr>
@@ -1218,7 +1230,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <tr><td>Carrier-grade NAT</td><td>An extra layer of NAT that some internet providers (especially on mobile broadband and some cable connections) put in between your router and the rest of the internet. Your home router opens a port fine, but the provider's NAT in front of it still blocks incoming connections. RemSound's UPnP status line warns you when this is the case &mdash; the way through it is a VPN like Tailscale, or the relay server.</td></tr>
 <tr><td>Auto-tune</td><td>RemSound automatically adjusting the latency target based on how evenly packets are arriving. Off by default; turn it on with the Continuous auto-tune checkbox on the Audio profile tab.</td></tr>
 <tr><td>Profile</td><td>A saved snapshot of every RemSound setting and choice &mdash; device ticks, send / receive states, codec, latency, peers, hotkeys, ASIO driver choice, the lot. Stored as one settings file. You pick one at startup, and can switch with File &rarr; Open profile.</td></tr>
-<tr><td>Blank template</td><td>An entry in the startup profile picker that begins a session with all the defaults &mdash; nothing ticked, no peers, no saved name. A clean starting point for a new profile, or for a one-off session you don't plan to save.</td></tr>
+<tr><td>New profile</td><td>An entry in the startup profile picker that begins a session with all the defaults &mdash; nothing ticked, no peers, no saved name. A clean starting point for a new profile, or for a one-off session you don't plan to save.</td></tr>
 <tr><td>Lock to audio clock</td><td>A sending-side timing mode that takes its timing straight from the sound device's hardware clock instead of from Windows. Removes a few milliseconds of wobble at tight latency targets. Off by default. Set with the checkbox of the same name on the Audio profile tab.</td></tr>
 <tr><td>Concealment</td><td>A receiving-side feature that fills brief gaps in the playback reserve with a small noise burst (the default) or an obvious click. You choose which on the Audio profile tab, in the <em>Artefact sound type</em> list. Opus also has its own repair of lost packets on top of this.</td></tr>
 <tr><td>Remote control</td><td>A RemSound feature that lets one connected peer adjust another peer's listening volume (or toggle their receive mute) using global hotkeys. There are two sets of commands: one adjusts the receiver's RemSound volume slider, the other adjusts the receiver's Windows volume. Off by default on both ends; the receiver opts in via &ldquo;Accept remote volume commands from peers&rdquo; in the Preferences dialog (Ctrl+P), and the sender sets up hotkeys in the Keyboard shortcuts dialog (Ctrl+K). Designed for the &ldquo;I'm NVDA-Remote'd into my desktop and want to nudge the laptop's volume&rdquo; case. See section 15.</td></tr>

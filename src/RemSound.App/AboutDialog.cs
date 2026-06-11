@@ -20,6 +20,23 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v3.8
+
+        You can now start a brand-new profile at any time. A
+        new "New profile" item at the top of the File menu (or
+        Ctrl+N) opens a fresh, unsaved profile, so you can set up
+        a profile for a different connection from scratch — even
+        when RemSound is set to start straight into a specific
+        profile and you'd otherwise never see the picker. If your
+        current profile has unsaved changes, it offers to save
+        them first. The startup picker and the window title now
+        say "New profile" too, where they used to say "blank
+        template".
+
+        And the "you and the other person have different
+        passwords" warning now stays on screen until you press
+        OK, instead of flashing away before you could reach it.
+
         RemSound v3.7
 
         Changing audio devices mid-session is smoother. A quick

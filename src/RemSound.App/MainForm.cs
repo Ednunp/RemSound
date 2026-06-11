@@ -537,6 +537,13 @@ public sealed class MainForm : Form
     private string? currentProfilePath;
     private Profile? pendingProfile;
     public string? NextProfileTitleToLoad { get; private set; }
+
+    /// <summary>Set by File → New profile. Program.cs's relaunch loop checks this FIRST and, when
+    /// true, rebuilds the form on a fresh blank template (<see cref="Profile.NewBlank"/>, no title)
+    /// instead of loading a saved profile. It's the only way to reach a blank template mid-session
+    /// — the fix for being unable to create a new profile when "start with a specific profile"
+    /// boots the user straight past the picker (issue #6).</summary>
+    public bool LoadBlankTemplateNext { get; private set; }
     /// <summary>Full path of the next profile to load, set when the user opens a file via
     /// File → Open profile. Program.cs prefers this over <see cref="NextProfileTitleToLoad"/>
     /// when non-null — it deserialises the JSON from this exact path, not from the active
@@ -1442,6 +1449,17 @@ public sealed class MainForm : Form
         var fileMenu = new ToolStripMenuItem("&File") { AccessibleName = "File menu" };
         var helpMenu = new ToolStripMenuItem("&Help") { AccessibleName = "Help menu" };
 
+        // New profile — starts a fresh blank template as a new unsaved session. Lives at the top of
+        // the File menu (the conventional New / Open / Save order) and, crucially, is reachable even
+        // when "start with a specific profile" boots straight past the picker (issue #6). Mnemonic
+        // Alt+F, W ('w' — N is taken by Minimise) plus the conventional Ctrl+N global shortcut.
+        var newProfileItem = new ToolStripMenuItem("Ne&w profile")
+        {
+            ShortcutKeys = Keys.Control | Keys.N,
+            AccessibleName = "New profile",
+        };
+        newProfileItem.Click += (_, _) => NewProfile();
+
         var openItem = new ToolStripMenuItem("&Open profile...")
         {
             ShortcutKeys = Keys.Control | Keys.O,
@@ -1534,6 +1552,7 @@ public sealed class MainForm : Form
 
         fileMenu.DropDownItems.AddRange(new ToolStripItem[]
         {
+            newProfileItem,
             openItem,
             recentProfilesMenu,
             saveItem,
@@ -1808,6 +1827,49 @@ public sealed class MainForm : Form
         {
             logFile.Event($"quick profile switch failed: {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    /// <summary>File → New profile. Starts a fresh blank template as a new unsaved session — the way
+    /// to create a profile from scratch even when "start with a specific profile" boots the user
+    /// straight past the picker (issue #6). Offers to save the current profile first if it has
+    /// unsaved changes, then hands off to Program.cs's loop via <see cref="LoadBlankTemplateNext"/>.</summary>
+    private void NewProfile()
+    {
+        // Don't silently lose unsaved work when abandoning the current session for a blank one.
+        if (unsavedChanges && profileStore is not null && !currentProfileReadOnly)
+        {
+            var result = MessageBox.Show(this,
+                "You have unsaved changes to your current profile. Save them before starting a new profile?\n\n" +
+                "Yes — save, then start a new profile.\nNo — discard the changes and start a new profile.\nCancel — stay where you are.",
+                "RemSound — unsaved changes",
+                MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button3);
+            if (result == DialogResult.Cancel) return;
+            if (result == DialogResult.Yes)
+            {
+                if (string.IsNullOrEmpty(currentProfileTitle))
+                {
+                    // Current session is itself a blank template — needs a name before it can be saved.
+                    var saveTitle = ProfileSaveAsPrompt.Show(this, profileStore, null);
+                    if (string.IsNullOrEmpty(saveTitle)) return; // cancelled the name prompt → abort the whole thing
+                    SaveProfileTo(saveTitle, showConfirmation: false);
+                }
+                else
+                {
+                    SaveProfileTo(currentProfileTitle, showConfirmation: false);
+                }
+            }
+            // No → fall through, discarding the unsaved changes.
+        }
+
+        // No profile-switch cue here — deliberately. Unlike Recent/Open (which play it on click),
+        // opening a fresh blank template should be silent; the switch sound feels wrong for "start
+        // new" (Ed, 2026-06-11). The rebuilt form never replays the cue either (see OnShown), so the
+        // entire New-profile path stays quiet.
+        LoadBlankTemplateNext = true;
+        // Stay in the tray if we were there, mirroring the quick-switch behaviour.
+        startNextInstanceMinimized = !Visible || WindowState == FormWindowState.Minimized;
+        AppendLogEntry("new profile: loading blank template");
+        Close();
     }
 
     /// <summary>Build the Record menu — Start/stop recording (toggling label), recording
@@ -5699,14 +5761,14 @@ public sealed class MainForm : Form
 
     /// <summary>Window title shows the active profile name explicitly so the user knows what
     /// they're editing. Format: "RemSound — Active profile: My profile name" (loaded) or
-    /// just "RemSound" (blank template). Read-only profiles get a " (read-only)" suffix so
+    /// "RemSound — New profile" (a fresh, unsaved session). Read-only profiles get a " (read-only)" suffix so
     /// NVDA announces the lock state on every title change and sighted users see it at a
     /// glance — important context that "anything I change here won't be saved".</summary>
     private string FormatWindowTitle(string? loadedTitle)
     {
         var readOnlySuffix = currentProfileReadOnly ? " (read-only)" : "";
         return string.IsNullOrEmpty(loadedTitle)
-            ? $"{AppName}{readOnlySuffix}"
+            ? $"{AppName} — New profile{readOnlySuffix}"
             : $"{AppName} — Active profile: {loadedTitle}{readOnlySuffix}";
     }
 
@@ -6080,11 +6142,16 @@ public sealed class MainForm : Form
         MarkProfileDirty();
     }
 
+    /// <summary>True while a peer-security warning dialog is on screen — set so the 1 Hz status
+    /// tick that raises it can't re-enter and stack (or churn the UI under) a second one.</summary>
+    private bool securityWarningShowing;
+
     /// <summary>Once a second, surface any password mismatch / out-of-date peer the receiver has
     /// detected from peers' advertised fingerprints — once per change, not every tick — so a
     /// silent encrypted stream is never an unexplained mystery.</summary>
     private void CheckPeerSecurity()
     {
+        if (securityWarningShowing) return; // a warning is already up — don't re-enter or stack
         foreach (var kv in receiver.GetPeerSecurityStatuses())
         {
             var addr = kv.Key;
@@ -6101,7 +6168,24 @@ public sealed class MainForm : Form
             var msg = status == PeerSecurityStatus.PasswordMismatch
                 ? $"You and {addr} have different passwords, so no audio will pass between you.\n\nMake sure you've both set the same password (File → Change this profile's password)."
                 : $"{addr} is running an older version of RemSound that can't connect securely. They need to update before audio can flow between you.";
-            MessageBox.Show(this, msg, AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            // Show it front-and-centre, and FREEZE the 1 Hz status tick while it's up. This dialog is
+            // raised FROM that tick; left running, the tick keeps firing into the modal loop and
+            // re-runs the peer-list rebuild (SyncAllPeerLists) UNDER the dialog, which knocks it out
+            // of the foreground — it "flashed away before I could click OK" (Ed, 2026-06-11). The
+            // timer-stop + re-entry guard make exactly one warning show and stay put until dismissed.
+            securityWarningShowing = true;
+            statusTimer.Stop();
+            try
+            {
+                ForegroundDialog.Show(owner =>
+                    MessageBox.Show(owner, msg, AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning));
+            }
+            finally
+            {
+                statusTimer.Start();
+                securityWarningShowing = false;
+            }
+            return; // one warning per tick; a second affected peer surfaces on the next tick
         }
     }
 
@@ -7241,7 +7325,7 @@ public sealed class MainForm : Form
         // is what unblocks NVDA-less or remote-session-dropped shutdowns from deadlocking
         // on a dialog the user can't reach.
         var skipPrompt = !string.IsNullOrEmpty(NextProfileTitleToLoad) || ReloadFromScratch
-            || currentProfileReadOnly || updatingInProgress;
+            || LoadBlankTemplateNext || currentProfileReadOnly || updatingInProgress;
 
         if (!skipPrompt && profileStore is not null && unsavedChanges)
         {

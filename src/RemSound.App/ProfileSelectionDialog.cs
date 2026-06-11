@@ -4,7 +4,7 @@ namespace RemSound.App;
 
 /// <summary>
 /// Modal dialog shown at app startup to pick which profile to load. Listbox of saved
-/// profile titles plus a synthetic "(Blank template)" entry for an unsaved-defaults
+/// profile titles plus a synthetic "New profile" entry for a fresh unsaved-defaults
 /// session. Enter or OK selects; Esc does nothing (deliberately disabled — picking is
 /// required); Alt+F4 closes the dialog and exits the app; Del on a profile prompts to
 /// delete it with a yes/no confirm. The user can also browse to a custom profiles
@@ -19,7 +19,15 @@ namespace RemSound.App;
 /// </summary>
 internal sealed class ProfileSelectionDialog : Form
 {
-    private const string BlankTemplateLabel = "(Blank template)";
+    // The synthetic top-of-list entry that starts a fresh, unsaved session. A distinct marker TYPE
+    // (not a magic string) so it can never be confused with a real profile a user happens to name
+    // "New profile" — identity is by type; the display text is its ToString().
+    private const string NewProfileLabel = "New profile";
+    private static readonly NewProfileMarker NewProfileEntry = new();
+    private sealed record NewProfileMarker
+    {
+        public override string ToString() => NewProfileLabel;
+    }
 
     private ProfileStore store;
     private readonly ListBox listBox;
@@ -59,7 +67,7 @@ internal sealed class ProfileSelectionDialog : Form
 
         var instructions = new Label
         {
-            Text = "Select a profile and press Enter, or pick \"" + BlankTemplateLabel + "\" to start fresh.",
+            Text = "Select a profile and press Enter, or pick \"" + NewProfileLabel + "\" to start a new one.",
             Dock = DockStyle.Top,
             AutoSize = false,
             Height = 36,
@@ -123,7 +131,7 @@ internal sealed class ProfileSelectionDialog : Form
         var prevSelectedTitle = GetSelectedTitle();
         listBox.BeginUpdate();
         listBox.Items.Clear();
-        listBox.Items.Add(BlankTemplateLabel);
+        listBox.Items.Add(NewProfileEntry);
         foreach (var t in store.ListProfileTitles())
         {
             // Wrap each title in a ProfileListItem so the displayed text can carry a
@@ -153,9 +161,9 @@ internal sealed class ProfileSelectionDialog : Form
         folderLabel.AccessibleName = folderLabel.Text;
     }
 
-    /// <summary>Returns the currently-selected profile title (or the BlankTemplateLabel
-    /// constant for the blank template), unwrapping the ProfileListItem if needed. Returns
-    /// null when nothing is selected. Used by accept / delete to key into the store.</summary>
+    /// <summary>Returns the currently-selected profile title, unwrapping the ProfileListItem if
+    /// needed. Returns null for the synthetic "New profile" entry and when nothing is selected
+    /// (callers distinguish those by checking the item type directly).</summary>
     private string? GetSelectedTitle()
     {
         var item = listBox.SelectedItem;
@@ -165,6 +173,7 @@ internal sealed class ProfileSelectionDialog : Form
     private static string? TitleOfItem(object? item) => item switch
     {
         null => null,
+        NewProfileMarker => null, // the synthetic "New profile" entry has no saved title
         string s => s,
         ProfileListItem p => p.Title,
         _ => item.ToString(),
@@ -197,21 +206,24 @@ internal sealed class ProfileSelectionDialog : Form
 
     private void Accept()
     {
-        var selected = GetSelectedTitle();
-        if (string.IsNullOrEmpty(selected)) return;
-        if (selected == BlankTemplateLabel)
+        var item = listBox.SelectedItem;
+        if (item is null) return;
+        if (item is NewProfileMarker)
         {
+            // New profile = a fresh unsaved session; a null title/profile signals that to the caller.
             SelectedTitle = null;
             SelectedProfile = null;
         }
         else
         {
+            var selected = TitleOfItem(item);
+            if (string.IsNullOrEmpty(selected)) return;
             SelectedTitle = selected;
             SelectedProfile = store.Load(selected);
             if (SelectedProfile is null)
             {
                 MessageBox.Show(this,
-                    $"Could not read profile \"{selected}\". Treating as blank template.",
+                    $"Could not read profile \"{selected}\". Starting a new profile instead.",
                     "RemSound", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 SelectedTitle = null;
             }
@@ -222,8 +234,10 @@ internal sealed class ProfileSelectionDialog : Form
 
     private void DeleteSelected()
     {
-        var selected = GetSelectedTitle();
-        if (string.IsNullOrEmpty(selected) || selected == BlankTemplateLabel) return;
+        var item = listBox.SelectedItem;
+        if (item is null or NewProfileMarker) return; // can't delete the "New profile" entry
+        var selected = TitleOfItem(item);
+        if (string.IsNullOrEmpty(selected)) return;
         var result = MessageBox.Show(this,
             $"Delete profile \"{selected}\"? This cannot be undone.",
             "Confirm delete", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);

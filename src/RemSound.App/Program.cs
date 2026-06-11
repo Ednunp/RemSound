@@ -235,7 +235,14 @@ internal static class Program
                 // (e.g. legacy switch-by-title flows that pre-date the path tracking).
                 nextPath = form.NextProfilePathToLoad;
                 var nextTitle = form.NextProfileTitleToLoad;
-                if (!string.IsNullOrEmpty(nextPath))
+                if (form.LoadBlankTemplateNext)
+                {
+                    // File → New profile: rebuild on a fresh blank template, no saved profile.
+                    profile = Profile.NewBlank();
+                    title = null;
+                    nextPath = null;
+                }
+                else if (!string.IsNullOrEmpty(nextPath))
                 {
                     try
                     {
