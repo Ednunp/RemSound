@@ -301,10 +301,16 @@ internal static class SelfTest
         // bug that shipped the v3.9 zip with no cue sounds.
         var soundsDir = AppConfig.SoundsDirectory;
         Check(Directory.Exists(soundsDir), "the runtime sounds folder must exist (cues are consolidated at startup)");
+        // Cues ship as numbered variants ("connect 1.wav", ...); each required cue must have at
+        // least one variant present.
         foreach (var cue in new[] { "connect.wav", "disconnect.wav", "start up.wav" })
         {
-            Check(File.Exists(Path.Combine(soundsDir, cue)), $"cue sound '{cue}' must be present (was the shipped sounds\\ folder empty?)");
+            Check(CueSounds.Variants(cue).Count > 0,
+                $"no sound variant present for the '{Path.GetFileNameWithoutExtension(cue)}' cue (was the shipped sounds\\ folder empty?)");
         }
+        // Keyboard-click typing sounds + the password passkey sound.
+        Check(File.Exists(Path.Combine(soundsDir, "key 1.wav")), "keyboard-click sound 'key 1.wav' must be present");
+        Check(File.Exists(Path.Combine(soundsDir, "passkey.wav")), "password 'passkey.wav' must be present");
 
         // Native Opus (Concentus.Native) keeps the encoder off the allocation-heavy managed fallback.
         var nativeOpus = Path.Combine(root, "runtimes", "win-x64", "native", "opus.dll");

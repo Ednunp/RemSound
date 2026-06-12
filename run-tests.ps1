@@ -44,10 +44,17 @@ if (-not (Test-Path -LiteralPath $exe)) {
 # ---- 2. PACKAGE CONTENTS (must run BEFORE any CLI call: every RemSound launch consolidates the
 #         bundled sounds\ into 'user settings and logs\sounds\', emptying sounds\) ----
 Write-Host "`nPackage contents:" -ForegroundColor Cyan
-$wavCount = @(Get-ChildItem -LiteralPath (Join-Path $publishDir 'sounds') -Filter *.wav -ErrorAction SilentlyContinue).Count
+$soundsPath = Join-Path $publishDir 'sounds'
+$wavCount = @(Get-ChildItem -LiteralPath $soundsPath -Filter *.wav -ErrorAction SilentlyContinue).Count
 if ($wavCount -ge 3) { Pass "cue sounds bundled ($wavCount .wav)" } else { Fail "cue sounds missing (found $wavCount) - this is the bug that shipped v3.9 with no sounds" }
-foreach ($cue in @('connect.wav', 'disconnect.wav', 'start up.wav')) {
-    if (Test-Path -LiteralPath (Join-Path $publishDir "sounds\$cue")) { Pass "cue '$cue' present" } else { Fail "cue '$cue' missing from the published sounds\ folder" }
+# Cues ship as numbered variants ("connect 1.wav", ...); each required cue needs at least one.
+foreach ($base in @('connect', 'disconnect', 'start up')) {
+    $variants = @(Get-ChildItem -LiteralPath $soundsPath -Filter "$base*.wav" -ErrorAction SilentlyContinue)
+    if ($variants.Count -gt 0) { Pass "'$base' cue has $($variants.Count) sound variant(s)" } else { Fail "no sound variant for the '$base' cue" }
+}
+# Keyboard-click + password sounds.
+foreach ($extra in @('key 1.wav', 'passkey.wav')) {
+    if (Test-Path -LiteralPath (Join-Path $soundsPath $extra)) { Pass "'$extra' present" } else { Fail "'$extra' missing from the published sounds\ folder" }
 }
 if (Test-Path -LiteralPath (Join-Path $publishDir 'readme.html')) { Pass "readme.html (F1 manual) bundled" } else { Fail "readme.html missing" }
 if (Test-Path -LiteralPath (Join-Path $publishDir 'runtimes\win-x64\native\opus.dll')) { Pass "native opus.dll bundled" } else { Fail "native opus.dll missing (runtimes\win-x64\native\)" }

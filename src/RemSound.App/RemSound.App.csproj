@@ -57,61 +57,17 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- All cue sounds live in a sounds\ subfolder under the publish output (moved out of
-         the install-root flat layout 2026-05-28). Default cue WAVs ship inside that folder;
-         user-supplied custom cue paths set in Preferences override the defaults at runtime.
-         Filenames containing a space (e.g. "record start.wav") are preserved verbatim on
-         copy so the load-by-filename path in TryLoadCueSound finds them exactly as written. -->
-    <!-- Exists-guarded like the newer cues below: a missing source WAV (e.g. while the project owner
-         is swapping in new cue sounds) must not break the dev build. The release gate (run-tests.ps1
-         and the self-test "Bundled resources present" step) enforces that the required cues are
-         actually present before a release ships, so guarding here loses no safety. -->
-    <Content Include="..\..\sounds\connect.wav" Condition="Exists('..\..\sounds\connect.wav')">
-      <Link>sounds\connect.wav</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <Content Include="..\..\sounds\disconnect.wav" Condition="Exists('..\..\sounds\disconnect.wav')">
-      <Link>sounds\disconnect.wav</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <Content Include="..\..\sounds\record start.wav" Condition="Exists('..\..\sounds\record start.wav')">
-      <Link>sounds\record start.wav</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <Content Include="..\..\sounds\record stop.wav" Condition="Exists('..\..\sounds\record stop.wav')">
-      <Link>sounds\record stop.wav</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <!-- New cues introduced 2026-05-28: save.wav fires after a successful Save / Save As;
-         profile.wav fires immediately after a profile finishes loading. Both default WAVs
-         to be supplied by the project owner; absent files are gracefully ignored at load
-         time (the cue just doesn't play) so the build is fine without them. -->
-    <Content Include="..\..\sounds\save.wav" Condition="Exists('..\..\sounds\save.wav')">
-      <Link>sounds\save.wav</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <Content Include="..\..\sounds\profile.wav" Condition="Exists('..\..\sounds\profile.wav')">
-      <Link>sounds\profile.wav</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <!-- update.wav (2026-05-31): plays just before an update starts installing, so a silent
-         background update still gives an audible heads-up. Per-profile mute + custom-sound
-         override available in Preferences, same as the other cues. -->
-    <Content Include="..\..\sounds\update.wav" Condition="Exists('..\..\sounds\update.wav')">
-      <Link>sounds\update.wav</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <!-- profile menu open.wav (v3.4): plays as the Quick profile switch popup opens. Project-owner
-         supplied; absent file is ignored at load time. Per-profile mute + custom override in Prefs. -->
-    <Content Include="..\..\sounds\profile menu open.wav" Condition="Exists('..\..\sounds\profile menu open.wav')">
-      <Link>sounds\profile menu open.wav</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <!-- start up.wav (v3.9): plays once when RemSound starts, right after this copy wins the
-         single-instance takeover and before the profile loads. Machine-wide enable + custom
-         override (AppConfig), since it fires before any profile is chosen. -->
-    <Content Include="..\..\sounds\start up.wav" Condition="Exists('..\..\sounds\start up.wav')">
-      <Link>sounds\start up.wav</Link>
+    <!-- All cue sounds live in a sounds\ subfolder under the build/publish output (moved out of the
+         install-root flat layout 2026-05-28). Every WAV in the source sounds\ folder ships, via a
+         wildcard, so the numbered cue variants ("connect 1.wav", "connect 2.wav", ...), the
+         keyboard-click sounds ("key 1.wav".."key 4.wav") and the password "passkey.wav" are all
+         carried without per-file edits, and adding more sounds later needs no csproj change.
+         Filenames containing a space are preserved verbatim (via %(Filename)%(Extension)) so the
+         load-by-filename path in CueSounds / KeyClickService finds them exactly as written. The
+         EnsureCueSoundsPublished target below is the belt-and-braces that guarantees these reach a
+         PUBLISH output even when MSBuild's incremental Content-copy marker would skip them. -->
+    <Content Include="..\..\sounds\*.wav">
+      <Link>sounds\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <!-- User manual. F1 anywhere in the app opens this via the user's default browser

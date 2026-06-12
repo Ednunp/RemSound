@@ -866,7 +866,7 @@ Toggle| What it does
 
 ## 18. Audio cue sounds
 
-RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called **cue sounds**. Eight events have a cue:
+RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called **cue sounds**. Nine events have a cue:
 
 Cue| Plays when
 ---|---
@@ -878,12 +878,13 @@ Cue| Plays when
 **Profile switched sound**|  You switch to a different profile — from the Recent profiles menu, the Quick profile switch popup, or File → Open profile. It plays the moment you pick the new profile. It deliberately does _not_ play on a fresh start into your first profile, so it isn't layered on top of the connect sound at launch.
 **Profile menu open sound**|  The Quick profile switch popup opens.
 **Update sound**|  An update is about to install — it plays just before RemSound closes to update itself. Handy when updates install silently in the background, so you're not caught off guard when RemSound restarts. Plays whether you ran the update by hand or it installed on its own.
+**Startup sound**|  RemSound has finished starting up. It plays once at launch, even when RemSound opens straight to the notification area, so you know it's running.
 
-All eight cues play through your default Windows sound output, which is separate from the audio RemSound is sending or receiving. They don't appear in a normal recording. (The exception: if your sending side is capturing the very output device the cues play through, then they get captured along with everything else from that device.)
+All of these cues play through your default Windows sound output, which is separate from the audio RemSound is sending or receiving. They don't appear in a normal recording. (The exception: if your sending side is capturing the very output device the cues play through, then they get captured along with everything else from that device.)
 
 ### Turning each cue on or off
 
-Open **File → Preferences** (or Ctrl+P). The **Audio cue sounds (Alt+N)** list shows all eight cues with a tickbox next to each. Tick to play the cue when the corresponding event happens; untick to silence it.
+Open **File → Preferences** (or Ctrl+P). The **Audio cue sounds (Alt+N)** list shows every cue with a tickbox next to each. Tick to play the cue when the corresponding event happens; untick to silence it.
 
 Use the up and down arrow keys to move between cues; press **Space** to toggle the highlighted cue's tick on or off.
 
@@ -900,6 +901,22 @@ Below the list are two buttons that act on whichever cue is currently highlighte
 
 Both buttons' labels update as you arrow through the list, so you always know which cue you're about to act on.
 
+### Choosing which built-in sound a cue uses
+
+Each cue ships with more than one sound to choose from. Between the cue list and the buttons is a **Choose default sound (Alt+D)** list. It shows the built-in sounds available for whichever cue is highlighted in the list above. Arrow up and down it and RemSound plays each sound as you land on it, so you can listen through them and stop on the one you like — the sound you leave selected becomes that cue's default.
+
+This is separate from browsing for your own file: this list picks among the sounds that _ship with_ RemSound, while Browse replaces the sound with a WAV of your own. A file you've browsed for always takes priority; clear it (right-click Browse → Use default) and the cue goes back to the built-in sound you chose here.
+
+Your choice here is remembered **for the whole installation** , not per profile, so your preferred set of built-in sounds follows you across every profile.
+
+### Keyboard clicks while typing
+
+Just below the cue controls is a tickbox, **Play keyboard clicks when typing into any edit field (Alt+K)** , which is on by default. With it ticked, typing into any text box anywhere in RemSound plays a soft click on each key, so you get an audible sense of your typing. It only sounds while your cursor is actually in an edit field — move out of the field and it stops.
+
+**Password boxes are treated specially:** they play the same key click _and_ a second, distinct sound at the same instant, so you can tell by ear when you're typing into a masked password field rather than an ordinary one. That second sound only happens in password fields.
+
+Untick the box to switch all of this off. The setting applies to the whole installation.
+
 Custom sound choices are **saved with the active profile** , the same way the tick states are. Different profiles can have completely different cue palettes — a “studio” profile might use one set of sounds, a “broadcast” profile another. The custom files themselves stay where you picked them on your disk; the profile just remembers their paths.
 
 ### Going back to the default sound
@@ -908,18 +925,7 @@ To revert a cue to its default sound, **right-click** the _Browse for [cue name]
 
 ### Where the cue sounds live
 
-RemSound keeps the cue WAV files in a `sounds` folder inside **user settings and logs** — the same folder your settings and profiles live in. It puts the defaults there for you; if you don't pick a custom file for a cue, RemSound plays the matching one from this folder:
-
-  * `sounds\connect.wav` — connect cue
-  * `sounds\disconnect.wav` — disconnect cue
-  * `sounds\record start.wav` — recording start cue
-  * `sounds\record stop.wav` — recording stop cue
-  * `sounds\save.wav` — profile saved cue
-  * `sounds\profile.wav` — profile switched cue
-  * `sounds\profile menu open.wav` — profile menu open cue
-  * `sounds\update.wav` — update cue
-
-
+RemSound keeps the cue WAV files in a `sounds` folder inside **user settings and logs** — the same folder your settings and profiles live in. Each cue ships with a small set of numbered sound files there. They're named after the cue with a number on the end — for example `connect 1.wav` and `connect 2.wav` for the connect cue, `record start 1.wav` and `record start 2.wav` for the recording-start cue, and so on. The **Choose default sound** list described above simply picks between the numbered files a cue has. If you add more numbered files of your own following the same pattern, they show up in the list automatically — there's no fixed limit.
 
 Because this folder is inside **user settings and logs** , RemSound updates never overwrite it. So if you drop your own WAV files in here in place of the defaults, your versions stay put when you update — you don't have to set them up again.
 

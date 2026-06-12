@@ -6486,14 +6486,16 @@ public sealed class MainForm : Form
             }
             else
             {
-                var defaultPath = Path.Combine(AppConfig.SoundsDirectory, defaultFileName);
-                if (File.Exists(defaultPath))
+                // The cue ships as numbered variants ("connect 1.wav", "connect 2.wav", ...);
+                // resolve the machine-wide chosen default (or the first variant) for this cue.
+                var defaultPath = CueSounds.ResolveDefaultPath(cueId, defaultFileName, AppConfig.Load());
+                if (defaultPath is not null && File.Exists(defaultPath))
                 {
                     path = defaultPath;
                 }
                 else
                 {
-                    logFile.Event($"cue sound '{cueId}': default missing ({defaultPath}) and no custom override set — cue will be silent");
+                    logFile.Event($"cue sound '{cueId}': no default variant found in sounds\\ and no custom override set — cue will be silent");
                     return;
                 }
             }

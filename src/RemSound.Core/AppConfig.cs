@@ -82,6 +82,20 @@ public sealed class AppConfig
     /// custom-cue paths) is loaded, so it can't live on <see cref="Profile"/>.</summary>
     public string? StartupCueCustomPath { get; set; }
 
+    /// <summary>The chosen default-sound FILENAME for each cue (e.g. "connect 2.wav"), keyed by
+    /// the cue id (<c>MainForm.CueId</c>). The cue WAVs ship as numbered variants ("connect 1.wav",
+    /// "connect 2.wav", ...); this records which one the user picked in Preferences. Machine-wide,
+    /// so a user's preferred sound palette follows them across every profile. A cue absent from the
+    /// dictionary uses the first available variant (the "1"s) by default. A per-profile custom WAV
+    /// (<see cref="Profile.CustomCuePaths"/>) still overrides this choice.</summary>
+    public Dictionary<string, string> DefaultCueSounds { get; set; } = new();
+
+    /// <summary>If true (the default), typing into any edit field anywhere in RemSound plays a soft
+    /// keyboard-click sound (one of several, picked at random), so a screen-reader user gets audible
+    /// typing feedback. Password fields additionally play a distinct key sound at the same time.
+    /// Machine-wide; the user unticks "Play keyboard clicks" in Preferences to silence it.</summary>
+    public bool EnableKeyboardClicks { get; set; } = true;
+
     /// <summary>If true, RemSound writes a tab-separated diagnostic log to
     /// <c>&lt;exe&gt;\logs\</c>. Lives here (not in <see cref="Profile"/>) because logging
     /// is a debugging affordance for the installation, not a user-facing audio preference —

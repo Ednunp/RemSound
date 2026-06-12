@@ -130,6 +130,13 @@ internal static class Program
         // is per-thread and modifier-aware: bare F1 only, so Shift/Ctrl/Alt+F1 stay free.
         HelpLauncher.Install();
 
+        // Audible typing feedback: a soft click on each keystroke in any edit field, plus a distinct
+        // passkey sound on password fields. Machine-wide toggle (on by default). Installed app-wide
+        // here - after the single-instance guard, before the profile picker - so it works on the
+        // picker and every dialog. Best-effort: inert if the click sounds can't load.
+        KeyClickService.Initialize(AppConfig.Load().EnableKeyboardClicks);
+        Application.ApplicationExit += (_, _) => KeyClickService.Shutdown();
+
         // One-time "your settings moved" notice — only the launch that actually relocated files
         // shows it (idempotent migration ⇒ MovedAnything is false on every later launch). Shown
         // here, after the guard and before the profile picker, so the user reads it once up front.
@@ -436,10 +443,11 @@ internal static class Program
             var cfg = AppConfig.Load();
             if (!cfg.EnableStartupCue) return;
             var custom = cfg.StartupCueCustomPath;
+            // Custom override wins; otherwise the chosen default variant ("start up 1.wav" etc).
             var path = !string.IsNullOrWhiteSpace(custom) && File.Exists(custom)
                 ? custom
-                : Path.Combine(AppConfig.SoundsDirectory, "start up.wav");
-            if (!File.Exists(path)) return;
+                : CueSounds.ResolveDefaultPath(MainForm.CueId.Startup, "start up.wav", cfg);
+            if (path is null || !File.Exists(path)) return;
             new CuePlayer(path).Play();
         }
         catch { /* a startup cue must never disturb startup */ }

@@ -77,6 +77,42 @@ internal sealed class PreferencesDialog : Form
         Padding = new Padding(6, 2, 6, 2),
     };
 
+    // "Choose default sound" — a second listbox under the cue checklist. The cue WAVs ship as
+    // numbered variants ("connect 1.wav", "connect 2.wav", ...); this lists the variants for the
+    // cue currently selected in cueList. Arrowing it previews each variant AND makes it the chosen
+    // default for that cue (machine-wide, AppConfig.DefaultCueSounds). The count isn't hard-coded —
+    // whatever "<base> <n>.wav" files exist are offered, so adding more sounds later needs no code.
+    private readonly Label defaultSoundLabel = new()
+    {
+        Text = "Choose default soun&d (Alt+D):",
+        AccessibleName = "Choose default sound",
+        AutoSize = true,
+        Padding = new Padding(0, 6, 0, 4),
+    };
+
+    private readonly ListBox defaultSoundList = new()
+    {
+        IntegralHeight = false,
+        Height = 76,
+        Width = 360,
+        AccessibleName = "Choose default sound",
+    };
+
+    // The variant filenames currently shown in defaultSoundList, index-aligned with its items, so a
+    // selected index maps back to the WAV to persist + preview.
+    private IReadOnlyList<string> currentVariants = Array.Empty<string>();
+    // Set while we repopulate / programmatically select the list, so it doesn't fire a preview.
+    private bool suppressDefaultSoundPreview;
+
+    // Keyboard-click typing feedback toggle (machine-wide, on by default). Ed asked for it right
+    // after the cue Browse button. Drives KeyClickService.Enabled live.
+    private readonly AccessibleCheckBox keyboardClicksBox = new()
+    {
+        Text = "Play keyboard clicks when typing into any edit field (Alt+&K)",
+        AccessibleName = "Play keyboard clicks when typing into any edit field",
+        AutoSize = true,
+    };
+
     /// <summary>Describes one cue row in the list. <see cref="DisplayName"/> is the listbox
     /// text; <see cref="CueId"/> is the well-known key from <see cref="MainForm.CueId"/>;
     /// <see cref="DefaultFileName"/> is the bundled WAV in <c>sounds\</c>. The Load/Save
@@ -329,7 +365,7 @@ internal sealed class PreferencesDialog : Form
         // Selection changes update the two action buttons' labels so they always tell the
         // user which cue they're about to act on. Refreshed eagerly at construction time
         // for the initial selection too.
-        cueList.SelectedIndexChanged += (_, _) => RefreshCueActionButtons();
+        cueList.SelectedIndexChanged += (_, _) => { RefreshCueActionButtons(); RefreshDefaultSoundList(); };
         RefreshCueActionButtons();
 
         playSelectedCueButton.Click += (_, _) =>
@@ -379,6 +415,22 @@ internal sealed class PreferencesDialog : Form
         browseSelectedCueButton.ContextMenuStrip = browseCtx;
 
         cueListLabel.Click += (_, _) => cueList.Focus();
+
+        // "Choose default sound" listbox — populated for the selected cue, arrowing it previews +
+        // chooses the default variant. Initial fill for the cue selected at construction.
+        defaultSoundLabel.Click += (_, _) => defaultSoundList.Focus();
+        defaultSoundList.SelectedIndexChanged += (_, _) => OnDefaultSoundChosen();
+        RefreshDefaultSoundList();
+
+        // Keyboard-click typing feedback toggle (machine-wide; drives KeyClickService live).
+        keyboardClicksBox.Checked = AppConfig.Load().EnableKeyboardClicks;
+        keyboardClicksBox.CheckedChanged += (_, _) =>
+        {
+            var c = AppConfig.Load();
+            c.EnableKeyboardClicks = keyboardClicksBox.Checked;
+            TrySaveConfig(c);
+            KeyClickService.Enabled = keyboardClicksBox.Checked;
+        };
 
         acceptRemoteVolumeBox.Checked = settings.LoadAcceptRemoteVolumeCommands();
         acceptRemoteVolumeBox.CheckedChanged += (_, _) =>
@@ -528,12 +580,10 @@ internal sealed class PreferencesDialog : Form
             Dock = DockStyle.Fill,
             AutoSize = true,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 6,
         };
         cueGroup.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        cueGroup.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        cueGroup.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        cueGroup.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        for (var i = 0; i < 6; i++) cueGroup.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         var cueActions = new FlowLayoutPanel
         {
             AutoSize = true,
@@ -541,12 +591,20 @@ internal sealed class PreferencesDialog : Form
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
             Padding = new Padding(0, 4, 0, 0),
+            TabIndex = 4,
         };
         cueActions.Controls.Add(playSelectedCueButton);
         cueActions.Controls.Add(browseSelectedCueButton);
+        // Tab order within the cue group: cue checklist -> default-sound list -> Play/Browse ->
+        // keyboard-clicks checkbox. Labels are skipped (not tab stops).
+        defaultSoundList.TabIndex = 2;
+        keyboardClicksBox.TabIndex = 5;
         cueGroup.Controls.Add(cueListLabel, 0, 0);
         cueGroup.Controls.Add(cueList, 0, 1);
-        cueGroup.Controls.Add(cueActions, 0, 2);
+        cueGroup.Controls.Add(defaultSoundLabel, 0, 2);
+        cueGroup.Controls.Add(defaultSoundList, 0, 3);
+        cueGroup.Controls.Add(cueActions, 0, 4);
+        cueGroup.Controls.Add(keyboardClicksBox, 0, 5);
 
         panel.Controls.Add(browseProfilesFolderButton, 0, 0);
         panel.Controls.Add(cueGroup, 0, 1);
@@ -627,6 +685,75 @@ internal sealed class PreferencesDialog : Form
         }
     }
 
+    /// <summary>Repopulate the "Choose default sound" listbox for the currently-selected cue with
+    /// its numbered variants, and select whichever variant is the active default. Disabled (with a
+    /// note) when the cue has no built-in sounds on disk.</summary>
+    private void RefreshDefaultSoundList()
+    {
+        suppressDefaultSoundPreview = true;
+        try
+        {
+            defaultSoundList.Items.Clear();
+            currentVariants = Array.Empty<string>();
+            var idx = cueList.SelectedIndex;
+            if (idx < 0 || idx >= cueRows.Length)
+            {
+                defaultSoundList.Enabled = false;
+                return;
+            }
+            var cue = cueRows[idx];
+            var variants = CueSounds.Variants(cue.DefaultFileName);
+            if (variants.Count == 0)
+            {
+                defaultSoundLabel.Text = "Choose default soun&d (Alt+D): (no built-in sounds)";
+                defaultSoundList.Enabled = false;
+                return;
+            }
+            defaultSoundLabel.Text = "Choose default soun&d (Alt+D):";
+            defaultSoundList.Enabled = true;
+            currentVariants = variants;
+            foreach (var v in variants) defaultSoundList.Items.Add(CueSounds.VariantLabel(cue.DefaultFileName, v));
+
+            var chosen = CueSounds.ResolveDefaultFileName(cue.CueId, cue.DefaultFileName, AppConfig.Load());
+            var sel = 0;
+            if (chosen is not null)
+            {
+                for (var i = 0; i < variants.Count; i++)
+                {
+                    if (variants[i].Equals(chosen, StringComparison.OrdinalIgnoreCase)) { sel = i; break; }
+                }
+            }
+            defaultSoundList.SelectedIndex = sel;
+        }
+        finally { suppressDefaultSoundPreview = false; }
+    }
+
+    /// <summary>The user arrowed onto / picked a default-sound variant: persist it machine-wide for
+    /// the selected cue and preview it. The running app re-reads the choice when this dialog closes
+    /// (MainForm.ReloadAllCueSounds), so the cue plays the new default from then on.</summary>
+    private void OnDefaultSoundChosen()
+    {
+        // Only a genuine user arrow/click should persist + preview; a programmatic re-fill must not.
+        if (suppressDefaultSoundPreview) return;
+        var idx = cueList.SelectedIndex;
+        var vi = defaultSoundList.SelectedIndex;
+        if (idx < 0 || idx >= cueRows.Length || vi < 0 || vi >= currentVariants.Count) return;
+        var cue = cueRows[idx];
+        var chosenFile = currentVariants[vi];
+
+        var cfg = AppConfig.Load();
+        cfg.DefaultCueSounds[cue.CueId] = chosenFile;
+        TrySaveConfig(cfg);
+        RefreshCueActionButtons(); // the Play button now previews this same default
+
+        try
+        {
+            var path = Path.Combine(AppConfig.SoundsDirectory, chosenFile);
+            if (File.Exists(path)) new CuePlayer(path).Play();
+        }
+        catch { /* a preview must never disturb the dialog */ }
+    }
+
     /// <summary>Resolves the WAV file currently configured for a cue: the user's custom
     /// override if set and on disk, otherwise the bundled default in <c>sounds\</c>.
     /// Returns null when neither resolves to an existing file (typical for save.wav /
@@ -642,10 +769,10 @@ internal sealed class PreferencesDialog : Form
         {
             return customPath;
         }
-        // Otherwise the bundled default WAV in sounds\ — the filename the descriptor carries
-        // (preserves spaces like "record start.wav" / "start up.wav" verbatim).
-        var defaultPath = Path.Combine(AppConfig.SoundsDirectory, cue.DefaultFileName);
-        return File.Exists(defaultPath) ? defaultPath : null;
+        // Otherwise the chosen default variant in sounds\ ("connect 1.wav" / "connect 2.wav" / ...),
+        // resolved the same way MainForm.TryLoadCueSound resolves it.
+        var defaultPath = CueSounds.ResolveDefaultPath(cue.CueId, cue.DefaultFileName, AppConfig.Load());
+        return defaultPath is not null && File.Exists(defaultPath) ? defaultPath : null;
     }
 
     /// <summary>Preview a cue's currently-configured WAV through the system default audio
