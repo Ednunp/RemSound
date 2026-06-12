@@ -119,4 +119,21 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
+
+  <!-- Guarantee the cue WAVs land in a PUBLISHED build. The sounds\ Content items above use
+       CopyToOutputDirectory=PreserveNewest, but MSBuild's incremental "copy already done" marker
+       (obj\...\.csproj.CopyComplete) can skip that copy when publishing into a fresh output folder
+       whose marker is up to date — which silently shipped the v3.9 zip with NO cue sounds at all
+       (startup sound + connect/disconnect/record/etc.). This explicit post-publish copy is marker-
+       independent: it always copies every WAV from the source sounds\ folder into the published
+       sounds\ folder. Build-release.ps1 zips the publish output, so this is what makes the release
+       reliably contain the sounds. (The self-test "Bundled resources present" step verifies it.) -->
+  <Target Name="EnsureCueSoundsPublished" AfterTargets="Publish">
+    <ItemGroup>
+      <_CueWavs Include="..\..\sounds\*.wav" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_CueWavs)"
+          DestinationFolder="$(PublishDir)sounds"
+          SkipUnchangedFiles="false" />
+  </Target>
 </Project>

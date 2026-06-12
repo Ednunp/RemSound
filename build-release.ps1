@@ -100,6 +100,24 @@ if (Test-Path $syncScript) {
     Write-Host "Note: sync-manual.py not found - skipping MANUAL.md sync." -ForegroundColor DarkGray
 }
 
+# Gate: build RemSound and run the full test suite (run-tests.ps1) before packaging anything. A
+# failing gate means no release - these are the same checks that would have caught the v3.9
+# missing-cue-sounds bug. run-tests publishes and tests its OWN throwaway copy, so it never runs
+# the app against (and never pollutes) the clean staging folder built below.
+$gate = Join-Path $repo 'run-tests.ps1'
+if (Test-Path $gate) {
+    Write-Host ""
+    Write-Host "Running the build-and-test gate (run-tests.ps1)..." -ForegroundColor Cyan
+    & $gate
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Host "RELEASE ABORTED - the build-and-test gate failed. Fix the failures above and re-run." -ForegroundColor Red
+        exit 1
+    }
+} else {
+    Write-Host "WARNING: run-tests.ps1 not found - packaging WITHOUT the test gate." -ForegroundColor Yellow
+}
+
 # Anything matching these must NEVER appear in a release. Folders by name; files by
 # extension / exact name. RemSound.deps.json and RemSound.runtimeconfig.json are
 # legitimate app files and are deliberately NOT matched (different names).

@@ -62,7 +62,7 @@ internal static class CommandLine
                 case "--devices": case "--list-devices":
                     return WithConsole(() => { WriteDevices(Console.Out); return 0; });
                 case "--selftest": case "--self-test":
-                    return WithConsole(() => RunSelfTest(args));
+                    return WithConsole(() => SelfTest.Run(args));
                 case "--diagnostics": case "--diag":
                     return WithConsole(() => RunDiagnostics(ValueAfter(args, raw)));
                 case "--log":
@@ -109,7 +109,7 @@ internal static class CommandLine
 
     // ---------------- commands ----------------
 
-    private static string AppVersion =>
+    internal static string AppVersion =>
         Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.0.0";
 
     private static int PrintVersion()
@@ -129,8 +129,9 @@ internal static class CommandLine
         Console.WriteLine("  --version             Show the installed version.");
         Console.WriteLine("  --devices             List all microphones, outputs and ASIO drivers,");
         Console.WriteLine("                        with their formats and device ids.");
-        Console.WriteLine("  --selftest [--opus]   Run a localhost audio round-trip (capture -> encode ->");
-        Console.WriteLine("             [--seconds N]  network -> decode) and report PASS or FAIL.");
+        Console.WriteLine("  --selftest [--seconds N]  Run the built-in self-test - a localhost audio");
+        Console.WriteLine("                        round-trip plus checks of encryption, the wire format,");
+        Console.WriteLine("                        settings, profiles and bundled files - and report PASS/FAIL.");
         Console.WriteLine("  --diagnostics [path]  Write a diagnostics report (version, config, profiles,");
         Console.WriteLine("                        devices, mic-privacy check, recent log) and exit. With");
         Console.WriteLine("                        no path, it is saved in the user settings and logs folder.");
@@ -201,56 +202,6 @@ internal static class CommandLine
         w.WriteLine();
     }
 
-    /// <summary>Localhost audio round-trip: capture the default output (as loopback) → encode →
-    /// send to 127.0.0.1 → receive → decode. The receiver renders to nothing (no sound), so this is
-    /// safe to run any time. PASS when packets flow end-to-end; exit code 0 = PASS, 1 = FAIL.</summary>
-    private static int RunSelfTest(string[] args)
-    {
-        var opus = args.Any(a => a.Equals("--opus", StringComparison.OrdinalIgnoreCase));
-        var seconds = int.TryParse(ValueAfter(args, "--seconds"), out var s) && s is > 0 and <= 60 ? s : 5;
-
-        Console.WriteLine($"RemSound self-test: localhost {(opus ? "Opus" : "PCM")} round-trip for {seconds}s...");
-
-        IReadOnlyList<AudioDeviceChoice> outputs;
-        try { outputs = AudioDeviceCatalog.LoadOutputs(); }
-        catch (Exception ex) { Console.WriteLine($"  could not enumerate outputs: {ex.Message}"); return 1; }
-        var dev = outputs.FirstOrDefault(o => o.DeviceId is not null);
-        var deviceId = dev?.DeviceId;
-        if (dev is null || deviceId is null)
-        {
-            Console.WriteLine("  RESULT: SKIP - no usable output device to capture from.");
-            return 1;
-        }
-
-        using var receiver = new AudioReceiver();
-        using var sender = new AudioSender();
-        try
-        {
-            receiver.Start();
-            receiver.SetOutputDevices(Array.Empty<string>()); // decode only - never make sound during a test
-            sender.ConfigureCodec(opus ? AudioTransportCodec.Opus : AudioTransportCodec.Pcm);
-            sender.Configure(new[] { new CaptureSourceSpec(deviceId, CaptureKind.Loopback, dev.Name) });
-            sender.SetReceivers(new[] { new IPEndPoint(IPAddress.Loopback, RemPacket.DefaultPort) });
-            sender.Start();
-            Console.WriteLine($"  capturing \"{dev.Name}\" -> 127.0.0.1:{RemPacket.DefaultPort}");
-            Thread.Sleep(seconds * 1000);
-        }
-        finally
-        {
-            try { sender.Stop(); } catch { /* ignore */ }
-            try { receiver.Stop(); } catch { /* ignore */ }
-        }
-
-        var sent = sender.PacketsSent;
-        var got = receiver.PacketsReceived;
-        Console.WriteLine($"  packets sent={sent}  received={got}  bytes received={receiver.BytesReceived}");
-        var pass = sent > 0 && got > 0;
-        Console.WriteLine(pass
-            ? "  RESULT: PASS - capture, encode, network and decode are all working."
-            : "  RESULT: FAIL - audio did not flow end-to-end (sent or received was zero).");
-        return pass ? 0 : 1;
-    }
-
     private static int SetLogging(string? value)
     {
         var on = value is not null && value.ToLowerInvariant() is "on" or "true" or "1" or "enable" or "enabled" or "yes";
@@ -279,9 +230,10 @@ internal static class CommandLine
         return 0;
     }
 
-    /// <summary>Write a support-friendly diagnostics report and exit. Always writes a file so it
-    /// works even when launched without a terminal; prints the path if a console is attached.</summary>
-    private static int RunDiagnostics(string? pathArg)
+    /// <summary>Build the support diagnostics report text for a given config (version, settings,
+    /// profiles, devices, mic-privacy, recent log). Shared by <c>--diagnostics</c> and the
+    /// self-test's privacy check. Lists profile titles only - never their contents.</summary>
+    internal static string BuildDiagnosticsReport(AppConfig cfg)
     {
         var sb = new StringBuilder();
         sb.AppendLine($"RemSound diagnostics");
@@ -293,8 +245,6 @@ internal static class CommandLine
         sb.AppendLine($"Exe:        {Environment.ProcessPath}");
         sb.AppendLine();
 
-        AppConfig cfg;
-        try { cfg = AppConfig.Load(); } catch { cfg = new AppConfig(); }
         sb.AppendLine("Settings:");
         sb.AppendLine($"  Logging enabled:        {cfg.LoggingEnabled}");
         sb.AppendLine($"  Start minimised:        {cfg.StartMinimised}");
@@ -326,6 +276,17 @@ internal static class CommandLine
         sb.AppendLine(TailNewestLog(40));
         sb.AppendLine();
 
+        return sb.ToString();
+    }
+
+    /// <summary>Write a support-friendly diagnostics report and exit. Always writes a file so it
+    /// works even when launched without a terminal; prints the path if a console is attached.</summary>
+    private static int RunDiagnostics(string? pathArg)
+    {
+        AppConfig cfg;
+        try { cfg = AppConfig.Load(); } catch { cfg = new AppConfig(); }
+        var report = BuildDiagnosticsReport(cfg);
+
         var path = !string.IsNullOrWhiteSpace(pathArg)
             ? pathArg!
             : Path.Combine(AppConfig.UserDataDirectory,
@@ -333,15 +294,15 @@ internal static class CommandLine
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-            File.WriteAllText(path, sb.ToString());
-            Console.WriteLine($"Diagnostics written to:");
+            File.WriteAllText(path, report);
+            Console.WriteLine("Diagnostics written to:");
             Console.WriteLine($"  {path}");
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Could not write the diagnostics file: {ex.Message}");
             Console.WriteLine();
-            Console.Write(sb.ToString()); // last resort - dump to the terminal
+            Console.Write(report); // last resort - dump to the terminal
             return 1;
         }
         return 0;
