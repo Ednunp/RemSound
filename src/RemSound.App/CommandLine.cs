@@ -82,6 +82,8 @@ internal static class CommandLine
                     return WithConsole(() => { WriteDevices(Console.Out); return 0; });
                 case "--selftest": case "--self-test": case "--smoke-test": case "--smoketest":
                     return WithConsole(() => SelfTest.Run(args));
+                case "--perftest": case "--perf-test":
+                    return WithConsole(() => RunPerfTest(args));
                 case "--diagnostics": case "--diag":
                     return WithConsole(() => RunDiagnostics(ValueAfter(args, raw)));
                 case "--log":
@@ -150,7 +152,9 @@ internal static class CommandLine
         Console.WriteLine("                        with their formats and device ids.");
         Console.WriteLine("  --selftest [--seconds N]  Run the built-in self-test - a localhost audio");
         Console.WriteLine("  (or --smoke-test)     round-trip plus checks of encryption, the wire format,");
-        Console.WriteLine("                        settings, profiles and bundled files - and report PASS/FAIL.");
+        Console.WriteLine("                        settings, profiles, dialog accessibility and bundled files.");
+        Console.WriteLine("  --perftest [--seconds N]  Run repeated audio cycles and report whether handle,");
+        Console.WriteLine("                        memory and thread counts stay bounded (leak sanity check).");
         Console.WriteLine("  --diagnostics [path]  Write a diagnostics report (version, config, profiles,");
         Console.WriteLine("                        devices, mic-privacy check, recent log) and exit. With");
         Console.WriteLine("                        no path, it is saved in the user settings and logs folder.");
@@ -225,6 +229,62 @@ internal static class CommandLine
         w.WriteLine();
     }
 
+    /// <summary>Resource-sanity check: run several short audio-loopback cycles and watch this
+    /// process's handle / memory / thread counts. Each cycle builds and tears down the audio
+    /// engine, so a handle or thread count that ratchets up cycle on cycle is the fingerprint of a
+    /// leak (RemSound has a handle-leak history). Lenient thresholds - it flags obvious runaway, not
+    /// normal fluctuation - and logs the numbers so builds can be compared. Note: the loopback
+    /// renders to nothing (no real output device, to stay silent), so it exercises the
+    /// capture/encode/network/decode path, not the WASAPI render path.</summary>
+    private static int RunPerfTest(string[] args)
+    {
+        var seconds = int.TryParse(ValueAfter(args, "--seconds"), out var s) && s is >= 6 and <= 120 ? s : 15;
+        const int cycles = 3;
+        var perCycle = Math.Max(2, seconds / cycles);
+        var proc = System.Diagnostics.Process.GetCurrentProcess();
+
+        Console.WriteLine($"RemSound perf sanity: {cycles} x {perCycle}s audio loopback, watching handles/memory/threads...");
+        Console.WriteLine();
+
+        static (int Handles, long WorkingSetMb, long PrivateMb, int Threads) Measure(System.Diagnostics.Process p)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            p.Refresh();
+            return (p.HandleCount, p.WorkingSet64 / (1024 * 1024), p.PrivateMemorySize64 / (1024 * 1024), p.Threads.Count);
+        }
+
+        var baseline = Measure(proc);
+        Console.WriteLine($"  baseline:  handles={baseline.Handles}  workingSet={baseline.WorkingSetMb}MB  private={baseline.PrivateMb}MB  threads={baseline.Threads}");
+
+        for (var i = 1; i <= cycles; i++)
+        {
+            var r = AudioLoopback.Run(opus: true, perCycle);
+            if (!r.Ran)
+            {
+                Console.WriteLine($"  RESULT: SKIP - {r.SkipReason} (no audio device to exercise).");
+                return 0;
+            }
+            var m = Measure(proc);
+            Console.WriteLine($"  cycle {i}/{cycles}: handles={m.Handles}  workingSet={m.WorkingSetMb}MB  private={m.PrivateMb}MB  threads={m.Threads}  (sent={r.PacketsSent}, received={r.PacketsReceived})");
+        }
+
+        var final = Measure(proc);
+        var handleGrowth = final.Handles - baseline.Handles;
+        var threadGrowth = final.Threads - baseline.Threads;
+        var memGrowth = final.WorkingSetMb - baseline.WorkingSetMb;
+        Console.WriteLine();
+        Console.WriteLine($"  net change over {cycles} cycles: handles {handleGrowth:+#;-#;0}, threads {threadGrowth:+#;-#;0}, workingSet {memGrowth:+#;-#;0}MB");
+
+        // Lenient: flag obvious runaway (e.g. a handle leak ratcheting up each cycle), not noise.
+        var runaway = handleGrowth > 1500 || threadGrowth > 100 || final.WorkingSetMb > 1500;
+        Console.WriteLine(runaway
+            ? "  RESULT: FAIL - resource use looks like it is running away (possible leak); compare the per-cycle trend above."
+            : "  RESULT: PASS - handles, threads and memory stayed bounded across cycles.");
+        return runaway ? 1 : 0;
+    }
+
     private static int SetLogging(string? value)
     {
         var on = value is not null && value.ToLowerInvariant() is "on" or "true" or "1" or "enable" or "enabled" or "yes";
@@ -256,7 +316,7 @@ internal static class CommandLine
     /// <summary>Build the support diagnostics report text for a given config (version, settings,
     /// profiles, devices, mic-privacy, recent log). Shared by <c>--diagnostics</c> and the
     /// self-test's privacy check. Lists profile titles only - never their contents.</summary>
-    internal static string BuildDiagnosticsReport(AppConfig cfg)
+    internal static string BuildDiagnosticsReport(AppConfig cfg, bool runLiveAudioProbe = true)
     {
         var sb = new StringBuilder();
         sb.AppendLine($"RemSound diagnostics");
@@ -295,11 +355,90 @@ internal static class CommandLine
         sb.AppendLine($"  {DescribeMicPrivacy()}");
         sb.AppendLine();
 
+        if (runLiveAudioProbe)
+        {
+            sb.AppendLine("Live audio self-check (localhost loopback, no sound output):");
+            AppendLiveAudioCheck(sb);
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("Most recent session snapshot (from the log):");
+        sb.AppendLine($"  {LastSessionSnapshot()}");
+        sb.AppendLine();
+
+        sb.AppendLine("Recent warnings and errors (from the log):");
+        sb.AppendLine(RecentLogProblems(15));
+        sb.AppendLine();
+
         sb.AppendLine("Most recent log (tail):");
         sb.AppendLine(TailNewestLog(40));
         sb.AppendLine();
 
         return sb.ToString();
+    }
+
+    /// <summary>Run a short localhost loopback for each codec and report the live counters - proves
+    /// this machine's capture/encode/network/decode path works, with real packet/underrun/drop
+    /// numbers. Skips (no failure) when there's no audio device.</summary>
+    private static void AppendLiveAudioCheck(StringBuilder sb)
+    {
+        foreach (var opus in new[] { false, true })
+        {
+            var r = AudioLoopback.Run(opus, 2);
+            if (!r.Ran) { sb.AppendLine($"  {r.Codec}: skipped ({r.SkipReason})"); continue; }
+            sb.AppendLine($"  {r.Codec}: sent={r.PacketsSent} pkts, received={r.PacketsReceived} pkts ({r.BytesReceived} bytes), "
+                        + $"underruns={r.Underruns}, drops={r.Drops}, buffer={r.BufferMs}ms, target latency={r.TargetLatencyMs}ms "
+                        + $"-> {(r.Flowed ? "OK" : "NO AUDIO")}");
+        }
+    }
+
+    /// <summary>The last one-second SNAP row from the newest log, as a readable line: the real
+    /// running session's codec, send/receive state, buffer, underruns, drops and heartbeat. These
+    /// are the live values a static report can't otherwise show. Empty when logging is off.</summary>
+    private static string LastSessionSnapshot()
+    {
+        try
+        {
+            var dir = AppConfig.LogsDirectory;
+            if (!Directory.Exists(dir)) return "(no logs - logging may be off)";
+            var newest = new DirectoryInfo(dir).GetFiles("*.log").OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault();
+            if (newest is null) return "(no log files - logging may be off)";
+            var lines = File.ReadAllLines(newest.FullName);
+            var header = lines.FirstOrDefault(l => l.StartsWith("Kind\t") || l.Contains("\tCodec\t"));
+            var lastSnap = lines.LastOrDefault(l => l.StartsWith("SNAP\t"));
+            if (header is null || lastSnap is null) return "(no session snapshots in the newest log yet)";
+            var cols = header.Split('\t');
+            var vals = lastSnap.Split('\t');
+            string Col(string name) { var i = Array.IndexOf(cols, name); return i >= 0 && i < vals.Length ? vals[i] : "?"; }
+            return $"Connected={Col("Connected")}, Send={Col("SendRunning")}, Receive={Col("ReceiveRunning")}, "
+                 + $"Codec={Col("Codec")}, Buffer={Col("BufferMs")}ms, Underruns={Col("Underruns")}, "
+                 + $"Drops={Col("Drops")}, Heartbeat={Col("Heartbeat")}, TargetLatency={Col("TargetLatencyMs")}ms";
+        }
+        catch (Exception ex) { return $"(could not read snapshot: {ex.Message})"; }
+    }
+
+    /// <summary>The recent WARN/ERROR/exception-style lines from the newest log, so a support
+    /// reader sees the problems without scrolling the whole file. Last <paramref name="max"/>.</summary>
+    private static string RecentLogProblems(int max)
+    {
+        try
+        {
+            var dir = AppConfig.LogsDirectory;
+            if (!Directory.Exists(dir)) return "  (no logs - logging may be off)";
+            var newest = new DirectoryInfo(dir).GetFiles("*.log").OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault();
+            if (newest is null) return "  (no log files - logging may be off)";
+            var problems = File.ReadLines(newest.FullName)
+                .Where(l => l.Contains("error", StringComparison.OrdinalIgnoreCase)
+                         || l.Contains("warn", StringComparison.OrdinalIgnoreCase)
+                         || l.Contains("exception", StringComparison.OrdinalIgnoreCase)
+                         || l.Contains("unreachable", StringComparison.OrdinalIgnoreCase)
+                         || l.Contains("failed", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (problems.Count == 0) return "  (none in the newest log)";
+            var tail = problems.Count <= max ? problems : problems.GetRange(problems.Count - max, max);
+            return string.Join(Environment.NewLine, tail.Select(l => "  " + l));
+        }
+        catch (Exception ex) { return $"  (could not scan log: {ex.Message})"; }
     }
 
     /// <summary>Write a support-friendly diagnostics report and exit. Always writes a file so it

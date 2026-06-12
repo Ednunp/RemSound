@@ -62,19 +62,23 @@
          user-supplied custom cue paths set in Preferences override the defaults at runtime.
          Filenames containing a space (e.g. "record start.wav") are preserved verbatim on
          copy so the load-by-filename path in TryLoadCueSound finds them exactly as written. -->
-    <Content Include="..\..\sounds\connect.wav">
+    <!-- Exists-guarded like the newer cues below: a missing source WAV (e.g. while the project owner
+         is swapping in new cue sounds) must not break the dev build. The release gate (run-tests.ps1
+         and the self-test "Bundled resources present" step) enforces that the required cues are
+         actually present before a release ships, so guarding here loses no safety. -->
+    <Content Include="..\..\sounds\connect.wav" Condition="Exists('..\..\sounds\connect.wav')">
       <Link>sounds\connect.wav</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="..\..\sounds\disconnect.wav">
+    <Content Include="..\..\sounds\disconnect.wav" Condition="Exists('..\..\sounds\disconnect.wav')">
       <Link>sounds\disconnect.wav</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="..\..\sounds\record start.wav">
+    <Content Include="..\..\sounds\record start.wav" Condition="Exists('..\..\sounds\record start.wav')">
       <Link>sounds\record start.wav</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="..\..\sounds\record stop.wav">
+    <Content Include="..\..\sounds\record stop.wav" Condition="Exists('..\..\sounds\record stop.wav')">
       <Link>sounds\record stop.wav</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>

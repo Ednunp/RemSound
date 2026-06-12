@@ -113,6 +113,14 @@ foreach ($line in ($st.Text -split "`r?`n")) {
 }
 if ($st.Code -eq 0) { Pass "self-test passed (exit 0)" } else { Fail "self-test failed (exit $($st.Code))" }
 
+Write-Host "`nResource sanity (handle/memory leak check):" -ForegroundColor Cyan
+$pf = Invoke-RsCli @('--perftest', '--seconds', '12')
+foreach ($line in ($pf.Text -split "`r?`n")) {
+    if ($line -match 'baseline:|cycle \d|net change|^\s*RESULT:') { Write-Host "  $($line.Trim())" }
+}
+if ($pf.Code -eq 0) { Pass "resources stayed bounded across cycles (or skipped - no audio device)" }
+else { Fail "perf sanity flagged possible runaway (exit $($pf.Code))" }
+
 # ---- 5. COLD START + CLEAN CLOSE, against an isolated --config-dir so the real settings are never
 #         touched (smoke-test brief, safety rule 1 + baseline steps 3-4) ----
 Write-Host "`nCold start and clean close (isolated config):" -ForegroundColor Cyan

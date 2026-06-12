@@ -3,9 +3,8 @@ using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Windows.Forms;
 using RemSound.Core;
-using RemSound.Receiver;
-using RemSound.Sender;
 
 namespace RemSound.App;
 
@@ -60,6 +59,7 @@ internal static class SelfTest
         RunStep(results, "Profile save and reload", ProfileRoundTrip);
         RunStep(results, "Diagnostics report privacy", DiagnosticsPrivacy);
         RunStep(results, "Bundled resources present", ResourcesPresent);
+        RunStep(results, "Dialog accessibility (names + mnemonics)", AccessibilityAudit);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");
@@ -99,38 +99,10 @@ internal static class SelfTest
     /// box) so the suite stays green where there's simply nothing to capture.</summary>
     private static string? AudioRoundTrip(bool opus, int seconds)
     {
-        IReadOnlyList<AudioDeviceChoice> outputs;
-        try { outputs = AudioDeviceCatalog.LoadOutputs(); }
-        catch (Exception ex) { return Skip("could not enumerate outputs: " + ex.Message); }
-        var dev = outputs.FirstOrDefault(o => o.DeviceId is not null);
-        if (dev?.DeviceId is not { } deviceId) return Skip("no usable output device to capture from");
-
-        // A dedicated test port, separate from the live DefaultPort (47830), so the self-test
-        // doesn't clash with a RemSound instance the user already has running.
-        const int testPort = 47929;
-        using var receiver = new AudioReceiver();
-        using var sender = new AudioSender();
-        try
-        {
-            try { receiver.Start(testPort); }
-            catch (Exception ex) { return Skip($"could not bind test port {testPort}: {ex.Message}"); }
-            receiver.SetOutputDevices(Array.Empty<string>()); // decode only - never make sound during a test
-            sender.ConfigureCodec(opus ? AudioTransportCodec.Opus : AudioTransportCodec.Pcm);
-            sender.Configure(new[] { new CaptureSourceSpec(deviceId, CaptureKind.Loopback, dev.Name) });
-            sender.SetReceivers(new[] { new IPEndPoint(IPAddress.Loopback, testPort) });
-            sender.Start();
-            Thread.Sleep(seconds * 1000);
-        }
-        finally
-        {
-            try { sender.Stop(); } catch { /* ignore */ }
-            try { receiver.Stop(); } catch { /* ignore */ }
-        }
-
-        var sent = sender.PacketsSent;
-        var got = receiver.PacketsReceived;
-        Check(sent > 0 && got > 0, $"audio did not flow end-to-end (sent={sent}, received={got})");
-        return $"sent={sent}, received={got}";
+        var r = AudioLoopback.Run(opus, seconds);
+        if (!r.Ran) return Skip(r.SkipReason ?? "audio loopback unavailable");
+        Check(r.Flowed, $"audio did not flow end-to-end (sent={r.PacketsSent}, received={r.PacketsReceived})");
+        return $"sent={r.PacketsSent}, received={r.PacketsReceived}";
     }
 
     /// <summary>Audio encryption: the right password decrypts to the original, the wrong one fails
@@ -301,7 +273,7 @@ internal static class SelfTest
             p.Password = canaryPassword;
             store.Save(p);
 
-            var report = CommandLine.BuildDiagnosticsReport(new AppConfig { ProfilesDirectory = temp });
+            var report = CommandLine.BuildDiagnosticsReport(new AppConfig { ProfilesDirectory = temp }, runLiveAudioProbe: false);
             Check(report.Contains("RemSound diagnostics") && report.Contains(Environment.MachineName),
                 "the diagnostics report must contain its basic header");
             Check(report.Contains(canaryTitle), "the diagnostics report should list the profile title");
@@ -338,6 +310,89 @@ internal static class SelfTest
         var nativeOpus = Path.Combine(root, "runtimes", "win-x64", "native", "opus.dll");
         Check(File.Exists(nativeOpus), "native opus.dll must ship under runtimes\\win-x64\\native\\");
         return "manual, cue sounds, native Opus";
+    }
+
+    /// <summary>Headless accessibility audit of the dialogs that can be built without hardware: every
+    /// actionable control announces a name to a screen reader, and the Alt-key mnemonic letters are
+    /// unique within a container so keyboard navigation is never ambiguous. The main window can't be
+    /// built headlessly (its constructor opens audio devices, registers hotkeys and binds sockets),
+    /// so it's out of scope here. A dialog that won't construct in this context is skipped, not
+    /// failed.</summary>
+    private static string? AccessibilityAudit()
+    {
+        var factories = new (string Name, Func<Form> Make)[]
+        {
+            ("Startup behaviour", () => new StartupBehaviourDialog(null)),
+            ("Recording settings", () => new RecordingSettingsDialog(new RecordingSettings())),
+            ("Preferences", () => new PreferencesDialog(
+                new RemSoundSettingsStore("RemSound"), null,
+                () => false, _ => { }, () => { }, () => { }, () => { }, _ => { },
+                () => (default(RouterMappingStatus), (IPEndPoint?)null, ""),
+                _ => { }, _ => { })),
+        };
+
+        var audited = new List<string>();
+        var skipped = new List<string>();
+        var violations = new List<string>();
+
+        foreach (var (name, make) in factories)
+        {
+            Form? form = null;
+            try { form = make(); }
+            catch (Exception ex) { skipped.Add($"{name} ({ex.GetType().Name})"); continue; }
+            try { AuditForm(name, form, violations); audited.Add(name); }
+            finally { try { form.Dispose(); } catch { /* ignore */ } }
+        }
+
+        if (audited.Count == 0) return Skip("no dialog could be constructed in this context");
+        Check(violations.Count == 0, string.Join("; ", violations));
+        var detail = $"audited {audited.Count} ({string.Join(", ", audited)})";
+        if (skipped.Count > 0) detail += $"; skipped {skipped.Count}";
+        return detail;
+    }
+
+    private static void AuditForm(string formName, Form form, List<string> violations)
+    {
+        var all = new List<Control>();
+        void Walk(Control parent) { foreach (Control c in parent.Controls) { all.Add(c); Walk(c); } }
+        Walk(form);
+
+        // Mnemonic uniqueness, per immediate container (the practical Alt-key scope).
+        foreach (var group in all.Where(c => TryMnemonic(c.Text, out _)).GroupBy(c => c.Parent))
+        {
+            var counts = new Dictionary<char, int>();
+            foreach (var c in group)
+            {
+                if (TryMnemonic(c.Text, out var letter))
+                    counts[letter] = counts.TryGetValue(letter, out var n) ? n + 1 : 1;
+            }
+            foreach (var dup in counts.Where(kv => kv.Value > 1))
+                violations.Add($"{formName}: Alt+{char.ToUpperInvariant(dup.Key)} is used by {dup.Value} controls in one group");
+        }
+
+        // Self-labelling controls (buttons, check boxes, radio buttons) must announce something.
+        foreach (var c in all.Where(c => c is ButtonBase))
+        {
+            var name = !string.IsNullOrWhiteSpace(c.AccessibleName) ? c.AccessibleName : c.Text;
+            if (string.IsNullOrWhiteSpace(name))
+                violations.Add($"{formName}: a {c.GetType().Name} has no accessible name or text");
+        }
+    }
+
+    /// <summary>Extract the Alt mnemonic letter from a WinForms caption ('&amp;X' marks X; '&amp;&amp;'
+    /// is a literal ampersand). Returns false when there is no mnemonic.</summary>
+    private static bool TryMnemonic(string? text, out char letter)
+    {
+        letter = '\0';
+        if (string.IsNullOrEmpty(text)) return false;
+        for (var i = 0; i < text.Length - 1; i++)
+        {
+            if (text[i] != '&') continue;
+            if (text[i + 1] == '&') { i++; continue; } // escaped "&&" is a literal ampersand
+            letter = char.ToLowerInvariant(text[i + 1]);
+            return char.IsLetterOrDigit(letter);
+        }
+        return false;
     }
 
     // ---------------- helper ----------------
