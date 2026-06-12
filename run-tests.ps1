@@ -113,6 +113,42 @@ foreach ($line in ($st.Text -split "`r?`n")) {
 }
 if ($st.Code -eq 0) { Pass "self-test passed (exit 0)" } else { Fail "self-test failed (exit $($st.Code))" }
 
+# ---- 5. COLD START + CLEAN CLOSE, against an isolated --config-dir so the real settings are never
+#         touched (smoke-test brief, safety rule 1 + baseline steps 3-4) ----
+Write-Host "`nCold start and clean close (isolated config):" -ForegroundColor Cyan
+$already = @(Get-Process RemSound -ErrorAction SilentlyContinue)
+if ($already.Count -gt 0) {
+    Write-Host "  [SKIP] a RemSound instance is already running (machine-wide single-instance lock) - close it to run this check" -ForegroundColor Yellow
+}
+else {
+    $testCfg = Join-Path ([System.IO.Path]::GetTempPath()) ("rs-cfg-" + [guid]::NewGuid().ToString('N'))
+    $proc = $null
+    try {
+        $proc = Start-Process -FilePath $exe -ArgumentList @('--config-dir', $testCfg, '--connect', '127.0.0.1', '--minimized') -PassThru
+        Start-Sleep -Seconds 6
+        if (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) { Pass "GUI cold-started and stayed up (minimized to tray)" }
+        else { Fail "GUI exited or crashed during cold start" }
+
+        # Startup consolidates the cue sounds into UserDataDirectory; with the override that's $testCfg,
+        # so a populated $testCfg proves the process honoured --config-dir and left the real settings alone.
+        if (Test-Path (Join-Path $testCfg 'sounds')) { Pass "ran against the isolated --config-dir folder (real settings untouched)" }
+        else { Fail "--config-dir folder was not populated - config isolation may not be working" }
+
+        Invoke-RsCli @('--close') | Out-Null
+        Start-Sleep -Seconds 2
+        $still = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
+        if (-not $still) { Pass "--close shut the GUI down cleanly (no orphan process)" }
+        else { Fail "process still running after --close"; try { $still | Stop-Process -Force } catch { } }
+    }
+    catch {
+        Fail "cold-start/close smoke threw: $($_.Exception.Message)"
+        if ($proc) { try { Get-Process -Id $proc.Id -ErrorAction SilentlyContinue | Stop-Process -Force } catch { } }
+    }
+    finally {
+        Remove-Item -LiteralPath $testCfg -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # ---- summary ----
 Remove-Item -LiteralPath $publishDir -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ""

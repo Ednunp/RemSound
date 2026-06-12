@@ -226,7 +226,23 @@ public sealed class AppConfig
     /// / the earlier <c>config\</c> folder so the install root stays tidy and the auto-updater can
     /// exclude one folder to leave ALL user state (including custom cue WAVs) untouched.</summary>
     public const string UserDataFolderName = "user settings and logs";
-    public static string UserDataDirectory => Path.Combine(AppContext.BaseDirectory, UserDataFolderName);
+
+    /// <summary>Process-wide override for <see cref="UserDataDirectory"/>. Null = the default
+    /// folder next to the exe. Set once at startup from the <c>--config-dir</c> switch so the test
+    /// suite (and a portable layout) can point ALL user state - config, profiles, logs, cue sounds -
+    /// at an explicit throwaway folder without touching the user's real settings. Must be set before
+    /// anything reads config/profiles/logs/sounds.</summary>
+    private static string? _userDataDirectoryOverride;
+
+    /// <summary>Redirect every user-state folder to <paramref name="path"/> for this process only.
+    /// Call before <see cref="MigrateLegacyLayoutIfNeeded"/> / any config read. Idempotent.</summary>
+    public static void SetUserDataDirectoryOverride(string path)
+    {
+        if (!string.IsNullOrWhiteSpace(path)) _userDataDirectoryOverride = Path.GetFullPath(path);
+    }
+
+    public static string UserDataDirectory =>
+        _userDataDirectoryOverride ?? Path.Combine(AppContext.BaseDirectory, UserDataFolderName);
 
     /// <summary>Where the per-machine log files are written.</summary>
     public static string LogsDirectory => Path.Combine(UserDataDirectory, "logs");

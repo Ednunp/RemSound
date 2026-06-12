@@ -1097,7 +1097,8 @@ Option| What it does
 `--help` or `-h`| Lists every option, the same as this section in short form.
 `--version`| Prints which version of RemSound is installed, for example “RemSound 3.9”.
 `--devices`| Lists every microphone and line-in, every speaker and headphone output, and every ASIO driver on the machine — each with its sample rate, channel count and the exact device id RemSound uses internally. This is the quickest way to confirm an interface is actually present and seen by Windows.
-`--selftest`| Runs RemSound's built-in self-test and reports **PASS** or **FAIL**. It works through a list of named checks: a full audio round-trip on the machine on its own (capture → encode → send across the network layer to itself → receive → decode, for both quality settings), the audio encryption, the network packet format, saving and reloading settings and a profile, that a diagnostics report never leaks a password, and that the bundled sounds and manual are present. No sound is played out, so it is safe to run silently. Add `--seconds N` to make the audio part run for longer than the default.
+`--selftest`
+(or `--smoke-test`)| Runs RemSound's built-in self-test and reports **PASS** or **FAIL**. It works through a list of named checks: a full audio round-trip on the machine on its own (capture → encode → send across the network layer to itself → receive → decode, for both quality settings), the audio encryption, the network packet format, saving and reloading settings and a profile, that a diagnostics report never leaks a password, and that the bundled sounds and manual are present. No sound is played out, so it is safe to run silently. Add `--seconds N` to make the audio part run for longer than the default.
 `--diagnostics`| Writes a single plain-text report file holding the version, the operating system, the current settings, the list of profiles, the full device list, a check of the Windows microphone-privacy permission, and the tail of the most recent log. With no path it saves into the **user settings and logs** folder and prints where it put it; you can also give a path, for example `--diagnostics C:\Users\you\Desktop\report.txt`. This is the file to send when asking for help — it answers most questions in one go.
 
 ### Options that change a setting or control a running copy, then exit
@@ -1116,6 +1117,7 @@ Option| What it does
 `--profile "<name>"`| Starts straight into the named profile and skips the profile picker. Put the name in quotes if it contains a space, for example `--profile "Studio link"`.
 `--connect <ip>`| Starts and connects to a peer at that address. You can give just an address (`--connect 192.168.1.42`) or an address and port (`--connect 192.168.1.42:47830`); with no port it uses RemSound's normal port, 47830. If you don't also give a `--profile`, it starts on a fresh blank profile already pointed at that peer.
 `--minimized` or `--tray`| Starts minimized to the notification area, with no window popping up. Pair it with `--profile` or `--connect` so it has something to do without waiting at the picker.
+`--config-dir <folder>`| Uses an explicit folder for this run's settings, profiles, logs and sounds, instead of the usual location. It lets you (or an automated test) run RemSound against a throwaway folder without touching your real settings. Works with any command — for example `--selftest --config-dir C:\Temp\rstest` or `--diagnostics --config-dir C:\Temp\rstest`.
 
 ### Examples
 

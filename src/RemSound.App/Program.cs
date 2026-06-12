@@ -25,6 +25,16 @@ internal static class Program
             return;
         }
 
+        // --config-dir <folder> (test / portable isolation): redirect ALL user state - config,
+        // profiles, logs, cue sounds - to an explicit folder for THIS process only. Applied first,
+        // before the layout migration and sound consolidation below read or write the default
+        // location, so a smoke test can run a real build without touching the user's settings
+        // (smoke-test brief, safety rule 1).
+        if (CommandLine.TryGetConfigDir(args, out var configDir))
+        {
+            AppConfig.SetUserDataDirectoryOverride(configDir);
+        }
+
         // SustainedLowLatency tells the GC to avoid full (gen 2) collections while audio is streaming.
         // Gen 0/1 collections still happen but are sub-millisecond; the long pauses that were causing
         // the receiver to fall behind in clusters of 4-5 underruns at a time were almost certainly

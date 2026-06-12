@@ -40,6 +40,25 @@ internal static class CommandLine
     [DllImport("kernel32.dll")] private static extern bool AttachConsole(int dwProcessId);
     private const int ATTACH_PARENT_PROCESS = -1;
 
+    /// <summary>The folder given after <c>--config-dir</c>, or null. Read at the very start of
+    /// <see cref="Program"/> - before the layout migration and any config/profile/log/sound access -
+    /// so it can redirect ALL user state via <see cref="AppConfig.SetUserDataDirectoryOverride"/>.
+    /// Applies to every command (e.g. <c>--selftest --config-dir</c>, <c>--diagnostics --config-dir</c>)
+    /// and to a normal GUI launch, so a test can exercise a real build without touching live settings.</summary>
+    public static bool TryGetConfigDir(string[] args, out string dir)
+    {
+        dir = "";
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i].Equals("--config-dir", StringComparison.OrdinalIgnoreCase) && !args[i + 1].StartsWith('-'))
+            {
+                dir = args[i + 1];
+                return !string.IsNullOrWhiteSpace(dir);
+            }
+        }
+        return false;
+    }
+
     /// <summary>
     /// Process the command line. Returns a non-null exit code when a do-and-exit command ran (the
     /// caller should <c>Environment.Exit</c> it); returns null to continue into the GUI launch with
@@ -61,7 +80,7 @@ internal static class CommandLine
                     return WithConsole(PrintVersion);
                 case "--devices": case "--list-devices":
                     return WithConsole(() => { WriteDevices(Console.Out); return 0; });
-                case "--selftest": case "--self-test":
+                case "--selftest": case "--self-test": case "--smoke-test": case "--smoketest":
                     return WithConsole(() => SelfTest.Run(args));
                 case "--diagnostics": case "--diag":
                     return WithConsole(() => RunDiagnostics(ValueAfter(args, raw)));
@@ -130,7 +149,7 @@ internal static class CommandLine
         Console.WriteLine("  --devices             List all microphones, outputs and ASIO drivers,");
         Console.WriteLine("                        with their formats and device ids.");
         Console.WriteLine("  --selftest [--seconds N]  Run the built-in self-test - a localhost audio");
-        Console.WriteLine("                        round-trip plus checks of encryption, the wire format,");
+        Console.WriteLine("  (or --smoke-test)     round-trip plus checks of encryption, the wire format,");
         Console.WriteLine("                        settings, profiles and bundled files - and report PASS/FAIL.");
         Console.WriteLine("  --diagnostics [path]  Write a diagnostics report (version, config, profiles,");
         Console.WriteLine("                        devices, mic-privacy check, recent log) and exit. With");
@@ -145,6 +164,10 @@ internal static class CommandLine
         Console.WriteLine("  --connect <ip[:port]> Start and connect to a peer at this address. With no");
         Console.WriteLine("                        --profile, starts on a fresh profile connected to it.");
         Console.WriteLine("  --minimized, --tray   Start minimized to the notification area.");
+        Console.WriteLine("  --config-dir <folder> Use an explicit folder for this run's settings, profiles,");
+        Console.WriteLine("                        logs and sounds, instead of the usual location. Lets a test");
+        Console.WriteLine("                        exercise RemSound without touching your real settings.");
+        Console.WriteLine("                        Works with any command (e.g. --selftest --config-dir ...).");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  RemSound.exe --devices");
