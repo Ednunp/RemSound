@@ -307,6 +307,7 @@ internal static class SelfTest
         {
             "connect.wav", "disconnect.wav", "start up.wav",
             "send on.wav", "send off.wav", "recieve on.wav", "recieve off.wav", "minimise.wav", "maximise.wav",
+            "check.wav", "uncheck.wav",
         })
         {
             Check(CueSounds.Variants(cue).Count > 0,

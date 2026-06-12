@@ -106,6 +106,9 @@ public sealed class AppConfig
     public bool EnableReceiveOffCue { get; set; } = true;
     public bool EnableHideCue { get; set; } = true;
     public bool EnableShowCue { get; set; } = true;
+    /// <summary>Tick / untick sounds played on every checkbox toggle anywhere in the app.</summary>
+    public bool EnableCheckboxOnCue { get; set; } = true;
+    public bool EnableCheckboxOffCue { get; set; } = true;
 
     /// <summary>Custom WAV overrides for the machine-wide cues above, keyed by cue id. The
     /// equivalent of <see cref="Profile.CustomCuePaths"/> but machine-wide, since these cues don't

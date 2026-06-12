@@ -60,6 +60,9 @@ internal sealed class AccessibleCheckBox : CheckBox
         if (Focused)
         {
             NotifyWinEvent(EVENT_OBJECT_FOCUS, Handle, OBJID_CLIENT, CHILDID_SELF);
+            // Audible tick/untick feedback. Gated on Focused so it fires for a genuine user toggle
+            // (click or spacebar) but stays silent for the bulk programmatic checking on profile load.
+            CheckSoundService.Play(Checked);
         }
     }
 }

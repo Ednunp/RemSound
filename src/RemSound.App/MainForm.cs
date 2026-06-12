@@ -776,8 +776,8 @@ public sealed class MainForm : Form
         // "Uncheck all inputs and outputs on all soundcards" — clears every device tick in one
         // press. Button owns its own &-mnemonic (Alt+U), so AccessibleName stays clean per Ed's
         // mnemonic convention.
-        uncheckAllDevicesButton.Text = "Uncheck all inputs and outputs on all soundcards (Alt+&U)";
-        uncheckAllDevicesButton.AccessibleName = "Uncheck all inputs and outputs on all soundcards";
+        uncheckAllDevicesButton.Text = "Uncheck all inputs and outputs on all soundcards and set ASIO driver to none (Alt+&U)";
+        uncheckAllDevicesButton.AccessibleName = "Uncheck all inputs and outputs on all soundcards and set ASIO driver to none";
         uncheckAllDevicesButton.Click += (_, _) => UncheckAllDevices();
 
         // Populate ASIO driver list at startup. Discovers all ASIO drivers via NAudio + a
@@ -4572,6 +4572,11 @@ public sealed class MainForm : Form
         }
         finally { suppressDeviceCheckChange = false; }
 
+        // Also reset the ASIO driver to "(none)" (row 0): the button now does a full reset to a
+        // clean WASAPI-only, nothing-selected state. Setting the index fires the driver-change
+        // handler, which saves the change and rebuilds the engine in WASAPI-only mode.
+        if (asioDriverBox.SelectedIndex > 0) asioDriverBox.SelectedIndex = 0;
+
         ApplyAudioRuntime();
         ApplyReceiveDevices();
         MarkProfileDirty();
@@ -6512,6 +6517,9 @@ public sealed class MainForm : Form
         public const string ReceiveOff = "receive-off";
         public const string Hide = "hide";
         public const string Show = "show";
+        // Played on every checkbox tick/untick across the whole app (CheckSoundService).
+        public const string CheckboxOn = "checkbox-on";
+        public const string CheckboxOff = "checkbox-off";
     }
 
     /// <summary>Load one cue sound. Resolution order:
@@ -6589,6 +6597,8 @@ public sealed class MainForm : Form
         TryLoadCueSound(CueId.ReceiveOff, "recieve off.wav", out receiveOffSound);
         TryLoadCueSound(CueId.Hide, "minimise.wav", out hideSound);
         TryLoadCueSound(CueId.Show, "maximise.wav", out showSound);
+        // The app-wide checkbox tick/untick sounds live in their own service; keep them in step.
+        CheckSoundService.Reload();
     }
 
     /// <summary>
@@ -7209,6 +7219,13 @@ public sealed class MainForm : Form
 
     private void WireCheckedListAccessibility(CheckedListBox list, Label statusLabel, string itemKind)
     {
+        // Tick/untick sound for the inputs/outputs lists. Gated on the list being focused so a real
+        // user click/spacebar clicks, but the bulk programmatic (un)checking done on profile load or
+        // by "uncheck all" (focus is on the button, not the list) stays silent.
+        list.ItemCheck += (_, e) =>
+        {
+            if (list.Focused) CheckSoundService.Play(e.NewValue == CheckState.Checked);
+        };
         list.SelectedIndexChanged += (_, _) =>
         {
             if (list.SelectedIndex >= 0) lastFocusedListIndices[list] = list.SelectedIndex;

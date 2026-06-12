@@ -866,7 +866,7 @@ Toggle| What it does
 
 ## 18. Audio cue sounds
 
-RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called **cue sounds**. Fifteen events have a cue:
+RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called **cue sounds**. Sixteen kinds of event have a cue:
 
 Cue| Plays when
 ---|---
@@ -883,6 +883,7 @@ Cue| Plays when
 **Receive turned on / off sound**|  You turn receiving audio on or off — from the **Receive audio** box or its mute shortcut. Again, a separate sound for on and for off.
 **Minimise (hide) sound**|  RemSound's window minimises to the notification area (hides).
 **Restore (show) sound**|  RemSound's window is brought back from the notification area (shows).
+**Checkbox ticked / unticked sound**|  You tick or untick _any_ checkbox anywhere in RemSound — a click for ticked, a different one for unticked. This gives instant feedback on which way a box just went, which is especially handy in the busy inputs and outputs lists. There's a separate sound for ticking and for unticking.
 
 All of these cues play through your default Windows sound output, which is separate from the audio RemSound is sending or receiving. They don't appear in a normal recording. (The exception: if your sending side is capturing the very output device the cues play through, then they get captured along with everything else from that device.)
 

@@ -137,6 +137,10 @@ internal static class Program
         KeyClickService.Initialize(AppConfig.Load().EnableKeyboardClicks);
         Application.ApplicationExit += (_, _) => KeyClickService.Shutdown();
 
+        // Tick/untick sounds for checkbox toggles app-wide (CheckSoundService). Loaded here; reloaded
+        // by MainForm.ReloadAllCueSounds whenever cue settings change in Preferences.
+        CheckSoundService.Reload();
+
         // One-time "your settings moved" notice — only the launch that actually relocated files
         // shows it (idempotent migration ⇒ MovedAnything is false on every later launch). Shown
         // here, after the guard and before the profile picker, so the user reads it once up front.

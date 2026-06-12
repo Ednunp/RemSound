@@ -194,6 +194,11 @@ internal sealed class PreferencesDialog : Form
                 c => c.EnableHideCue, (c, v) => c.EnableHideCue = v),
             MachineRow("Restore (show) sound", MainForm.CueId.Show, "maximise.wav",
                 c => c.EnableShowCue, (c, v) => c.EnableShowCue = v),
+            // Played on every checkbox tick / untick across the whole app (CheckSoundService).
+            MachineRow("Checkbox ticked sound", MainForm.CueId.CheckboxOn, "check.wav",
+                c => c.EnableCheckboxOnCue, (c, v) => c.EnableCheckboxOnCue = v),
+            MachineRow("Checkbox unticked sound", MainForm.CueId.CheckboxOff, "uncheck.wav",
+                c => c.EnableCheckboxOffCue, (c, v) => c.EnableCheckboxOffCue = v),
         ];
     }
 
