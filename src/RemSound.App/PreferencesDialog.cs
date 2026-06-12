@@ -56,9 +56,10 @@ internal sealed class PreferencesDialog : Form
         Padding = new Padding(0, 6, 0, 4),
     };
 
-    private readonly CheckedListBox cueList = new()
+    // A plain list of cue names (no tickboxes any more - on/off is the "(none)" entry in the sound
+    // list below). Arrowing it previews the cue's currently-configured sound.
+    private readonly ListBox cueList = new()
     {
-        CheckOnClick = true,
         IntegralHeight = false,
         Height = 130,
         Width = 360,
@@ -376,27 +377,19 @@ internal sealed class PreferencesDialog : Form
         cueList.Items.Clear();
         foreach (var c in cueRows)
         {
-            cueList.Items.Add(c.DisplayName, c.LoadEnabled());
+            cueList.Items.Add(c.DisplayName);
         }
         if (cueList.Items.Count > 0) cueList.SelectedIndex = 0;
-        cueList.ItemCheck += (_, e) =>
-        {
-            // ItemCheck fires BEFORE the visual state actually flips; e.NewValue is what
-            // it's about to become, so the persisted value matches what the user just
-            // clicked.
-            if (e.Index < 0 || e.Index >= cueRows.Length) return;
-            var nowEnabled = e.NewValue == CheckState.Checked;
-            var row = cueRows[e.Index];
-            row.SaveEnabled(nowEnabled);
-            // Machine-wide rows (the Startup cue) persist immediately and aren't part of the
-            // profile, so they must not arm the "save profile?" prompt on the way out.
-            if (row.IsProfileSetting) ChangedAnyProfileSetting = true;
-        };
 
-        // Selection changes update the two action buttons' labels so they always tell the
-        // user which cue they're about to act on. Refreshed eagerly at construction time
-        // for the initial selection too.
-        cueList.SelectedIndexChanged += (_, _) => { RefreshCueActionButtons(); RefreshDefaultSoundList(); };
+        // Selection change: refresh the action-button labels and the sound list, and preview the
+        // cue's current sound so arrowing the list lets the user hear each cue. (Enable/disable is
+        // no longer a tickbox here - it's the "(none)" entry in the sound list.)
+        cueList.SelectedIndexChanged += (_, _) =>
+        {
+            RefreshCueActionButtons();
+            RefreshDefaultSoundList();
+            PreviewSelectedCueCurrentSound();
+        };
         RefreshCueActionButtons();
 
         playSelectedCueButton.Click += (_, _) =>
@@ -734,24 +727,26 @@ internal sealed class PreferencesDialog : Form
             }
             var cue = cueRows[idx];
             var variants = CueSounds.Variants(cue.DefaultFileName);
-            if (variants.Count == 0)
-            {
-                defaultSoundLabel.Text = "Choose default soun&d (Alt+D): (no built-in sounds)";
-                defaultSoundList.Enabled = false;
-                return;
-            }
-            defaultSoundLabel.Text = "Choose default soun&d (Alt+D):";
+            defaultSoundLabel.Text = "Choose soun&d (Alt+D):";
             defaultSoundList.Enabled = true;
             currentVariants = variants;
+
+            // Row 0 is always "(none)" = this cue is off. The numbered variants follow, offset by one.
+            defaultSoundList.Items.Add("(none)");
             foreach (var v in variants) defaultSoundList.Items.Add(CueSounds.VariantLabel(cue.DefaultFileName, v));
 
-            var chosen = CueSounds.ResolveDefaultFileName(cue.CueId, cue.DefaultFileName, AppConfig.Load());
+            // (none) selected only when the cue is off; otherwise the chosen variant (default = first).
             var sel = 0;
-            if (chosen is not null)
+            if (cue.LoadEnabled() && variants.Count > 0)
             {
-                for (var i = 0; i < variants.Count; i++)
+                sel = 1;
+                var chosen = CueSounds.ResolveDefaultFileName(cue.CueId, cue.DefaultFileName, AppConfig.Load());
+                if (chosen is not null)
                 {
-                    if (variants[i].Equals(chosen, StringComparison.OrdinalIgnoreCase)) { sel = i; break; }
+                    for (var i = 0; i < variants.Count; i++)
+                    {
+                        if (variants[i].Equals(chosen, StringComparison.OrdinalIgnoreCase)) { sel = i + 1; break; }
+                    }
                 }
             }
             defaultSoundList.SelectedIndex = sel;
@@ -759,28 +754,59 @@ internal sealed class PreferencesDialog : Form
         finally { suppressDefaultSoundPreview = false; }
     }
 
-    /// <summary>The user arrowed onto / picked a default-sound variant: persist it machine-wide for
-    /// the selected cue and preview it. The running app re-reads the choice when this dialog closes
-    /// (MainForm.ReloadAllCueSounds), so the cue plays the new default from then on.</summary>
+    /// <summary>The user arrowed onto / picked an entry in the sound list. "(none)" (row 0) turns the
+    /// cue off; any other row turns it on and records that variant as the cue's sound, then previews
+    /// it. The running app re-reads it all when the dialog closes (MainForm.ReloadAllCueSounds).</summary>
     private void OnDefaultSoundChosen()
     {
-        // Only a genuine user arrow/click should persist + preview; a programmatic re-fill must not.
+        // A programmatic re-fill must not persist or preview.
         if (suppressDefaultSoundPreview) return;
         var idx = cueList.SelectedIndex;
         var vi = defaultSoundList.SelectedIndex;
-        if (idx < 0 || idx >= cueRows.Length || vi < 0 || vi >= currentVariants.Count) return;
+        if (idx < 0 || idx >= cueRows.Length || vi < 0) return;
         var cue = cueRows[idx];
-        var chosenFile = currentVariants[vi];
 
+        if (vi == 0)
+        {
+            // "(none)" — turn the cue off. No sound to preview.
+            cue.SaveEnabled(false);
+            if (cue.IsProfileSetting) ChangedAnyProfileSetting = true;
+            RefreshCueActionButtons();
+            return;
+        }
+
+        var variantIndex = vi - 1; // account for the (none) row
+        if (variantIndex < 0 || variantIndex >= currentVariants.Count) return;
+        var chosenFile = currentVariants[variantIndex];
+
+        cue.SaveEnabled(true);
+        if (cue.IsProfileSetting) ChangedAnyProfileSetting = true;
         var cfg = AppConfig.Load();
         cfg.DefaultCueSounds[cue.CueId] = chosenFile;
         TrySaveConfig(cfg);
-        RefreshCueActionButtons(); // the Play button now previews this same default
+        RefreshCueActionButtons();
 
         try
         {
             var path = Path.Combine(AppConfig.SoundsDirectory, chosenFile);
             if (File.Exists(path)) new CuePlayer(path).Play();
+        }
+        catch { /* a preview must never disturb the dialog */ }
+    }
+
+    /// <summary>Preview the currently-selected cue's current sound (custom or chosen default), so
+    /// arrowing the cue list lets the user hear each cue. A cue set to "(none)" plays nothing.</summary>
+    private void PreviewSelectedCueCurrentSound()
+    {
+        if (suppressDefaultSoundPreview) return;
+        var idx = cueList.SelectedIndex;
+        if (idx < 0 || idx >= cueRows.Length) return;
+        var cue = cueRows[idx];
+        if (!cue.LoadEnabled()) return; // "(none)" — silent
+        try
+        {
+            var path = ResolveCueFilePath(cue);
+            if (path is not null) new CuePlayer(path).Play();
         }
         catch { /* a preview must never disturb the dialog */ }
     }
