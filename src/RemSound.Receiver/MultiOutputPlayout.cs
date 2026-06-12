@@ -336,9 +336,10 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         private const double DriftRatioMin = 0.95;
         private const double DriftRatioMax = 1.05;
         // Feedback: steer the buffer toward a cushion. Pure rate-matching holds the buffer wherever
-        // the start-up transient left it (~50 ms and climbing in the field) — SessionPlayout gets
-        // away without this because it ARMS at target and has a click-trim net; the device buffer
-        // has neither, so it needs an explicit depth term. The correction is tiny (≤0.3 % rate,
+        // the start-up transient left it (~50 ms and climbing in the field). SessionPlayout was
+        // originally thought to get away without this (it ARMS at target and has a click-trim net),
+        // but the same standing-bloat showed up on its ring over a long WASAPI session, so as of
+        // 2026-06-12 it carries the identical depth term. The correction is tiny (≤0.3 % rate,
         // spread over seconds): a sub-audible pitch nudge, never a click.
         //
         // The cushion is sized to the CARD, not hardcoded. A device can't hold a buffer below one

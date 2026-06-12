@@ -199,6 +199,20 @@ internal sealed class SessionPlayout : IDisposable
     // Low-pass filter time constant for the buffer-level-error display in the diag log.
     // Doesn't affect any correction logic in Phase 4 — purely informational.
     private const double DriftFilterTimeConstantSec = 2.0;
+    // === Depth feedback (2026-06-12) — drain a standing buffer back to target ===
+    // The clock-ratio resampler above is a pure rate-MATCHER: it equalises long-run sender-write
+    // and receiver-output rates, which holds the ring at whatever depth it currently sits. On the
+    // WASAPI render path (a Stopwatch-paced producer loop drains the ring, not a hardware clock) a
+    // stall-then-burst can leave the ring standing ~100 ms deep and the rate-matcher then freezes
+    // it there for the whole session — receive latency ratchets up overnight and only ever resets
+    // on a reconnect or a glitchy click-trim. Andre's 2026-06-11 overnight WASAPI log showed
+    // exactly this sawtooth. The per-device WASAPI corrector (MultiOutputPlayout.DriftResampling-
+    // Provider) already carries this depth term; this ports the same term onto the per-sender ring.
+    // depthError > 0 (too deep) biases the rate UP so the resampler pulls more input per output and
+    // drains faster; clamped to ±MaxDepthBias and spread over DepthCorrectionSec → a sub-audible
+    // ≤0.3 % pitch nudge, never a click.
+    private const double DepthCorrectionSec = 15.0;
+    private const double MaxDepthBias = 0.003;
     // Number of stereo frames each side of a splice point that get blended when a drop or
     // repeat fires. Cosine crossfade over this window smooths the discontinuity into an audio
     // DriftDropFramesTotal / DriftRepeatFramesTotal accessors removed 2026-05-23 alongside
@@ -541,7 +555,7 @@ internal sealed class SessionPlayout : IDisposable
         }
         prevDriftSampleTicks = nowTicks;
 
-        UpdateDriftResamplerRateIfDue(nowTicks);
+        UpdateDriftResamplerRateIfDue(nowTicks, targetLatencyMs);
 
         // Read through the resampler and apply concealment on full underruns.
         ReadThroughResampler(output, outFrames);
@@ -554,7 +568,7 @@ internal sealed class SessionPlayout : IDisposable
     /// into the live ratio, and push it to the resampler. Called from the audio thread
     /// on every ReadFloats. No-op if the window hasn't elapsed yet.
     /// </summary>
-    private void UpdateDriftResamplerRateIfDue(long nowTicks)
+    private void UpdateDriftResamplerRateIfDue(long nowTicks, int targetLatencyMs)
     {
         if (resamplerWindowStartTicks == 0)
         {
@@ -577,8 +591,10 @@ internal sealed class SessionPlayout : IDisposable
 
         if (bytesOutputInWindow > 0 && bytesWrittenInWindow > 0)
         {
-            // ratio = bytes_sender_produced / bytes_receiver_consumed over the window.
-            // Above 1.0 = sender clock faster than receiver. Below 1.0 = sender slower.
+            // Feed-forward: ratio = bytes_sender_produced / bytes_receiver_consumed over the
+            // window. Above 1.0 = sender clock faster than receiver; below = slower. This is the
+            // true crystal difference, independent of the resampler rate we apply, so it cleanly
+            // cancels steady-state drift and the depth feedback below doesn't have to fight it.
             // For Ed's hardware (sender slower than receiver) this should settle ~0.9998.
             var measuredRatio = (double)bytesWrittenInWindow / bytesOutputInWindow;
             if (measuredRatio >= DriftRatioMin && measuredRatio <= DriftRatioMax)
@@ -594,16 +610,30 @@ internal sealed class SessionPlayout : IDisposable
                     // Subsequent — smooth so a one-window outlier doesn't yank the rate.
                     smoothedRateRatio = (1.0 - DriftRatioSmoothingNew) * smoothedRateRatio + DriftRatioSmoothingNew * measuredRatio;
                 }
-                // Push to the resampler. SetRates(input_rate, output_rate). Input rate
-                // = measured sender rate; output rate = the receiver's nominal MixSampleRate.
-                // The resampler now stretches or compresses incoming audio by the ppm
-                // necessary to keep the playout ring buffer level constant.
-                driftResampler.SetRates(MixSampleRate * smoothedRateRatio, MixSampleRate);
-                Interlocked.Increment(ref resamplerUpdatesTotal);
             }
             // If the measured ratio is outside the sanity window (>5 % off), reject it.
             // That happens transiently during session arming, slider raises, or sender
             // start-of-stream bursts. Keep the previous ratio rather than yanking.
+        }
+
+        // Feedback: nudge the ring back toward the user's target depth. Without this the
+        // resampler is a pure rate-matcher and a standing (bloated) buffer never drains — see the
+        // DepthCorrectionSec / MaxDepthBias note above. depthError > 0 (too deep) biases the
+        // applied rate UP so the resampler pulls more input per output and drains the buffer
+        // faster; < 0 biases down to refill. Clamped + spread over DepthCorrectionSec so it's a
+        // gentle, inaudible pitch trim, not a per-sample discontinuity. No-op until the
+        // feed-forward has a valid measurement (smoothedRateRatio is meaningless before then).
+        if (resamplerActivelyTracking)
+        {
+            var depthFrames = playout.BufferedBytes / MixBytesPerFrame;
+            var targetFrames = targetLatencyMs * MixSampleRate / 1000;
+            var depthError = depthFrames - targetFrames;
+            var depthCorrection = Math.Clamp(
+                depthError / (DepthCorrectionSec * MixSampleRate),
+                -MaxDepthBias, MaxDepthBias);
+            var appliedRatio = smoothedRateRatio + depthCorrection;
+            driftResampler.SetRates(MixSampleRate * appliedRatio, MixSampleRate);
+            Interlocked.Increment(ref resamplerUpdatesTotal);
         }
 
         // Anchor the next window.

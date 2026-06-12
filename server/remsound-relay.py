@@ -362,6 +362,12 @@ class Relay:
             return
         now = time.monotonic()
         entry = self.v2_clients.get(client_id)
+        # Capture whether this packet came from the endpoint this client_id is CURRENTLY registered
+        # at, BEFORE the NAT-rebind update below overwrites entry.addr. Used to reject spoofed
+        # control packets: the roster broadcast ships every member's client_id to all members, so on
+        # an internet-facing relay anyone who joins learns the others' ids and could otherwise forge
+        # a BYE to evict them. A genuine BYE always comes from the client's own registered endpoint.
+        from_registered_endpoint = entry is not None and entry.addr == addr
         if entry is None:
             # Admit attempt.
             if len(self.v2_clients) >= self.max_clients:
@@ -398,6 +404,14 @@ class Relay:
                 self.v2_roster_dirty = True
             return
         if pkt_type == TYPE_LOBBY_BYE:
+            # Only the endpoint a client is registered at may say goodbye for it — otherwise a
+            # forged BYE bearing a known client_id (learned from the roster) could evict any peer.
+            if not from_registered_endpoint:
+                self.log.warning(
+                    "event=bye_rejected reason=endpoint_mismatch client_id=%s from=%s",
+                    client_id, _fmt_addr(addr),
+                )
+                return
             self.v2_clients.pop(client_id, None)
             self.log.info(
                 "event=client_left client_id=%s addr=%s reason=bye",
@@ -526,16 +540,28 @@ def main() -> int:
                 ready, _, _ = select.select([sock], [], [], SOCKET_POLL_TIMEOUT_SECONDS)
             except InterruptedError:
                 continue
+            except OSError as e:
+                # select() itself failed (e.g. a transient resource-pressure error on a long-
+                # running, low-RAM host). Log and pause briefly rather than spin or exit.
+                log.warning("event=select_failed err=%s", e)
+                time.sleep(0.1)
+                continue
             now = time.monotonic()
-            if ready:
-                try:
+            # Per-iteration work, fully guarded. A relay that must stay up for DAYS — and that is
+            # reachable from the open internet — can never let a single packet or a housekeeping
+            # tick crash the whole process: that would drop EVERY connected client and force a ~5s
+            # systemd restart. Anything unexpected is logged (with a traceback) and we carry on.
+            try:
+                if ready:
                     data, addr = sock.recvfrom(RECV_BUFFER_BYTES)
-                except OSError as e:
-                    log.warning("event=recv_failed err=%s", e)
-                    continue
-                relay.handle_packet(data, addr)
-            relay.tick(now)
-            relay.maybe_log_stats(now)
+                    relay.handle_packet(data, addr)
+                relay.tick(now)
+                relay.maybe_log_stats(now)
+            except OSError as e:
+                # recvfrom, or a sendto that escaped its own guard — transient; keep serving.
+                log.warning("event=io_error err=%s", e)
+            except Exception:
+                log.exception("event=loop_error — recovered, continuing")
     finally:
         log.info("event=shutdown")
         sock.close()

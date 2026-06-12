@@ -20,6 +20,21 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v3.9
+
+        Listening for a long time no longer slowly builds up
+        delay. On the standard (non-ASIO) path the incoming audio
+        buffer used to creep deeper after a network hiccup and
+        never settle back, so a connection that started tight
+        could feel laggy by morning. It now eases itself back to
+        your chosen latency, gently and silently, so a long
+        session stays as tight as it began.
+
+        RemSound's log now also records whether your microphone
+        audio is actually leaving the machine, alongside how loud
+        it is — so a "my mic isn't getting through" report can be
+        pinned down from the log instead of guessed at.
+
         RemSound v3.8
 
         You can now start a brand-new profile at any time. A

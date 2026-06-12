@@ -68,6 +68,20 @@ public sealed class AppConfig
     /// already running quietly". Default false.</summary>
     public bool StartMinimised { get; set; }
 
+    /// <summary>If true (the default), RemSound plays the startup cue once, right after this
+    /// copy wins the single-instance takeover and before the profile loads. Machine-wide (not
+    /// per-<see cref="Profile"/>) because it fires before any profile — and its per-profile
+    /// custom-cue dictionary — has been chosen. Like the connect/disconnect cues it's audible
+    /// feedback, on by default; the user unticks "Startup sound" in Preferences to silence it.
+    /// (The usual "auto-options default off" rule is about data-persistence toggles, not cues.)</summary>
+    public bool EnableStartupCue { get; set; } = true;
+
+    /// <summary>Optional custom WAV path for the startup cue. Null = use the bundled
+    /// <c>sounds\start up.wav</c>. Machine-wide for the same reason as
+    /// <see cref="EnableStartupCue"/>: the cue plays before any profile (and the per-profile
+    /// custom-cue paths) is loaded, so it can't live on <see cref="Profile"/>.</summary>
+    public string? StartupCueCustomPath { get; set; }
+
     /// <summary>If true, RemSound writes a tab-separated diagnostic log to
     /// <c>&lt;exe&gt;\logs\</c>. Lives here (not in <see cref="Profile"/>) because logging
     /// is a debugging affordance for the installation, not a user-facing audio preference —

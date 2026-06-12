@@ -188,6 +188,15 @@ public sealed class AudioSender : IDisposable
         return a > b ? a : b;
     }
 
+    /// <summary>Total audio frames both lanes actually handed to the wire since the last call
+    /// (resets on read). Pairs with <see cref="TakeMaxSenderPreEncodePeak"/> on the diag line:
+    /// capPeak proves real signal reached the encoder; this proves frames left the socket. A
+    /// high capPeak with zero frames sent localises a silence to the encode/encrypt stage — the
+    /// missing measurement behind the "mic only works in ASIO" report. In WasapiOnly mode only
+    /// defaultLane fires, so this number IS the WASAPI mic lane's output.</summary>
+    public long TakeSenderAudioFramesSent() =>
+        defaultLane.TakeAudioFramesSent() + asioLane.TakeAudioFramesSent();
+
     // Cross-buffer (boundary) and within-buffer (content) split — see AudioStepProbe for the
     // diagnostic distinction. Used by the per-second diag logger to emit two extra columns so
     // an offline log inspection can tell a real audio transient apart from a buffer-boundary

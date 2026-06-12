@@ -668,12 +668,24 @@ internal sealed class PlayoutEngine : IWaveProvider
         foreach (var session in snap)
         {
             var matchesOwnLane = session.Route == route;
-            // Orphan = session tagged for the OTHER non-Mixed lane, and that lane has no
-            // active output. (Mixed-tagged sessions never appear in BothIndependent.)
+            // Orphan = session tagged for the OTHER non-Mixed lane whose lane has no active
+            // output — fall it through onto whichever lane IS being read so it stays audible
+            // (2026-05-15).
             var isOrphanFromOtherLane = !matchesOwnLane
                 && session.Route != RenderRoute.Mixed
                 && !otherLaneActive;
-            if (!matchesOwnLane && !isOrphanFromOtherLane) continue;
+            // A Mixed (plain) session belongs to NO lane — it's what a classic WASAPI-only sender
+            // announces. In BothIndependent mode the lane-filtered reads would otherwise SKIP it
+            // (it matches neither lane, and the orphan clause above excludes Mixed), so a plain
+            // stream sent to an ASIO-mode receiver was decoded but never rendered — heard as total
+            // silence while its session ring filled and overflowed. 2026-06-12 fix: render a Mixed
+            // session on exactly ONE active lane — the WASAPI lane by preference, falling back to
+            // the ASIO lane only when no WASAPI output is active — so a plain stream always plays,
+            // in any mode, honouring the "every send/receive combination interoperates" contract.
+            // (A read on route==WasapiLane implies that lane is active, so this never double-plays.)
+            var playMixedHere = session.Route == RenderRoute.Mixed
+                && (route == RenderRoute.WasapiLane || !wasapiLaneActive);
+            if (!matchesOwnLane && !isOrphanFromOtherLane && !playMixedHere) continue;
             aggregateBufferedBytes += session.BufferedBytes;
             var produced = session.ReadFloats(sessionBuf.AsSpan(0, outFloats), outFrames, routeTargetMs, routeMaxMs, smoothness);
             if (produced <= 0) continue;

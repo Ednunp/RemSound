@@ -3626,7 +3626,15 @@ public sealed class MainForm : Form
         if (!connected) return;
         var all = allSendEndpoints;
 
-        // Endpoints the heartbeat currently considers long-dead, keyed by "ip:port".
+        // Decide which selected peers to actually TRANSMIT audio to. We arm only peers that are
+        // genuinely reachable — anyone whose heartbeat has been Unreachable for longer than
+        // AudioPruneUnreachableAfter is dropped from the send set, so RemSound never streams audio
+        // into a dead address. The heartbeat keeps pinging EVERY selected peer regardless (it runs
+        // off SetTrackedPeers, not this set), so the instant a peer comes back it is re-armed.
+        //
+        // Carve-out: a peer we are actively RECEIVING audio from stays armed even if its heartbeat
+        // reads Unreachable — that covers an asymmetric path where audio flows but the heartbeat
+        // round-trip doesn't, so a working stream is never cut.
         HashSet<string>? dead = null;
         if (all.Length > 0 && heartbeatService is { } hb)
         {
@@ -3634,7 +3642,8 @@ public sealed class MainForm : Form
             {
                 if (ph.State == PeerHealthState.Unreachable
                     && ph.AgeOfLastPong is { } age
-                    && age > AudioPruneUnreachableAfter)
+                    && age > AudioPruneUnreachableAfter
+                    && !receiver.IsAudioFlowingFrom(ph.AudioEndpoint.Address, TimeSpan.FromSeconds(3)))
                 {
                     (dead ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase))
                         .Add($"{ph.AudioEndpoint.Address}:{ph.AudioEndpoint.Port}");
@@ -3646,17 +3655,24 @@ public sealed class MainForm : Form
             ? all
             : all.Where(ep => !dead.Contains($"{ep.Address}:{ep.Port}")).ToArray();
 
-        // Safety net: never silence EVERY peer through pruning. If the whole set looks dead (a
-        // total network drop), keep sending to all — the wasted SendTo per dead endpoint is
-        // cheaper than masking a global outage or missing the recovery.
-        if (armed.Length == 0) armed = all;
+        // There used to be a "never silence EVERY peer" safety net here that re-armed the whole
+        // set when pruning would leave nobody. Removed 2026-06-12: when NO peer is reachable we
+        // must send NOTHING, not blast audio at every dead address. Otherwise someone connected to
+        // a single peer that goes offline keeps uploading the full stream into the void — exactly
+        // a-singer's issue #8 ("Not connected to any peer ... sending 51.1 kB/s ... sent 2116.5 MB"
+        // after the only receiver was switched off hours earlier). The heartbeat still probes all
+        // peers, so the moment one answers again it is re-armed and audio resumes on its own.
 
         var signature = string.Join("|", armed.Select(ep => $"{ep.Address}:{ep.Port}").OrderBy(s => s, StringComparer.OrdinalIgnoreCase));
         if (signature == activeAudioReceiverSignature) return;
         activeAudioReceiverSignature = signature;
         sender.SetReceivers(armed);
         var pruned = all.Length - armed.Length;
-        if (pruned > 0)
+        if (armed.Length == 0)
+        {
+            logFile.Event($"audio receivers updated: 0 active — no reachable peer, not sending (heartbeat still probing {all.Length})");
+        }
+        else if (pruned > 0)
         {
             logFile.Event($"audio receivers updated: {armed.Length} active, {pruned} pruned (unreachable >{AudioPruneUnreachableAfter.TotalSeconds:0}s); heartbeat still probing all");
         }
@@ -5443,6 +5459,7 @@ public sealed class MainForm : Form
                 var stepRawCapWB = sender.TakeMaxSenderRawCaptureStepWithinBuffer();
                 var stepRawCap = stepRawCapXB > stepRawCapWB ? stepRawCapXB : stepRawCapWB;
                 var capPeak = sender.TakeMaxSenderPreEncodePeak();
+                var sndAudFr = sender.TakeSenderAudioFramesSent();
                 var clippedNow = sender.ClippedSampleCount;
                 var clippedDelta = clippedNow - prevDiagClippedSamples; prevDiagClippedSamples = clippedNow;
                 var stepPostDecXB = receiver.TakeMaxPostDecodeStepCrossBuffer();
@@ -5478,7 +5495,7 @@ public sealed class MainForm : Form
                     $"trimB={trimBytes} trimN={trimFires} trimΔ={trimDelta} drainB={drainBytes} ovfB={ovfBytes} pktRej={pktRej} " +
                     $"concealΔ={concealDelta} shortReadΔ={shortReadDelta} " +
                     $"filtErr={filteredErrorFrames:0.0}f " +
-                    $"capPeak={capPeak:0.000} stepRawCap={stepRawCap:0.000} stepPreEnc={stepPreEnc:0.000} stepPreEncWas={stepPreEncWas:0.000} stepPreEncAsi={stepPreEncAsi:0.000} stepPostDec={stepPostDec:0.000} stepPostRing={stepPostRing:0.000} stepPostRsm={stepPostRsm:0.000} " +
+                    $"capPeak={capPeak:0.000} sndAudFrΔ={sndAudFr} stepRawCap={stepRawCap:0.000} stepPreEnc={stepPreEnc:0.000} stepPreEncWas={stepPreEncWas:0.000} stepPreEncAsi={stepPreEncAsi:0.000} stepPostDec={stepPostDec:0.000} stepPostRing={stepPostRing:0.000} stepPostRsm={stepPostRsm:0.000} " +
                     $"stepRawCapXB={stepRawCapXB:0.000} stepRawCapWB={stepRawCapWB:0.000} " +
                     $"stepPreEncWasXB={stepPreEncWasXB:0.000} stepPreEncWasWB={stepPreEncWasWB:0.000} " +
                     $"stepPreEncAsiXB={stepPreEncAsiXB:0.000} stepPreEncAsiWB={stepPreEncAsiWB:0.000} " +
@@ -5539,8 +5556,15 @@ public sealed class MainForm : Form
                 var selfMeter = processSelfMeter.Take();
                 var captureMs = sender.TakeCaptureWorkMs();
                 var sendMs = sender.TakeSendWorkMs();
+                // capPeak = loudest sample reaching the encoder; sndAudFrΔ = audio frames that
+                // actually left the socket this second. Together they split "mic captured but
+                // nothing sent" (drop at encode/encrypt) from "mic captured and sent" — the
+                // measurement the "mic only works in ASIO" report needs, now on the talker side too.
+                var capPeak = sender.TakeMaxSenderPreEncodePeak();
+                var sndAudFr = sender.TakeSenderAudioFramesSent();
                 logFile.Event(
                     $"sender-diag sendCbGapMs={sendCbGapMs} emitMs={emitMs} sndCallMs={sendCallMs} " +
+                    $"capPeak={capPeak:0.000} sndAudFrΔ={sndAudFr} " +
                     $"stepPreEnc={stepPreEnc:0.000} stepPreEncWas={stepPreEncWas:0.000} stepPreEncAsi={stepPreEncAsi:0.000} stepRawCap={stepRawCap:0.000} " +
                     $"stepRawCapXB={stepRawCapXB:0.000} stepRawCapWB={stepRawCapWB:0.000} " +
                     $"stepPreEncWasXB={stepPreEncWasXB:0.000} stepPreEncWasWB={stepPreEncWasWB:0.000} " +
@@ -6430,6 +6454,10 @@ public sealed class MainForm : Form
         public const string ProfileSwitch = "profile-switch";
         public const string ProfileMenuOpen = "profile-menu-open";
         public const string Update = "update";
+        // Startup cue is special: it plays from Program.cs before any profile loads, so its
+        // enable flag and custom-path live machine-wide in AppConfig, not the per-profile
+        // settings store. This id is still used by the Preferences cue list for display/keying.
+        public const string Startup = "startup";
     }
 
     /// <summary>Load one cue sound. Resolution order:

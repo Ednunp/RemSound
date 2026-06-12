@@ -14,7 +14,7 @@
          tag_name on the latest GitHub release; bump it on every public release. The
          AssemblyVersion / FileVersion default to this value, and Assembly.GetName().Version
          is what the About dialog and the updater both read. -->
-    <Version>3.8.0</Version>
+    <Version>3.9.1</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -101,6 +101,13 @@
          supplied; absent file is ignored at load time. Per-profile mute + custom override in Prefs. -->
     <Content Include="..\..\sounds\profile menu open.wav" Condition="Exists('..\..\sounds\profile menu open.wav')">
       <Link>sounds\profile menu open.wav</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!-- start up.wav (v3.9): plays once when RemSound starts, right after this copy wins the
+         single-instance takeover and before the profile loads. Machine-wide enable + custom
+         override (AppConfig), since it fires before any profile is chosen. -->
+    <Content Include="..\..\sounds\start up.wav" Condition="Exists('..\..\sounds\start up.wav')">
+      <Link>sounds\start up.wav</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <!-- User manual. F1 anywhere in the app opens this via the user's default browser

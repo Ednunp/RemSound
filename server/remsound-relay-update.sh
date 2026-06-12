@@ -88,41 +88,46 @@ read_current_version() {
     printf '%s' "${TAG_PREFIX}v0"
 }
 
-# Parse a tag like "server-v2.10" into a comparable numeric form.
-# Outputs MAJOR.MINOR; both default to 0 if the tag is unparseable.
-tag_to_version() {
-    local tag="$1"
-    # strip the prefix
-    tag="${tag#"$TAG_PREFIX"}"
-    # strip a leading "v" if present
-    tag="${tag#v}"
-    local major minor
-    major="${tag%%.*}"
-    minor="${tag#*.}"
-    # if there's no dot, minor==major. Treat as MAJOR.0.
-    if [[ "$minor" == "$tag" ]]; then
-        minor="0"
-    fi
-    # keep only digits — survive things like "v2.0-rc1" by ignoring the suffix.
-    major="${major//[^0-9]/}"
-    minor="${minor//[^0-9]/}"
-    : "${major:=0}"
-    : "${minor:=0}"
-    printf '%s.%s' "$major" "$minor"
-}
+# Compare two release tags by their dotted numeric version, parsed the SAME way as the Python
+# release selector in get_latest_release() — split on every '.', keep the digits of each
+# component, then pad to equal length before comparing. Delegated to python3 (already a hard
+# dependency of this script) so the upgrade GATE and the release SELECTOR can never disagree, and
+# so multi-component tags (server-v2.3.1), pre-release suffixes (server-v2.3-rc1) and missing
+# components are all handled correctly.
+#
+# This replaces a bash-only parser that collapsed everything after the FIRST dot into the "minor"
+# field and then stripped the dot — so server-v2.3.1 read as "2.31" and was wrongly judged NEWER
+# than server-v2.3. The moment any patch-style tag existed, the hourly update check would STOP and
+# RESTART the live relay (a real multi-second outage for every connected client), and it could even
+# "upgrade" to an OLDER build (server-v2.9.1 -> "2.91" > server-v2.10 -> "2.10"). 2026-06-12.
 
-# Returns 0 if $1 > $2 (i.e. left tag is newer), 1 otherwise.
+# Returns 0 if $1 is a strictly newer version than $2, 1 otherwise (equal counts as NOT newer).
 tag_newer_than() {
-    local left right lv rv
-    left="$(tag_to_version "$1")"
-    right="$(tag_to_version "$2")"
-    # Numeric compare major then minor.
-    lv="${left%.*}"; rv="${right%.*}"
-    if (( lv > rv )); then return 0; fi
-    if (( lv < rv )); then return 1; fi
-    lv="${left#*.}"; rv="${right#*.}"
-    if (( lv > rv )); then return 0; fi
-    return 1
+    TAG_PREFIX="$TAG_PREFIX" python3 - "$1" "$2" <<'PY'
+import os, sys
+
+prefix = os.environ.get("TAG_PREFIX", "server-")
+
+def parse(tag):
+    if tag.startswith(prefix):
+        tag = tag[len(prefix):]
+    if tag.startswith("v"):
+        tag = tag[1:]
+    out = []
+    for part in tag.split("."):
+        digits = "".join(c for c in part if c.isdigit())
+        out.append(int(digits) if digits else 0)
+    return out
+
+left = parse(sys.argv[1])
+right = parse(sys.argv[2])
+# Pad to equal length so 2.3 and 2.3.0 compare EQUAL — a shorter tuple must not read as older,
+# or a re-tagged same-version release would trigger a needless stop/restart of the relay.
+n = max(len(left), len(right))
+left += [0] * (n - len(left))
+right += [0] * (n - len(right))
+sys.exit(0 if left > right else 1)
+PY
 }
 
 # -------- GitHub releases query ---------------------------------------------

@@ -83,6 +83,17 @@ internal sealed class SenderLane
     private float preEncodePeak;
     public float TakeMaxPreEncodePeak() { var p = preEncodePeak; preEncodePeak = 0f; return p; }
 
+    // Count of audio frames this lane actually handed to the wire (encode AND encrypt both
+    // succeeded → SendAudio / SendPcmPart called) since the last drain. Pairs with preEncodePeak:
+    // capPeak proves real signal reached the encoder INPUT, but every post-encode early-return —
+    // the Opus encoder returning len<=0, no password so cryptoGcm is null, or the accumulator
+    // never completing a frame — is INVISIBLE to it. This counts what actually left the machine,
+    // so a log can finally tell "mic captured but nothing sent" (a drop at encode/encrypt) from
+    // "mic captured and sent" (the silence is downstream). Added 2026-06-12 for Andre's
+    // WASAPI-mic-only-works-in-ASIO investigation. Reset on read, like the peak.
+    private long audioFramesSent;
+    public long TakeAudioFramesSent() => Interlocked.Exchange(ref audioFramesSent, 0);
+
     // Which render route this lane announces in its format packets. The receiver reads the
     // Lane byte on the wire and tags the matching SessionPlayout, which makes PlayoutEngine
     // route the lane's audio to the corresponding per-route IWaveProvider surface (lane
@@ -297,6 +308,7 @@ internal sealed class SenderLane
         var maxPart = RemPacket.MaxAudioPayloadBytes;
         var totalParts = (byte)((ctLen + maxPart - 1) / maxPart);
         pcmFrameId++;
+        Interlocked.Increment(ref audioFramesSent);
         for (byte part = 0; part < totalParts; part++)
         {
             var offset = part * maxPart;
@@ -324,6 +336,7 @@ internal sealed class SenderLane
         EnsureCrypto();
         if (cryptoGcm is null) return; // no password yet → never send audio in the clear
         var ctLen = RemSoundCrypto.EncryptInto(cryptoGcm, opusBytes, cipherScratch);
+        Interlocked.Increment(ref audioFramesSent);
         SendAudio(cipherScratch.AsSpan(0, ctLen));
     }
 

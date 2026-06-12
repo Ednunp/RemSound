@@ -77,36 +77,68 @@ internal sealed class PreferencesDialog : Form
         Padding = new Padding(6, 2, 6, 2),
     };
 
-    /// <summary>Describes one cue. <see cref="DisplayName"/> ends up in the listbox row;
-    /// <see cref="CueId"/> is the well-known key from <see cref="MainForm.CueId"/>; the
-    /// LoadEnabled / SaveEnabled pair routes the checkbox state to the right
-    /// <see cref="RemSoundSettingsStore"/> getter/setter so we don't need a hard-coded
-    /// switch on index.</summary>
+    /// <summary>Describes one cue row in the list. <see cref="DisplayName"/> is the listbox
+    /// text; <see cref="CueId"/> is the well-known key from <see cref="MainForm.CueId"/>;
+    /// <see cref="DefaultFileName"/> is the bundled WAV in <c>sounds\</c>. The Load/Save
+    /// delegates close over the right backing store so the handlers don't need to know whether
+    /// a row is per-profile (<see cref="RemSoundSettingsStore"/>) or machine-wide
+    /// (<see cref="AppConfig"/> — the Startup cue, which fires before any profile loads).
+    /// <see cref="IsProfileSetting"/> tells the handlers whether toggling the row should flag
+    /// a pending profile save; machine-wide rows persist immediately and never do.</summary>
     private sealed record CueRowDescriptor(
         string DisplayName,
         string CueId,
-        Func<RemSoundSettingsStore, bool> LoadEnabled,
-        Action<RemSoundSettingsStore, bool> SaveEnabled);
+        string DefaultFileName,
+        bool IsProfileSetting,
+        Func<bool> LoadEnabled,
+        Action<bool> SaveEnabled,
+        Func<string?> LoadCustomPath,
+        Action<string?> SaveCustomPath);
 
-    private static readonly CueRowDescriptor[] CueRows =
-    [
-        new("Connect sound", MainForm.CueId.Connect,
-            s => s.LoadEnableConnectCue(), (s, v) => s.SaveEnableConnectCue(v)),
-        new("Disconnect sound", MainForm.CueId.Disconnect,
-            s => s.LoadEnableDisconnectCue(), (s, v) => s.SaveEnableDisconnectCue(v)),
-        new("Recording start sound", MainForm.CueId.RecordStart,
-            s => s.LoadEnableRecordStartCue(), (s, v) => s.SaveEnableRecordStartCue(v)),
-        new("Recording stop sound", MainForm.CueId.RecordStop,
-            s => s.LoadEnableRecordStopCue(), (s, v) => s.SaveEnableRecordStopCue(v)),
-        new("Profile saved sound", MainForm.CueId.Save,
-            s => s.LoadEnableSaveCue(), (s, v) => s.SaveEnableSaveCue(v)),
-        new("Profile switched sound", MainForm.CueId.ProfileSwitch,
-            s => s.LoadEnableProfileSwitchCue(), (s, v) => s.SaveEnableProfileSwitchCue(v)),
-        new("Profile menu open sound", MainForm.CueId.ProfileMenuOpen,
-            s => s.LoadEnableProfileMenuOpenCue(), (s, v) => s.SaveEnableProfileMenuOpenCue(v)),
-        new("Update sound", MainForm.CueId.Update,
-            s => s.LoadEnableUpdateCue(), (s, v) => s.SaveEnableUpdateCue(v)),
-    ];
+    // Built per-dialog (not static) so the per-profile rows can close over the live `settings`
+    // store while the Startup row closes over machine-wide AppConfig. Order = listbox order.
+    private readonly CueRowDescriptor[] cueRows;
+
+    private static CueRowDescriptor[] BuildCueRows(RemSoundSettingsStore settings)
+    {
+        CueRowDescriptor ProfileRow(string name, string id, string file,
+            Func<RemSoundSettingsStore, bool> load, Action<RemSoundSettingsStore, bool> save) =>
+            new(name, id, file, true,
+                () => load(settings), v => save(settings, v),
+                () => settings.LoadCustomCuePath(id), p => settings.SaveCustomCuePath(id, p));
+
+        return
+        [
+            ProfileRow("Connect sound", MainForm.CueId.Connect, "connect.wav",
+                s => s.LoadEnableConnectCue(), (s, v) => s.SaveEnableConnectCue(v)),
+            ProfileRow("Disconnect sound", MainForm.CueId.Disconnect, "disconnect.wav",
+                s => s.LoadEnableDisconnectCue(), (s, v) => s.SaveEnableDisconnectCue(v)),
+            ProfileRow("Recording start sound", MainForm.CueId.RecordStart, "record start.wav",
+                s => s.LoadEnableRecordStartCue(), (s, v) => s.SaveEnableRecordStartCue(v)),
+            ProfileRow("Recording stop sound", MainForm.CueId.RecordStop, "record stop.wav",
+                s => s.LoadEnableRecordStopCue(), (s, v) => s.SaveEnableRecordStopCue(v)),
+            ProfileRow("Profile saved sound", MainForm.CueId.Save, "save.wav",
+                s => s.LoadEnableSaveCue(), (s, v) => s.SaveEnableSaveCue(v)),
+            ProfileRow("Profile switched sound", MainForm.CueId.ProfileSwitch, "profile.wav",
+                s => s.LoadEnableProfileSwitchCue(), (s, v) => s.SaveEnableProfileSwitchCue(v)),
+            ProfileRow("Profile menu open sound", MainForm.CueId.ProfileMenuOpen, "profile menu open.wav",
+                s => s.LoadEnableProfileMenuOpenCue(), (s, v) => s.SaveEnableProfileMenuOpenCue(v)),
+            ProfileRow("Update sound", MainForm.CueId.Update, "update.wav",
+                s => s.LoadEnableUpdateCue(), (s, v) => s.SaveEnableUpdateCue(v)),
+            // Startup cue — machine-wide (AppConfig), because it plays before a profile is loaded.
+            // Persists immediately on change and never flags a profile save (IsProfileSetting=false).
+            new("Startup sound", MainForm.CueId.Startup, "start up.wav", false,
+                () => AppConfig.Load().EnableStartupCue,
+                v => { var c = AppConfig.Load(); c.EnableStartupCue = v; TrySaveConfig(c); },
+                () => AppConfig.Load().StartupCueCustomPath,
+                p => { var c = AppConfig.Load(); c.StartupCueCustomPath = p; TrySaveConfig(c); }),
+        ];
+    }
+
+    private static void TrySaveConfig(AppConfig cfg)
+    {
+        try { cfg.Save(); } catch { /* harmless — the choice just won't survive a restart */ }
+    }
 
     private readonly AccessibleCheckBox acceptRemoteVolumeBox = new()
     {
@@ -227,6 +259,7 @@ internal sealed class PreferencesDialog : Form
         Action<EventHandler> unsubscribeUpnpStatusChanged)
     {
         this.getUpnpSnapshot = getUpnpSnapshot;
+        cueRows = BuildCueRows(settings);
 
         Text = "Preferences";
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -270,13 +303,13 @@ internal sealed class PreferencesDialog : Form
                 "Profiles folder updated", MessageBoxButtons.OK, MessageBoxIcon.Information);
         };
 
-        // Populate the cue listbox — order matches the CueRows array, and the index of a
-        // selected row maps 1:1 to a CueRowDescriptor. Each row's ticked state is loaded
-        // from the active profile's per-cue enable flag via the descriptor.
+        // Populate the cue listbox — order matches the cueRows array, and the index of a
+        // selected row maps 1:1 to a CueRowDescriptor. Each row's ticked state is loaded via
+        // the descriptor (per-profile cues from the settings store; the Startup cue from AppConfig).
         cueList.Items.Clear();
-        foreach (var c in CueRows)
+        foreach (var c in cueRows)
         {
-            cueList.Items.Add(c.DisplayName, c.LoadEnabled(settings));
+            cueList.Items.Add(c.DisplayName, c.LoadEnabled());
         }
         if (cueList.Items.Count > 0) cueList.SelectedIndex = 0;
         cueList.ItemCheck += (_, e) =>
@@ -284,28 +317,31 @@ internal sealed class PreferencesDialog : Form
             // ItemCheck fires BEFORE the visual state actually flips; e.NewValue is what
             // it's about to become, so the persisted value matches what the user just
             // clicked.
-            if (e.Index < 0 || e.Index >= CueRows.Length) return;
+            if (e.Index < 0 || e.Index >= cueRows.Length) return;
             var nowEnabled = e.NewValue == CheckState.Checked;
-            CueRows[e.Index].SaveEnabled(settings, nowEnabled);
-            ChangedAnyProfileSetting = true;
+            var row = cueRows[e.Index];
+            row.SaveEnabled(nowEnabled);
+            // Machine-wide rows (the Startup cue) persist immediately and aren't part of the
+            // profile, so they must not arm the "save profile?" prompt on the way out.
+            if (row.IsProfileSetting) ChangedAnyProfileSetting = true;
         };
 
         // Selection changes update the two action buttons' labels so they always tell the
         // user which cue they're about to act on. Refreshed eagerly at construction time
         // for the initial selection too.
-        cueList.SelectedIndexChanged += (_, _) => RefreshCueActionButtons(settings);
-        RefreshCueActionButtons(settings);
+        cueList.SelectedIndexChanged += (_, _) => RefreshCueActionButtons();
+        RefreshCueActionButtons();
 
         playSelectedCueButton.Click += (_, _) =>
         {
-            if (cueList.SelectedIndex < 0 || cueList.SelectedIndex >= CueRows.Length) return;
-            OnPlayClicked(CueRows[cueList.SelectedIndex], settings);
+            if (cueList.SelectedIndex < 0 || cueList.SelectedIndex >= cueRows.Length) return;
+            OnPlayClicked(cueRows[cueList.SelectedIndex]);
         };
         browseSelectedCueButton.Click += (_, _) =>
         {
-            if (cueList.SelectedIndex < 0 || cueList.SelectedIndex >= CueRows.Length) return;
-            OnBrowseClicked(browseSelectedCueButton, CueRows[cueList.SelectedIndex], settings);
-            RefreshCueActionButtons(settings);
+            if (cueList.SelectedIndex < 0 || cueList.SelectedIndex >= cueRows.Length) return;
+            OnBrowseClicked(browseSelectedCueButton, cueRows[cueList.SelectedIndex]);
+            RefreshCueActionButtons();
         };
 
         // Right-click "Use default sound" context menu lives on the Browse button. It acts
@@ -315,26 +351,26 @@ internal sealed class PreferencesDialog : Form
         var useDefaultItem = new ToolStripMenuItem("Use default sound");
         useDefaultItem.Click += (_, _) =>
         {
-            if (cueList.SelectedIndex < 0 || cueList.SelectedIndex >= CueRows.Length) return;
-            var cue = CueRows[cueList.SelectedIndex];
-            if (settings.LoadCustomCuePath(cue.CueId) is not null)
+            if (cueList.SelectedIndex < 0 || cueList.SelectedIndex >= cueRows.Length) return;
+            var cue = cueRows[cueList.SelectedIndex];
+            if (cue.LoadCustomPath() is not null)
             {
-                settings.SaveCustomCuePath(cue.CueId, null);
-                ChangedAnyProfileSetting = true;
-                RefreshCueActionButtons(settings);
+                cue.SaveCustomPath(null);
+                if (cue.IsProfileSetting) ChangedAnyProfileSetting = true;
+                RefreshCueActionButtons();
             }
         };
         browseCtx.Opening += (_, _) =>
         {
-            if (cueList.SelectedIndex < 0 || cueList.SelectedIndex >= CueRows.Length)
+            if (cueList.SelectedIndex < 0 || cueList.SelectedIndex >= cueRows.Length)
             {
                 useDefaultItem.Enabled = false;
                 useDefaultItem.Text = "Use default sound";
             }
             else
             {
-                var cue = CueRows[cueList.SelectedIndex];
-                useDefaultItem.Enabled = settings.LoadCustomCuePath(cue.CueId) is not null;
+                var cue = cueRows[cueList.SelectedIndex];
+                useDefaultItem.Enabled = cue.LoadCustomPath() is not null;
                 useDefaultItem.Text = $"Use default {cue.DisplayName.ToLowerInvariant()}";
                 useDefaultItem.AccessibleName = useDefaultItem.Text;
             }
@@ -557,10 +593,10 @@ internal sealed class PreferencesDialog : Form
     /// based on whether a custom path is set). When the selection is empty — e.g. the
     /// listbox briefly clears during a profile reload — both buttons get a generic label
     /// and are disabled so a stray click can't act on a stale index.</summary>
-    private void RefreshCueActionButtons(RemSoundSettingsStore settings)
+    private void RefreshCueActionButtons()
     {
         var idx = cueList.SelectedIndex;
-        if (idx < 0 || idx >= CueRows.Length)
+        if (idx < 0 || idx >= cueRows.Length)
         {
             playSelectedCueButton.Text = "&Play selected sound";
             playSelectedCueButton.AccessibleName = "Play selected sound";
@@ -571,12 +607,12 @@ internal sealed class PreferencesDialog : Form
             return;
         }
 
-        var cue = CueRows[idx];
+        var cue = cueRows[idx];
         playSelectedCueButton.Enabled = true;
         playSelectedCueButton.Text = $"&Play {cue.DisplayName.ToLowerInvariant()}";
         playSelectedCueButton.AccessibleName = $"Play {cue.DisplayName.ToLowerInvariant()}";
 
-        var customPath = settings.LoadCustomCuePath(cue.CueId);
+        var customPath = cue.LoadCustomPath();
         browseSelectedCueButton.Enabled = true;
         if (string.IsNullOrWhiteSpace(customPath))
         {
@@ -599,30 +635,16 @@ internal sealed class PreferencesDialog : Form
     /// preview exactly what the cue would play if it fired now. Reads through the settings
     /// cache so we see whatever the user has changed in this dialog session, including
     /// custom paths not yet persisted to the profile JSON.</summary>
-    private static string? ResolveCueFilePath(CueRowDescriptor cue, RemSoundSettingsStore settings)
+    private static string? ResolveCueFilePath(CueRowDescriptor cue)
     {
-        var customPath = settings.LoadCustomCuePath(cue.CueId);
+        var customPath = cue.LoadCustomPath();
         if (!string.IsNullOrWhiteSpace(customPath) && File.Exists(customPath))
         {
             return customPath;
         }
-        // Default WAV filename is built from the cue ID — same convention as MainForm.
-        // The dictionary kept here makes the mapping explicit and lets us pretty-print
-        // "record start" / "record stop" with the space rather than the cue ID's hyphen.
-        var defaultFileName = cue.CueId switch
-        {
-            MainForm.CueId.Connect => "connect.wav",
-            MainForm.CueId.Disconnect => "disconnect.wav",
-            MainForm.CueId.RecordStart => "record start.wav",
-            MainForm.CueId.RecordStop => "record stop.wav",
-            MainForm.CueId.Save => "save.wav",
-            MainForm.CueId.ProfileSwitch => "profile.wav",
-            MainForm.CueId.ProfileMenuOpen => "profile menu open.wav",
-            MainForm.CueId.Update => "update.wav",
-            _ => null,
-        };
-        if (defaultFileName is null) return null;
-        var defaultPath = Path.Combine(AppConfig.SoundsDirectory, defaultFileName);
+        // Otherwise the bundled default WAV in sounds\ — the filename the descriptor carries
+        // (preserves spaces like "record start.wav" / "start up.wav" verbatim).
+        var defaultPath = Path.Combine(AppConfig.SoundsDirectory, cue.DefaultFileName);
         return File.Exists(defaultPath) ? defaultPath : null;
     }
 
@@ -632,9 +654,9 @@ internal sealed class PreferencesDialog : Form
     /// resolves — e.g. a cue without a default WAV and no custom path — show a small popup
     /// so the user knows why nothing happened, rather than silently doing nothing and
     /// leaving them wondering whether the Play button worked.</summary>
-    private void OnPlayClicked(CueRowDescriptor cue, RemSoundSettingsStore settings)
+    private void OnPlayClicked(CueRowDescriptor cue)
     {
-        var path = ResolveCueFilePath(cue, settings);
+        var path = ResolveCueFilePath(cue);
         if (path is null)
         {
             MessageBox.Show(this,
@@ -665,10 +687,10 @@ internal sealed class PreferencesDialog : Form
     /// replaces the default WAV). Writes through the settings cache, since custom cue paths
     /// are per-profile — clearing here also flips ChangedAnyProfileSetting so the save-prompt
     /// fires on the way out.</summary>
-    private void OnBrowseClicked(Button btn, CueRowDescriptor cue, RemSoundSettingsStore settings)
+    private void OnBrowseClicked(Button btn, CueRowDescriptor cue)
     {
         var soundsFolder = AppConfig.SoundsDirectory;
-        var existing = settings.LoadCustomCuePath(cue.CueId);
+        var existing = cue.LoadCustomPath();
         var initialDir = !string.IsNullOrWhiteSpace(existing) && File.Exists(existing)
             ? Path.GetDirectoryName(existing) ?? soundsFolder
             : soundsFolder;
@@ -691,17 +713,18 @@ internal sealed class PreferencesDialog : Form
         // user on a specific shipped-default file across updates.
         if (pickedFullPath.StartsWith(soundsFolderFullPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
         {
-            settings.SaveCustomCuePath(cue.CueId, null);
+            cue.SaveCustomPath(null);
         }
         else
         {
-            settings.SaveCustomCuePath(cue.CueId, pickedFullPath);
+            cue.SaveCustomPath(pickedFullPath);
         }
-        ChangedAnyProfileSetting = true;
+        // The Startup cue is machine-wide, not part of the profile — don't arm the save prompt.
+        if (cue.IsProfileSetting) ChangedAnyProfileSetting = true;
         // Refresh the visible action-button labels so the "(custom)" tag appears or
         // disappears right away. Belt-and-braces: the caller also refreshes, but doing it
         // here makes the function self-consistent.
-        RefreshCueActionButtons(settings);
+        RefreshCueActionButtons();
     }
 
     /// <summary>Pull the latest UPnP snapshot and update the inline status label. Always

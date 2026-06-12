@@ -89,6 +89,14 @@ internal static class Program
             }
         }
 
+        // We hold the single-instance lock — THIS copy has taken over (any stuck older copy was
+        // force-closed just above). Play the one-shot startup cue here: after the take-over
+        // decision is settled and before the profile picker/load, so if a copy was already
+        // running you only hear it once the NEW process is in charge. The earlier "switch to the
+        // running copy" / "cancel" paths returned before this point, so a copy that bowed out
+        // never plays it. Fire-and-forget WaveOut, so it sounds even when we launch into the tray.
+        PlayStartupCueIfEnabled();
+
         // We hold the single-instance lock. Listen for a later copy asking us to surface, and
         // route that request to whichever main window is open at the time.
         instance.StartActivationListener();
@@ -368,5 +376,26 @@ internal static class Program
             catch { /* leave it if locked — the app reads the per-user copy anyway */ }
         }
         catch { /* never let cue consolidation disturb startup */ }
+    }
+
+    /// <summary>Play the startup cue once if the machine-wide setting is on. Resolves the WAV the
+    /// same way the in-app cues do — a user-set custom path (machine-wide, in <see cref="AppConfig"/>)
+    /// if it exists on disk, otherwise the bundled <c>sounds\start up.wav</c>. Read straight from
+    /// AppConfig because no profile (and therefore no settings store) is loaded yet at this point
+    /// in startup. Best-effort: a cue must never stop RemSound from starting.</summary>
+    private static void PlayStartupCueIfEnabled()
+    {
+        try
+        {
+            var cfg = AppConfig.Load();
+            if (!cfg.EnableStartupCue) return;
+            var custom = cfg.StartupCueCustomPath;
+            var path = !string.IsNullOrWhiteSpace(custom) && File.Exists(custom)
+                ? custom
+                : Path.Combine(AppConfig.SoundsDirectory, "start up.wav");
+            if (!File.Exists(path)) return;
+            new CuePlayer(path).Play();
+        }
+        catch { /* a startup cue must never disturb startup */ }
     }
 }
