@@ -48,7 +48,7 @@ $soundsPath = Join-Path $publishDir 'sounds'
 $wavCount = @(Get-ChildItem -LiteralPath $soundsPath -Filter *.wav -ErrorAction SilentlyContinue).Count
 if ($wavCount -ge 3) { Pass "cue sounds bundled ($wavCount .wav)" } else { Fail "cue sounds missing (found $wavCount) - this is the bug that shipped v3.9 with no sounds" }
 # Cues ship as numbered variants ("connect 1.wav", ...); each required cue needs at least one.
-foreach ($base in @('connect', 'disconnect', 'start up')) {
+foreach ($base in @('connect', 'disconnect', 'start up', 'send on', 'send off', 'recieve on', 'recieve off', 'minimise', 'maximise')) {
     $variants = @(Get-ChildItem -LiteralPath $soundsPath -Filter "$base*.wav" -ErrorAction SilentlyContinue)
     if ($variants.Count -gt 0) { Pass "'$base' cue has $($variants.Count) sound variant(s)" } else { Fail "no sound variant for the '$base' cue" }
 }

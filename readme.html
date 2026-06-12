@@ -919,7 +919,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <h2 id="audio-cues">18. Audio cue sounds</h2>
 
-<p>RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called <strong>cue sounds</strong>. Nine events have a cue:</p>
+<p>RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called <strong>cue sounds</strong>. Fifteen events have a cue:</p>
 
 <table>
 <tr><th>Cue</th><th>Plays when</th></tr>
@@ -932,6 +932,10 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <tr><td><strong>Profile menu open sound</strong></td><td>The Quick profile switch popup opens.</td></tr>
 <tr><td><strong>Update sound</strong></td><td>An update is about to install &mdash; it plays just before RemSound closes to update itself. Handy when updates install silently in the background, so you're not caught off guard when RemSound restarts. Plays whether you ran the update by hand or it installed on its own.</td></tr>
 <tr><td><strong>Startup sound</strong></td><td>RemSound has finished starting up. It plays once at launch, even when RemSound opens straight to the notification area, so you know it's running.</td></tr>
+<tr><td><strong>Send turned on / off sound</strong></td><td>You turn sending your audio on or off &mdash; whether by ticking the <strong>Send my audio</strong> box in the window or by pressing its mute shortcut. There's a separate sound for on and for off.</td></tr>
+<tr><td><strong>Receive turned on / off sound</strong></td><td>You turn receiving audio on or off &mdash; from the <strong>Receive audio</strong> box or its mute shortcut. Again, a separate sound for on and for off.</td></tr>
+<tr><td><strong>Minimise (hide) sound</strong></td><td>RemSound's window minimises to the notification area (hides).</td></tr>
+<tr><td><strong>Restore (show) sound</strong></td><td>RemSound's window is brought back from the notification area (shows).</td></tr>
 </table>
 
 <p>All of these cues play through your default Windows sound output, which is separate from the audio RemSound is sending or receiving. They don't appear in a normal recording. (The exception: if your sending side is capturing the very output device the cues play through, then they get captured along with everything else from that device.)</p>

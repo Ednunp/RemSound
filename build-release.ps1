@@ -35,6 +35,15 @@ $distDir = Join-Path $repo 'dist'
 $zipPath = Join-Path $distDir "RemSound-$Tag.zip"
 $staging = Join-Path ([System.IO.Path]::GetTempPath()) ("remsound-release-" + [guid]::NewGuid().ToString('N'))
 
+# 0a. SoundForge drops a .sfk peak file next to every .wav it opens. They're byproducts that must
+#     never ship (the build only bundles *.wav, so they wouldn't anyway) - clear them from the
+#     source sounds\ folder so they don't accumulate and clutter the working tree.
+$sfk = @(Get-ChildItem -LiteralPath (Join-Path $repo 'sounds') -Filter '*.sfk' -ErrorAction SilentlyContinue)
+if ($sfk.Count -gt 0) {
+    Write-Host "Removing $($sfk.Count) SoundForge .sfk byproduct(s) from sounds\..." -ForegroundColor Cyan
+    $sfk | Remove-Item -Force
+}
+
 # 0. Keep the GitHub-facing MANUAL.md in sync with the bundled readme.html.
 #    Two copies of the manual exist on purpose: readme.html ships inside RemSound (F1
 #    inside the app opens it), MANUAL.md is the Markdown rendition rendered on the

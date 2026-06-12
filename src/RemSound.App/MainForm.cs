@@ -334,6 +334,13 @@ public sealed class MainForm : Form
     private CuePlayer? profileSwitchSound;
     private CuePlayer? profileMenuOpenSound;
     private CuePlayer? updateSound;
+    // Machine-wide cues (2026-06-13): send/receive toggled on/off, and minimise(hide)/restore(show).
+    private CuePlayer? sendOnSound;
+    private CuePlayer? sendOffSound;
+    private CuePlayer? receiveOnSound;
+    private CuePlayer? receiveOffSound;
+    private CuePlayer? hideSound;
+    private CuePlayer? showSound;
     // Labels for the three send/receive device lists, captured at layout time so they can be
     // re-titled when the user toggles between WASAPI mode (Windows devices) and ASIO mode
     // (driver channel pairs). null until BuildLayout has run.
@@ -986,6 +993,12 @@ public sealed class MainForm : Form
         TryLoadCueSound(CueId.ProfileSwitch, "profile.wav", out profileSwitchSound);
         TryLoadCueSound(CueId.ProfileMenuOpen, "profile menu open.wav", out profileMenuOpenSound);
         TryLoadCueSound(CueId.Update, "update.wav", out updateSound);
+        TryLoadCueSound(CueId.SendOn, "send on.wav", out sendOnSound);
+        TryLoadCueSound(CueId.SendOff, "send off.wav", out sendOffSound);
+        TryLoadCueSound(CueId.ReceiveOn, "recieve on.wav", out receiveOnSound);
+        TryLoadCueSound(CueId.ReceiveOff, "recieve off.wav", out receiveOffSound);
+        TryLoadCueSound(CueId.Hide, "minimise.wav", out hideSound);
+        TryLoadCueSound(CueId.Show, "maximise.wav", out showSound);
 
         LoadAudioDevices();
         // Apply persisted ASIO mode from settings — switches sender/receiver backends so the
@@ -6164,6 +6177,39 @@ public sealed class MainForm : Form
         if (!EnsureStreamingPassword(box)) return;
         HandleCapabilityChange();
         MarkProfileDirty();
+        // Audible feedback for the toggle, whether the user clicked the checkbox or pressed the
+        // mute hotkey (the hotkey flips .Checked, which routes through here too). Suppressed during
+        // profile load by the suppressStreamingPasswordGate guard above, so loading a profile that
+        // has send/receive on doesn't blast the cues.
+        PlayStreamToggleCue(box);
+    }
+
+    /// <summary>Play the send/receive turned-on / turned-off cue for a streaming checkbox toggle.
+    /// Machine-wide cues (enable flags in AppConfig); silent when the cue is unticked or absent.</summary>
+    private void PlayStreamToggleCue(AccessibleCheckBox box)
+    {
+        var on = box.Checked;
+        var cfg = AppConfig.Load();
+        if (box == sendMyAudioCheckbox)
+        {
+            if (on) { if (cfg.EnableSendOnCue) sendOnSound?.Play(); }
+            else { if (cfg.EnableSendOffCue) sendOffSound?.Play(); }
+        }
+        else if (box == receiveAudioCheckbox)
+        {
+            if (on) { if (cfg.EnableReceiveOnCue) receiveOnSound?.Play(); }
+            else { if (cfg.EnableReceiveOffCue) receiveOffSound?.Play(); }
+        }
+    }
+
+    /// <summary>Play the minimise(hide) or restore(show) cue. Called by the tray controller when the
+    /// window actually transitions to/from hidden. Machine-wide enable flags; silent when unticked
+    /// or the cue WAV is absent.</summary>
+    public void PlayWindowVisibilityCue(bool show)
+    {
+        var cfg = AppConfig.Load();
+        if (show) { if (cfg.EnableShowCue) showSound?.Play(); }
+        else { if (cfg.EnableHideCue) hideSound?.Play(); }
     }
 
     /// <summary>True while a peer-security warning dialog is on screen — set so the 1 Hz status
@@ -6458,6 +6504,14 @@ public sealed class MainForm : Form
         // enable flag and custom-path live machine-wide in AppConfig, not the per-profile
         // settings store. This id is still used by the Preferences cue list for display/keying.
         public const string Startup = "startup";
+        // Send/receive toggle + minimise(hide)/restore(show) cues (2026-06-13). Also machine-wide
+        // (enable flags + custom paths in AppConfig) - app-level feedback, not per-profile audio.
+        public const string SendOn = "send-on";
+        public const string SendOff = "send-off";
+        public const string ReceiveOn = "receive-on";
+        public const string ReceiveOff = "receive-off";
+        public const string Hide = "hide";
+        public const string Show = "show";
     }
 
     /// <summary>Load one cue sound. Resolution order:
@@ -6479,6 +6533,12 @@ public sealed class MainForm : Form
         {
             string? path = null;
             var customPath = settings.LoadCustomCuePath(cueId);
+            if (string.IsNullOrWhiteSpace(customPath)
+                && AppConfig.Load().MachineCueCustomPaths.TryGetValue(cueId, out var machinePath))
+            {
+                // Machine-wide cues (send/receive/hide/show) keep their custom override in AppConfig.
+                customPath = machinePath;
+            }
             if (!string.IsNullOrWhiteSpace(customPath) && File.Exists(customPath))
             {
                 path = customPath;
@@ -6523,6 +6583,12 @@ public sealed class MainForm : Form
         TryLoadCueSound(CueId.ProfileSwitch, "profile.wav", out profileSwitchSound);
         TryLoadCueSound(CueId.ProfileMenuOpen, "profile menu open.wav", out profileMenuOpenSound);
         TryLoadCueSound(CueId.Update, "update.wav", out updateSound);
+        TryLoadCueSound(CueId.SendOn, "send on.wav", out sendOnSound);
+        TryLoadCueSound(CueId.SendOff, "send off.wav", out sendOffSound);
+        TryLoadCueSound(CueId.ReceiveOn, "recieve on.wav", out receiveOnSound);
+        TryLoadCueSound(CueId.ReceiveOff, "recieve off.wav", out receiveOffSound);
+        TryLoadCueSound(CueId.Hide, "minimise.wav", out hideSound);
+        TryLoadCueSound(CueId.Show, "maximise.wav", out showSound);
     }
 
     /// <summary>

@@ -96,6 +96,23 @@ public sealed class AppConfig
     /// Machine-wide; the user unticks "Play keyboard clicks" in Preferences to silence it.</summary>
     public bool EnableKeyboardClicks { get; set; } = true;
 
+    /// <summary>Per-cue enable flags for the machine-wide cues added 2026-06-13: the send/receive
+    /// on/off toggle cues and the minimise(hide)/restore(show) cues. Machine-wide (like the startup
+    /// cue) rather than per-profile - they're app-level feedback for an action, not a per-profile
+    /// audio setting. All default on; the user unticks them in Preferences like any other cue.</summary>
+    public bool EnableSendOnCue { get; set; } = true;
+    public bool EnableSendOffCue { get; set; } = true;
+    public bool EnableReceiveOnCue { get; set; } = true;
+    public bool EnableReceiveOffCue { get; set; } = true;
+    public bool EnableHideCue { get; set; } = true;
+    public bool EnableShowCue { get; set; } = true;
+
+    /// <summary>Custom WAV overrides for the machine-wide cues above, keyed by cue id. The
+    /// equivalent of <see cref="Profile.CustomCuePaths"/> but machine-wide, since these cues don't
+    /// live on a profile. Empty = use the chosen default variant. The startup cue keeps its own
+    /// <see cref="StartupCueCustomPath"/> field for backward compatibility.</summary>
+    public Dictionary<string, string> MachineCueCustomPaths { get; set; } = new();
+
     /// <summary>If true, RemSound writes a tab-separated diagnostic log to
     /// <c>&lt;exe&gt;\logs\</c>. Lives here (not in <see cref="Profile"/>) because logging
     /// is a debugging affordance for the installation, not a user-facing audio preference —

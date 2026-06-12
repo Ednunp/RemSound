@@ -201,6 +201,8 @@ internal sealed class MainFormTrayController : IDisposable
 
     public void Restore()
     {
+        // Only sound the "show" cue on a genuine hidden -> shown transition, not a no-op restore.
+        var wasHidden = !owner.Visible || owner.WindowState == FormWindowState.Minimized;
         owner.Show();
         if (owner.WindowState == FormWindowState.Minimized)
         {
@@ -218,6 +220,7 @@ internal sealed class MainFormTrayController : IDisposable
         // to actually hear the new content.
         try { SetForegroundWindow(owner.Handle); } catch { /* harmless — Restore still mostly worked */ }
         trayIcon.Visible = false;
+        if (wasHidden) (owner as MainForm)?.PlayWindowVisibilityCue(show: true);
     }
 
     [DllImport("user32.dll")]
@@ -226,7 +229,11 @@ internal sealed class MainFormTrayController : IDisposable
 
     public void Minimize()
     {
+        // Only sound the "hide" cue on a genuine shown -> hidden transition (not a startup-minimise
+        // before the window has ever been shown, nor a repeat call once already hidden).
+        var wasVisible = owner.Visible;
         owner.Hide();
+        if (wasVisible) (owner as MainForm)?.PlayWindowVisibilityCue(show: false);
         // Refresh the tooltip BEFORE showing the icon so the shell's NIM_ADD call carries
         // the current live state (peer count, send / receive routing, recording timer),
         // not a stale "starting up" string set earlier. The shell tends to cache hover

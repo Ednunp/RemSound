@@ -143,6 +143,17 @@ internal sealed class PreferencesDialog : Form
                 () => load(settings), v => save(settings, v),
                 () => settings.LoadCustomCuePath(id), p => settings.SaveCustomCuePath(id, p));
 
+        // Machine-wide cue (enable flag + custom path in AppConfig, not the profile). Persists
+        // immediately and never flags a profile save (IsProfileSetting=false). Same shape as the
+        // Startup row below, factored out for the send/receive/hide/show cues.
+        CueRowDescriptor MachineRow(string name, string id, string file,
+            Func<AppConfig, bool> loadEnabled, Action<AppConfig, bool> saveEnabled) =>
+            new(name, id, file, false,
+                () => loadEnabled(AppConfig.Load()),
+                v => { var c = AppConfig.Load(); saveEnabled(c, v); TrySaveConfig(c); },
+                () => AppConfig.Load().MachineCueCustomPaths.TryGetValue(id, out var p) ? p : null,
+                p => { var c = AppConfig.Load(); if (string.IsNullOrWhiteSpace(p)) c.MachineCueCustomPaths.Remove(id); else c.MachineCueCustomPaths[id] = p!; TrySaveConfig(c); });
+
         return
         [
             ProfileRow("Connect sound", MainForm.CueId.Connect, "connect.wav",
@@ -168,6 +179,21 @@ internal sealed class PreferencesDialog : Form
                 v => { var c = AppConfig.Load(); c.EnableStartupCue = v; TrySaveConfig(c); },
                 () => AppConfig.Load().StartupCueCustomPath,
                 p => { var c = AppConfig.Load(); c.StartupCueCustomPath = p; TrySaveConfig(c); }),
+            // Send/receive toggle + minimise(hide)/restore(show) cues (machine-wide). The Receive
+            // file bases use the spelling of the shipped files ("recieve ...") so variant discovery
+            // matches; the display names use the correct spelling.
+            MachineRow("Send turned on sound", MainForm.CueId.SendOn, "send on.wav",
+                c => c.EnableSendOnCue, (c, v) => c.EnableSendOnCue = v),
+            MachineRow("Send turned off sound", MainForm.CueId.SendOff, "send off.wav",
+                c => c.EnableSendOffCue, (c, v) => c.EnableSendOffCue = v),
+            MachineRow("Receive turned on sound", MainForm.CueId.ReceiveOn, "recieve on.wav",
+                c => c.EnableReceiveOnCue, (c, v) => c.EnableReceiveOnCue = v),
+            MachineRow("Receive turned off sound", MainForm.CueId.ReceiveOff, "recieve off.wav",
+                c => c.EnableReceiveOffCue, (c, v) => c.EnableReceiveOffCue = v),
+            MachineRow("Minimise (hide) sound", MainForm.CueId.Hide, "minimise.wav",
+                c => c.EnableHideCue, (c, v) => c.EnableHideCue = v),
+            MachineRow("Restore (show) sound", MainForm.CueId.Show, "maximise.wav",
+                c => c.EnableShowCue, (c, v) => c.EnableShowCue = v),
         ];
     }
 

@@ -303,7 +303,11 @@ internal static class SelfTest
         Check(Directory.Exists(soundsDir), "the runtime sounds folder must exist (cues are consolidated at startup)");
         // Cues ship as numbered variants ("connect 1.wav", ...); each required cue must have at
         // least one variant present.
-        foreach (var cue in new[] { "connect.wav", "disconnect.wav", "start up.wav" })
+        foreach (var cue in new[]
+        {
+            "connect.wav", "disconnect.wav", "start up.wav",
+            "send on.wav", "send off.wav", "recieve on.wav", "recieve off.wav", "minimise.wav", "maximise.wav",
+        })
         {
             Check(CueSounds.Variants(cue).Count > 0,
                 $"no sound variant present for the '{Path.GetFileNameWithoutExtension(cue)}' cue (was the shipped sounds\\ folder empty?)");

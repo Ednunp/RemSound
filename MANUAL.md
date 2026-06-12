@@ -866,7 +866,7 @@ Toggle| What it does
 
 ## 18. Audio cue sounds
 
-RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called **cue sounds**. Nine events have a cue:
+RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called **cue sounds**. Fifteen events have a cue:
 
 Cue| Plays when
 ---|---
@@ -879,6 +879,10 @@ Cue| Plays when
 **Profile menu open sound**|  The Quick profile switch popup opens.
 **Update sound**|  An update is about to install — it plays just before RemSound closes to update itself. Handy when updates install silently in the background, so you're not caught off guard when RemSound restarts. Plays whether you ran the update by hand or it installed on its own.
 **Startup sound**|  RemSound has finished starting up. It plays once at launch, even when RemSound opens straight to the notification area, so you know it's running.
+**Send turned on / off sound**|  You turn sending your audio on or off — whether by ticking the **Send my audio** box in the window or by pressing its mute shortcut. There's a separate sound for on and for off.
+**Receive turned on / off sound**|  You turn receiving audio on or off — from the **Receive audio** box or its mute shortcut. Again, a separate sound for on and for off.
+**Minimise (hide) sound**|  RemSound's window minimises to the notification area (hides).
+**Restore (show) sound**|  RemSound's window is brought back from the notification area (shows).
 
 All of these cues play through your default Windows sound output, which is separate from the audio RemSound is sending or receiving. They don't appear in a normal recording. (The exception: if your sending side is capturing the very output device the cues play through, then they get captured along with everything else from that device.)
 
