@@ -29,8 +29,9 @@ It was built for playing music together over the internet — a guitarist on one
   1. [Updating RemSound](#19-updating-remsound)
   1. [Recording to a file](#20-recording-to-a-file)
   1. [Logs and diagnostics](#21-logs-and-diagnostics)
-  1. [Troubleshooting](#22-troubleshooting)
-  1. [Glossary](#23-glossary)
+  1. [Command-line options](#22-command-line-options)
+  1. [Troubleshooting](#23-troubleshooting)
+  1. [Glossary](#24-glossary)
 
 
 ## 1. What RemSound does
@@ -1077,7 +1078,58 @@ Logs are plain text and can be opened in any text editor, or in a spreadsheet. T
 
 
 
-## 22. Troubleshooting
+## 22. Command-line options
+
+RemSound is normally a windowed program you click to open. But it can also take **command-line options** — short text instructions you type after the program name. They are handy for three things: checking a machine quickly (what devices are present, does the audio path work at all), getting a support report to send to whoever helps you, and starting RemSound a particular way from a shortcut or a script.
+
+To use them, open a command prompt (press the Windows key, type `cmd`, press Enter), then run RemSound with the option after it. If RemSound is on your desktop you can type the whole path in quotes, for example:
+
+
+    "C:\Users\you\Desktop\RemSound\RemSound.exe" --devices
+
+
+The options that just report something print their answer straight into the same command window as plain text — a screen reader reads it normally — and then RemSound exits without opening a window. The start-up options open RemSound as usual, just set up the way you asked.
+
+### Options that print something and then exit
+
+Option| What it does
+---|---
+`--help` or `-h`| Lists every option, the same as this section in short form.
+`--version`| Prints which version of RemSound is installed, for example “RemSound 3.9”.
+`--devices`| Lists every microphone and line-in, every speaker and headphone output, and every ASIO driver on the machine — each with its sample rate, channel count and the exact device id RemSound uses internally. This is the quickest way to confirm an interface is actually present and seen by Windows.
+`--selftest`| Runs a complete round-trip on the machine on its own: it captures sound, encodes it, sends it across the network layer to itself, receives it and decodes it, then reports **PASS** or **FAIL**. No sound is played out, so it is safe to run silently. A PASS proves capture, encoding, the network code and decoding are all working on that computer. Add `--opus` to test the Opus codec path, or `--seconds N` to run it for longer than the default.
+`--diagnostics`| Writes a single plain-text report file holding the version, the operating system, the current settings, the list of profiles, the full device list, a check of the Windows microphone-privacy permission, and the tail of the most recent log. With no path it saves into the **user settings and logs** folder and prints where it put it; you can also give a path, for example `--diagnostics C:\Users\you\Desktop\report.txt`. This is the file to send when asking for help — it answers most questions in one go.
+
+### Options that change a setting or control a running copy, then exit
+
+Option| What it does
+---|---
+`--log on` or `--log off`| Turns the diagnostic log on or off. The change takes effect the next time RemSound starts. The same setting lives in the Preferences dialog; this is just a way to set it without opening the window.
+`--close`| Closes a copy of RemSound that is already running. Useful in a script that needs to restart it.
+
+### Options that change how RemSound starts
+
+These open RemSound as normal, set up the way you ask, and are meant for shortcuts and scripts.
+
+Option| What it does
+---|---
+`--profile "<name>"`| Starts straight into the named profile and skips the profile picker. Put the name in quotes if it contains a space, for example `--profile "Studio link"`.
+`--connect <ip>`| Starts and connects to a peer at that address. You can give just an address (`--connect 192.168.1.42`) or an address and port (`--connect 192.168.1.42:47830`); with no port it uses RemSound's normal port, 47830. If you don't also give a `--profile`, it starts on a fresh blank profile already pointed at that peer.
+`--minimized` or `--tray`| Starts minimized to the notification area, with no window popping up. Pair it with `--profile` or `--connect` so it has something to do without waiting at the picker.
+
+### Examples
+
+
+    RemSound.exe --devices
+    RemSound.exe --selftest --opus
+    RemSound.exe --diagnostics
+    RemSound.exe --profile "Studio" --minimized
+    RemSound.exe --connect 192.168.1.42
+
+
+A common support sequence: ask the person to run `--diagnostics` and send you the file, then have them run `--selftest` — if that says PASS, capture, encoding and the audio path are all sound on their machine and the problem is somewhere in the connection between you.
+
+## 23. Troubleshooting
 
 ### I don't hear my friend
 
@@ -1164,7 +1216,7 @@ The most common reasons:
 
 If none of those apply, just fall back to Tailscale — it works without involving the router at all.
 
-## 23. Glossary
+## 24. Glossary
 
 Term| Meaning
 ---|---

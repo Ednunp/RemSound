@@ -30,10 +30,34 @@ internal sealed class AboutDialog : Form
         your chosen latency, gently and silently, so a long
         session stays as tight as it began.
 
+        Fixed a long-standing cause of one-way silence: if you
+        sent plain (non-ASIO) audio to someone who had an ASIO
+        device selected, your sound — your microphone included —
+        could arrive at their machine and then never be played,
+        leaving them in silence. It now always reaches their
+        speakers, whatever mix of ASIO and standard audio the two
+        of you happen to be using.
+
         RemSound's log now also records whether your microphone
         audio is actually leaving the machine, alongside how loud
         it is — so a "my mic isn't getting through" report can be
         pinned down from the log instead of guessed at.
+
+        RemSound no longer sends audio out when no one is actually
+        connected. It waits until a peer is genuinely reachable, so
+        a profile left open on its own sits quietly instead of
+        streaming into nothing.
+
+        RemSound now plays a short sound as it starts up, so you
+        know it's running even when it opens straight to the
+        notification area. You can turn it off, or choose your own
+        sound, under Options → Preferences.
+
+        And RemSound can now be driven from the command line for
+        quick checks and support — list the audio devices, run a
+        self-test of the whole audio path, or write a diagnostics
+        report to send for help. Press F1 and see "Command-line
+        options" in the manual for the full list.
 
         RemSound v3.8
 

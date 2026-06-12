@@ -48,6 +48,15 @@ internal static class Program
         // a no-op once they're gone. 2026-06-08.
         CleanUpLegacyRootSounds();
 
+        // Command-line interface (Sensor-Readout-style). "Do-and-exit" commands (--devices,
+        // --selftest, --diagnostics, --version, --log, --close, --help) run here — before the
+        // single-instance lock and before any window — and terminate the process. Otherwise we
+        // collect launch overrides (--profile / --connect / --minimized) and continue the normal
+        // GUI start below, applying them as we resolve the profile.
+        var cliExit = CommandLine.Process(args, out var cli);
+        if (cliExit is { } cliCode) Environment.Exit(cliCode);
+        if (cli.StartMinimized) MainForm.startNextInstanceMinimized = true;
+
         // Single-instance guard. RemSound must never run as two copies at once: with the
         // auto-updater relaunching the app, a copy that didn't exit cleanly used to leave two
         // (then more) copies running, each playing received audio — Andre's "stacked and
@@ -155,6 +164,20 @@ internal static class Program
             Profile? autoLoaded = null;
             string? autoLoadedTitle = null;
 
+            // CLI overrides take precedence over the resume sentinel and the "start with profile"
+            // setting. --profile loads a named profile; --connect with no --profile starts blank
+            // (the requested peer is added to whatever profile loads, further below).
+            if (cli.ProfileName is not null)
+            {
+                try { autoLoaded = store.Load(cli.ProfileName); if (autoLoaded is not null) autoLoadedTitle = cli.ProfileName; }
+                catch { /* fall through to the normal resolution */ }
+            }
+            else if (cli.ForceBlankProfile)
+            {
+                autoLoaded = Profile.NewBlank();
+                autoLoadedTitle = null;
+            }
+
             var resumeSentinelPath = Path.Combine(AppContext.BaseDirectory, RemSoundUpdater.ResumeProfileSentinelName);
             string? resumeTitle = null;
             if (File.Exists(resumeSentinelPath))
@@ -167,7 +190,7 @@ internal static class Program
                 try { File.Delete(resumeSentinelPath); } catch { /* ignore */ }
             }
 
-            if (!string.IsNullOrWhiteSpace(resumeTitle))
+            if (autoLoaded is null && !string.IsNullOrWhiteSpace(resumeTitle))
             {
                 try
                 {
@@ -202,6 +225,19 @@ internal static class Program
                 store = dialog.Store;
                 profile = dialog.SelectedProfile;
                 title = dialog.SelectedTitle;
+            }
+
+            // Apply --connect: add the requested peer address(es) to the loaded profile so MainForm
+            // selects and connects to them on startup. Stored as plain address strings, the same
+            // shape "Add peer by IP" produces (the audio port is the default unless one is given).
+            if (cli.ConnectPeers.Count > 0 && profile is not null)
+            {
+                foreach (var ep in cli.ConnectPeers)
+                {
+                    var addr = ep.Port == RemPacket.DefaultPort ? ep.Address.ToString() : $"{ep.Address}:{ep.Port}";
+                    if (!profile.RememberedPeers.Contains(addr)) profile.RememberedPeers.Add(addr);
+                    if (!profile.SelectedConnectedPeers.Contains(addr)) profile.SelectedConnectedPeers.Add(addr);
+                }
             }
 
             // Switch-profile loop: when the user clicks "Switch to profile" in the Manage

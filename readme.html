@@ -48,6 +48,7 @@ ul, ol { padding-left: 1.4em; }
 <li><a href="#updates">Updating RemSound</a></li>
 <li><a href="#recording">Recording to a file</a></li>
 <li><a href="#logs">Logs and diagnostics</a></li>
+<li><a href="#command-line">Command-line options</a></li>
 <li><a href="#troubleshooting">Troubleshooting</a></li>
 <li><a href="#glossary">Glossary</a></li>
 </ol>
@@ -1135,7 +1136,56 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <li><strong>OpusUnrecoveredGaps</strong> &mdash; a running total of multi-packet losses that Opus couldn't repair. Each one is an audible click. It stays at 0 on a clean connection; small numbers are normal over the internet.</li>
 </ul>
 
-<h2 id="troubleshooting">22. Troubleshooting</h2>
+<h2 id="command-line">22. Command-line options</h2>
+
+<p>RemSound is normally a windowed program you click to open. But it can also take <strong>command-line options</strong> &mdash; short text instructions you type after the program name. They are handy for three things: checking a machine quickly (what devices are present, does the audio path work at all), getting a support report to send to whoever helps you, and starting RemSound a particular way from a shortcut or a script.</p>
+
+<p>To use them, open a command prompt (press the Windows key, type <code>cmd</code>, press Enter), then run RemSound with the option after it. If RemSound is on your desktop you can type the whole path in quotes, for example:</p>
+
+<pre>
+"C:\Users\you\Desktop\RemSound\RemSound.exe" --devices
+</pre>
+
+<p>The options that just report something print their answer straight into the same command window as plain text &mdash; a screen reader reads it normally &mdash; and then RemSound exits without opening a window. The start-up options open RemSound as usual, just set up the way you asked.</p>
+
+<h3>Options that print something and then exit</h3>
+<table>
+<tr><th>Option</th><th>What it does</th></tr>
+<tr><td><code>--help</code> or <code>-h</code></td><td>Lists every option, the same as this section in short form.</td></tr>
+<tr><td><code>--version</code></td><td>Prints which version of RemSound is installed, for example &ldquo;RemSound 3.9&rdquo;.</td></tr>
+<tr><td><code>--devices</code></td><td>Lists every microphone and line-in, every speaker and headphone output, and every ASIO driver on the machine &mdash; each with its sample rate, channel count and the exact device id RemSound uses internally. This is the quickest way to confirm an interface is actually present and seen by Windows.</td></tr>
+<tr><td><code>--selftest</code></td><td>Runs a complete round-trip on the machine on its own: it captures sound, encodes it, sends it across the network layer to itself, receives it and decodes it, then reports <strong>PASS</strong> or <strong>FAIL</strong>. No sound is played out, so it is safe to run silently. A PASS proves capture, encoding, the network code and decoding are all working on that computer. Add <code>--opus</code> to test the Opus codec path, or <code>--seconds N</code> to run it for longer than the default.</td></tr>
+<tr><td><code>--diagnostics</code></td><td>Writes a single plain-text report file holding the version, the operating system, the current settings, the list of profiles, the full device list, a check of the Windows microphone-privacy permission, and the tail of the most recent log. With no path it saves into the <strong>user settings and logs</strong> folder and prints where it put it; you can also give a path, for example <code>--diagnostics C:\Users\you\Desktop\report.txt</code>. This is the file to send when asking for help &mdash; it answers most questions in one go.</td></tr>
+</table>
+
+<h3>Options that change a setting or control a running copy, then exit</h3>
+<table>
+<tr><th>Option</th><th>What it does</th></tr>
+<tr><td><code>--log on</code> or <code>--log off</code></td><td>Turns the diagnostic log on or off. The change takes effect the next time RemSound starts. The same setting lives in the Preferences dialog; this is just a way to set it without opening the window.</td></tr>
+<tr><td><code>--close</code></td><td>Closes a copy of RemSound that is already running. Useful in a script that needs to restart it.</td></tr>
+</table>
+
+<h3>Options that change how RemSound starts</h3>
+<p>These open RemSound as normal, set up the way you ask, and are meant for shortcuts and scripts.</p>
+<table>
+<tr><th>Option</th><th>What it does</th></tr>
+<tr><td><code>--profile "&lt;name&gt;"</code></td><td>Starts straight into the named profile and skips the profile picker. Put the name in quotes if it contains a space, for example <code>--profile "Studio link"</code>.</td></tr>
+<tr><td><code>--connect &lt;ip&gt;</code></td><td>Starts and connects to a peer at that address. You can give just an address (<code>--connect 192.168.1.42</code>) or an address and port (<code>--connect 192.168.1.42:47830</code>); with no port it uses RemSound's normal port, 47830. If you don't also give a <code>--profile</code>, it starts on a fresh blank profile already pointed at that peer.</td></tr>
+<tr><td><code>--minimized</code> or <code>--tray</code></td><td>Starts minimized to the notification area, with no window popping up. Pair it with <code>--profile</code> or <code>--connect</code> so it has something to do without waiting at the picker.</td></tr>
+</table>
+
+<h3>Examples</h3>
+<pre>
+RemSound.exe --devices
+RemSound.exe --selftest --opus
+RemSound.exe --diagnostics
+RemSound.exe --profile "Studio" --minimized
+RemSound.exe --connect 192.168.1.42
+</pre>
+
+<p>A common support sequence: ask the person to run <code>--diagnostics</code> and send you the file, then have them run <code>--selftest</code> &mdash; if that says PASS, capture, encoding and the audio path are all sound on their machine and the problem is somewhere in the connection between you.</p>
+
+<h2 id="troubleshooting">23. Troubleshooting</h2>
 
 <h3>I don't hear my friend</h3>
 <ol>
@@ -1207,7 +1257,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 </ul>
 <p>If none of those apply, just fall back to Tailscale &mdash; it works without involving the router at all.</p>
 
-<h2 id="glossary">23. Glossary</h2>
+<h2 id="glossary">24. Glossary</h2>
 
 <table>
 <tr><th>Term</th><th>Meaning</th></tr>
