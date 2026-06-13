@@ -51,6 +51,14 @@ internal sealed class AccessibleCheckBox : CheckBox
     [DllImport("user32.dll")]
     private static extern void NotifyWinEvent(uint eventMin, nint hwnd, int idObject, int idChild);
 
+    /// <summary>Optional gate, called with the new Checked state just before the generic checkbox
+    /// tick/untick sound plays; return true to suppress it. The send/receive checkboxes set this so
+    /// that when their OWN dedicated cue (send/receive turned on/off) is enabled, only that cue
+    /// plays - the generic checkbox sound doesn't double up on top of it. When their dedicated cue
+    /// is set to "(none)", this returns false and the generic checkbox sound plays as normal.</summary>
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Func<bool, bool>? SuppressCheckSound { get; set; }
+
     protected override void OnCheckedChanged(EventArgs e)
     {
         base.OnCheckedChanged(e);
@@ -61,8 +69,9 @@ internal sealed class AccessibleCheckBox : CheckBox
         {
             NotifyWinEvent(EVENT_OBJECT_FOCUS, Handle, OBJID_CLIENT, CHILDID_SELF);
             // Audible tick/untick feedback. Gated on Focused so it fires for a genuine user toggle
-            // (click or spacebar) but stays silent for the bulk programmatic checking on profile load.
-            CheckSoundService.Play(Checked);
+            // (click or spacebar) but stays silent for the bulk programmatic checking on profile
+            // load - and skipped when a control has its own dedicated cue (send/receive).
+            if (SuppressCheckSound?.Invoke(Checked) != true) CheckSoundService.Play(Checked);
         }
     }
 }

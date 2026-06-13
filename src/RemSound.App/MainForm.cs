@@ -1009,6 +1009,11 @@ public sealed class MainForm : Form
         // --- Wire main-form events ---
         receiveAudioCheckbox.CheckedChanged += (_, _) => OnStreamingCheckboxChanged(receiveAudioCheckbox);
         sendMyAudioCheckbox.CheckedChanged += (_, _) => OnStreamingCheckboxChanged(sendMyAudioCheckbox);
+        // Send/receive have their own dedicated cue sounds (send/receive turned on/off). When that
+        // dedicated cue is on, only it plays - suppress the generic checkbox tick/untick on these two.
+        // When the dedicated cue is "(none)", these return false and the checkbox sound plays as normal.
+        sendMyAudioCheckbox.SuppressCheckSound = on => on ? AppConfig.Load().EnableSendOnCue : AppConfig.Load().EnableSendOffCue;
+        receiveAudioCheckbox.SuppressCheckSound = on => on ? AppConfig.Load().EnableReceiveOnCue : AppConfig.Load().EnableReceiveOffCue;
         volumeBar.Scroll += (_, _) => { receiver.Volume = volumeBar.Value / 100f; MarkProfileDirty(); };
         WireCheckedListAccessibility(receiveOutputDevicesList, receiveOutputDevicesStatusLabel, "receive output device");
         receiveOutputDevicesList.ItemCheck += (_, e) =>
