@@ -731,27 +731,8 @@ internal sealed class PreferencesDialog : Form
         {
             if (IsDisposed) return;
             if (tabs.TabCount > 0) tabs.SelectedIndex = 0;
-            var leaf = FirstTabStopLeaf(tabs.SelectedTab) ?? (Control)tabs;
-            ActiveControl = null;
-            leaf.Focus();
-            if (leaf.IsHandleCreated) WinEventNotifier.NotifyFocus(leaf);
+            WinEventNotifier.AnnounceByFocusingLeaf(this, tabs.SelectedTab, tabs);
         }));
-    }
-
-    /// <summary>The first visible, enabled, tab-stop control inside <paramref name="container"/>,
-    /// searched depth-first in child order (which matches the order controls were added to each tab).
-    /// Returns a real leaf the dialog can focus on open so NVDA has a named control to announce —
-    /// never a layout panel or the role-less tab strip.</summary>
-    private static Control? FirstTabStopLeaf(Control? container)
-    {
-        if (container is null) return null;
-        foreach (Control c in container.Controls)
-        {
-            if (c is { CanSelect: true, TabStop: true, Visible: true, Enabled: true })
-                return c;
-            if (FirstTabStopLeaf(c) is { } nested) return nested;
-        }
-        return null;
     }
 
     /// <summary>Wire up the Startup behaviour tab (moved here from StartupBehaviourDialog): load the

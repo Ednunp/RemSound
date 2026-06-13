@@ -227,13 +227,17 @@ internal sealed class MainFormTrayController : IDisposable
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetForegroundWindow(IntPtr hWnd);
 
-    public void Minimize()
+    /// <summary>Hide the window to the tray. <paramref name="playCue"/> defaults true for a genuine
+    /// user-initiated minimise; the startup-minimise path passes false because that's not the user
+    /// choosing to hide the window — and the usual "was it visible?" guard can't tell the two apart,
+    /// since by the time the deferred startup minimise runs the window HAS been shown (Visible=true).</summary>
+    public void Minimize(bool playCue = true)
     {
-        // Only sound the "hide" cue on a genuine shown -> hidden transition (not a startup-minimise
-        // before the window has ever been shown, nor a repeat call once already hidden).
+        // Only sound the "hide" cue on a genuine shown -> hidden transition the user asked for: not a
+        // startup-minimise (playCue:false), and not a repeat call once already hidden (wasVisible).
         var wasVisible = owner.Visible;
         owner.Hide();
-        if (wasVisible) (owner as MainForm)?.PlayWindowVisibilityCue(show: false);
+        if (wasVisible && playCue) (owner as MainForm)?.PlayWindowVisibilityCue(show: false);
         // Refresh the tooltip BEFORE showing the icon so the shell's NIM_ADD call carries
         // the current live state (peer count, send / receive routing, recording timer),
         // not a stale "starting up" string set earlier. The shell tends to cache hover

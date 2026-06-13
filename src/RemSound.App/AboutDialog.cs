@@ -20,6 +20,17 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v4.1
+
+        A couple of small fixes for screen-reader users. When
+        RemSound starts straight into the notification area, it no
+        longer plays the "minimise" sound — starting in the tray
+        isn't the same as you choosing to hide the window, so it
+        shouldn't sound the cue. And when you bring the window back
+        from the tray, RemSound now lands on a control on whichever
+        tab you'd left open, so your screen reader announces the
+        window instead of coming up silent.
+
         RemSound v4.0
 
         RemSound now has a sound for nearly everything you do.

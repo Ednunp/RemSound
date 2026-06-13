@@ -606,6 +606,16 @@ public sealed class MainForm : Form
         {
             if (InvokeRequired) { BeginInvoke(new Action(RestoreFromTray)); return; }
             trayController.Restore();
+            // Land focus on a real, named control on whichever tab is showing, so NVDA announces
+            // something when the window comes back from the tray. Without this, focus rests on the
+            // QuietTabControl (deliberately role-less / nameless) and a screen reader has nothing to
+            // read, so the window surfaces silently — the same issue the Preferences dialog had.
+            // Deferred so it runs after the show/foreground settles.
+            BeginInvoke(new Action(() =>
+            {
+                if (IsDisposed) return;
+                WinEventNotifier.AnnounceByFocusingLeaf(this, mainTabControl.SelectedTab, mainTabControl);
+            }));
         }
         catch { /* best-effort — surfacing the window is a convenience, not load-critical */ }
     }
@@ -1265,7 +1275,9 @@ public sealed class MainForm : Form
             startNextInstanceMinimized = false;
             if (minimizeThisInstance)
             {
-                BeginInvoke(() => trayController.Minimize());
+                // playCue:false — starting up in the tray (StartMinimised / --minimized) isn't the
+                // user choosing to minimise, so it must not sound the "minimise" cue.
+                BeginInvoke(() => trayController.Minimize(playCue: false));
             }
 
             // Kick off UPnP discovery if the user has the box ticked. Off by default; the
