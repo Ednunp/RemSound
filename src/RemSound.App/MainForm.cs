@@ -1236,6 +1236,10 @@ public sealed class MainForm : Form
             // auto-jumping when the user arrows between tabs, only on first show.
             BeginInvoke(() => FocusListControl(connectedPeersList));
 
+            // First-launch pass: warn about any cue that's switched on but whose sound file is
+            // missing (deferred so it lands after the window is fully up and can surface).
+            BeginInvoke(CheckForMissingEnabledCues);
+
             // Honour AppConfig.StartMinimised — drop straight to the tray after the
             // window finishes loading. Wrapped in BeginInvoke so the minimise happens
             // *after* Shown completes (otherwise the form-show + form-hide collide and
@@ -6589,6 +6593,69 @@ public sealed class MainForm : Form
         TryLoadCueSound(CueId.Show, "maximise.wav", out showSound);
         // The app-wide checkbox tick/untick sounds live in their own service; keep them in step.
         CheckSoundService.Reload();
+        // After a reload (e.g. the user changed a cue in Preferences), warn about any cue that's
+        // switched on but whose sound file is missing. Skipped during construction (no window yet);
+        // OnShown does the first-launch pass.
+        CheckForMissingEnabledCues();
+    }
+
+    private readonly HashSet<string> reportedMissingCues = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>For every cue that's switched ON but whose sound file couldn't be found (player is
+    /// null - e.g. a custom WAV was deleted, or a chosen sound is gone), turn the cue off and tell
+    /// the user, front-most, once per cue. They re-enable it by choosing a sound in Preferences.</summary>
+    private void CheckForMissingEnabledCues()
+    {
+        if (!IsHandleCreated) return; // need a window so the warning can surface
+        var cfg = AppConfig.Load();
+        (CuePlayer? Player, bool Enabled, Action Disable, string Name, string When)[] cues =
+        {
+            (connectSound, settings.LoadEnableConnectCue(), () => settings.SaveEnableConnectCue(false), "connect", "a peer connects"),
+            (disconnectSound, settings.LoadEnableDisconnectCue(), () => settings.SaveEnableDisconnectCue(false), "disconnect", "a peer disconnects"),
+            (recordStartSound, settings.LoadEnableRecordStartCue(), () => settings.SaveEnableRecordStartCue(false), "recording start", "you start recording"),
+            (recordStopSound, settings.LoadEnableRecordStopCue(), () => settings.SaveEnableRecordStopCue(false), "recording stop", "you stop recording"),
+            (saveSound, settings.LoadEnableSaveCue(), () => settings.SaveEnableSaveCue(false), "profile saved", "you save a profile"),
+            (profileSwitchSound, settings.LoadEnableProfileSwitchCue(), () => settings.SaveEnableProfileSwitchCue(false), "profile switched", "you switch profile"),
+            (profileMenuOpenSound, settings.LoadEnableProfileMenuOpenCue(), () => settings.SaveEnableProfileMenuOpenCue(false), "profile menu open", "the quick profile menu opens"),
+            (updateSound, settings.LoadEnableUpdateCue(), () => settings.SaveEnableUpdateCue(false), "update", "an update is about to install"),
+            (sendOnSound, cfg.EnableSendOnCue, () => SetMachineCueEnabled(c => c.EnableSendOnCue = false), "send turned on", "you turn sending on"),
+            (sendOffSound, cfg.EnableSendOffCue, () => SetMachineCueEnabled(c => c.EnableSendOffCue = false), "send turned off", "you turn sending off"),
+            (receiveOnSound, cfg.EnableReceiveOnCue, () => SetMachineCueEnabled(c => c.EnableReceiveOnCue = false), "receive turned on", "you turn receiving on"),
+            (receiveOffSound, cfg.EnableReceiveOffCue, () => SetMachineCueEnabled(c => c.EnableReceiveOffCue = false), "receive turned off", "you turn receiving off"),
+            (hideSound, cfg.EnableHideCue, () => SetMachineCueEnabled(c => c.EnableHideCue = false), "minimise", "RemSound minimises to the tray"),
+            (showSound, cfg.EnableShowCue, () => SetMachineCueEnabled(c => c.EnableShowCue = false), "restore", "RemSound is restored from the tray"),
+        };
+        foreach (var c in cues)
+        {
+            if (c.Enabled && c.Player is null)
+            {
+                c.Disable();
+                ReportMissingCueSound(c.Name, c.When);
+            }
+        }
+    }
+
+    private static void SetMachineCueEnabled(Action<AppConfig> set)
+    {
+        var c = AppConfig.Load();
+        set(c);
+        try { c.Save(); } catch { /* harmless — the cue is silent regardless this session */ }
+    }
+
+    /// <summary>Surface the "couldn't find a cue's sound file" message, front-most even when RemSound
+    /// is minimised, once per cue per session. The cue has already been turned off by the caller.</summary>
+    private void ReportMissingCueSound(string name, string when)
+    {
+        if (!reportedMissingCues.Add(name)) return;
+        logFile.Event($"cue sound '{name}': enabled but file missing — cue turned off, informing the user");
+        BeginInvoke(() =>
+        {
+            try { RestoreFromTray(); } catch { /* surfacing is best-effort */ }
+            MessageBox.Show(this,
+                $"RemSound was unable to find the {name} sound file used when {when}. " +
+                "RemSound has set this particular audio cue to not play for now, until a new sound file is specified.",
+                "RemSound — missing sound file", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        });
     }
 
     /// <summary>
