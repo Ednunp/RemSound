@@ -38,6 +38,8 @@ internal static class ProfilePasswordDialog
             Dock = DockStyle.Top,
             Width = 400,
             AccessibleName = $"Password for profile {profileTitle}",
+            // Mark as a password field so the key-click hook layers in the passkey sound.
+            Tag = KeyClickService.PasswordFieldTag,
         };
         var hint = new Label
         {

@@ -60,7 +60,7 @@ internal static class ProfilePasswordManagerDialog
             catch { current = ""; }
 
             var label = new Label { Text = title, AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 6, 10, 6) };
-            var box = new TextBox { Text = current, Anchor = AnchorStyles.Left | AnchorStyles.Right, AccessibleName = $"Password for profile {title}" };
+            var box = new TextBox { Text = current, Anchor = AnchorStyles.Left | AnchorStyles.Right, AccessibleName = $"Password for profile {title}", Tag = KeyClickService.PasswordFieldTag };
             grid.Controls.Add(label);
             grid.Controls.Add(box);
             rows.Add((title, current, box));

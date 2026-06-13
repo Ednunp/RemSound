@@ -20,6 +20,12 @@ internal static class KeyClickService
 {
     private const int WM_CHAR = 0x0102;
 
+    /// <summary>Tag value a password entry field sets on itself (<c>control.Tag = PasswordFieldTag</c>)
+    /// so the key-click hook layers in the distinct passkey sound. RemSound's password boxes are
+    /// deliberately NOT PasswordChar-masked (a screen-reader user can't see the mask anyway), so
+    /// there's no built-in flag to detect - they mark themselves with this tag instead.</summary>
+    public const string PasswordFieldTag = "remsound-password-field";
+
     private static KeyClickPlayer? player;
     private static MessageFilter? filter;
 
@@ -58,7 +64,10 @@ internal static class KeyClickService
         if (!Enabled || player is null) return;
         // The WM_CHAR target window is the focused control. Click only when it's an edit field.
         if (System.Windows.Forms.Control.FromHandle(hwnd) is not System.Windows.Forms.TextBoxBase edit) return;
-        var isPassword = edit is System.Windows.Forms.TextBox tb && (tb.UseSystemPasswordChar || tb.PasswordChar != '\0');
+        // A password field is marked by its Tag (RemSound's boxes aren't PasswordChar-masked), with
+        // a fallback to the standard masking flags for any conventionally-masked box.
+        var isPassword = (edit.Tag as string) == PasswordFieldTag
+            || (edit is System.Windows.Forms.TextBox tb && (tb.UseSystemPasswordChar || tb.PasswordChar != '\0'));
         player.PlayClick(isPassword);
     }
 
