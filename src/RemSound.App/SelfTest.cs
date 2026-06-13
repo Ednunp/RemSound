@@ -333,7 +333,6 @@ internal static class SelfTest
     {
         var factories = new (string Name, Func<Form> Make)[]
         {
-            ("Startup behaviour", () => new StartupBehaviourDialog(null)),
             ("Recording settings", () => new RecordingSettingsDialog(new RecordingSettings())),
             ("Preferences", () => new PreferencesDialog(
                 new RemSoundSettingsStore("RemSound"), null,

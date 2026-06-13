@@ -4,27 +4,17 @@ using RemSound.Core;
 namespace RemSound.App;
 
 /// <summary>
-/// Preferences dialog. Holds settings that aren't profile-management actions in their own
-/// right:
-///   * Browse for RemSound profiles folder — picks the directory the profile picker scans
-///     next launch.
-///   * Audio cue sounds — per-cue enable list (connect, disconnect, recording start/stop).
-///     One CheckedListBox; ticked items play, unticked are silent. Replaced the old single
-///     "Mute connect/disconnect sounds" toggle (2026-05-15) when recording start/stop cues
-///     were added — a CheckedListBox scales to future cues without dialog re-layout. Label
-///     gained the "Audio" prefix on 2026-05-21 to disambiguate from the underlying engine's
-///     "buffer cues" and "ASIO cues" diagnostic terms, which look the same in writing.
-///   * Accept remote volume commands from peers — opt-in for the remote-control feature.
-///   * Update settings — startup-check toggle, frequency, manual check, silent-install
-///     toggle. Layout deliberately reads top-to-bottom as the question the user is
-///     answering: "Check for updates on startup? (yes/no) Then, in the background, every?
-///     (interval) When one's found? (silent install / ask first)".
-///   * UPnP — optional automatic router port-forwarding via Mono.Nat. Off by default; when
-///     ticked, we kick off discovery and surface the result + external address inline.
-///   * Enable logs + Write logs now.
-///
-/// Startup behaviour was previously a button here that opened <see cref="StartupBehaviourDialog"/>;
-/// it's now a top-level Options menu item in its own right (2026-05-15 menu reorg).
+/// Preferences dialog. A four-tab dialog (2026-06-13 overhaul) using the same accessible
+/// <see cref="QuietTabControl"/> as the main window:
+///   * General — Browse for RemSound profiles folder, Accept remote volume commands, UPnP
+///     automatic router port-forwarding, and Enable logs / Write logs now.
+///   * Audio cues — the cue list (a plain list of cue names; arrowing previews each cue's
+///     current sound), a "Choose sound" list whose "(none)" entry turns a cue off, the Play /
+///     Browse actions, and the keyboard-clicks toggle.
+///   * Startup behaviour — Start minimised, Start with Windows, Start with a specific profile
+///     (+ the profile list). Moved here from the standalone Options-menu dialog.
+///   * Update settings — startup-check toggle, frequency, manual check, silent-install, and
+///     show-what's-new.
 ///
 /// All settings save through <see cref="RemSoundSettingsStore"/> or <see cref="AppConfig"/>
 /// on every change (no OK-to-commit). Esc or Close dismisses.
@@ -298,6 +288,41 @@ internal sealed class PreferencesDialog : Form
         AutoSize = true,
     };
 
+    // Startup behaviour (moved here from the Options-menu StartupBehaviourDialog, 2026-06-13). These
+    // live on their own tab; their Alt-letters are isolated per tab so reusing M/A/P/L is fine.
+    private readonly AccessibleCheckBox startMinimisedBox = new()
+    {
+        Text = "Start minimised to tray (Alt+&M)",
+        AccessibleName = "Start minimised to tray",
+        AutoSize = true,
+    };
+    private readonly AccessibleCheckBox startWithUserBox = new()
+    {
+        Text = "Start RemSound automatically when this user logs in (Alt+&A)",
+        AccessibleName = "Start RemSound automatically when this user logs in",
+        AutoSize = true,
+    };
+    private readonly AccessibleCheckBox startWithProfileBox = new()
+    {
+        Text = "Start with a specific profile (Alt+&P)",
+        AccessibleName = "Start with a specific profile",
+        AutoSize = true,
+    };
+    private readonly Label startupProfileListLabel = new()
+    {
+        Text = "Profile to start with (Alt+&L):",
+        AutoSize = true,
+        AccessibleName = "Profile to start with",
+    };
+    private readonly ListBox startupProfileList = new()
+    {
+        IntegralHeight = false,
+        Width = 360,
+        Height = 120,
+        AccessibleName = "Profile to start with",
+    };
+    private bool suppressStartWithUserHandler;
+
     private readonly Button closeButton = new()
     {
         Text = "Close",
@@ -549,37 +574,8 @@ internal sealed class PreferencesDialog : Form
 
         closeButton.Click += (_, _) => Close();
 
-        var panel = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            Padding = new Padding(12),
-            ColumnCount = 1,
-            RowCount = 13,
-        };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (var i = 0; i < 12; i++) panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        // Tab order top-to-bottom: browse-profiles-folder → cue list → Play selected →
-        // Browse for selected → accept remote → check-on-startup → frequency → check-now →
-        // silent install → UPnP → enable logs → write logs now → close. The cue section is
-        // three tab stops total: the list itself (where up/down navigates between cues and
-        // Space toggles enable), then the two action buttons that operate on whichever cue
-        // is currently selected in the list.
-        browseProfilesFolderButton.TabIndex = 0;
-        cueList.TabIndex = 1;
-        playSelectedCueButton.TabIndex = 2;
-        browseSelectedCueButton.TabIndex = 3;
-        acceptRemoteVolumeBox.TabIndex = 4;
-        checkForUpdatesOnStartupBox.TabIndex = 5;
-        updateFrequencyBox.TabIndex = 6;
-        checkForUpdatesNowButton.TabIndex = 7;
-        silentlyInstallUpdatesBox.TabIndex = 8;
-        showWhatsNewAfterUpdateBox.TabIndex = 9;
-        upnpEnabledBox.TabIndex = 10;
-        loggingBox.TabIndex = 11;
-        writeLogsNowButton.TabIndex = 12;
-        closeButton.TabIndex = 13;
+        // Wire up the Startup behaviour tab (moved here from the old Options-menu dialog).
+        WireStartupBehaviour(profileStore);
 
         // Group the frequency label + combo on one FlowLayoutPanel row so the visible label
         // sits inline next to the combo while keeping the combo as the focusable target.
@@ -630,18 +626,27 @@ internal sealed class PreferencesDialog : Form
         cueGroup.Controls.Add(cueActions, 0, 4);
         cueGroup.Controls.Add(keyboardClicksBox, 0, 5);
 
-        panel.Controls.Add(browseProfilesFolderButton, 0, 0);
-        panel.Controls.Add(cueGroup, 0, 1);
-        panel.Controls.Add(acceptRemoteVolumeBox, 0, 2);
-        panel.Controls.Add(checkForUpdatesOnStartupBox, 0, 3);
-        panel.Controls.Add(freqRow, 0, 4);
-        panel.Controls.Add(checkForUpdatesNowButton, 0, 5);
-        panel.Controls.Add(silentlyInstallUpdatesBox, 0, 6);
-        panel.Controls.Add(showWhatsNewAfterUpdateBox, 0, 7);
-        panel.Controls.Add(upnpEnabledBox, 0, 8);
-        panel.Controls.Add(upnpStatusLabel, 0, 9);
-        panel.Controls.Add(loggingBox, 0, 10);
-        panel.Controls.Add(writeLogsNowButton, 0, 11);
+        // Startup profile list (label + list), shown only when "start with a specific profile" is on.
+        var startupListPanel = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.TopDown,
+            AutoSize = true,
+            WrapContents = false,
+            Padding = new Padding(20, 0, 0, 0),
+        };
+        startupListPanel.Controls.Add(startupProfileListLabel);
+        startupListPanel.Controls.Add(startupProfileList);
+
+        // Four tabs, accessible (QuietTabControl) like the main window. Ctrl+Tab / arrows on the
+        // strip switch tabs; the active page's controls are the next tab stops.
+        var tabs = new QuietTabControl { Dock = DockStyle.Fill, TabIndex = 0, TabStop = true };
+        tabs.TabPages.Add(MakeTab("General",
+            browseProfilesFolderButton, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel, loggingBox, writeLogsNowButton));
+        tabs.TabPages.Add(MakeTab("Audio cues", cueGroup));
+        tabs.TabPages.Add(MakeTab("Startup behaviour",
+            startMinimisedBox, startWithUserBox, startWithProfileBox, startupListPanel));
+        tabs.TabPages.Add(MakeTab("Update settings",
+            checkForUpdatesOnStartupBox, freqRow, checkForUpdatesNowButton, silentlyInstallUpdatesBox, showWhatsNewAfterUpdateBox));
 
         var buttons = new FlowLayoutPanel
         {
@@ -652,8 +657,29 @@ internal sealed class PreferencesDialog : Form
         };
         buttons.Controls.Add(closeButton);
 
-        Controls.Add(panel);
+        Controls.Add(tabs);
         Controls.Add(buttons);
+
+        // Stack the given controls vertically in a tab body (auto-size rows + a spacer), mirroring
+        // the original single-panel layout so Dock=Fill children like the cue group still fit.
+        static TabPage MakeTab(string title, params Control[] controls)
+        {
+            var page = new TabPage(title);
+            var body = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(12),
+                ColumnCount = 1,
+                RowCount = controls.Length + 1,
+                AutoScroll = true,
+            };
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            for (var i = 0; i < controls.Length; i++) body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            body.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            for (var i = 0; i < controls.Length; i++) body.Controls.Add(controls[i], 0, i);
+            page.Controls.Add(body);
+            return page;
+        }
 
         AcceptButton = closeButton;
         CancelButton = closeButton;
@@ -668,6 +694,110 @@ internal sealed class PreferencesDialog : Form
             }
         };
     }
+
+    /// <summary>Wire up the Startup behaviour tab (moved here from StartupBehaviourDialog): load the
+    /// current state, populate the profile list, and persist each change immediately to AppConfig /
+    /// the Windows auto-start registry entry, exactly as the old dialog did.</summary>
+    private void WireStartupBehaviour(ProfileStore? store)
+    {
+        var cfg = AppConfig.Load();
+        startMinimisedBox.Checked = cfg.StartMinimised;
+        startWithUserBox.Checked = StartupAutoStart.IsEnabled;
+        var hasProfile = !string.IsNullOrWhiteSpace(cfg.StartWithProfileTitle);
+        startWithProfileBox.Checked = hasProfile;
+
+        if (store is not null)
+        {
+            foreach (var title in store.ListProfileTitles()) startupProfileList.Items.Add(title);
+        }
+        if (hasProfile && cfg.StartWithProfileTitle is { } savedTitle)
+        {
+            var idx = startupProfileList.Items.IndexOf(savedTitle);
+            if (idx >= 0) startupProfileList.SelectedIndex = idx;
+        }
+        UpdateStartupProfileListVisibility();
+
+        startMinimisedBox.CheckedChanged += (_, _) =>
+        {
+            var c = AppConfig.Load();
+            c.StartMinimised = startMinimisedBox.Checked;
+            try { c.Save(); } catch (Exception ex) { ShowStartupWarning("Could not save Start minimised preference: " + ex.Message); }
+        };
+
+        startWithUserBox.CheckedChanged += (_, _) =>
+        {
+            if (suppressStartWithUserHandler) return;
+            // Source of truth for auto-start is the registry, not AppConfig — flip it directly.
+            var ok = startWithUserBox.Checked ? StartupAutoStart.TryEnable() : StartupAutoStart.TryDisable();
+            if (!ok)
+            {
+                MessageBox.Show(this,
+                    "RemSound could not change the auto-start setting in the Windows registry. The setting did not change. (This usually means a policy or another security tool is blocking it.)",
+                    "Auto-start change failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                var actual = StartupAutoStart.IsEnabled;
+                if (startWithUserBox.Checked != actual)
+                {
+                    suppressStartWithUserHandler = true;
+                    try { startWithUserBox.Checked = actual; }
+                    finally { suppressStartWithUserHandler = false; }
+                }
+            }
+        };
+
+        startWithProfileBox.CheckedChanged += (_, _) =>
+        {
+            UpdateStartupProfileListVisibility();
+            if (startWithProfileBox.Checked)
+            {
+                if (startupProfileList.Items.Count == 0)
+                {
+                    MessageBox.Show(this,
+                        "You don't have any saved profiles yet. Save a profile first (File menu -> Save profile as), then come back here and pick it.",
+                        "No saved profiles", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    startWithProfileBox.Checked = false;
+                    return;
+                }
+                if (startupProfileList.SelectedIndex < 0) startupProfileList.SelectedIndex = 0;
+                CommitStartupProfileSelection();
+            }
+            else
+            {
+                ClearStartupProfileSelection();
+            }
+        };
+
+        startupProfileList.SelectedIndexChanged += (_, _) =>
+        {
+            if (!startWithProfileBox.Checked || startupProfileList.SelectedIndex < 0) return;
+            CommitStartupProfileSelection();
+        };
+        startupProfileListLabel.Click += (_, _) => startupProfileList.Focus();
+    }
+
+    private void UpdateStartupProfileListVisibility()
+    {
+        var visible = startWithProfileBox.Checked;
+        startupProfileListLabel.Visible = visible;
+        startupProfileList.Visible = visible;
+    }
+
+    private void CommitStartupProfileSelection()
+    {
+        if (startupProfileList.SelectedItem is not string title || string.IsNullOrWhiteSpace(title)) return;
+        var c = AppConfig.Load();
+        c.StartWithProfileTitle = title;
+        try { c.Save(); } catch (Exception ex) { ShowStartupWarning("Could not save the start-with-profile choice: " + ex.Message); }
+    }
+
+    private void ClearStartupProfileSelection()
+    {
+        var c = AppConfig.Load();
+        c.StartWithProfileTitle = null;
+        try { c.Save(); } catch (Exception ex) { ShowStartupWarning("Could not save the start-with-profile choice: " + ex.Message); }
+    }
+
+    private void ShowStartupWarning(string message) =>
+        MessageBox.Show(this, message, "Startup behaviour", MessageBoxButtons.OK, MessageBoxIcon.Warning);
 
     /// <summary>Refresh the Play and Browse action buttons so their visible text and
     /// AccessibleName reflect the currently-selected cue. Called on every selection change

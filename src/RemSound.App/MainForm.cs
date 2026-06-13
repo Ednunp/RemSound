@@ -1604,17 +1604,8 @@ public sealed class MainForm : Form
         };
         keyboardItem.Click += (_, _) => hotkeyController.ShowKeyboardShortcutsDialog(this);
 
-        var startupBehaviourItem = new ToolStripMenuItem("S&tartup behaviour...")
-        {
-            AccessibleName = "Startup behaviour",
-        };
-        startupBehaviourItem.Click += (_, _) =>
-        {
-            using var dialog = new StartupBehaviourDialog(profileStore);
-            dialog.ShowDialog(this);
-            // Startup-behaviour state persists through AppConfig / registry directly. No
-            // profile-dirty flag involved here — none of these settings live on Profile.
-        };
+        // Startup behaviour moved into the Preferences dialog (its own tab) on 2026-06-13; the
+        // Options-menu item and the standalone StartupBehaviourDialog are retired.
 
         var prefsItem = new ToolStripMenuItem("&Preferences...")
         {
@@ -1648,7 +1639,6 @@ public sealed class MainForm : Form
         {
             recordingSettingsItem,
             keyboardItem,
-            startupBehaviourItem,
             profilePasswordsItem,
         };
         if (realtekToggle is not null) optionItems.Add(realtekToggle);
