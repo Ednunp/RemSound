@@ -267,7 +267,7 @@ Item| Shortcut| What it does
 **Recording settings …**| Alt+O, S| Opens the Recording settings dialog. Up to five lists: _Recording source_ (Alt+S), _File format_ (Alt+F), _Audio format attributes_ (Alt+A), _FLAC compression level_ (Alt+L — only shown when FLAC is chosen), and _Channels_ (Alt+C). The attributes list changes to match the format you pick. OK saves to the current profile; Cancel discards.
 **Keyboard shortcuts …**| Ctrl+K, or Alt+O, K| Opens the global hotkey dialog (mute, volume, show/hide window, start/stop recording, remote-control commands).
 **Startup behaviour …**| Alt+O, T| Opens the Startup behaviour dialog. Choose whether to launch automatically with Windows, which profile to load by default, and whether to start hidden in the tray.
-**Preferences …**| Ctrl+P, or Alt+O, P| Opens the Preferences dialog. Settings here are a mix of machine-level (the profiles folder, updates, logging, UPnP) and per-profile (the audio cue list and its tick states). It holds: the profiles folder; the **Audio cue sounds (Alt+N)** list with Play and Browse buttons (see Audio cue sounds); whether to accept remote volume commands; whether to check for updates on startup; how often to check after that; a manual check-for-updates button; whether to install updates quietly; whether to ask your router to open the audio port for you (UPnP); whether to keep logs; and a button to write logs now. Esc or the Close button dismisses it.
+**Preferences …**| Ctrl+P, or Alt+O, P| Opens the Preferences dialog, organised into four tabs (move between them with Ctrl+Tab, or the arrow keys when the tab names have focus): **General** — the profiles folder, accept remote volume commands, UPnP router opening, and keep-logs / write-logs-now; **Audio cues** — the cue list and its sounds (see Audio cue sounds); **Startup behaviour** — start minimised / with Windows / with a specific profile; and **Update settings** — the update checks and install options. Esc or the Close button dismisses it.
 
 ### Help menu
 
@@ -844,7 +844,7 @@ The feature is symmetric: both computers can both send and accept. If you set up
 
 ## 17. Startup behaviour
 
-Open the **Startup behaviour** dialog from Options → Startup behaviour (Alt+O, T). It has three independent toggles, plus a profile picker that appears when the third one is on, and a Close button. Esc closes the dialog. Each tick is saved straight away — there's no OK or Apply button.
+Startup behaviour now lives on the **Startup behaviour** tab of the Preferences dialog (**File → Preferences**, or Ctrl+P). It has three independent toggles, plus a profile picker that appears when the third one is on. Each tick is saved straight away — there's no OK or Apply button. (It used to be a separate item on the Options menu; it moved into Preferences in the 2026 cue overhaul.)
 
 Toggle| What it does
 ---|---
@@ -852,12 +852,12 @@ Toggle| What it does
 **Start RemSound automatically when this user logs in (Alt+A)**|  Adds RemSound to (or removes it from) Windows' standard list of programs that start when you log in. After ticking it, Windows launches RemSound the next time you log in. It also appears under Task Manager → Startup, where you can disable it too. It applies to your account only — it doesn't need admin rights and doesn't affect anyone else who uses the same computer.
 **Start with a specific profile (Alt+P)**|  When ticked, RemSound skips the startup profile picker and loads the profile you choose in the list below. When unticked, the profile picker shows as normal. If you don't have any saved profiles yet, ticking this shows a one-time warning and stays unticked — save a profile first, then come back. To bring the picker back temporarily without losing your choice, untick the box, start RemSound normally, then tick it again afterwards.
 
-**Profile to start with (Alt+L)** — the list of your saved profiles. It only shows when the third toggle is on. Pick a profile and the choice is saved straight away. Double-click a profile to pick it and close the dialog at the same time.
+**Profile to start with (Alt+L)** — the list of your saved profiles. It only shows when the third toggle is on. Pick a profile and the choice is saved straight away.
 
 ### Combining the three for a hands-off start
 
   1. Save a profile with the device choices, peers, and sound settings you want for “always-on” use.
-  2. Open Startup behaviour. Tick all three: _Start minimised_ , _Start automatically when this user logs in_ , and _Start with a specific profile_ — then pick the profile you just saved.
+  2. Go to the Startup behaviour tab in Preferences. Tick all three: _Start minimised_ , _Start automatically when this user logs in_ , and _Start with a specific profile_ — then pick the profile you just saved.
   3. Close the dialog. Reboot, or log out and back in, to test — RemSound starts itself, loads the profile, and goes straight to the tray. Sound starts flowing as soon as the peer is reachable.
 
 
@@ -887,11 +887,22 @@ Cue| Plays when
 
 All of these cues play through your default Windows sound output, which is separate from the audio RemSound is sending or receiving. They don't appear in a normal recording. (The exception: if your sending side is capturing the very output device the cues play through, then they get captured along with everything else from that device.)
 
-### Turning each cue on or off
+### The Audio cues tab
 
-Open **File → Preferences** (or Ctrl+P). The **Audio cue sounds (Alt+N)** list shows every cue with a tickbox next to each. Tick to play the cue when the corresponding event happens; untick to silence it.
+Open **File → Preferences** (or Ctrl+P) and go to the **Audio cues** tab. (Preferences is now organised into four tabs — General, Audio cues, Startup behaviour and Update settings — which you move between with Ctrl+Tab, or with the arrow keys when the row of tab names has focus.)
 
-Use the up and down arrow keys to move between cues; press **Space** to toggle the highlighted cue's tick on or off.
+The **Audio cue sounds (Alt+N)** list shows every cue by name. Use the up and down arrow keys to move between them — as you land on each cue, RemSound plays its current sound, so you can hear what's set just by arrowing through.
+
+### Turning a cue on or off, and choosing its sound
+
+Just below the cue list is a **Choose sound (Alt+D)** list, which controls whichever cue is highlighted above. Its first entry is **(none)** ; the rest are the built-in sounds that cue ships with. Arrow through it and RemSound plays each one as you land on it:
+
+  * Land on **(none)** and the cue is switched **off** — nothing plays for that event.
+  * Land on a sound and the cue is switched **on** and set to use that sound.
+
+
+
+Every cue starts switched on, using its first sound. **"(none)" is how you silence a cue** — there are no separate tickboxes any more. Your choices are remembered for next time (per-event cues travel with the active profile; the app-level cues like startup and minimise are remembered for the whole installation).
 
 The tick settings are **saved with the active profile** , so different profiles can have different combinations of cues on. For example, a “quiet listening” profile might have all cues off, while a “live monitoring” profile keeps them on. When you save the profile (Ctrl+S), the new settings travel with it.
 
@@ -906,13 +917,9 @@ Below the list are two buttons that act on whichever cue is currently highlighte
 
 Both buttons' labels update as you arrow through the list, so you always know which cue you're about to act on.
 
-### Choosing which built-in sound a cue uses
+### If a cue's sound file goes missing
 
-Each cue ships with more than one sound to choose from. Between the cue list and the buttons is a **Choose default sound (Alt+D)** list. It shows the built-in sounds available for whichever cue is highlighted in the list above. Arrow up and down it and RemSound plays each sound as you land on it, so you can listen through them and stop on the one you like — the sound you leave selected becomes that cue's default.
-
-This is separate from browsing for your own file: this list picks among the sounds that _ship with_ RemSound, while Browse replaces the sound with a WAV of your own. A file you've browsed for always takes priority; clear it (right-click Browse → Use default) and the cue goes back to the built-in sound you chose here.
-
-Your choice here is remembered **for the whole installation** , not per profile, so your preferred set of built-in sounds follows you across every profile.
+If a cue is switched on but RemSound can't find its sound file — for example you delete a WAV you'd browsed for — RemSound brings its window to the front (even when it's minimised) and tells you which cue and which event it was, then switches that cue to **(none)** so it stops trying. Pick a sound for it again in the **Choose sound** list, or Browse for a new file, to turn it back on.
 
 ### Keyboard clicks while typing
 
