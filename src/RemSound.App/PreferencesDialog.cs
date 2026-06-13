@@ -190,6 +190,11 @@ internal sealed class PreferencesDialog : Form
                 c => c.EnableCheckboxOnCue, (c, v) => c.EnableCheckboxOnCue = v),
             MachineRow("Checkbox unticked sound", MainForm.CueId.CheckboxOff, "uncheck.wav",
                 c => c.EnableCheckboxOffCue, (c, v) => c.EnableCheckboxOffCue = v),
+            // Played whenever the user switches tabs anywhere in the app (TabSwitchSoundService).
+            // Display name is Ed's "switch tabs"; the shipped files are "tab switch 1.wav" etc, so
+            // the base filename here is "tab switch.wav" for variant discovery to match.
+            MachineRow("Switch tabs sound", MainForm.CueId.TabSwitch, "tab switch.wav",
+                c => c.EnableTabSwitchCue, (c, v) => c.EnableTabSwitchCue = v),
         ];
     }
 
@@ -330,6 +335,10 @@ internal sealed class PreferencesDialog : Form
         DialogResult = DialogResult.OK,
     };
 
+    // The four-tab strip. Held as a field (not a constructor local) so OnShown can land focus
+    // on it when the dialog opens — see the OnShown override for why that's needed for NVDA.
+    private readonly QuietTabControl tabs = new() { Dock = DockStyle.Fill, TabIndex = 0, TabStop = true };
+
     /// <summary>True if the user toggled Mute cues or Accept remote during this dialog
     /// session. The owner uses this to know whether to MarkProfileDirty after the dialog
     /// closes (since both settings live on Profile and need to flag a save-pending state).</summary>
@@ -355,6 +364,10 @@ internal sealed class PreferencesDialog : Form
         cueRows = BuildCueRows(settings);
 
         Text = "Preferences";
+        // Explicitly a dialog so the spoken title is clean and screen readers treat it as a dialog
+        // (ShowDialog already exposes UIA IsDialog on .NET 7+; this is harmless reinforcement).
+        AccessibleRole = AccessibleRole.Dialog;
+        AccessibleName = "Preferences";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MinimizeBox = false;
         MaximizeBox = false;
@@ -638,8 +651,8 @@ internal sealed class PreferencesDialog : Form
         startupListPanel.Controls.Add(startupProfileList);
 
         // Four tabs, accessible (QuietTabControl) like the main window. Ctrl+Tab / arrows on the
-        // strip switch tabs; the active page's controls are the next tab stops.
-        var tabs = new QuietTabControl { Dock = DockStyle.Fill, TabIndex = 0, TabStop = true };
+        // strip switch tabs; the active page's controls are the next tab stops. The control itself
+        // is a field (declared above) so OnShown can focus it when the dialog opens.
         tabs.TabPages.Add(MakeTab("General",
             browseProfilesFolderButton, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel, loggingBox, writeLogsNowButton));
         tabs.TabPages.Add(MakeTab("Audio cues", cueGroup));
@@ -693,6 +706,52 @@ internal sealed class PreferencesDialog : Form
                 e.Handled = true;
             }
         };
+    }
+
+    /// <summary>When the dialog opens, land focus on the first real, NAMED leaf control inside the
+    /// active tab page so NVDA announces the dialog and that control. Never the tab strip: the tab
+    /// control is a <see cref="QuietTabControl"/> whose own accessible object is deliberately
+    /// role-less and nameless (so NVDA reads the tab item, not a redundant "tab control"), and
+    /// focusing THAT on open gave NVDA nothing to announce — which is exactly why Preferences opened
+    /// silent until you moved. Focusing a named leaf (the first General-tab control) gives NVDA
+    /// something to speak, and because ShowDialog exposes the form as a dialog (UIA IsDialog, .NET 7+)
+    /// it then reads the whole dialog.
+    ///
+    /// Three load-bearing details, confirmed against the dotnet/winforms + NVDA issue trackers and
+    /// matching the pattern Andre's Sensor Readout uses (it focuses a real list/textbox in Shown):
+    ///   * Deferred via BeginInvoke so it runs after the dialog's accessibility tree is live.
+    ///   * ActiveControl=null FIRST, so leaf.Focus() is a genuine focus CHANGE and actually raises the
+    ///     focus event (without the transition WinForms can treat focus as unchanged and stay silent).
+    ///   * NotifyFocus re-fires the MSAA focus event as belt-and-braces.
+    /// Ctrl+Tab still switches tabs from inside the page.</summary>
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        BeginInvoke(new Action(() =>
+        {
+            if (IsDisposed) return;
+            if (tabs.TabCount > 0) tabs.SelectedIndex = 0;
+            var leaf = FirstTabStopLeaf(tabs.SelectedTab) ?? (Control)tabs;
+            ActiveControl = null;
+            leaf.Focus();
+            if (leaf.IsHandleCreated) WinEventNotifier.NotifyFocus(leaf);
+        }));
+    }
+
+    /// <summary>The first visible, enabled, tab-stop control inside <paramref name="container"/>,
+    /// searched depth-first in child order (which matches the order controls were added to each tab).
+    /// Returns a real leaf the dialog can focus on open so NVDA has a named control to announce —
+    /// never a layout panel or the role-less tab strip.</summary>
+    private static Control? FirstTabStopLeaf(Control? container)
+    {
+        if (container is null) return null;
+        foreach (Control c in container.Controls)
+        {
+            if (c is { CanSelect: true, TabStop: true, Visible: true, Enabled: true })
+                return c;
+            if (FirstTabStopLeaf(c) is { } nested) return nested;
+        }
+        return null;
     }
 
     /// <summary>Wire up the Startup behaviour tab (moved here from StartupBehaviourDialog): load the

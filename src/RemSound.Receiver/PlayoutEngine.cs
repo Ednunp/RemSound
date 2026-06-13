@@ -366,6 +366,53 @@ internal sealed class PlayoutEngine : IWaveProvider
         return total;
     }
 
+    /// <summary>Cause-split underrun aggregators for the continuous auto-tune (2026-06-13).
+    /// <see cref="AggregateTuneBlockingUnderrunsFor"/> sums the short-reads the tuner should treat
+    /// as "need more buffer" (full-empty reads + reads taken while the ring was draining below
+    /// target). <see cref="AggregateDeviceGulpUnderrunsFor"/> sums the inaudible on-target partial
+    /// short-reads caused by a chunky output render callback, which more buffer can't fix and which
+    /// must NOT block the tuner from lowering. Together they partition <see cref="AggregateUnderrunsFor"/>.
+    /// Per-route, mirroring the underrun aggregator above.</summary>
+    public long AggregateTuneBlockingUnderrunsFor(RenderRoute route)
+    {
+        long total = 0;
+        foreach (var s in sessionsSnapshot)
+        {
+            if (s.Route == route) total += s.TuneBlockingUnderrunsTotal;
+        }
+        return total;
+    }
+
+    public long AggregateTuneBlockingUnderruns
+    {
+        get
+        {
+            long total = 0;
+            foreach (var s in sessionsSnapshot) total += s.TuneBlockingUnderrunsTotal;
+            return total;
+        }
+    }
+
+    public long AggregateDeviceGulpUnderrunsFor(RenderRoute route)
+    {
+        long total = 0;
+        foreach (var s in sessionsSnapshot)
+        {
+            if (s.Route == route) total += s.DeviceGulpUnderrunsTotal;
+        }
+        return total;
+    }
+
+    public long AggregateDeviceGulpUnderruns
+    {
+        get
+        {
+            long total = 0;
+            foreach (var s in sessionsSnapshot) total += s.DeviceGulpUnderrunsTotal;
+            return total;
+        }
+    }
+
     /// <summary>True if at least one session is currently tagged for this route. Used by
     /// the auto-tune to skip ticking a lane that has nobody to tune — without this gate
     /// the ASIO auto-tune (for example) would react to the shared network-gap signal

@@ -74,6 +74,17 @@ internal sealed class QuietTabControl : TabControl
     protected override AccessibleObject CreateAccessibilityInstance()
         => new QuietAcc(this);
 
+    protected override void OnSelectedIndexChanged(EventArgs e)
+    {
+        base.OnSelectedIndexChanged(e);
+        // Audible tab-switch cue, app-wide (every QuietTabControl gets it for free). Gated on
+        // ContainsFocus so a genuine user switch - arrow keys with the strip focused, or Ctrl+Tab
+        // with focus on a control inside the active page - clicks, while the programmatic
+        // SelectedIndex set done while a window is being built or its last tab restored (nothing
+        // here focused yet) stays silent.
+        if (ContainsFocus) TabSwitchSoundService.Play();
+    }
+
     private sealed class QuietAcc : ControlAccessibleObject
     {
         public QuietAcc(Control owner) : base(owner) { }

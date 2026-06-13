@@ -114,12 +114,14 @@ Action| How
 
 ### Where your files are stored
 
-Everything RemSound keeps for you on this computer — your settings, your profiles, your logs, and your cue sounds — lives together in one folder inside RemSound called **user settings and logs**. Each profile is one small file, stored at:
+Everything RemSound keeps for you on this computer — your settings, your profiles, and your logs — lives together in one folder inside RemSound called **user settings and logs**. Each profile is one small file, stored at:
 
 
     <RemSound folder>\user settings and logs\profiles\<your computer name>\<profile name>
 
-(If you're upgrading from an older version, RemSound moves all of this into the **user settings and logs** folder automatically the first time you run this version, and tells you once that it's done it. Nothing is lost.) From this version on, RemSound updates never touch that folder — so anything of your own in there, including custom cue sounds, stays safe when you update.
+(If you're upgrading from an older version, RemSound moves all of this into the **user settings and logs** folder automatically the first time you run this version, and tells you once that it's done it. Nothing is lost.) RemSound updates never touch that folder — so anything of your own in there stays safe when you update.
+
+The built-in cue sounds are kept separately, in a **default sounds** folder alongside the program. Those are part of RemSound itself, so an update can refresh them — if a future version ships an improved default sound, you'll get it. Your own choices are never affected: a sound you pick for a cue with the **Browse** button is remembered as a link to your own file (wherever you keep it), and that's left exactly as you set it.
 
 The folder named after your computer keeps each machine's profiles separate. If you used the **Browse …** button on the startup dialog to pick a different folder (for example, one inside Dropbox), the profiles are stored directly in that folder — with no per-computer subfolder — so two computers pointed at the same shared folder see exactly the same list.
 
@@ -866,7 +868,7 @@ Toggle| What it does
 
 ## 18. Audio cue sounds
 
-RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called **cue sounds**. Sixteen kinds of event have a cue:
+RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called **cue sounds**. Seventeen kinds of event have a cue:
 
 Cue| Plays when
 ---|---
@@ -884,6 +886,7 @@ Cue| Plays when
 **Minimise (hide) sound**|  RemSound's window minimises to the notification area (hides).
 **Restore (show) sound**|  RemSound's window is brought back from the notification area (shows).
 **Checkbox ticked / unticked sound**|  You tick or untick _any_ checkbox anywhere in RemSound — a click for ticked, a different one for unticked. This gives instant feedback on which way a box just went, which is especially handy in the busy inputs and outputs lists. There's a separate sound for ticking and for unticking.
+**Switch tabs sound**|  You move between tabs anywhere in RemSound — the row of tabs in the main window, or the tabs in a dialog like Preferences. It plays each time you land on a different tab (with Ctrl+Tab, or the arrow keys when the row of tab names has focus).
 
 All of these cues play through your default Windows sound output, which is separate from the audio RemSound is sending or receiving. They don't appear in a normal recording. (The exception: if your sending side is capturing the very output device the cues play through, then they get captured along with everything else from that device.)
 
@@ -933,13 +936,13 @@ Custom sound choices are **saved with the active profile** , the same way the ti
 
 ### Going back to the default sound
 
-To revert a cue to its default sound, **right-click** the _Browse for [cue name] …_ button and pick **Use default sound**. The custom path is forgotten and the cue goes back to playing the default WAV that ships with RemSound. The right-click option is greyed out when the cue is already using its default. (Alternatively, click _Browse_ and pick a file from RemSound's own `sounds` folder — inside **user settings and logs** — and RemSound treats that as “use default” and clears the override automatically.)
+To revert a cue to its default sound, **right-click** the _Browse for [cue name] …_ button and pick **Use default sound**. The custom path is forgotten and the cue goes back to playing the default WAV that ships with RemSound. The right-click option is greyed out when the cue is already using its default. (Alternatively, click _Browse_ and pick a file from RemSound's own `default sounds` folder — alongside the program — and RemSound treats that as “use default” and clears the override automatically.)
 
 ### Where the cue sounds live
 
-RemSound keeps the cue WAV files in a `sounds` folder inside **user settings and logs** — the same folder your settings and profiles live in. Each cue ships with a small set of numbered sound files there. They're named after the cue with a number on the end — for example `connect 1.wav` and `connect 2.wav` for the connect cue, `record start 1.wav` and `record start 2.wav` for the recording-start cue, and so on. The **Choose default sound** list described above simply picks between the numbered files a cue has. If you add more numbered files of your own following the same pattern, they show up in the list automatically — there's no fixed limit.
+RemSound keeps the built-in cue WAV files in a `default sounds` folder alongside the program. Each cue ships with a small set of numbered sound files there. They're named after the cue with a number on the end — for example `connect 1.wav` and `connect 2.wav` for the connect cue, `record start 1.wav` and `record start 2.wav` for the recording-start cue, and so on. The **Choose sound** list described above simply picks between the numbered files a cue has.
 
-Because this folder is inside **user settings and logs** , RemSound updates never overwrite it. So if you drop your own WAV files in here in place of the defaults, your versions stay put when you update — you don't have to set them up again.
+Because these are RemSound's own built-in sounds, an update can refresh them — if a future version ships an improved default, you'll get it. To use a sound of your _own_ for a cue, don't drop a file into `default sounds` (an update would overwrite it); instead use the **Browse** button, which links the cue to your file wherever you keep it. That link is remembered and never touched by an update, so your chosen sound always stays put.
 
 If a cue's WAV file is missing — either the default file doesn't exist or a custom path points at a file you've since deleted — the cue stays silent rather than producing an error. RemSound logs a note in the diagnostic log (if logging is on) so you can see what happened.
 
@@ -1035,7 +1038,7 @@ Format| What you get| When to pick it
 
 ### Start and stop sound cues
 
-RemSound plays a short ding when a recording starts and another when it stops, so you have an audible confirmation that the toggle actually took effect. These are two of the eight cues described in Audio cue sounds. You can turn either or both off, replace them with your own WAV files, and preview them from Preferences. The defaults live at `sounds\record start.wav` and `sounds\record stop.wav` inside the **user settings and logs** folder.
+RemSound plays a short ding when a recording starts and another when it stops, so you have an audible confirmation that the toggle actually took effect. These are two of the cues described in Audio cue sounds. You can turn either or both off, replace them with your own WAV files, and preview them from Preferences. The built-in defaults are the `record start` and `record stop` sounds in the **default sounds** folder alongside the program.
 
 ### Where recordings go
 

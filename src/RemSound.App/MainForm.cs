@@ -271,6 +271,15 @@ public sealed class MainForm : Form
     private bool suppressConnectedCheck;
     private bool suppressDiscoveredCheck;
     private bool suppressRememberedCheck;
+    /// <summary>True while ANY checkable list is being (un)checked programmatically — a device-list
+    /// refresh (<see cref="suppressDeviceCheckChange"/>) or a rebuild of one of the three peer lists
+    /// (each fires ItemCheck for every pre-checked row it adds). The tick/untick CUE must stay silent
+    /// for all of these, not just device-list changes: on startup the connected-peers list is focused
+    /// (see the Shown handler's FocusListControl call), so a saved-peer reconnect rebuilding that list
+    /// would otherwise click a checkbox sound at launch. Only a genuine user toggle — no flag set —
+    /// should click.</summary>
+    private bool SuppressingCheckSounds =>
+        suppressDeviceCheckChange || suppressConnectedCheck || suppressDiscoveredCheck || suppressRememberedCheck;
     private string lastConnectedListSignature = string.Empty;
     private string lastDiscoveredListSignature = string.Empty;
     private string lastRememberedListSignature = string.Empty;
@@ -460,6 +469,7 @@ public sealed class MainForm : Form
     // are gone too.
     private long prevDiagConceal;
     private long prevDiagShortRead;
+    private long prevDiagDeviceGulp;
     private long prevDiagTrimFires;
     // Wire-level packet-sequence tracking deltas. Detects packet reordering, loss, or
     // duplication on the UDP path between sender and receiver. On a healthy LAN all three
@@ -1282,7 +1292,9 @@ public sealed class MainForm : Form
             // launch RemSound, find an update, and stay running for less than the timer
             // interval would otherwise miss the release entirely. Default on. The
             // background-poll path handles both silent install and the user-prompt flow.
-            if (startupCfg.CheckForUpdatesOnStartup)
+            // Skipped on a --silent (automated/throwaway) launch: a test instance must never pop an
+            // "update available" prompt or, worse, silently download/install + restart mid-test.
+            if (startupCfg.CheckForUpdatesOnStartup && !CuePlayer.GloballyMuted)
             {
                 // Defer a few seconds so the network stack, audio engine, and any device
                 // hot-swap has settled before we touch GitHub. The visible cue (silent-
@@ -4013,7 +4025,8 @@ public sealed class MainForm : Form
         // Log the detector's verdict every startup so a silent-mic session is no longer ambiguous —
         // we can see whether RemSound thought Windows was blocking the mic, not just whether it warned.
         logFile.Event($"mic-privacy: windows-blocks-desktop-mic={blocked} wasapiMicTicked={anyWasapiMicChecked}");
-        if (blocked && anyWasapiMicChecked) WarnMicrophoneBlockedByWindowsPrivacy();
+        // A --silent (automated/throwaway) launch logs the verdict but never pops the warning dialog.
+        if (blocked && anyWasapiMicChecked && !CuePlayer.GloballyMuted) WarnMicrophoneBlockedByWindowsPrivacy();
     }
 
     /// <summary>
@@ -4024,6 +4037,10 @@ public sealed class MainForm : Form
     /// </summary>
     private void MaybeWarnAboutRealtekAsio()
     {
+        // A --silent (automated/throwaway) launch must not pop this warning - its TaskDialog plays
+        // the Windows warning ding even when nobody can see the dialog (it's on a minimized test
+        // instance that's then auto-closed). The decision belongs to a real user at a real launch.
+        if (CuePlayer.GloballyMuted) return;
         if (realtekAsioDriverNames.Count == 0) return;
         var cfg = AppConfig.Load();
         var changed = false;
@@ -5383,6 +5400,11 @@ public sealed class MainForm : Form
                 var shortReadNow = receiver.ShortReadFires;
                 var concealDelta = concealNow - prevDiagConceal; prevDiagConceal = concealNow;
                 var shortReadDelta = shortReadNow - prevDiagShortRead; prevDiagShortRead = shortReadNow;
+                // Device-gulp short-reads this second — the inaudible, on-target partial reads the
+                // cause-aware auto-tune ignores. High devGulpΔ alongside a near-zero concealΔ is the
+                // onboard-Realtek chunky-render-callback fingerprint we built the split to catch.
+                var deviceGulpNow = receiver.DeviceGulpUnderruns;
+                var deviceGulpDeltaDiag = deviceGulpNow - prevDiagDeviceGulp; prevDiagDeviceGulp = deviceGulpNow;
                 var trimDelta = trimFires - prevDiagTrimFires; prevDiagTrimFires = trimFires;
                 // Live state — current LP-filtered drift error. Negative = buffer running below
                 // target on average; positive = above.
@@ -5510,7 +5532,7 @@ public sealed class MainForm : Form
                     $"privMB={selfMeter.PrivateBytesMb:0.0} gcHeapMB={selfMeter.GcHeapMb:0.0} gcFragMB={selfMeter.GcFragmentedMb:0.0} gcCommitMB={selfMeter.GcCommittedMb:0.0} handles={selfMeter.HandleCount} threads={selfMeter.ThreadCount} " +
                     $"captureMs={captureMs:0.0} sendMs={sendMs:0.0} recvMs={recvMs:0.0} renderMs={renderMs:0.0} " +
                     $"trimB={trimBytes} trimN={trimFires} trimΔ={trimDelta} drainB={drainBytes} ovfB={ovfBytes} pktRej={pktRej} " +
-                    $"concealΔ={concealDelta} shortReadΔ={shortReadDelta} " +
+                    $"concealΔ={concealDelta} shortReadΔ={shortReadDelta} devGulpΔ={deviceGulpDeltaDiag} " +
                     $"filtErr={filteredErrorFrames:0.0}f " +
                     $"capPeak={capPeak:0.000} sndAudFrΔ={sndAudFr} stepRawCap={stepRawCap:0.000} stepPreEnc={stepPreEnc:0.000} stepPreEncWas={stepPreEncWas:0.000} stepPreEncAsi={stepPreEncAsi:0.000} stepPostDec={stepPostDec:0.000} stepPostRing={stepPostRing:0.000} stepPostRsm={stepPostRsm:0.000} " +
                     $"stepRawCapXB={stepRawCapXB:0.000} stepRawCapWB={stepRawCapWB:0.000} " +
@@ -5736,6 +5758,11 @@ public sealed class MainForm : Form
         if (pendingProfile is null) return;
         var p = pendingProfile;
         applyingProfile = true;
+        // Silence the generic checkbox tick/untick for the whole bulk apply. The per-box Focused
+        // gate isn't enough on launch: the box we tick in code is often the focused control, so it
+        // would click. This + the applyingProfile guard on the send/receive cue keep a profile load
+        // down to just the startup and (real) connect cues.
+        CheckSoundService.Suppressed = true;
         try
         {
             // Volume first — affects what's audible during the rest of this method.
@@ -5778,6 +5805,7 @@ public sealed class MainForm : Form
             // the original profile forever.
             pendingProfile = null;
             applyingProfile = false;
+            CheckSoundService.Suppressed = false;
         }
     }
 
@@ -6182,10 +6210,10 @@ public sealed class MainForm : Form
         HandleCapabilityChange();
         MarkProfileDirty();
         // Audible feedback for the toggle, whether the user clicked the checkbox or pressed the
-        // mute hotkey (the hotkey flips .Checked, which routes through here too). Suppressed during
-        // profile load by the suppressStreamingPasswordGate guard above, so loading a profile that
-        // has send/receive on doesn't blast the cues.
-        PlayStreamToggleCue(box);
+        // mute hotkey (the hotkey flips .Checked, which routes through here too). Skipped while a
+        // profile is being applied programmatically — loading a profile that has send/receive on
+        // shouldn't blast the cues; only a genuine user toggle should.
+        if (!applyingProfile) PlayStreamToggleCue(box);
     }
 
     /// <summary>Play the send/receive turned-on / turned-off cue for a streaming checkbox toggle.
@@ -6519,6 +6547,9 @@ public sealed class MainForm : Form
         // Played on every checkbox tick/untick across the whole app (CheckSoundService).
         public const string CheckboxOn = "checkbox-on";
         public const string CheckboxOff = "checkbox-off";
+        // Played whenever the user switches tabs anywhere in the app (TabSwitchSoundService,
+        // fired from QuietTabControl). The shipped WAVs are "tab switch 1.wav" etc.
+        public const string TabSwitch = "tab-switch";
     }
 
     /// <summary>Load one cue sound. Resolution order:
@@ -6596,8 +6627,10 @@ public sealed class MainForm : Form
         TryLoadCueSound(CueId.ReceiveOff, "recieve off.wav", out receiveOffSound);
         TryLoadCueSound(CueId.Hide, "minimise.wav", out hideSound);
         TryLoadCueSound(CueId.Show, "maximise.wav", out showSound);
-        // The app-wide checkbox tick/untick sounds live in their own service; keep them in step.
+        // The app-wide checkbox tick/untick and tab-switch sounds live in their own services; keep
+        // them in step.
         CheckSoundService.Reload();
+        TabSwitchSoundService.Reload();
         // After a reload (e.g. the user changed a cue in Preferences), warn about any cue that's
         // switched on but whose sound file is missing. Skipped during construction (no window yet);
         // OnShown does the first-launch pass.
@@ -6653,6 +6686,8 @@ public sealed class MainForm : Form
     {
         if (!reportedMissingCues.Add(name)) return;
         logFile.Event($"cue sound '{name}': enabled but file missing — cue turned off, informing the user");
+        // A --silent (automated) launch turns the cue off quietly and never pops a dialog at the user.
+        if (CuePlayer.GloballyMuted) return;
         BeginInvoke(() =>
         {
             try { RestoreFromTray(); } catch { /* surfacing is best-effort */ }
@@ -7131,13 +7166,13 @@ public sealed class MainForm : Form
             if (continuousTuneEnabled && receiver.HasSessionsForRoute(RenderRoute.WasapiLane))
             {
                 TickRoute(RenderRoute.WasapiLane, maxLatencyBox, "WASAPI",
-                    ref lastObservedUnderrunCount, ref suppressUserSliderMoveTracking,
+                    ref lastObservedUnderrunCount, ref lastObservedDeviceGulpCount, ref suppressUserSliderMoveTracking,
                     lastUserSliderMoveUtc, intervalSec, frameMs.Value);
             }
             if (settings.LoadContinuousAutoTuneAsioEnabled() && receiver.HasSessionsForRoute(RenderRoute.AsioLane))
             {
                 TickRoute(RenderRoute.AsioLane, maxLatencyAsioBox, "ASIO",
-                    ref lastObservedUnderrunCountAsio, ref suppressUserAsioSliderMoveTracking,
+                    ref lastObservedUnderrunCountAsio, ref lastObservedDeviceGulpCountAsio, ref suppressUserAsioSliderMoveTracking,
                     lastUserAsioSliderMoveUtc, intervalSec, frameMs.Value);
             }
         }
@@ -7146,7 +7181,7 @@ public sealed class MainForm : Form
             if (continuousTuneEnabled)
             {
                 TickRoute(RenderRoute.Mixed, maxLatencyBox, "",
-                    ref lastObservedUnderrunCount, ref suppressUserSliderMoveTracking,
+                    ref lastObservedUnderrunCount, ref lastObservedDeviceGulpCount, ref suppressUserSliderMoveTracking,
                     lastUserSliderMoveUtc, intervalSec, frameMs.Value);
             }
         }
@@ -7159,6 +7194,12 @@ public sealed class MainForm : Form
     // a heap-allocated state object on the hot path.
     private long lastObservedUnderrunCountAsio;
     private bool suppressUserAsioSliderMoveTracking;
+    // Per-route "device-gulp underruns at last tick" — the inaudible, more-buffer-won't-fix
+    // partial short-reads the cause-aware skip gate deliberately ignores. Tracked only so the
+    // auto-tune log can show how many were ignored; shared between Mixed and the WASAPI lane the
+    // same way lastObservedUnderrunCount is.
+    private long lastObservedDeviceGulpCount;
+    private long lastObservedDeviceGulpCountAsio;
 
     /// <summary>
     /// Per-route auto-tune tick body. Same algorithm as the pre-2026-05-11 single-route
@@ -7175,6 +7216,7 @@ public sealed class MainForm : Form
         NumericUpDown slider,
         string routeLabel,
         ref long lastObservedUnderruns,
+        ref long lastObservedDeviceGulps,
         ref bool suppressFlag,
         DateTime lastUserMoveUtc,
         int intervalSec,
@@ -7195,20 +7237,31 @@ public sealed class MainForm : Form
         // Defer to user's manual change — wait at least one tick interval before overriding.
         if (DateTime.UtcNow - lastUserMoveUtc < TimeSpan.FromSeconds(intervalSec)) return;
 
-        // Per-route underrun delta. The receiver tracks underruns per session, so summing
-        // only over sessions tagged with this route gives a route-local distress signal.
-        var currentUnderruns = route == RenderRoute.Mixed ? receiver.Underruns : receiver.UnderrunsFor(route);
+        // Per-route underrun delta — but the CAUSE-AWARE kind (2026-06-13). We gate on
+        // tune-blocking underruns only: the full-empty / producer-starved short-reads that
+        // genuinely mean "the buffer is too thin". A steady trickle of inaudible device-gulp
+        // partials — a chunky onboard-Realtek render callback asking for an oversized block on an
+        // otherwise on-target ring — is deliberately NOT counted here, so it can no longer pin the
+        // target high forever by making every tick skip. The recommendation below still folds in
+        // the render-callback gap, so even when we're free to lower we can never lower below what
+        // the device structurally needs; it just settles to that floor instead of overshooting up.
+        var currentUnderruns = route == RenderRoute.Mixed ? receiver.TuneBlockingUnderruns : receiver.TuneBlockingUnderrunsFor(route);
         var underrunDelta = currentUnderruns - lastObservedUnderruns;
         lastObservedUnderruns = currentUnderruns;
+        // Device-gulp delta is tracked for the diagnostic trail only — it never gates.
+        var currentDeviceGulps = route == RenderRoute.Mixed ? receiver.DeviceGulpUnderruns : receiver.DeviceGulpUnderrunsFor(route);
+        var deviceGulpDelta = currentDeviceGulps - lastObservedDeviceGulps;
+        lastObservedDeviceGulps = currentDeviceGulps;
         if (underrunDelta > 0)
         {
             // Route label slots into the message body when present, omitted entirely in classic
             // modes so the legacy "continuous auto-tune: skipping (N new underruns...)" wording
             // is preserved bit-for-bit. The trailing-space + colon ordering is what gave the
             // pre-fix line its weird "continuous auto-tune : skipping" formatting when the
-            // label was empty.
+            // label was empty. devGulp shows how many inaudible device-gulp partials were ignored
+            // this tick — a high devGulp with a small underrunDelta is the Realtek fingerprint.
             var prefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
-            logFile.Event($"{prefix}: skipping ({underrunDelta} new underruns since last tick)");
+            logFile.Event($"{prefix}: skipping ({underrunDelta} new underruns since last tick, devGulp={deviceGulpDelta} ignored)");
             return;
         }
 
@@ -7271,7 +7324,7 @@ public sealed class MainForm : Form
             suppressFlag = false;
         }
         var logPrefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
-        logFile.Event($"{logPrefix}: gap-max={gapPeak}ms gap-used={observedGap}ms renderCb={observedRenderCb}ms over {sampleCount}s recommended={recommended}ms capped={capped}ms prev={current}ms applied={clamped}ms frame={frameMs}ms");
+        logFile.Event($"{logPrefix}: gap-max={gapPeak}ms gap-used={observedGap}ms renderCb={observedRenderCb}ms over {sampleCount}s recommended={recommended}ms capped={capped}ms prev={current}ms applied={clamped}ms frame={frameMs}ms devGulp={deviceGulpDelta}");
     }
 
     // UpdateTuneButtonEnabled + TuneLatencyAsync retired alongside the one-shot Tune button.
@@ -7281,12 +7334,16 @@ public sealed class MainForm : Form
 
     private void WireCheckedListAccessibility(CheckedListBox list, Label statusLabel, string itemKind)
     {
-        // Tick/untick sound for the inputs/outputs lists. Gated on the list being focused so a real
-        // user click/spacebar clicks, but the bulk programmatic (un)checking done on profile load or
-        // by "uncheck all" (focus is on the button, not the list) stays silent.
+        // Tick/untick sound for the inputs/outputs AND peer lists. Gated on the list being focused so
+        // a real user click/spacebar clicks, but EVERY programmatic (un)check stays silent — via the
+        // list-focus gate, CheckSoundService.Suppressed during profile apply, and SuppressingCheckSounds
+        // which covers both the device-list mutations and the three peer-list rebuilds (each rebuild
+        // fires ItemCheck for its pre-checked rows). Without the peer-list half, a saved-peer reconnect
+        // rebuilding the focused connected-peers list at startup would click a checkbox sound. Only a
+        // genuine user toggle (no suppression flag set) should click.
         list.ItemCheck += (_, e) =>
         {
-            if (list.Focused) CheckSoundService.Play(e.NewValue == CheckState.Checked);
+            if (list.Focused && !SuppressingCheckSounds) CheckSoundService.Play(e.NewValue == CheckState.Checked);
         };
         list.SelectedIndexChanged += (_, _) =>
         {

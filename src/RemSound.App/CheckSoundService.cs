@@ -17,6 +17,13 @@ internal static class CheckSoundService
     private static CuePlayer? checkSound;
     private static CuePlayer? uncheckSound;
 
+    /// <summary>When true, <see cref="Play"/> is a no-op. MainForm sets this around bulk programmatic
+    /// control updates (profile load, "uncheck all", device-list refresh). The per-call Focused gate
+    /// already silences MOST programmatic ticks, but it leaks when the box we tick in code happens to
+    /// be the focused control on launch — which is exactly what made loading a profile blast a
+    /// checkbox click. This flag closes that gap: only genuine user toggles ever click.</summary>
+    public static bool Suppressed { get; set; }
+
     /// <summary>(Re)load the tick/untick sounds from the current cue configuration. Call at startup
     /// and whenever cue settings change.</summary>
     public static void Reload()
@@ -28,6 +35,7 @@ internal static class CheckSoundService
 
     public static void Play(bool isChecked)
     {
+        if (Suppressed) return;
         var cfg = AppConfig.Load();
         if (isChecked) { if (cfg.EnableCheckboxOnCue) checkSound?.Play(); }
         else { if (cfg.EnableCheckboxOffCue) uncheckSound?.Play(); }

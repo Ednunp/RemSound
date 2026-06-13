@@ -35,6 +35,16 @@ internal static class Program
             AppConfig.SetUserDataDirectoryOverride(configDir);
         }
 
+        // --silent: make this launch play no cue sounds at all (startup, connect, checkbox,
+        // tab-switch, ...) and skip the front-most "missing sound file" warning. The automated test
+        // harness passes it so its throwaway launches stay completely quiet instead of chiming a
+        // startup cue (or popping a dialog) onto whoever happens to be at the screen. Set up front,
+        // before consolidation or the startup cue can fire.
+        if (Array.Exists(args, a => string.Equals(a, "--silent", StringComparison.OrdinalIgnoreCase)))
+        {
+            CuePlayer.GloballyMuted = true;
+        }
+
         // SustainedLowLatency tells the GC to avoid full (gen 2) collections while audio is streaming.
         // Gen 0/1 collections still happen but are sub-millisecond; the long pauses that were causing
         // the receiver to fall behind in clusters of 4-5 underruns at a time were almost certainly
@@ -48,8 +58,11 @@ internal static class Program
         // "user settings and logs" folder before anything reads config/profiles/logs. Idempotent +
         // best-effort; upgrades users from any older build. Shown to the user once if files moved.
         var layoutMigration = RemSound.Core.AppConfig.MigrateLegacyLayoutIfNeeded();
-        // Move the cue sounds into that folder too — seeded from the shipped defaults (see method).
-        ConsolidateSounds();
+        // Cue sounds no longer live in a sounds\ folder at all (the shipped defaults are install-side
+        // in AppConfig.SoundsDirectory = "default sounds\" now, so an update always refreshes them).
+        // Delete BOTH defunct old sounds folders an upgrader might still have, whatever version they
+        // came from. Best-effort + idempotent.
+        RemoveLegacySoundFolders();
 
         // Remove cue WAVs (and their .sfk peak files) left loose in the install ROOT by pre-
         // 2026-05-28 builds, where the cues lived next to RemSound.exe before they moved into
@@ -137,14 +150,18 @@ internal static class Program
         KeyClickService.Initialize(AppConfig.Load().EnableKeyboardClicks);
         Application.ApplicationExit += (_, _) => KeyClickService.Shutdown();
 
-        // Tick/untick sounds for checkbox toggles app-wide (CheckSoundService). Loaded here; reloaded
-        // by MainForm.ReloadAllCueSounds whenever cue settings change in Preferences.
+        // Tick/untick sounds for checkbox toggles app-wide (CheckSoundService) and the tab-switch
+        // cue (TabSwitchSoundService). Loaded here; reloaded by MainForm.ReloadAllCueSounds whenever
+        // cue settings change in Preferences.
         CheckSoundService.Reload();
+        TabSwitchSoundService.Reload();
 
         // One-time "your settings moved" notice — only the launch that actually relocated files
         // shows it (idempotent migration ⇒ MovedAnything is false on every later launch). Shown
         // here, after the guard and before the profile picker, so the user reads it once up front.
-        if (layoutMigration.MovedAnything)
+        // Skipped on a --silent (automated/throwaway) launch: its TaskDialog dings at and pops over
+        // whoever's at the screen during a test, and a throwaway instance needn't announce a move.
+        if (layoutMigration.MovedAnything && !CuePlayer.GloballyMuted)
         {
             ShowLayoutMigrationNotice();
         }
@@ -405,39 +422,34 @@ internal static class Program
         catch { /* never let cleanup disturb startup */ }
     }
 
-    /// <summary>Consolidate the cue WAVs into the per-user sounds folder. The release ships the
-    /// default cues in <c>&lt;exe&gt;\sounds\</c>; this copies any cue MISSING from the per-user
-    /// <c>...\user settings and logs\sounds\</c> across (so a fresh install, or a release that adds a
-    /// new cue, gets seeded) WITHOUT overwriting one already there (so the user's own cue files
-    /// survive), then removes the shipped folder to keep the install root tidy. The app reads cues
-    /// only from the per-user folder, which the updater leaves untouched — so a user's custom cue
-    /// WAVs are no longer clobbered by an update. Best-effort + idempotent. 2026-06-10.</summary>
-    private static void ConsolidateSounds()
+    /// <summary>Delete the two defunct old cue-sounds folders an upgrader might still have on disk,
+    /// whichever version they came from. Sounds now live install-side in
+    /// <see cref="AppConfig.SoundsDirectory"/> (<c>&lt;exe&gt;\default sounds\</c>), which updates
+    /// always refresh; both old locations are dead and only cause confusion / stale reads if left:
+    ///   * <c>&lt;exe&gt;\sounds\</c> — the install-side folder cue WAVs lived in from ~v3.1 to v3.4.
+    ///     A user jumping STRAIGHT from that era to this version never ran the v3.5 consolidation that
+    ///     used to move-and-delete it, so it can still be sitting there.
+    ///   * <c>...\user settings and logs\sounds\</c> — the per-user folder cues lived in from v3.5 to
+    ///     v3.9.1, with a never-overwrite seed that meant a changed default could never reach an
+    ///     existing user (the whole reason for the 2026-06-13 move).
+    /// Best-effort + idempotent — a no-op once they're gone. The user's REAL custom sounds were never
+    /// in either folder (they're explicit Browse-picked file paths elsewhere), so nothing is lost.</summary>
+    private static void RemoveLegacySoundFolders()
     {
-        try
+        foreach (var legacy in new[]
+                 {
+                     Path.Combine(AppContext.BaseDirectory, "sounds"),  // ~v3.1–v3.4 install-side
+                     AppConfig.LegacyUserSoundsDirectory,                 // v3.5–v3.9.1 per-user
+                 })
         {
-            var userSounds = AppConfig.SoundsDirectory;
-            Directory.CreateDirectory(userSounds);
-            var shippedSounds = Path.Combine(AppContext.BaseDirectory, "sounds");
-            if (!Directory.Exists(shippedSounds)) return;
-            foreach (var src in Directory.GetFiles(shippedSounds))
-            {
-                try
-                {
-                    var dest = Path.Combine(userSounds, Path.GetFileName(src));
-                    if (!File.Exists(dest)) File.Copy(src, dest);
-                }
-                catch { /* one unreadable cue mustn't stop the rest */ }
-            }
-            try { Directory.Delete(shippedSounds, recursive: true); }
-            catch { /* leave it if locked — the app reads the per-user copy anyway */ }
+            try { if (Directory.Exists(legacy)) Directory.Delete(legacy, recursive: true); }
+            catch { /* leave it if locked / unreadable — it's just unused clutter now */ }
         }
-        catch { /* never let cue consolidation disturb startup */ }
     }
 
     /// <summary>Play the startup cue once if the machine-wide setting is on. Resolves the WAV the
     /// same way the in-app cues do — a user-set custom path (machine-wide, in <see cref="AppConfig"/>)
-    /// if it exists on disk, otherwise the bundled <c>sounds\start up.wav</c>. Read straight from
+    /// if it exists on disk, otherwise the bundled <c>default sounds\start up.wav</c>. Read straight from
     /// AppConfig because no profile (and therefore no settings store) is loaded yet at this point
     /// in startup. Best-effort: a cue must never stop RemSound from starting.</summary>
     private static void PlayStartupCueIfEnabled()

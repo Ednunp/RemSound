@@ -41,20 +41,23 @@ if (-not (Test-Path -LiteralPath $exe)) {
     exit 1
 }
 
-# ---- 2. PACKAGE CONTENTS (must run BEFORE any CLI call: every RemSound launch consolidates the
-#         bundled sounds\ into 'user settings and logs\sounds\', emptying sounds\) ----
+# ---- 2. PACKAGE CONTENTS ----
+#  The shipped DEFAULT cues live install-side in 'default sounds\' next to the exe (the app reads
+#  them from there and updates always overwrite them; they're no longer copied into the per-user
+#  folder). So unlike before, a CLI launch does NOT empty this folder - the checks here are robust
+#  whatever order they run in.
 Write-Host "`nPackage contents:" -ForegroundColor Cyan
-$soundsPath = Join-Path $publishDir 'sounds'
+$soundsPath = Join-Path $publishDir 'default sounds'
 $wavCount = @(Get-ChildItem -LiteralPath $soundsPath -Filter *.wav -ErrorAction SilentlyContinue).Count
 if ($wavCount -ge 3) { Pass "cue sounds bundled ($wavCount .wav)" } else { Fail "cue sounds missing (found $wavCount) - this is the bug that shipped v3.9 with no sounds" }
 # Cues ship as numbered variants ("connect 1.wav", ...); each required cue needs at least one.
-foreach ($base in @('connect', 'disconnect', 'start up', 'send on', 'send off', 'recieve on', 'recieve off', 'minimise', 'maximise', 'check', 'uncheck')) {
+foreach ($base in @('connect', 'disconnect', 'start up', 'send on', 'send off', 'recieve on', 'recieve off', 'minimise', 'maximise', 'check', 'uncheck', 'tab switch')) {
     $variants = @(Get-ChildItem -LiteralPath $soundsPath -Filter "$base*.wav" -ErrorAction SilentlyContinue)
     if ($variants.Count -gt 0) { Pass "'$base' cue has $($variants.Count) sound variant(s)" } else { Fail "no sound variant for the '$base' cue" }
 }
 # Keyboard-click + password sounds.
 foreach ($extra in @('key 1.wav', 'passkey.wav')) {
-    if (Test-Path -LiteralPath (Join-Path $soundsPath $extra)) { Pass "'$extra' present" } else { Fail "'$extra' missing from the published sounds\ folder" }
+    if (Test-Path -LiteralPath (Join-Path $soundsPath $extra)) { Pass "'$extra' present" } else { Fail "'$extra' missing from the published 'default sounds' folder" }
 }
 if (Test-Path -LiteralPath (Join-Path $publishDir 'readme.html')) { Pass "readme.html (F1 manual) bundled" } else { Fail "readme.html missing" }
 if (Test-Path -LiteralPath (Join-Path $publishDir 'runtimes\win-x64\native\opus.dll')) { Pass "native opus.dll bundled" } else { Fail "native opus.dll missing (runtimes\win-x64\native\)" }
@@ -139,15 +142,20 @@ else {
     $testCfg = Join-Path ([System.IO.Path]::GetTempPath()) ("rs-cfg-" + [guid]::NewGuid().ToString('N'))
     $proc = $null
     try {
-        $proc = Start-Process -FilePath $exe -ArgumentList @('--config-dir', $testCfg, '--connect', '127.0.0.1', '--minimized') -PassThru
+        # --silent so this throwaway launch makes no cue sounds (startup / connect) and pops no
+        # dialogs at whoever's at the screen while the gate runs. The shipped default sounds live
+        # install-side ('default sounds\' next to the exe) so this cold-start finds them with no
+        # consolidation step and no missing-sound warning - nothing to restore here any more.
+        $proc = Start-Process -FilePath $exe -ArgumentList @('--config-dir', $testCfg, '--connect', '127.0.0.1', '--minimized', '--silent') -PassThru
         Start-Sleep -Seconds 6
         if (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) { Pass "GUI cold-started and stayed up (minimized to tray)" }
         else { Fail "GUI exited or crashed during cold start" }
 
-        # Startup consolidates the cue sounds into UserDataDirectory; with the override that's $testCfg,
-        # so a populated $testCfg proves the process honoured --config-dir and left the real settings alone.
-        if (Test-Path (Join-Path $testCfg 'sounds')) { Pass "ran against the isolated --config-dir folder (real settings untouched)" }
-        else { Fail "--config-dir folder was not populated - config isolation may not be working" }
+        # The process creates its user-data folder at the --config-dir override (MigrateLegacyLayout),
+        # so the override folder existing afterwards proves it honoured --config-dir and left the real
+        # settings alone. (Sounds are NOT here - they're install-side now.)
+        if (Test-Path -LiteralPath $testCfg) { Pass "ran against the isolated --config-dir folder (real settings untouched)" }
+        else { Fail "--config-dir folder was not created - config isolation may not be working" }
 
         Invoke-RsCli @('--close') | Out-Null
         Start-Sleep -Seconds 2

@@ -172,6 +172,8 @@ internal static class CommandLine
         Console.WriteLine("                        logs and sounds, instead of the usual location. Lets a test");
         Console.WriteLine("                        exercise RemSound without touching your real settings.");
         Console.WriteLine("                        Works with any command (e.g. --selftest --config-dir ...).");
+        Console.WriteLine("  --silent              Play no cue sounds and show no missing-sound pop-ups for");
+        Console.WriteLine("                        this run - for automated / unattended launches.");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  RemSound.exe --devices");

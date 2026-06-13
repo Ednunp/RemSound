@@ -14,7 +14,7 @@
          tag_name on the latest GitHub release; bump it on every public release. The
          AssemblyVersion / FileVersion default to this value, and Assembly.GetName().Version
          is what the About dialog and the updater both read. -->
-    <Version>3.9</Version>
+    <Version>4.0</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -57,17 +57,18 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- All cue sounds live in a sounds\ subfolder under the build/publish output (moved out of the
-         install-root flat layout 2026-05-28). Every WAV in the source sounds\ folder ships, via a
-         wildcard, so the numbered cue variants ("connect 1.wav", "connect 2.wav", ...), the
-         keyboard-click sounds ("key 1.wav".."key 4.wav") and the password "passkey.wav" are all
-         carried without per-file edits, and adding more sounds later needs no csproj change.
-         Filenames containing a space are preserved verbatim (via %(Filename)%(Extension)) so the
-         load-by-filename path in CueSounds / KeyClickService finds them exactly as written. The
-         EnsureCueSoundsPublished target below is the belt-and-braces that guarantees these reach a
-         PUBLISH output even when MSBuild's incremental Content-copy marker would skip them. -->
-    <Content Include="..\..\sounds\*.wav">
-      <Link>sounds\%(Filename)%(Extension)</Link>
+    <!-- Shipped DEFAULT cue sounds live in a "default sounds\" subfolder under the build/publish
+         output (2026-06-13: moved out of the per-user folder, which never overwrote them, so a
+         changed default sound could never reach an existing user). They are part of the install:
+         the auto-updater (and a dev republish) always overwrites this folder, so a tweaked default
+         always lands. The user's OWN custom sounds are NOT here - they're explicit file paths set
+         via the Preferences Browse picker, which the updater never touches. Every WAV in the source
+         "default sounds\" folder ships via a wildcard (numbered variants, key clicks, passkey), so
+         adding sounds later needs no csproj change. Spaces in filenames are preserved verbatim. The
+         EnsureCueSoundsPublished target below guarantees they reach a PUBLISH output even when
+         MSBuild's incremental Content-copy marker would skip them. -->
+    <Content Include="..\..\default sounds\*.wav">
+      <Link>default sounds\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <!-- User manual. F1 anywhere in the app opens this via the user's default browser
@@ -80,20 +81,20 @@
     </Content>
   </ItemGroup>
 
-  <!-- Guarantee the cue WAVs land in a PUBLISHED build. The sounds\ Content items above use
+  <!-- Guarantee the cue WAVs land in a PUBLISHED build. The Content items above use
        CopyToOutputDirectory=PreserveNewest, but MSBuild's incremental "copy already done" marker
        (obj\...\.csproj.CopyComplete) can skip that copy when publishing into a fresh output folder
-       whose marker is up to date — which silently shipped the v3.9 zip with NO cue sounds at all
-       (startup sound + connect/disconnect/record/etc.). This explicit post-publish copy is marker-
-       independent: it always copies every WAV from the source sounds\ folder into the published
-       sounds\ folder. Build-release.ps1 zips the publish output, so this is what makes the release
-       reliably contain the sounds. (The self-test "Bundled resources present" step verifies it.) -->
+       whose marker is up to date — which silently shipped the v3.9 zip with NO cue sounds at all.
+       This explicit post-publish copy is marker-independent: it always copies every WAV from the
+       source "default sounds\" folder into the published "default sounds\" folder. Build-release.ps1
+       zips the publish output, so this is what makes the release reliably contain the sounds. (The
+       self-test "Bundled resources present" step verifies it.) -->
   <Target Name="EnsureCueSoundsPublished" AfterTargets="Publish">
     <ItemGroup>
-      <_CueWavs Include="..\..\sounds\*.wav" />
+      <_CueWavs Include="..\..\default sounds\*.wav" />
     </ItemGroup>
     <Copy SourceFiles="@(_CueWavs)"
-          DestinationFolder="$(PublishDir)sounds"
+          DestinationFolder="$(PublishDir)default sounds"
           SkipUnchangedFiles="false" />
   </Target>
 </Project>

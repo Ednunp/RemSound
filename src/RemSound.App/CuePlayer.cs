@@ -20,12 +20,22 @@ namespace RemSound.App;
 /// </summary>
 internal sealed class CuePlayer : IDisposable
 {
+    /// <summary>The "this is a silent / automated launch" flag, set once at startup by the
+    /// <c>--silent</c> flag. Primarily an app-wide mute for every cue sound (startup, connect,
+    /// checkbox, tab-switch, send/receive, previews — everything that plays through a CuePlayer).
+    /// It ALSO doubles as the signal to suppress the unattended startup pop-ups that would otherwise
+    /// ding at and bother whoever's at the screen during a throwaway test launch — the missing-sound
+    /// warning and the Realtek-ASIO-detected warning both check it. So a <c>--silent</c> launch is
+    /// completely quiet: no cue audio, no warning dings, no dialogs. Off in normal use.</summary>
+    public static bool GloballyMuted { get; set; }
+
     private readonly string filePath;
 
     public CuePlayer(string filePath) => this.filePath = filePath;
 
     public void Play()
     {
+        if (GloballyMuted) return;
         var path = filePath;
         Task.Run(() =>
         {

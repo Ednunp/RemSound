@@ -20,6 +20,43 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v4.0
+
+        RemSound now has a sound for nearly everything you do.
+        On top of the connect, disconnect and recording cues, it
+        can play a short sound when you turn sending or receiving
+        on or off, when it minimises to or returns from the tray,
+        when you tick or untick any box, and when you move between
+        tabs. Every one is optional: under Options → Preferences →
+        Audio cues you can silence any of them, pick which built-in
+        sound it uses, or choose your own WAV file.
+
+        It can also click softly as you type into any box, so you
+        hear your keystrokes, with a distinct sound in password
+        fields so you always know which kind of box you're in. That
+        too is a single tick you can turn off.
+
+        The Preferences window is now organised into four clear tabs
+        — General, Audio cues, Startup behaviour and Update settings
+        — so everything is easier to find. The startup options
+        (start with Windows, start minimised, start with a chosen
+        profile) have moved here from the Options menu.
+
+        The automatic latency tuning is cleverer. It used to treat
+        every tiny audio glitch as "the buffer is too small" and
+        keep adding delay — even when the real cause was the
+        receiving computer's own sound card stumbling, which more
+        buffer can't fix. It now tells the two apart, so it stops
+        piling on delay it can't help. And when it does lower the
+        latency, it eases the buffer down smoothly instead of
+        trimming it, so you no longer hear little clicks while it
+        tunes.
+
+        Finally, the built-in default sounds now travel with the
+        program itself, so an update can refresh them — if a better
+        default sound ships in a future update, you'll actually get
+        it. Your own chosen sounds are kept exactly as you set them.
+
         RemSound v3.9
 
         Listening for a long time no longer slowly builds up

@@ -37,10 +37,10 @@ $staging = Join-Path ([System.IO.Path]::GetTempPath()) ("remsound-release-" + [g
 
 # 0a. SoundForge drops a .sfk peak file next to every .wav it opens. They're byproducts that must
 #     never ship (the build only bundles *.wav, so they wouldn't anyway) - clear them from the
-#     source sounds\ folder so they don't accumulate and clutter the working tree.
-$sfk = @(Get-ChildItem -LiteralPath (Join-Path $repo 'sounds') -Filter '*.sfk' -ErrorAction SilentlyContinue)
+#     source 'default sounds\' folder so they don't accumulate and clutter the working tree.
+$sfk = @(Get-ChildItem -LiteralPath (Join-Path $repo 'default sounds') -Filter '*.sfk' -ErrorAction SilentlyContinue)
 if ($sfk.Count -gt 0) {
-    Write-Host "Removing $($sfk.Count) SoundForge .sfk byproduct(s) from sounds\..." -ForegroundColor Cyan
+    Write-Host "Removing $($sfk.Count) SoundForge .sfk byproduct(s) from 'default sounds\'..." -ForegroundColor Cyan
     $sfk | Remove-Item -Force
 }
 

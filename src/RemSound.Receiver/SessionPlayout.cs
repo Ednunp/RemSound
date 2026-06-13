@@ -56,6 +56,19 @@ internal sealed class SessionPlayout : IDisposable
     // independent of the byte amount).
     private long trimFireCount;
 
+    // Reference latency the click-trim threshold is measured against, distinct from the live
+    // target. It snaps UP to the target instantly (raising never trims) but eases DOWN slowly when
+    // the target is lowered - e.g. the continuous auto-tune walking the latency down. Without this
+    // glide, each downward target step drops the trim threshold under the buffer's natural sawtooth
+    // and the trim shaves a chunk off the buffer on the spot: an audible click on every step (the
+    // "crackly while it tunes" Ed reported, worse at a 3-second tune interval, and on ASIO too since
+    // its tighter smoothness=1 trim is even more eager). Easing the ceiling down slower than the
+    // depth corrector drains the buffer lets the buffer slide down UNDER the threshold instead of
+    // being trimmed. Genuine bloat above the gliding ceiling still trims. In steady state it equals
+    // the target, so normal operation - including ASIO Tight mode's burst snap-back - is unchanged.
+    private double trimGlideTargetMs;
+    private long prevTrimGlideTicks;
+
     // === Underrun concealment state ===
     // When the playout ring buffer comes up short on a render-side read, AudioRingBuffer
     // silence-fills the missing portion with hard zero. The transient from the last real
@@ -249,6 +262,33 @@ internal sealed class SessionPlayout : IDisposable
     private long partialReadFiresTotal;
     public long ConcealmentFiresTotal => Interlocked.Read(ref concealmentFiresTotal);
     public long PartialReadFiresTotal => Interlocked.Read(ref partialReadFiresTotal);
+
+    // Cause-split of ring short-reads, for the continuous auto-tune (2026-06-13). The legacy
+    // UnderrunCount can't tell apart two very different events that both come up short on a read:
+    //   * PRODUCER starvation — the ring is draining below target because decoded audio isn't
+    //     arriving fast enough (late/lost packets, or a stalled receive/decode thread). MORE
+    //     buffer genuinely helps; this is the "raise the target / don't lower" case.
+    //   * DEVICE gulp — the output render callback came late/chunky and asked for an oversized
+    //     block in one go (classic onboard-Realtek WASAPI ~21ms period stretching toward ~42ms),
+    //     so a perfectly healthy on-target ring still can't fill that one gulp. These are partial
+    //     short-reads that are INAUDIBLE (zero-padded sub-frame tail since the 2026-05-14 fix), and
+    //     more buffer never cures the gulp pattern — it just adds permanent latency. This is the
+    //     case that used to pin the auto-tune high forever (it skipped lowering on ANY underrun).
+    // We tell them apart by where the buffer is sitting at the instant of the short-read: a
+    // chronically-below-target buffer (filteredErrorFrames well negative) is producer starvation;
+    // an on-target buffer that momentarily came up short is a device gulp. The split is computed
+    // live on the render thread, independent of file logging, so it drives the live tuner even
+    // with logs off. The cumulative totals are also surfaced for the diag log so the classification
+    // can be validated against real captures.
+    private long tuneBlockingUnderrunsTotal;
+    private long deviceGulpUnderrunsTotal;
+    /// <summary>Short-reads the auto-tune should treat as "need more buffer" — full-empty reads
+    /// (audible) plus any short-read taken while the ring was chronically below target (producer
+    /// starvation). These block the auto-tune from lowering, exactly as the legacy total used to.</summary>
+    public long TuneBlockingUnderrunsTotal => Interlocked.Read(ref tuneBlockingUnderrunsTotal);
+    /// <summary>Inaudible partial short-reads taken while the ring was on target — the device-gulp
+    /// case more buffer can't fix. These must NOT block the auto-tune from lowering.</summary>
+    public long DeviceGulpUnderrunsTotal => Interlocked.Read(ref deviceGulpUnderrunsTotal);
     /// <summary>Live state — the LP-filtered drift error in stereo frames. Positive = buffer
     /// running above target on average (sender clock faster); negative = buffer below
     /// target. Magnitude shows how off-target the buffer's average position is right now.</summary>
@@ -378,6 +418,8 @@ internal sealed class SessionPlayout : IDisposable
         lastConcealSampleR = 0f;
         filteredErrorFrames = 0;
         prevDriftSampleTicks = 0;
+        trimGlideTargetMs = 0;
+        prevTrimGlideTicks = 0;
         // Phase-4 drift resampler state. Reset counters and window state. Reset() on the
         // resampler clears its internal filter delay line so a fresh session doesn't
         // inherit phase from a prior one. SetRates back to 1:1 — we'll re-measure drift
@@ -520,8 +562,28 @@ internal sealed class SessionPlayout : IDisposable
         };
         if (knobExtraMs >= 0)
         {
+            // Ease the trim's reference latency: snap UP to the target instantly (raising never
+            // trims), glide DOWN at ~1.5 ms/sec - slower than the depth corrector can drain the
+            // buffer - so a lowered target (the auto-tune walking latency down) lets the buffer
+            // slide down under the threshold rather than being shaved into a click on each step.
+            const double TrimGlideDownMsPerSec = 1.5;
+            var nowTrimTicks = Stopwatch.GetTimestamp();
+            if (trimGlideTargetMs <= 0 || targetLatencyMs >= trimGlideTargetMs)
+            {
+                trimGlideTargetMs = targetLatencyMs;
+            }
+            else if (prevTrimGlideTicks != 0)
+            {
+                var dtSec = (nowTrimTicks - prevTrimGlideTicks) / (double)Stopwatch.Frequency;
+                trimGlideTargetMs = Math.Max(targetLatencyMs, trimGlideTargetMs - TrimGlideDownMsPerSec * dtSec);
+            }
+            prevTrimGlideTicks = nowTrimTicks;
+
             var trimMarginMs = floorMarginMs + knobExtraMs;
-            var trimThresholdBytes = MillisecondsToBytes(targetLatencyMs + trimMarginMs);
+            // Threshold uses the gliding ceiling so a freshly-lowered target doesn't trip the trim.
+            // The drop destination still uses the REAL target, so if genuine bloat does push the
+            // buffer above the gliding ceiling, it's cut back to where the latency actually wants it.
+            var trimThresholdBytes = MillisecondsToBytes((int)Math.Round(trimGlideTargetMs) + trimMarginMs);
             if (playout.BufferedBytes > trimThresholdBytes)
             {
                 var keepBytes = MillisecondsToBytes(Math.Max(targetLatencyMs + dropToCushionMs, 1));
@@ -701,6 +763,21 @@ internal sealed class SessionPlayout : IDisposable
         // than zero; the zero-padded tail just produces silence at the resampler output
         // for that fraction.
         var artifact = (ConcealmentArtifact)concealmentArtifactRaw;
+        // Cause-split for the continuous auto-tune (see tuneBlockingUnderrunsTotal declaration).
+        // Any short-read is classified the instant it happens by where the buffer is sitting:
+        // a ring chronically below target (filteredErrorFrames well negative) is producer/network
+        // starvation that more buffer fixes; an on-target ring that came up short is an inaudible
+        // device gulp that more buffer can't fix. ~3ms of deficit is the boundary — past the
+        // on-target jitter the depth-corrector leaves behind, far short of a real producer stall.
+        if (framesGot < inputFramesNeeded)
+        {
+            const int TuneStarveMs = 3;
+            var producerBehind = filteredErrorFrames <= -(TuneStarveMs * MixSampleRate / 1000.0);
+            if (framesGot == 0 || producerBehind)
+                Interlocked.Increment(ref tuneBlockingUnderrunsTotal);
+            else
+                Interlocked.Increment(ref deviceGulpUnderrunsTotal);
+        }
         if (framesGot == 0)
         {
             Interlocked.Increment(ref concealmentFiresTotal);

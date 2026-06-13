@@ -491,6 +491,19 @@ public sealed class AudioReceiver : IDisposable
     public long Underruns => playoutEngine.AggregateUnderruns;
     public long Drops => playoutEngine.AggregateDrops + Interlocked.Read(ref packetsDropped);
 
+    /// <summary>Cause-split of <see cref="Underruns"/> for the continuous auto-tune (2026-06-13).
+    /// <c>TuneBlockingUnderruns</c> are the short-reads that mean "the buffer is genuinely too thin"
+    /// (full-empty reads + reads taken while the ring was draining below target) — the auto-tune
+    /// gates its lowering on THESE rather than the legacy total, so a steady trickle of inaudible
+    /// device-gulp partials (a chunky output render callback asking for an oversized block on an
+    /// otherwise on-target ring) no longer pins the target high forever. <c>DeviceGulpUnderruns</c>
+    /// is that excluded device-structural remainder, surfaced for the diag log so the split can be
+    /// validated. Both are per-route for BothIndependent, mirroring <see cref="UnderrunsFor"/>.</summary>
+    public long TuneBlockingUnderruns => playoutEngine.AggregateTuneBlockingUnderruns;
+    public long TuneBlockingUnderrunsFor(RenderRoute route) => playoutEngine.AggregateTuneBlockingUnderrunsFor(route);
+    public long DeviceGulpUnderruns => playoutEngine.AggregateDeviceGulpUnderruns;
+    public long DeviceGulpUnderrunsFor(RenderRoute route) => playoutEngine.AggregateDeviceGulpUnderrunsFor(route);
+
     /// <summary>Per-cause split of the legacy `Drops` rollup. Useful in the diag log to tell
     /// "we deliberately trimmed the buffer to track the latency target" (TrimDropBytes) from
     /// "we got malformed packets" (PacketsRejectedMalformed) from "ringbuffer overflowed and

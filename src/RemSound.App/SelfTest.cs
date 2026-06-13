@@ -295,12 +295,11 @@ internal static class SelfTest
         var root = AppContext.BaseDirectory;
         Check(File.Exists(Path.Combine(root, "readme.html")), "readme.html (the F1 manual) must ship next to the exe");
 
-        // Cues are consolidated from the shipped sounds\ folder into the runtime sounds folder at
-        // startup (Program.ConsolidateSounds), so by the time the self-test runs they live here.
-        // An empty runtime folder means the shipped build had no sounds to seed from - exactly the
-        // bug that shipped the v3.9 zip with no cue sounds.
+        // The shipped DEFAULT cues live install-side in "default sounds\" next to the exe
+        // (AppConfig.SoundsDirectory). An empty/absent folder means the shipped build had no sounds -
+        // exactly the bug that shipped the v3.9 zip with no cue sounds.
         var soundsDir = AppConfig.SoundsDirectory;
-        Check(Directory.Exists(soundsDir), "the runtime sounds folder must exist (cues are consolidated at startup)");
+        Check(Directory.Exists(soundsDir), "the shipped 'default sounds' folder must exist next to the exe");
         // Cues ship as numbered variants ("connect 1.wav", ...); each required cue must have at
         // least one variant present.
         foreach (var cue in new[]
@@ -311,7 +310,7 @@ internal static class SelfTest
         })
         {
             Check(CueSounds.Variants(cue).Count > 0,
-                $"no sound variant present for the '{Path.GetFileNameWithoutExtension(cue)}' cue (was the shipped sounds\\ folder empty?)");
+                $"no sound variant present for the '{Path.GetFileNameWithoutExtension(cue)}' cue (was the shipped 'default sounds' folder empty?)");
         }
         // Keyboard-click typing sounds + the password passkey sound.
         Check(File.Exists(Path.Combine(soundsDir, "key 1.wav")), "keyboard-click sound 'key 1.wav' must be present");

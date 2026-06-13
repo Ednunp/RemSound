@@ -109,6 +109,9 @@ public sealed class AppConfig
     /// <summary>Tick / untick sounds played on every checkbox toggle anywhere in the app.</summary>
     public bool EnableCheckboxOnCue { get; set; } = true;
     public bool EnableCheckboxOffCue { get; set; } = true;
+    /// <summary>Sound played whenever the user switches between tabs anywhere in the app (the main
+    /// window's tab strip and every tabbed dialog). Machine-wide, default on.</summary>
+    public bool EnableTabSwitchCue { get; set; } = true;
 
     /// <summary>Custom WAV overrides for the machine-wide cues above, keyed by cue id. The
     /// equivalent of <see cref="Profile.CustomCuePaths"/> but machine-wide, since these cues don't
@@ -281,8 +284,21 @@ public sealed class AppConfig
     /// <summary>Where the per-machine log files are written.</summary>
     public static string LogsDirectory => Path.Combine(UserDataDirectory, "logs");
 
-    /// <summary>Where the cue WAVs live (seeded from the shipped defaults; see Program.ConsolidateSounds).</summary>
-    public static string SoundsDirectory => Path.Combine(UserDataDirectory, "sounds");
+    /// <summary>Where the shipped DEFAULT cue WAVs live: a <c>default sounds\</c> folder next to the
+    /// exe. This is part of the INSTALL, not user state — the auto-updater (and a dev republish)
+    /// always overwrites it, so a changed default sound reaches every user, including existing ones.
+    /// Deliberately NOT under <see cref="UserDataDirectory"/> and NOT redirected by <c>--config-dir</c>:
+    /// these are shipped defaults, not per-user data. The user's OWN custom sounds are never stored
+    /// here — they're explicit file paths (the Preferences "Browse" picker) that live in the user's
+    /// own location, which the updater never touches. 2026-06-13: moved here out of the per-user
+    /// <c>sounds\</c> folder, whose never-overwrite seeding meant a tweaked default could never land
+    /// for anyone who already had the old one.</summary>
+    public static string SoundsDirectory => Path.Combine(AppContext.BaseDirectory, "default sounds");
+
+    /// <summary>The OLD per-user sounds folder (<c>...\user settings and logs\sounds\</c>), now
+    /// defunct after sounds moved to the install-side <see cref="SoundsDirectory"/>. Kept only so the
+    /// startup migration can delete the orphan. Do NOT read cues from here.</summary>
+    public static string LegacyUserSoundsDirectory => Path.Combine(UserDataDirectory, "sounds");
 
     /// <summary>The base profiles folder (ProfileStore appends the per-machine subfolder).</summary>
     public static string ProfilesBaseDirectory => Path.Combine(UserDataDirectory, "profiles");
@@ -303,10 +319,11 @@ public sealed class AppConfig
     ///                     <c>&lt;exe&gt;\config\global config.json</c> (the 2026-06-07 interim layout)
     ///   * profiles:       <c>&lt;exe&gt;\config\profiles\</c> (interim) OR <c>&lt;exe&gt;\profiles\</c> (oldest)
     ///   * logs:           <c>&lt;exe&gt;\logs\</c>
-    /// → all under <c>...\user settings and logs\</c>. (Sounds are consolidated separately by
-    /// Program.ConsolidateSounds — the shipped default cues need seeding, not a plain move.) Runs
-    /// BEFORE anything reads config/profiles/logs. A custom <see cref="ProfilesDirectory"/> is
-    /// untouched. Directory moves fall back to copy-then-delete across a volume boundary.
+    /// → all under <c>...\user settings and logs\</c>. (Sounds are NOT part of this folder any more —
+    /// the shipped defaults live install-side in <see cref="SoundsDirectory"/>; Program deletes the
+    /// two orphaned old sounds folders on startup.) Runs BEFORE anything reads config/profiles/
+    /// logs. A custom <see cref="ProfilesDirectory"/> is untouched. Directory moves fall back to
+    /// copy-then-delete across a volume boundary.
     /// </summary>
     public static LayoutMigrationResult MigrateLegacyLayoutIfNeeded()
     {
