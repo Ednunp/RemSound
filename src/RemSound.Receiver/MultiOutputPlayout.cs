@@ -239,6 +239,13 @@ internal sealed class MultiOutputPlayout : IRenderBackend
     {
         // Pro Audio MMCSS for the producer thread — it's the one feeding all WASAPI outputs.
         using var threadBoost = new WindowsAudioThreadBoost("Pro Audio");
+        // Hold the system timer at 1 ms for as long as we're producing. This loop paces itself with
+        // WaitHandle.WaitOne below, whose granularity is the system timer — coarse (~15.6 ms) by
+        // default, which slips the 10 ms feed to ~16–31 ms and delivers audio to the outputs in
+        // chunky bursts (the receive-render chunkiness behind Andre's dropouts/lag). The MMCSS boost
+        // above raises priority but NOT timer granularity. Deliberately NOT gated behind the opt-in
+        // Priority mode — the audio path must run smoothly without a user toggle. 2026-06-15.
+        using var timerResolution = new SystemTimerResolution(1);
 
         var ticksPerFrame = Stopwatch.Frequency * FrameMs / 1000;
         var nextTickStopwatch = Stopwatch.GetTimestamp() + ticksPerFrame;

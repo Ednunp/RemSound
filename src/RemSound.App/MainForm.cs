@@ -1265,13 +1265,21 @@ public sealed class MainForm : Form
             // missing (deferred so it lands after the window is fully up and can surface).
             BeginInvoke(CheckForMissingEnabledCues);
 
-            // Honour AppConfig.StartMinimised — drop straight to the tray after the
-            // window finishes loading. Wrapped in BeginInvoke so the minimise happens
-            // *after* Shown completes (otherwise the form-show + form-hide collide and
-            // some virtual-machine drivers throw a redraw exception). The pending-profile
-            // apply path above is unaffected — settings/devices/peers are already wired
-            // up before we hide the window.
-            var minimizeThisInstance = AppConfig.Load().StartMinimised || startNextInstanceMinimized;
+            // "Start minimised" is a COLD-BOOT preference: drop straight to the tray when the app
+            // first launches. It must NOT apply when the user deliberately creates a new profile or
+            // switches profiles — those relaunch the window through the Program.cs loop. Those paths
+            // already set startNextInstanceMinimized to "stay in the tray only if we were already
+            // there", which is the right intent; but ORing in the global StartMinimised used to
+            // override that and hide the window on every new-profile / switch, which read to the user
+            // as a crash (issue #12). So gate StartMinimised to the genuine first launch, and let
+            // relaunches honour only the explicit per-instance flag.
+            // BeginInvoke so the minimise happens *after* Shown completes (otherwise the form-show +
+            // form-hide collide and some virtual-machine drivers throw a redraw exception). The
+            // pending-profile apply path above is unaffected — settings/devices/peers are already
+            // wired up before we hide the window.
+            var coldStart = isFirstLaunch;
+            isFirstLaunch = false;
+            var minimizeThisInstance = startNextInstanceMinimized || (coldStart && AppConfig.Load().StartMinimised);
             startNextInstanceMinimized = false;
             if (minimizeThisInstance)
             {
@@ -1782,6 +1790,12 @@ public sealed class MainForm : Form
     // in the tray should land back in the tray; internal so Program.Main can also skip the
     // "loading audio driver" splash in that case.
     internal static bool startNextInstanceMinimized;
+
+    // True until the first MainForm of the process has shown its window. Distinguishes a genuine
+    // cold launch (where the "Start minimised" preference applies) from an in-session new-profile or
+    // profile-switch relaunch (where it must NOT — those would otherwise hide the window and look
+    // like a crash, issue #12). Flipped false in the first OnShown.
+    private static bool isFirstLaunch = true;
 
     /// <summary>Switch to the profile at <paramref name="path"/> via the same close-and-relaunch
     /// flow OpenProfileFromPicker uses. The active profile gets pushed to the front of the
@@ -5062,43 +5076,51 @@ public sealed class MainForm : Form
     /// </summary>
     private void PushDiscoveryUnicastHints()
     {
-        var hints = new HashSet<IPAddress>();
-
-        // Manual peers store IPEndPoint already.
-        foreach (var peer in manualPeers.Values)
+        // Snapshot the UI-thread-owned inputs HERE, then resolve hostnames OFF the UI thread.
+        //
+        // The comment that used to live here claimed Dns.GetHostAddresses "returns near-instantly".
+        // It does for a parsed IP or an already-cached name — but for a remembered HOSTNAME that
+        // can't currently resolve (an offline peer, or a Tailscale/WireGuard name while the VPN is
+        // down) it BLOCKS for the system DNS timeout, seconds per entry. This method runs on the UI
+        // thread on every connect / disconnect / add-peer (it's how discovery learns its VPN unicast
+        // targets), so that block froze the whole window for a few seconds — which a screen-reader
+        // user experiences as the entire machine locking up (issue #10). Same class of bug as the
+        // v3.0.1 UPnP-on-the-UI-thread hang, in a newer feature.
+        //
+        // SetUnicastPeerAddresses just swaps a snapshot reference and fires an announcement, and is
+        // already called from the discovery receive loop's own thread, so it's safe to call from a
+        // background thread here. The hints are advisory and re-pushed frequently, so a slightly
+        // stale result from an overlapping resolution is harmless.
+        var seedAddresses = manualPeers.Values.Select(p => p.Address).ToList();
+        var rememberedEntries = settings.LoadRememberedPeers().ToList();
+        Task.Run(() =>
         {
-            hints.Add(peer.Address);
-        }
-        // Remembered peers are stored as string entries (IP or hostname). Try to parse as IP;
-        // for hostnames try a quick non-blocking DNS lookup. We do this synchronously here
-        // because the remembered list is small (typically 1–10 entries) and Dns.GetHostAddresses
-        // returns near-instantly for either a parsed IP or a cached hostname.
-        foreach (var entry in settings.LoadRememberedPeers())
-        {
-            if (string.IsNullOrWhiteSpace(entry)) continue;
-            if (IPAddress.TryParse(entry, out var direct))
+            var hints = new HashSet<IPAddress>(seedAddresses);
+            foreach (var entry in rememberedEntries)
             {
-                hints.Add(direct);
-                continue;
-            }
-            try
-            {
-                foreach (var addr in Dns.GetHostAddresses(entry))
+                if (string.IsNullOrWhiteSpace(entry)) continue;
+                if (IPAddress.TryParse(entry, out var direct))
                 {
-                    if (addr.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                    hints.Add(direct);
+                    continue;
+                }
+                try
+                {
+                    foreach (var addr in Dns.GetHostAddresses(entry))
                     {
-                        hints.Add(addr);
+                        if (addr.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                        {
+                            hints.Add(addr);
+                        }
                     }
                 }
+                catch
+                {
+                    // Not resolvable right now — skip; re-pushed next time this method runs.
+                }
             }
-            catch
-            {
-                // Hostname not resolvable right now — skip silently. Will retry next time
-                // PushDiscoveryUnicastHints is called.
-            }
-        }
-
-        discovery.SetUnicastPeerAddresses(hints);
+            discovery.SetUnicastPeerAddresses(hints);
+        });
     }
 
 

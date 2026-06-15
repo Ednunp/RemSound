@@ -311,6 +311,11 @@ internal sealed class MixingEngine : ICaptureBackend
     {
         // Pro Audio scheduling category if available; falls back gracefully if MMCSS isn't accessible.
         using var threadBoost = new WindowsAudioThreadBoost("Pro Audio");
+        // Hold the system timer at 1 ms while mixing. Like the receive producer loop, this paces
+        // itself with WaitHandle.WaitOne, whose granularity is the (coarse, ~15.6 ms by default)
+        // system timer; without a fine timer the mix tick slips and the capture path turns lumpy.
+        // Not gated behind Priority mode — see SystemTimerResolution. 2026-06-15.
+        using var timerResolution = new SystemTimerResolution(1);
 
         var ticksPerFrame = Stopwatch.Frequency * MixTickMs / 1000;
         var nextTickStopwatch = Stopwatch.GetTimestamp() + ticksPerFrame;

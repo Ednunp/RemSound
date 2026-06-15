@@ -20,6 +20,36 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v4.2
+
+        Three fixes, one of them a real annoyance gone.
+
+        Connecting to someone no longer risks a freeze.
+        If you had a peer saved by name and that name
+        couldn't be looked up quickly, RemSound used to
+        stall for a few seconds while it waited — and
+        because your screen reader waits on RemSound, the
+        whole computer could seem to lock up. That lookup
+        now happens out of the way, so connecting stays
+        responsive.
+
+        Creating a new profile (Ctrl+N), or switching
+        profiles, no longer drops the window to the tray
+        when you have "start minimised" turned on.
+        Starting minimised is meant for when RemSound
+        first launches, not for something you did on
+        purpose — so a new profile now comes up the normal
+        way (or stays in the tray only if that's where you
+        already were), instead of vanishing and looking
+        like a crash.
+
+        And WASAPI audio is smoother. RemSound now keeps
+        Windows' timing fine while it's streaming, so audio
+        moves in even steps instead of arriving in clumps.
+        On machines where playback was breaking up or
+        running laggy on WASAPI, this should help — and you
+        no longer need Priority mode switched on to get it.
+
         RemSound v4.1
 
         A couple of small fixes for screen-reader users. When
