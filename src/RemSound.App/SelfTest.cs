@@ -335,7 +335,7 @@ internal static class SelfTest
             ("Recording settings", () => new RecordingSettingsDialog(new RecordingSettings())),
             ("Preferences", () => new PreferencesDialog(
                 new RemSoundSettingsStore("RemSound"), null,
-                () => false, _ => { }, () => { }, () => { }, () => { }, _ => { },
+                () => false, _ => { }, () => { }, () => 0, () => { }, () => { }, _ => { },
                 () => (default(RouterMappingStatus), (IPEndPoint?)null, ""),
                 _ => { }, _ => { })),
         };

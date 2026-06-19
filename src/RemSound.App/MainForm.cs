@@ -716,7 +716,10 @@ public sealed class MainForm : Form
             () => SendRemoteControl(RemoteControlKind.SystemVolumeUp, 0),
             () => SendRemoteControl(RemoteControlKind.SystemVolumeDown, 0),
             () => SendRemoteControl(RemoteControlKind.SystemMuteToggle, 0),
-            ShowQuickProfileSwitch);
+            ShowQuickProfileSwitch,
+            // Speak the status line aloud through the active screen reader (issue #13). Screen-reader
+            // specific; the global hotkey is unset by default (the user binds it in Keyboard shortcuts).
+            SpeakStatusLine);
         // Pipe hotkey controller diagnostics into the main log so we can see, e.g.,
         // "capture send-system-volume-down: OK = Ctrl+Shift+Alt+J" and
         // "register send-system-volume-down: FAILED = Ctrl+Shift+Alt+J (Win32 error 1409:
@@ -1235,6 +1238,7 @@ public sealed class MainForm : Form
             }
 
             hotkeyController.Dispose();
+            ScreenReader.Shutdown();
             trayController.Dispose();
             logFile.Dispose();
         };
@@ -1379,9 +1383,52 @@ public sealed class MainForm : Form
         if (IsDisposed) return;
         MaybeShowWhatsNewAfterUpdate();
         if (IsDisposed) return;
+        MaybeRunLogHousekeeping();
+        if (IsDisposed) return;
         MaybeWarnAboutRealtekAsio();
         if (IsDisposed) return;
         MaybeWarnMicBlockedOnStartup();
+    }
+
+    /// <summary>Startup log-folder housekeeping driven by the Logging-tab preferences. Both steps are
+    /// opt-in (off by default): first prune logs older than the configured age, then warn if the
+    /// folder still exceeds the configured size. Best-effort — failures never block launch.</summary>
+    private void MaybeRunLogHousekeeping()
+    {
+        if (IsDisposed) return;
+        AppConfig cfg;
+        try { cfg = AppConfig.Load(); }
+        catch { return; }
+
+        if (cfg.PruneOldLogs)
+        {
+            var removed = LogMaintenance.PruneLogsOlderThan(cfg.PruneOldLogsDays, logFile.Path);
+            if (removed > 0)
+                logFile.Event($"log housekeeping: pruned {removed} log(s) older than {cfg.PruneOldLogsDays} day(s)");
+        }
+
+        if (cfg.WarnIfLogsFolderExceeds)
+        {
+            var bytes = LogMaintenance.LogsFolderSizeBytes();
+            var limitBytes = (long)cfg.LogsFolderWarnThresholdMb * 1024 * 1024;
+            if (bytes > limitBytes)
+            {
+                var mb = bytes / (1024.0 * 1024.0);
+                logFile.Event($"log housekeeping: logs folder {mb:0.#} MB exceeds {cfg.LogsFolderWarnThresholdMb} MB threshold — warning user");
+                var page = new TaskDialogPage
+                {
+                    Caption = "RemSound",
+                    Heading = "Logs folder is getting large",
+                    Text = $"The RemSound logs folder is using about {mb:0} MB, which is over your {cfg.LogsFolderWarnThresholdMb} MB warning size.\n\n"
+                         + "You can clear old logs from Preferences, on the Logging tab.",
+                    Icon = TaskDialogIcon.Warning,
+                    Buttons = { TaskDialogButton.OK },
+                    AllowCancel = true,
+                };
+                try { ForegroundDialog.Show(owner => TaskDialog.ShowDialog(owner, page)); }
+                catch (Exception ex) { logFile.Event($"log housekeeping: warn dialog failed: {ex.GetType().Name}: {ex.Message}"); }
+            }
+        }
     }
 
     /// <summary>If the user opted in (<see cref="AppConfig.ShowWhatsNewAfterUpdate"/>) and the
@@ -2242,6 +2289,13 @@ public sealed class MainForm : Form
                 UpdateDiagnosticsGate();
             },
             writeLogsNow: () => logFile.Event("user requested write logs now"),
+            deleteAllLogs: () =>
+            {
+                // Spare the log we're currently writing (it's held open and can't be removed anyway).
+                var removed = LogMaintenance.DeleteAllLogs(logFile.Path);
+                logFile.Event($"user deleted all logs from Preferences ({removed} file(s) removed)");
+                return removed;
+            },
             checkForUpdatesNow: () => CheckForUpdatesManually(),
             onUpdateFrequencyChanged: ApplyUpdateCheckTimer,
             applyUpnpEnabled: enabled =>
@@ -3128,6 +3182,21 @@ public sealed class MainForm : Form
         // next tick will pick it up if the user moves focus away.
         if (statusReadout.Focused) return;
         statusReadout.Text = text;
+    }
+
+    /// <summary>Speak the current connection status line aloud through the active screen reader, via
+    /// Tolk (<see cref="ScreenReader"/>). Answers issue #13: NVDA sometimes can't see the status
+    /// readout ("no status line found"), so this reads it on demand. Triggered only by a user-set
+    /// global hotkey (screen-reader only, unset by default) — being a system-wide hotkey it works from
+    /// anywhere, whether or not RemSound is focused. Newlines become ". " so the multi-line readout
+    /// speaks as a sentence rather than running together.</summary>
+    private void SpeakStatusLine()
+    {
+        var text = statusReadout.Text;
+        text = string.IsNullOrWhiteSpace(text)
+            ? "No status information available."
+            : text.Replace("\r\n", ". ").Replace("\n", ". ");
+        ScreenReader.Speak(text);
     }
 
     private string ComputeStatusText()

@@ -212,6 +212,9 @@ public sealed class Profile
     /// <summary>Global hotkey that opens the Quick profile switch popup — a list of all profiles you
     /// can arrow through and press Enter to switch to, from anywhere in Windows. Unset by default.</summary>
     public HotkeyRecord? QuickProfileSwitchHotkey { get; set; }
+    /// <summary>Optional global hotkey that speaks the connection status line aloud through the active
+    /// screen reader (issue #13). Unset by default. Screen-reader specific.</summary>
+    public HotkeyRecord? SpeakStatusLineHotkey { get; set; }
     /// <summary>When true, this machine honours incoming Control packets from connected
     /// peers — adjusts the local volume slider or toggles mute. Default false: receiving
     /// remote control is opt-in even though the audio allow-list already gates who's

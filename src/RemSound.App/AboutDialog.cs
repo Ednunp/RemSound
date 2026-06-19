@@ -20,6 +20,31 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v4.3
+
+        Two additions for screen-reader users, and a
+        tidier home for logging.
+
+        You can now hear the RemSound status line on
+        demand. In the Keyboard shortcuts dialog set a
+        key for "Speak the RemSound status information",
+        and pressing it reads the whole status line aloud
+        through your screen reader — how long you've been
+        connected, your peers, whether sound is flowing,
+        and how healthy the link is — from anywhere, even
+        with RemSound in the tray. It's there for the
+        times your screen reader can't read the status
+        line itself. Unset to begin with, so you pick the
+        key.
+
+        Logging now has its own tab in Preferences, and it
+        can keep its own folder tidy: warn you at startup
+        if the logs folder grows past a size you choose,
+        automatically delete logs older than a number of
+        days you set, and a "Delete all logs" button to
+        clear them out at once. All three are off unless
+        you turn them on.
+
         RemSound v4.2
 
         Three fixes, one of them a real annoyance gone.

@@ -14,7 +14,7 @@
          tag_name on the latest GitHub release; bump it on every public release. The
          AssemblyVersion / FileVersion default to this value, and Assembly.GetName().Version
          is what the About dialog and the updater both read. -->
-    <Version>4.2</Version>
+    <Version>4.3</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -79,6 +79,17 @@
       <Link>readme.html</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- Tolk screen-reader output DLLs (vendored 2026-06-19). Native libraries P/Invoked by
+         TolkScreenReaderOutput so RemSound can speak the status line aloud on demand (issue #13) —
+         needed because a GLOBAL hotkey fires while RemSound isn't focused, where NVDA won't read
+         anything itself. Tolk.dll loads its two helper DLLs from the same folder, so all three ship
+         flat next to the exe. Copied on build AND publish; the EnsureTolkDllsPublished target below
+         makes the publish copy marker-independent (the same belt-and-braces the cue WAVs use). -->
+    <Content Include="..\..\tolk\Tolk.dll;..\..\tolk\nvdaControllerClient64.dll;..\..\tolk\SAAPI64.dll;..\..\tolk\LICENSE-Tolk.txt">
+      <Link>%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
   </ItemGroup>
 
   <!-- Guarantee the cue WAVs land in a PUBLISHED build. The Content items above use
@@ -96,5 +107,15 @@
     <Copy SourceFiles="@(_CueWavs)"
           DestinationFolder="$(PublishDir)default sounds"
           SkipUnchangedFiles="false" />
+  </Target>
+
+  <!-- Same marker-independent guarantee for the Tolk DLLs: always copy them into a PUBLISHED build
+       so a release zip can never ship without the screen-reader libraries the "speak status line"
+       feature needs. -->
+  <Target Name="EnsureTolkDllsPublished" AfterTargets="Publish">
+    <ItemGroup>
+      <_TolkFiles Include="..\..\tolk\Tolk.dll;..\..\tolk\nvdaControllerClient64.dll;..\..\tolk\SAAPI64.dll;..\..\tolk\LICENSE-Tolk.txt" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_TolkFiles)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="false" />
   </Target>
 </Project>

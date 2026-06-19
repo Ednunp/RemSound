@@ -699,7 +699,7 @@ Alt+R| Focus the Remembered peers list
 Alt+A| Add peer by IP
 Alt+S| Focus the Connection status read-out
 
-(The logging controls — Enable logs and Write logs now — are in the Preferences dialog; reach it via Options → Preferences or Ctrl+P, then use Alt+L / Alt+W within the dialog.)
+(The logging controls — Enable logs, Write logs now and the log-folder housekeeping — are on the Logging tab of the Preferences dialog; reach it via Options → Preferences or Ctrl+P, then use Alt+L / Alt+W within the dialog.)
 
 ### Audio inputs and outputs tab
 
@@ -784,6 +784,7 @@ Send remote receive mute toggle to peers| Tell every connected peer to toggle th
 Send Windows global volume up to peers| Tell every connected peer to nudge their _Windows_ volume up by one step (about 2%, the same as their keyboard volume key). This affects every app on the receiving computer, not just RemSound. Hold the hotkey down for bigger jumps. See Remote control.| Unset
 Send Windows global volume down to peers| The same, but lowering.| Unset
 Send Windows global mute toggle to peers| Tell every connected peer to toggle their Windows mute.| Unset
+Speak the RemSound status information| Read the whole status line out loud through your screen reader — the connection time, how many peers you have, whether sound is flowing, and how healthy the link is — from anywhere, even with RemSound in the tray. Just for screen-reader users; see Hearing the status on demand below.| Unset
 
 You can change any of these to whatever combination you prefer. Each accepts modifiers (Ctrl, Shift, Alt) plus one ordinary key.
 
@@ -792,6 +793,14 @@ You can change any of these to whatever combination you prefer. Each accepts mod
 Once you've given **Quick profile switch** a key, pressing it anywhere pops up a small list of every profile you have. Arrow to the one you want and press Enter (or click it) to switch straight to it. The profile you're currently on is marked in the list. A sound plays as the list opens, and the profile-switch sound plays the moment you pick one. Press Escape to close the list without switching.
 
 If RemSound was minimised to the system tray when you pressed the hotkey, it switches the profile and **stays in the tray** — the window doesn't jump up in front of whatever you're doing. So you can change profiles mid-task without losing your place.
+
+### Hearing the RemSound status on demand
+
+The main window has a **status line** that updates every second with how long you've been connected, how many peers you have, whether sound is flowing, and how healthy the connection is. Normally your screen reader reads it like any other text — but now and then, for reasons that have nothing to do with RemSound, a screen reader loses sight of it and says there's nothing there.
+
+This hotkey is the cure. Give **Speak the RemSound status information** a key in the Keyboard shortcuts dialog, and from then on pressing it reads the whole status line out loud, wherever you are — even when RemSound is tucked away in the tray or another program is in front. It's unset to start with, so the key is yours to choose.
+
+This one is just for screen-reader users: it talks straight through your screen reader. It works with the screen readers RemSound's speech helper supports — **NVDA** , JAWS, Window-Eyes, System Access, SuperNova and ZoomText — and falls back to Windows' own built-in speech if none of those is running. If you don't use a screen reader, just leave this one unset.
 
 ### Your screen reader reads out the hotkeys
 
@@ -954,7 +963,7 @@ RemSound can check for a newer version on a schedule you choose, prompt you to i
 
 ### Settings in Preferences
 
-Open **Options → Preferences** (or Ctrl+P). The update settings sit just above the logging row:
+Open **Options → Preferences** (or Ctrl+P) and go to the **Update settings** tab:
 
 Setting| Shortcut| What it does
 ---|---|---
@@ -1077,7 +1086,7 @@ OK (Alt+O) saves your choices to the current profile. Cancel (Alt+N) or Esc disc
 
 ## 21. Logs and diagnostics
 
-If logging is turned on (the **Enable logs** checkbox in the Preferences dialog — Options → Preferences, or Ctrl+P — on by default), RemSound writes a log file each session into a `logs` folder inside **user settings and logs** — the same folder your settings and profiles live in. One file per launch.
+Everything to do with logging lives on its own **Logging** tab in the Preferences dialog (Options → Preferences, or Ctrl+P). If logging is turned on (the **Enable logs** checkbox there, on by default), RemSound writes a log file each session into a `logs` folder inside **user settings and logs** — the same folder your settings and profiles live in. One file per launch.
 
 The file contains two kinds of rows:
 
@@ -1086,7 +1095,17 @@ Kind| Contents
 EVT| Event lines — startup, a peer being selected, capture starting, errors, and so on.
 SNAP| One-second snapshots of running figures: codec, latency target, how much sound is buffered, packets sent, packets received, drop-outs, drops, and peer round-trip times.
 
-The **Write logs now** button in the Preferences dialog (Alt+W within that dialog) writes a “user requested write logs now” marker into the log, so you can find that moment in the file afterwards.
+The **Write logs now** button on the Logging tab (Alt+W within the dialog) writes a “user requested write logs now” marker into the log, so you can find that moment in the file afterwards.
+
+### Keeping the logs folder tidy
+
+Log files are small, but if you leave logging on for months they add up. The **Logging** tab has three ways to keep the folder under control, all switched off to begin with so nothing is ever deleted unless you ask for it:
+
+  * **Warn at startup if the logs folder is larger than … megabytes** (Alt+S) — tick this and pick a size, and the next time RemSound starts it checks the folder and pops up a friendly notice if it has grown past that size. It only warns; it never deletes anything itself. The size box (Alt+M) starts at 100 megabytes and stays greyed out until you tick the box.
+  * **Delete logs older than … days old** (Alt+D) — tick this and pick a number of days, from 1 to 30, and each time RemSound starts it quietly clears out any log older than that. The log it's writing right now is never touched. The days box (Alt+Y) starts at 14 and stays greyed out until you tick the box.
+  * **Delete all logs** (Alt+A) — a button that clears out every log file in one go. It asks you to confirm first, Yes or No, then tells you how many it removed. Again, the log RemSound is writing right now is kept; everything else goes.
+
+
 
 Logs are plain text and can be opened in any text editor, or in a spreadsheet. The most useful figures when something feels wrong:
 

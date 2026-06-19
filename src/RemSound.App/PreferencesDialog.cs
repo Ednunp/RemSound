@@ -293,6 +293,60 @@ internal sealed class PreferencesDialog : Form
         AutoSize = true,
     };
 
+    // --- Logging tab: log-folder housekeeping (2026-06-19). All machine-local (AppConfig). The two
+    // spinners are greyed out until their enabling checkbox is ticked. Mnemonics on this tab: L, W,
+    // S, M, D, Y, A — all distinct (tab scope is per-page, so reuse elsewhere is fine). ---
+    private readonly AccessibleCheckBox warnIfLogsExceedBox = new()
+    {
+        Text = "Warn at startup if the logs folder is larger than (Alt+&S)",
+        AccessibleName = "Warn at startup if the logs folder is larger than",
+        AutoSize = true,
+    };
+    private readonly NumericUpDown logsSizeLimitBox = new()
+    {
+        Minimum = 1,
+        Maximum = 100000,
+        Increment = 10,
+        Value = 100,
+        Width = 90,
+        AccessibleName = "Warn when the logs folder is larger than this many megabytes (Alt+M)",
+    };
+    private readonly MnemonicLabel logsSizeUnitLabel = new()
+    {
+        Text = "&megabytes",
+        AutoSize = true,
+        Anchor = AnchorStyles.Left,
+        Padding = new Padding(6, 6, 0, 0),
+    };
+    private readonly AccessibleCheckBox pruneOldLogsBox = new()
+    {
+        Text = "Delete logs older than (Alt+&D)",
+        AccessibleName = "Delete logs older than",
+        AutoSize = true,
+    };
+    private readonly NumericUpDown pruneDaysBox = new()
+    {
+        Minimum = 1,
+        Maximum = 30,
+        Increment = 1,
+        Value = 14,
+        Width = 70,
+        AccessibleName = "Delete logs older than this many days (Alt+Y)",
+    };
+    private readonly MnemonicLabel pruneDaysUnitLabel = new()
+    {
+        Text = "da&ys old",
+        AutoSize = true,
+        Anchor = AnchorStyles.Left,
+        Padding = new Padding(6, 6, 0, 0),
+    };
+    private readonly Button deleteAllLogsButton = new()
+    {
+        Text = "Delete &all logs",
+        AccessibleName = "Delete all logs",
+        AutoSize = true,
+    };
+
     // Startup behaviour (moved here from the Options-menu StartupBehaviourDialog, 2026-06-13). These
     // live on their own tab; their Alt-letters are isolated per tab so reusing M/A/P/L is fine.
     private readonly AccessibleCheckBox startMinimisedBox = new()
@@ -353,6 +407,7 @@ internal sealed class PreferencesDialog : Form
         Func<bool> getLoggingEnabled,
         Action<bool> applyLoggingEnabled,
         Action writeLogsNow,
+        Func<int> deleteAllLogs,
         Action checkForUpdatesNow,
         Action onUpdateFrequencyChanged,
         Action<bool> applyUpnpEnabled,
@@ -585,6 +640,70 @@ internal sealed class PreferencesDialog : Form
 
         writeLogsNowButton.Click += (_, _) => writeLogsNow();
 
+        // --- Logging housekeeping (machine-local; each control writes through to AppConfig on
+        // change, like the Update-settings controls above). The two spinners follow their
+        // checkbox's enabled state so they're only editable when the feature is on. ---
+        warnIfLogsExceedBox.Checked = cfgForLoad.WarnIfLogsFolderExceeds;
+        logsSizeLimitBox.Value = Math.Clamp(cfgForLoad.LogsFolderWarnThresholdMb, (int)logsSizeLimitBox.Minimum, (int)logsSizeLimitBox.Maximum);
+        logsSizeLimitBox.Enabled = warnIfLogsExceedBox.Checked;
+        logsSizeUnitLabel.MnemonicTarget = logsSizeLimitBox;
+        warnIfLogsExceedBox.CheckedChanged += (_, _) =>
+        {
+            var cfg = AppConfig.Load();
+            cfg.WarnIfLogsFolderExceeds = warnIfLogsExceedBox.Checked;
+            TrySaveConfig(cfg);
+            logsSizeLimitBox.Enabled = warnIfLogsExceedBox.Checked;
+        };
+        logsSizeLimitBox.ValueChanged += (_, _) =>
+        {
+            var cfg = AppConfig.Load();
+            cfg.LogsFolderWarnThresholdMb = (int)logsSizeLimitBox.Value;
+            TrySaveConfig(cfg);
+        };
+
+        pruneOldLogsBox.Checked = cfgForLoad.PruneOldLogs;
+        pruneDaysBox.Value = Math.Clamp(cfgForLoad.PruneOldLogsDays, (int)pruneDaysBox.Minimum, (int)pruneDaysBox.Maximum);
+        pruneDaysBox.Enabled = pruneOldLogsBox.Checked;
+        pruneDaysUnitLabel.MnemonicTarget = pruneDaysBox;
+        pruneOldLogsBox.CheckedChanged += (_, _) =>
+        {
+            var cfg = AppConfig.Load();
+            cfg.PruneOldLogs = pruneOldLogsBox.Checked;
+            TrySaveConfig(cfg);
+            pruneDaysBox.Enabled = pruneOldLogsBox.Checked;
+        };
+        pruneDaysBox.ValueChanged += (_, _) =>
+        {
+            var cfg = AppConfig.Load();
+            cfg.PruneOldLogsDays = (int)pruneDaysBox.Value;
+            TrySaveConfig(cfg);
+        };
+
+        deleteAllLogsButton.Click += (_, _) =>
+        {
+            var confirm = new TaskDialogPage
+            {
+                Caption = "RemSound",
+                Heading = "Delete all logs?",
+                Text = "This permanently deletes every log file in the logs folder except the one currently in use. This cannot be undone.",
+                Icon = TaskDialogIcon.Warning,
+                Buttons = { TaskDialogButton.Yes, TaskDialogButton.No },
+                DefaultButton = TaskDialogButton.No,
+                AllowCancel = true,
+            };
+            if (TaskDialog.ShowDialog(this, confirm) != TaskDialogButton.Yes) return;
+            var removed = deleteAllLogs();
+            var done = new TaskDialogPage
+            {
+                Caption = "RemSound",
+                Heading = "Logs deleted",
+                Text = removed == 1 ? "Deleted 1 log file." : $"Deleted {removed} log files.",
+                Icon = TaskDialogIcon.Information,
+                Buttons = { TaskDialogButton.OK },
+            };
+            TaskDialog.ShowDialog(this, done);
+        };
+
         closeButton.Click += (_, _) => Close();
 
         // Wire up the Startup behaviour tab (moved here from the old Options-menu dialog).
@@ -650,16 +769,46 @@ internal sealed class PreferencesDialog : Form
         startupListPanel.Controls.Add(startupProfileListLabel);
         startupListPanel.Controls.Add(startupProfileList);
 
-        // Four tabs, accessible (QuietTabControl) like the main window. Ctrl+Tab / arrows on the
+        // Logging tab rows: each spinner sits with its unit label on its own indented row beneath the
+        // checkbox that enables it (number box first, then the "megabytes"/"days old" unit label —
+        // matching the natural "...larger than [100] megabytes" reading order).
+        var logsSizeRow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Padding = new Padding(20, 2, 0, 0),
+        };
+        logsSizeRow.Controls.Add(logsSizeLimitBox);
+        logsSizeRow.Controls.Add(logsSizeUnitLabel);
+        var pruneDaysRow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Padding = new Padding(20, 2, 0, 0),
+        };
+        pruneDaysRow.Controls.Add(pruneDaysBox);
+        pruneDaysRow.Controls.Add(pruneDaysUnitLabel);
+
+        // Five tabs, accessible (QuietTabControl) like the main window. Ctrl+Tab / arrows on the
         // strip switch tabs; the active page's controls are the next tab stops. The control itself
-        // is a field (declared above) so OnShown can focus it when the dialog opens.
+        // is a field (declared above) so OnShown can focus it when the dialog opens. Logging is its
+        // own tab (2026-06-19); the two logging controls moved off the General tab to lead it.
         tabs.TabPages.Add(MakeTab("General",
-            browseProfilesFolderButton, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel, loggingBox, writeLogsNowButton));
+            browseProfilesFolderButton, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel));
         tabs.TabPages.Add(MakeTab("Audio cues", cueGroup));
         tabs.TabPages.Add(MakeTab("Startup behaviour",
             startMinimisedBox, startWithUserBox, startWithProfileBox, startupListPanel));
         tabs.TabPages.Add(MakeTab("Update settings",
             checkForUpdatesOnStartupBox, freqRow, checkForUpdatesNowButton, silentlyInstallUpdatesBox, showWhatsNewAfterUpdateBox));
+        tabs.TabPages.Add(MakeTab("Logging",
+            loggingBox, writeLogsNowButton,
+            warnIfLogsExceedBox, logsSizeRow,
+            pruneOldLogsBox, pruneDaysRow,
+            deleteAllLogsButton));
 
         var buttons = new FlowLayoutPanel
         {

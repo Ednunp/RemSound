@@ -144,6 +144,16 @@ public sealed class RemSoundSettingsStore
         Save(s);
     }
 
+    public HotkeyInfo LoadSpeakStatusLineHotkey() =>
+        Try(() => Load()?.SpeakStatusLineHotkey?.ToHotkeyInfo()) ?? HotkeyInfo.Unset;
+
+    public void SaveSpeakStatusLineHotkey(HotkeyInfo hotkey)
+    {
+        var s = Load() ?? new Settings();
+        s.SpeakStatusLineHotkey = HotkeySetting.From(hotkey);
+        Save(s);
+    }
+
     public bool LoadAcceptRemoteVolumeCommands(bool defaultValue = false) =>
         Try(() => Load()?.AcceptRemoteVolumeCommands) ?? defaultValue;
 
@@ -593,6 +603,7 @@ public sealed class RemSoundSettingsStore
             SystemVolumeDownHotkey = profile.SystemVolumeDownHotkey is null ? null : HotkeySettingFromRecord(profile.SystemVolumeDownHotkey),
             SystemMuteToggleHotkey = profile.SystemMuteToggleHotkey is null ? null : HotkeySettingFromRecord(profile.SystemMuteToggleHotkey),
             QuickProfileSwitchHotkey = profile.QuickProfileSwitchHotkey is null ? null : HotkeySettingFromRecord(profile.QuickProfileSwitchHotkey),
+            SpeakStatusLineHotkey = profile.SpeakStatusLineHotkey is null ? null : HotkeySettingFromRecord(profile.SpeakStatusLineHotkey),
             AcceptRemoteVolumeCommands = profile.AcceptRemoteVolumeCommands,
             MaxLatencyMs = profile.MaxLatencyMs,
             Codec = profile.Codec,
@@ -649,6 +660,7 @@ public sealed class RemSoundSettingsStore
         profile.SystemVolumeDownHotkey = s.SystemVolumeDownHotkey is null ? null : HotkeyRecordFromSetting(s.SystemVolumeDownHotkey);
         profile.SystemMuteToggleHotkey = s.SystemMuteToggleHotkey is null ? null : HotkeyRecordFromSetting(s.SystemMuteToggleHotkey);
         profile.QuickProfileSwitchHotkey = s.QuickProfileSwitchHotkey is null ? null : HotkeyRecordFromSetting(s.QuickProfileSwitchHotkey);
+        profile.SpeakStatusLineHotkey = s.SpeakStatusLineHotkey is null ? null : HotkeyRecordFromSetting(s.SpeakStatusLineHotkey);
         if (s.AcceptRemoteVolumeCommands is bool arvc) profile.AcceptRemoteVolumeCommands = arvc;
         if (s.MaxLatencyMs is int ml) profile.MaxLatencyMs = ml;
         if (s.Codec is AudioTransportCodec c) profile.Codec = c;
@@ -716,6 +728,7 @@ public sealed class RemSoundSettingsStore
         public HotkeySetting? SystemVolumeDownHotkey { get; set; }
         public HotkeySetting? SystemMuteToggleHotkey { get; set; }
         public HotkeySetting? QuickProfileSwitchHotkey { get; set; }
+        public HotkeySetting? SpeakStatusLineHotkey { get; set; }
         public bool? AcceptRemoteVolumeCommands { get; set; }
         public int? MaxLatencyMs { get; set; }
         public AudioTransportCodec? Codec { get; set; }

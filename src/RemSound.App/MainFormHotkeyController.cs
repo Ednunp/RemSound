@@ -31,6 +31,10 @@ internal sealed class MainFormHotkeyController : IDisposable
     private readonly Action sendSystemVolumeDown;
     private readonly Action sendSystemMuteToggle;
     private readonly Action quickProfileSwitch;
+    // Speak the connection status line aloud through the active screen reader (Tolk). Screen-reader
+    // specific (issue #13); unset by default. Global so it reads the status even when RemSound isn't
+    // focused — the case NVDA can't otherwise cover.
+    private readonly Action speakStatusLine;
     private Form? owner;
     private HotkeyInfo sendMuteHotkey;
     private HotkeyInfo receiveMuteHotkey;
@@ -45,6 +49,7 @@ internal sealed class MainFormHotkeyController : IDisposable
     private HotkeyInfo systemVolumeDownHotkey;
     private HotkeyInfo systemMuteToggleHotkey;
     private HotkeyInfo quickProfileSwitchHotkey;
+    private HotkeyInfo speakStatusLineHotkey;
     private GlobalHotkey? sendMuteGlobalHotkey;
     private GlobalHotkey? receiveMuteGlobalHotkey;
     private GlobalHotkey? trayGlobalHotkey;
@@ -58,6 +63,7 @@ internal sealed class MainFormHotkeyController : IDisposable
     private GlobalHotkey? systemVolumeDownGlobalHotkey;
     private GlobalHotkey? systemMuteToggleGlobalHotkey;
     private GlobalHotkey? quickProfileSwitchGlobalHotkey;
+    private GlobalHotkey? speakStatusLineGlobalHotkey;
 
     /// <summary>Optional log sink. MainForm wires this to <c>logFile.Event(...)</c> so each
     /// hotkey change writes a clear trail of "user opened capture", "captured X", "registered X
@@ -87,7 +93,8 @@ internal sealed class MainFormHotkeyController : IDisposable
         Action sendSystemVolumeUp,
         Action sendSystemVolumeDown,
         Action sendSystemMuteToggle,
-        Action quickProfileSwitch)
+        Action quickProfileSwitch,
+        Action speakStatusLine)
     {
         this.settingsStore = settingsStore;
         this.toggleSend = toggleSend;
@@ -103,6 +110,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         this.sendSystemVolumeDown = sendSystemVolumeDown;
         this.sendSystemMuteToggle = sendSystemMuteToggle;
         this.quickProfileSwitch = quickProfileSwitch;
+        this.speakStatusLine = speakStatusLine;
         sendMuteHotkey = settingsStore.LoadSendMuteHotkey();
         receiveMuteHotkey = settingsStore.LoadReceiveMuteHotkey();
         trayHotkey = settingsStore.LoadTrayHotkey();
@@ -116,6 +124,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         systemVolumeDownHotkey = settingsStore.LoadSystemVolumeDownHotkey();
         systemMuteToggleHotkey = settingsStore.LoadSystemMuteToggleHotkey();
         quickProfileSwitchHotkey = settingsStore.LoadQuickProfileSwitchHotkey();
+        speakStatusLineHotkey = settingsStore.LoadSpeakStatusLineHotkey();
     }
 
     public void Initialize(Form ownerForm)
@@ -134,6 +143,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         systemVolumeDownGlobalHotkey = new GlobalHotkey(ownerForm);
         systemMuteToggleGlobalHotkey = new GlobalHotkey(ownerForm);
         quickProfileSwitchGlobalHotkey = new GlobalHotkey(ownerForm);
+        speakStatusLineGlobalHotkey = new GlobalHotkey(ownerForm);
         sendMuteGlobalHotkey.Pressed += () => InvokeOnOwner(toggleSend);
         receiveMuteGlobalHotkey.Pressed += () => InvokeOnOwner(toggleReceive);
         trayGlobalHotkey.Pressed += () => InvokeOnOwner(toggleTray);
@@ -147,6 +157,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         systemVolumeDownGlobalHotkey.Pressed += () => InvokeOnOwner(sendSystemVolumeDown);
         systemMuteToggleGlobalHotkey.Pressed += () => InvokeOnOwner(sendSystemMuteToggle);
         quickProfileSwitchGlobalHotkey.Pressed += () => InvokeOnOwner(quickProfileSwitch);
+        speakStatusLineGlobalHotkey.Pressed += () => InvokeOnOwner(speakStatusLine);
         RegisterSendMuteHotkey();
         RegisterReceiveMuteHotkey();
         RegisterTrayHotkey();
@@ -160,6 +171,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         RegisterSystemVolumeDownHotkey();
         RegisterSystemMuteToggleHotkey();
         RegisterQuickProfileSwitchHotkey();
+        RegisterSpeakStatusLineHotkey();
     }
 
     public void ShowKeyboardShortcutsDialog(IWin32Window dialogOwner)
@@ -269,6 +281,7 @@ internal sealed class MainFormHotkeyController : IDisposable
             list.Items.Add($"Send Windows global volume down to peers: {systemVolumeDownHotkey}");
             list.Items.Add($"Send Windows global mute toggle to peers: {systemMuteToggleHotkey}");
             list.Items.Add($"Quick profile switch (open a list of all profiles): {quickProfileSwitchHotkey}");
+            list.Items.Add($"Speak the RemSound status information from anywhere (screen reader only): {speakStatusLineHotkey}");
             if (prev >= 0 && prev < list.Items.Count)
             {
                 list.SelectedIndex = prev;
@@ -306,6 +319,7 @@ internal sealed class MainFormHotkeyController : IDisposable
                 case 10: ChangeSystemVolumeDownHotkey(dialog); break;
                 case 11: ChangeSystemMuteToggleHotkey(dialog); break;
                 case 12: ChangeQuickProfileSwitchHotkey(dialog); break;
+                case 13: ChangeSpeakStatusLineHotkey(dialog); break;
                 default: return;
             }
             RefreshList();
@@ -338,6 +352,7 @@ internal sealed class MainFormHotkeyController : IDisposable
                 case 10: ApplyUnset("send-system-volume-down", h => systemVolumeDownHotkey = h, RegisterSystemVolumeDownHotkey, settingsStore.SaveSystemVolumeDownHotkey); break;
                 case 11: ApplyUnset("send-system-mute-toggle", h => systemMuteToggleHotkey = h, RegisterSystemMuteToggleHotkey, settingsStore.SaveSystemMuteToggleHotkey); break;
                 case 12: ApplyUnset("quick-profile-switch", h => quickProfileSwitchHotkey = h, RegisterQuickProfileSwitchHotkey, settingsStore.SaveQuickProfileSwitchHotkey); break;
+                case 13: ApplyUnset("speak-status-line", h => speakStatusLineHotkey = h, RegisterSpeakStatusLineHotkey, settingsStore.SaveSpeakStatusLineHotkey); break;
                 default: return;
             }
             RefreshList();
@@ -418,6 +433,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         systemVolumeDownGlobalHotkey?.Dispose();
         systemMuteToggleGlobalHotkey?.Dispose();
         quickProfileSwitchGlobalHotkey?.Dispose();
+        speakStatusLineGlobalHotkey?.Dispose();
     }
 
     public HotkeyInfo SendMuteHotkey => sendMuteHotkey;
@@ -433,6 +449,7 @@ internal sealed class MainFormHotkeyController : IDisposable
     public HotkeyInfo SystemVolumeDownHotkey => systemVolumeDownHotkey;
     public HotkeyInfo SystemMuteToggleHotkey => systemMuteToggleHotkey;
     public HotkeyInfo QuickProfileSwitchHotkey => quickProfileSwitchHotkey;
+    public HotkeyInfo SpeakStatusLineHotkey => speakStatusLineHotkey;
 
     /// <summary>Open the capture dialog, log what came back, and (on a successful capture)
     /// run <paramref name="apply"/> with the captured hotkey. Centralises the boilerplate
@@ -571,6 +588,13 @@ internal sealed class MainFormHotkeyController : IDisposable
         settingsStore.SaveQuickProfileSwitchHotkey(h);
     });
 
+    private void ChangeSpeakStatusLineHotkey(IWin32Window dialogOwner) => ChangeHotkey(dialogOwner, "speak-status-line", h =>
+    {
+        speakStatusLineHotkey = h;
+        RegisterSpeakStatusLineHotkey();
+        settingsStore.SaveSpeakStatusLineHotkey(h);
+    });
+
     // Hotkeys come in two flavours and need different Windows-side registration:
     //   * Toggle hotkeys (mute, tray show/hide) — re-firing on hold would flip state back
     //     and forth. Registered with MOD_NOREPEAT (allowRepeat=false). One press, one fire.
@@ -599,6 +623,9 @@ internal sealed class MainFormHotkeyController : IDisposable
     // Quick profile switch is a one-shot (press → open the popup); MOD_NOREPEAT (the default) keeps
     // a held key from re-opening it repeatedly.
     private void RegisterQuickProfileSwitchHotkey() => RegisterIfSet(quickProfileSwitchGlobalHotkey, quickProfileSwitchHotkey, "quick profile switch");
+    // Speak status line is a one-shot (press → read the status aloud once); MOD_NOREPEAT (the default)
+    // keeps a held key from re-triggering the speech over and over.
+    private void RegisterSpeakStatusLineHotkey() => RegisterIfSet(speakStatusLineGlobalHotkey, speakStatusLineHotkey, "speak status line");
 
     private void RegisterIfSet(GlobalHotkey? globalHotkey, HotkeyInfo hotkey, string description, bool allowRepeat = false)
     {

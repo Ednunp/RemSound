@@ -128,6 +128,25 @@ public sealed class AppConfig
     /// ticks <em>Enable logs</em> in the Preferences dialog.</summary>
     public bool LoggingEnabled { get; set; }
 
+    /// <summary>If true, RemSound checks the total size of the <c>logs\</c> folder at startup and,
+    /// when it exceeds <see cref="LogsFolderWarnThresholdMb"/> megabytes, shows a one-time warning so
+    /// the user can prune or clear it. Off by default (opt-in, like the other behaviour toggles).
+    /// Machine-local — a "watch my disk on this box" decision, not a per-profile audio setting.</summary>
+    public bool WarnIfLogsFolderExceeds { get; set; }
+
+    /// <summary>The size threshold in megabytes for <see cref="WarnIfLogsFolderExceeds"/>. Default
+    /// 100 MB. Only consulted when that flag is on.</summary>
+    public int LogsFolderWarnThresholdMb { get; set; } = 100;
+
+    /// <summary>If true, RemSound deletes log files older than <see cref="PruneOldLogsDays"/> days
+    /// from the <c>logs\</c> folder at startup. Off by default (opt-in). The currently-open log file
+    /// is never a candidate (it's today's). Machine-local.</summary>
+    public bool PruneOldLogs { get; set; }
+
+    /// <summary>Age in days for <see cref="PruneOldLogs"/>: log files last written more than this many
+    /// days ago are deleted at startup. Range 1–30, default 14. Only consulted when that flag is on.</summary>
+    public int PruneOldLogsDays { get; set; } = 14;
+
     /// <summary>If non-null and a profile with this title exists, RemSound skips the
     /// startup profile picker and loads this profile directly. Combine with
     /// <see cref="StartMinimised"/> + the Windows auto-start registry entry
