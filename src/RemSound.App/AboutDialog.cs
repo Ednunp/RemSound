@@ -20,6 +20,20 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v4.4
+
+        Keyboard shortcuts are now shared across all
+        your profiles, instead of being saved separately
+        in each one. Set a shortcut once and it works on
+        every profile, and stays put when you switch —
+        which is what people asked for.
+
+        Because of this change, your shortcuts have gone
+        back to their defaults. If you'd set up any of
+        your own, please set them again in Options →
+        Keyboard shortcuts (Ctrl+K). You only need to do
+        this once.
+
         RemSound v4.3.1
 
         A gentler update sound. The cue that plays when

@@ -768,6 +768,8 @@ Alt+F4| Close (the standard Windows shortcut)
 
 ## 15. Global hotkeys (work even when minimised)
 
+Your keyboard shortcuts are **shared across all your profiles** — set one once and it works on every profile, and stays put when you switch between them. (Before version 4.4 they were saved separately inside each profile, so a shortcut set on one profile wouldn't work on another. If you're upgrading, your shortcuts will have gone back to their defaults the first time you run the new version — just set the ones you use again, once.)
+
 You set these up in the Keyboard shortcuts dialog (Ctrl+K, or Options → Keyboard shortcuts). The dialog is a single list of every hotkey you can set: **Enter** sets the highlighted row, **Del** clears it (back to _not set_), and **Escape** or the Close button closes the dialog. The defaults:
 
 Hotkey| Action| Default

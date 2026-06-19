@@ -14,145 +14,73 @@ public sealed class RemSoundSettingsStore
 {
     public RemSoundSettingsStore(string appName) { }
 
-    public HotkeyInfo LoadReceiveMuteHotkey() =>
-        Try(() => Load()?.ReceiveMuteHotkey?.ToHotkeyInfo()) ?? new HotkeyInfo(Keys.R, true, true, true);
-
-    public void SaveReceiveMuteHotkey(HotkeyInfo hotkey)
+    // Keyboard shortcuts are MACHINE-WIDE as of v4.4 — one set shared by every profile, stored in
+    // AppConfig (issue #14: before v4.4 they lived on each Profile, so a shortcut set on one profile
+    // didn't apply on another). The Load*/Save* method names are unchanged, so the hotkey controller
+    // didn't need touching; only the backing store moved from the per-profile cache to AppConfig. The
+    // built-in defaults below are unchanged.
+    private static void SaveGlobalHotkey(Action<AppConfig> set)
     {
-        var s = Load() ?? new Settings();
-        s.ReceiveMuteHotkey = HotkeySetting.From(hotkey);
-        Save(s);
+        var c = AppConfig.Load();
+        set(c);
+        try { c.Save(); } catch { /* best-effort, like the app's other AppConfig writes */ }
     }
+
+    public HotkeyInfo LoadReceiveMuteHotkey() =>
+        AppConfig.Load().ReceiveMuteHotkey?.ToHotkeyInfo() ?? new HotkeyInfo(Keys.R, true, true, true);
+    public void SaveReceiveMuteHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.ReceiveMuteHotkey = HotkeyRecord.From(hotkey));
 
     public HotkeyInfo LoadSendMuteHotkey() =>
-        Try(() => Load()?.SendMuteHotkey?.ToHotkeyInfo()) ?? new HotkeyInfo(Keys.S, true, true, true);
-
-    public void SaveSendMuteHotkey(HotkeyInfo hotkey)
-    {
-        var s = Load() ?? new Settings();
-        s.SendMuteHotkey = HotkeySetting.From(hotkey);
-        Save(s);
-    }
+        AppConfig.Load().SendMuteHotkey?.ToHotkeyInfo() ?? new HotkeyInfo(Keys.S, true, true, true);
+    public void SaveSendMuteHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.SendMuteHotkey = HotkeyRecord.From(hotkey));
 
     public HotkeyInfo LoadTrayHotkey() =>
-        Try(() => Load()?.TrayHotkey?.ToHotkeyInfo()) ?? new HotkeyInfo(Keys.F10, true, true, false);
-
-    public void SaveTrayHotkey(HotkeyInfo hotkey)
-    {
-        var s = Load() ?? new Settings();
-        s.TrayHotkey = HotkeySetting.From(hotkey);
-        Save(s);
-    }
+        AppConfig.Load().TrayHotkey?.ToHotkeyInfo() ?? new HotkeyInfo(Keys.F10, true, true, false);
+    public void SaveTrayHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.TrayHotkey = HotkeyRecord.From(hotkey));
 
     public HotkeyInfo LoadVolumeUpHotkey() =>
-        Try(() => Load()?.VolumeUpHotkey?.ToHotkeyInfo()) ?? HotkeyInfo.Unset;
-
-    public void SaveVolumeUpHotkey(HotkeyInfo hotkey)
-    {
-        var s = Load() ?? new Settings();
-        s.VolumeUpHotkey = HotkeySetting.From(hotkey);
-        Save(s);
-    }
+        AppConfig.Load().VolumeUpHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveVolumeUpHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.VolumeUpHotkey = HotkeyRecord.From(hotkey));
 
     public HotkeyInfo LoadVolumeDownHotkey() =>
-        Try(() => Load()?.VolumeDownHotkey?.ToHotkeyInfo()) ?? HotkeyInfo.Unset;
-
-    public void SaveVolumeDownHotkey(HotkeyInfo hotkey)
-    {
-        var s = Load() ?? new Settings();
-        s.VolumeDownHotkey = HotkeySetting.From(hotkey);
-        Save(s);
-    }
+        AppConfig.Load().VolumeDownHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveVolumeDownHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.VolumeDownHotkey = HotkeyRecord.From(hotkey));
 
     public HotkeyInfo LoadToggleRecordingHotkey() =>
-        Try(() => Load()?.ToggleRecordingHotkey?.ToHotkeyInfo()) ?? HotkeyInfo.Unset;
-
-    public void SaveToggleRecordingHotkey(HotkeyInfo hotkey)
-    {
-        var s = Load() ?? new Settings();
-        s.ToggleRecordingHotkey = HotkeySetting.From(hotkey);
-        Save(s);
-    }
+        AppConfig.Load().ToggleRecordingHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveToggleRecordingHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.ToggleRecordingHotkey = HotkeyRecord.From(hotkey));
 
     public HotkeyInfo LoadRemoteVolumeUpHotkey() =>
-        Try(() => Load()?.RemoteVolumeUpHotkey?.ToHotkeyInfo()) ?? HotkeyInfo.Unset;
-
-    public void SaveRemoteVolumeUpHotkey(HotkeyInfo hotkey)
-    {
-        var s = Load() ?? new Settings();
-        s.RemoteVolumeUpHotkey = HotkeySetting.From(hotkey);
-        Save(s);
-    }
+        AppConfig.Load().RemoteVolumeUpHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveRemoteVolumeUpHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.RemoteVolumeUpHotkey = HotkeyRecord.From(hotkey));
 
     public HotkeyInfo LoadRemoteVolumeDownHotkey() =>
-        Try(() => Load()?.RemoteVolumeDownHotkey?.ToHotkeyInfo()) ?? HotkeyInfo.Unset;
-
-    public void SaveRemoteVolumeDownHotkey(HotkeyInfo hotkey)
-    {
-        var s = Load() ?? new Settings();
-        s.RemoteVolumeDownHotkey = HotkeySetting.From(hotkey);
-        Save(s);
-    }
+        AppConfig.Load().RemoteVolumeDownHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveRemoteVolumeDownHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.RemoteVolumeDownHotkey = HotkeyRecord.From(hotkey));
 
     public HotkeyInfo LoadRemoteMuteToggleHotkey() =>
-        Try(() => Load()?.RemoteMuteToggleHotkey?.ToHotkeyInfo()) ?? HotkeyInfo.Unset;
-
-    public void SaveRemoteMuteToggleHotkey(HotkeyInfo hotkey)
-    {
-        var s = Load() ?? new Settings();
-        s.RemoteMuteToggleHotkey = HotkeySetting.From(hotkey);
-        Save(s);
-    }
+        AppConfig.Load().RemoteMuteToggleHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveRemoteMuteToggleHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.RemoteMuteToggleHotkey = HotkeyRecord.From(hotkey));
 
     public HotkeyInfo LoadSystemVolumeUpHotkey() =>
-        Try(() => Load()?.SystemVolumeUpHotkey?.ToHotkeyInfo()) ?? HotkeyInfo.Unset;
-
-    public void SaveSystemVolumeUpHotkey(HotkeyInfo hotkey)
-    {
-        var s = Load() ?? new Settings();
-        s.SystemVolumeUpHotkey = HotkeySetting.From(hotkey);
-        Save(s);
-    }
+        AppConfig.Load().SystemVolumeUpHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveSystemVolumeUpHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.SystemVolumeUpHotkey = HotkeyRecord.From(hotkey));
 
     public HotkeyInfo LoadSystemVolumeDownHotkey() =>
-        Try(() => Load()?.SystemVolumeDownHotkey?.ToHotkeyInfo()) ?? HotkeyInfo.Unset;
-
-    public void SaveSystemVolumeDownHotkey(HotkeyInfo hotkey)
-    {
-        var s = Load() ?? new Settings();
-        s.SystemVolumeDownHotkey = HotkeySetting.From(hotkey);
-        Save(s);
-    }
+        AppConfig.Load().SystemVolumeDownHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveSystemVolumeDownHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.SystemVolumeDownHotkey = HotkeyRecord.From(hotkey));
 
     public HotkeyInfo LoadSystemMuteToggleHotkey() =>
-        Try(() => Load()?.SystemMuteToggleHotkey?.ToHotkeyInfo()) ?? HotkeyInfo.Unset;
-
-    public void SaveSystemMuteToggleHotkey(HotkeyInfo hotkey)
-    {
-        var s = Load() ?? new Settings();
-        s.SystemMuteToggleHotkey = HotkeySetting.From(hotkey);
-        Save(s);
-    }
+        AppConfig.Load().SystemMuteToggleHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveSystemMuteToggleHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.SystemMuteToggleHotkey = HotkeyRecord.From(hotkey));
 
     public HotkeyInfo LoadQuickProfileSwitchHotkey() =>
-        Try(() => Load()?.QuickProfileSwitchHotkey?.ToHotkeyInfo()) ?? HotkeyInfo.Unset;
-
-    public void SaveQuickProfileSwitchHotkey(HotkeyInfo hotkey)
-    {
-        var s = Load() ?? new Settings();
-        s.QuickProfileSwitchHotkey = HotkeySetting.From(hotkey);
-        Save(s);
-    }
+        AppConfig.Load().QuickProfileSwitchHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveQuickProfileSwitchHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.QuickProfileSwitchHotkey = HotkeyRecord.From(hotkey));
 
     public HotkeyInfo LoadSpeakStatusLineHotkey() =>
-        Try(() => Load()?.SpeakStatusLineHotkey?.ToHotkeyInfo()) ?? HotkeyInfo.Unset;
-
-    public void SaveSpeakStatusLineHotkey(HotkeyInfo hotkey)
-    {
-        var s = Load() ?? new Settings();
-        s.SpeakStatusLineHotkey = HotkeySetting.From(hotkey);
-        Save(s);
-    }
+        AppConfig.Load().SpeakStatusLineHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveSpeakStatusLineHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.SpeakStatusLineHotkey = HotkeyRecord.From(hotkey));
 
     public bool LoadAcceptRemoteVolumeCommands(bool defaultValue = false) =>
         Try(() => Load()?.AcceptRemoteVolumeCommands) ?? defaultValue;
@@ -590,20 +518,9 @@ public sealed class RemSoundSettingsStore
         if (profile is null) throw new ArgumentNullException(nameof(profile));
         cache = new Settings
         {
-            ReceiveMuteHotkey = profile.ReceiveMuteHotkey is null ? null : HotkeySettingFromRecord(profile.ReceiveMuteHotkey),
-            SendMuteHotkey = profile.SendMuteHotkey is null ? null : HotkeySettingFromRecord(profile.SendMuteHotkey),
-            TrayHotkey = profile.TrayHotkey is null ? null : HotkeySettingFromRecord(profile.TrayHotkey),
-            VolumeUpHotkey = profile.VolumeUpHotkey is null ? null : HotkeySettingFromRecord(profile.VolumeUpHotkey),
-            VolumeDownHotkey = profile.VolumeDownHotkey is null ? null : HotkeySettingFromRecord(profile.VolumeDownHotkey),
-            ToggleRecordingHotkey = profile.ToggleRecordingHotkey is null ? null : HotkeySettingFromRecord(profile.ToggleRecordingHotkey),
-            RemoteVolumeUpHotkey = profile.RemoteVolumeUpHotkey is null ? null : HotkeySettingFromRecord(profile.RemoteVolumeUpHotkey),
-            RemoteVolumeDownHotkey = profile.RemoteVolumeDownHotkey is null ? null : HotkeySettingFromRecord(profile.RemoteVolumeDownHotkey),
-            RemoteMuteToggleHotkey = profile.RemoteMuteToggleHotkey is null ? null : HotkeySettingFromRecord(profile.RemoteMuteToggleHotkey),
-            SystemVolumeUpHotkey = profile.SystemVolumeUpHotkey is null ? null : HotkeySettingFromRecord(profile.SystemVolumeUpHotkey),
-            SystemVolumeDownHotkey = profile.SystemVolumeDownHotkey is null ? null : HotkeySettingFromRecord(profile.SystemVolumeDownHotkey),
-            SystemMuteToggleHotkey = profile.SystemMuteToggleHotkey is null ? null : HotkeySettingFromRecord(profile.SystemMuteToggleHotkey),
-            QuickProfileSwitchHotkey = profile.QuickProfileSwitchHotkey is null ? null : HotkeySettingFromRecord(profile.QuickProfileSwitchHotkey),
-            SpeakStatusLineHotkey = profile.SpeakStatusLineHotkey is null ? null : HotkeySettingFromRecord(profile.SpeakStatusLineHotkey),
+            // Keyboard shortcuts are no longer per-profile (v4.4) — they live in AppConfig now and are
+            // not carried through the profile cache. Profile's HotkeyRecord fields remain only so old
+            // profile JSONs still deserialise; they're ignored.
             AcceptRemoteVolumeCommands = profile.AcceptRemoteVolumeCommands,
             MaxLatencyMs = profile.MaxLatencyMs,
             Codec = profile.Codec,
@@ -647,20 +564,7 @@ public sealed class RemSoundSettingsStore
     {
         if (profile is null) throw new ArgumentNullException(nameof(profile));
         var s = cache;
-        profile.ReceiveMuteHotkey = s.ReceiveMuteHotkey is null ? null : HotkeyRecordFromSetting(s.ReceiveMuteHotkey);
-        profile.SendMuteHotkey = s.SendMuteHotkey is null ? null : HotkeyRecordFromSetting(s.SendMuteHotkey);
-        profile.TrayHotkey = s.TrayHotkey is null ? null : HotkeyRecordFromSetting(s.TrayHotkey);
-        profile.VolumeUpHotkey = s.VolumeUpHotkey is null ? null : HotkeyRecordFromSetting(s.VolumeUpHotkey);
-        profile.VolumeDownHotkey = s.VolumeDownHotkey is null ? null : HotkeyRecordFromSetting(s.VolumeDownHotkey);
-        profile.ToggleRecordingHotkey = s.ToggleRecordingHotkey is null ? null : HotkeyRecordFromSetting(s.ToggleRecordingHotkey);
-        profile.RemoteVolumeUpHotkey = s.RemoteVolumeUpHotkey is null ? null : HotkeyRecordFromSetting(s.RemoteVolumeUpHotkey);
-        profile.RemoteVolumeDownHotkey = s.RemoteVolumeDownHotkey is null ? null : HotkeyRecordFromSetting(s.RemoteVolumeDownHotkey);
-        profile.RemoteMuteToggleHotkey = s.RemoteMuteToggleHotkey is null ? null : HotkeyRecordFromSetting(s.RemoteMuteToggleHotkey);
-        profile.SystemVolumeUpHotkey = s.SystemVolumeUpHotkey is null ? null : HotkeyRecordFromSetting(s.SystemVolumeUpHotkey);
-        profile.SystemVolumeDownHotkey = s.SystemVolumeDownHotkey is null ? null : HotkeyRecordFromSetting(s.SystemVolumeDownHotkey);
-        profile.SystemMuteToggleHotkey = s.SystemMuteToggleHotkey is null ? null : HotkeyRecordFromSetting(s.SystemMuteToggleHotkey);
-        profile.QuickProfileSwitchHotkey = s.QuickProfileSwitchHotkey is null ? null : HotkeyRecordFromSetting(s.QuickProfileSwitchHotkey);
-        profile.SpeakStatusLineHotkey = s.SpeakStatusLineHotkey is null ? null : HotkeyRecordFromSetting(s.SpeakStatusLineHotkey);
+        // Keyboard shortcuts moved to AppConfig (machine-wide) in v4.4 — no longer written to profiles.
         if (s.AcceptRemoteVolumeCommands is bool arvc) profile.AcceptRemoteVolumeCommands = arvc;
         if (s.MaxLatencyMs is int ml) profile.MaxLatencyMs = ml;
         if (s.Codec is AudioTransportCodec c) profile.Codec = c;
@@ -697,38 +601,8 @@ public sealed class RemSoundSettingsStore
         if (s.RecordingSettings is RecordingSettings rs) profile.RecordingSettings = rs.Clone();
     }
 
-    private static HotkeySetting HotkeySettingFromRecord(HotkeyRecord r) => new()
-    {
-        Key = r.Key,
-        Control = r.Control,
-        Shift = r.Shift,
-        Alt = r.Alt,
-    };
-
-    private static HotkeyRecord HotkeyRecordFromSetting(HotkeySetting s) => new()
-    {
-        Key = s.Key,
-        Control = s.Control,
-        Shift = s.Shift,
-        Alt = s.Alt,
-    };
-
     private sealed class Settings
     {
-        public HotkeySetting? ReceiveMuteHotkey { get; set; }
-        public HotkeySetting? SendMuteHotkey { get; set; }
-        public HotkeySetting? TrayHotkey { get; set; }
-        public HotkeySetting? VolumeUpHotkey { get; set; }
-        public HotkeySetting? VolumeDownHotkey { get; set; }
-        public HotkeySetting? ToggleRecordingHotkey { get; set; }
-        public HotkeySetting? RemoteVolumeUpHotkey { get; set; }
-        public HotkeySetting? RemoteVolumeDownHotkey { get; set; }
-        public HotkeySetting? RemoteMuteToggleHotkey { get; set; }
-        public HotkeySetting? SystemVolumeUpHotkey { get; set; }
-        public HotkeySetting? SystemVolumeDownHotkey { get; set; }
-        public HotkeySetting? SystemMuteToggleHotkey { get; set; }
-        public HotkeySetting? QuickProfileSwitchHotkey { get; set; }
-        public HotkeySetting? SpeakStatusLineHotkey { get; set; }
         public bool? AcceptRemoteVolumeCommands { get; set; }
         public int? MaxLatencyMs { get; set; }
         public AudioTransportCodec? Codec { get; set; }
@@ -769,27 +643,4 @@ public sealed class RemSoundSettingsStore
         public RecordingSettings? RecordingSettings { get; set; }
     }
 
-    private sealed class HotkeySetting
-    {
-        public string Key { get; set; } = "M";
-        public bool Control { get; set; }
-        public bool Shift { get; set; }
-        public bool Alt { get; set; }
-
-        public static HotkeySetting From(HotkeyInfo hotkey) => new()
-        {
-            Key = hotkey.Key.ToString(),
-            Control = hotkey.Control,
-            Shift = hotkey.Shift,
-            Alt = hotkey.Alt,
-        };
-
-        public HotkeyInfo ToHotkeyInfo()
-        {
-            if (!Enum.TryParse<Keys>(Key, out var parsedKey)) return HotkeyInfo.Default;
-            var hotkey = new HotkeyInfo(parsedKey, Control, Shift, Alt);
-            if (hotkey.IsUnset) return HotkeyInfo.Unset;
-            return hotkey.IsValid ? hotkey : HotkeyInfo.Default;
-        }
-    }
 }

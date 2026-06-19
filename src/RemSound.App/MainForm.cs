@@ -1381,6 +1381,8 @@ public sealed class MainForm : Form
     private void RunStartupNotices()
     {
         if (IsDisposed) return;
+        MaybeShowKeyboardShortcutsGlobalNotice();
+        if (IsDisposed) return;
         MaybeShowWhatsNewAfterUpdate();
         if (IsDisposed) return;
         MaybeRunLogHousekeeping();
@@ -1429,6 +1431,55 @@ public sealed class MainForm : Form
                 catch (Exception ex) { logFile.Event($"log housekeeping: warn dialog failed: {ex.GetType().Name}: {ex.Message}"); }
             }
         }
+    }
+
+    /// <summary>One-time notice (v4.4) telling upgraders that keyboard shortcuts have moved from
+    /// per-profile to machine-wide storage (issue #14), so their shortcuts have reset to defaults and
+    /// need re-setting. Shown once to anyone who ran an earlier version; on a brand-new install (which
+    /// has nothing to reset) it's silently marked done and never shown. Must run BEFORE
+    /// <see cref="MaybeShowWhatsNewAfterUpdate"/>, which overwrites the LastWhatsNewVersion we read to
+    /// tell upgraders apart from fresh installs.</summary>
+    private void MaybeShowKeyboardShortcutsGlobalNotice()
+    {
+        if (IsDisposed) return;
+        AppConfig cfg;
+        try { cfg = AppConfig.Load(); }
+        catch { return; }
+        if (cfg.KeyboardShortcutsGlobalNoticeShown) return;
+
+        // A non-empty LastWhatsNewVersion means a previous version has run on this machine — i.e. this
+        // is an upgrade, so there were per-profile shortcuts that have now reset. A fresh install has it
+        // empty (it's set later, by MaybeShowWhatsNewAfterUpdate) and has nothing to reset.
+        var isUpgrade = !string.IsNullOrEmpty(cfg.LastWhatsNewVersion);
+        if (isUpgrade)
+        {
+            logFile.Event("keyboard shortcuts: showing one-time 'now shared across profiles' notice");
+            var page = new TaskDialogPage
+            {
+                Caption = "RemSound",
+                Heading = "Your keyboard shortcuts are now shared across profiles",
+                Text = "Keyboard shortcuts used to be saved separately for each profile, so a shortcut you set on one "
+                     + "profile wouldn't work on another. From this version they're shared across all your profiles "
+                     + "instead — one set for the whole app, which our users have requested.\n\n"
+                     + "Because of this change, your shortcuts have started fresh at their defaults. If you'd set up any "
+                     + "shortcuts of your own, please set them again in Options → Keyboard shortcuts (Ctrl+K). You only "
+                     + "need to do this once — from now on they'll stay put whatever profile you're on.",
+                Icon = TaskDialogIcon.Information,
+                Buttons = { TaskDialogButton.OK },
+                AllowCancel = true,
+            };
+            try { ForegroundDialog.Show(owner => TaskDialog.ShowDialog(owner, page)); }
+            catch (Exception ex) { logFile.Event($"keyboard shortcuts notice failed: {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        // Mark done either way (shown to upgraders, silently to fresh installs) so it's strictly one-time.
+        try
+        {
+            var fresh = AppConfig.Load();
+            fresh.KeyboardShortcutsGlobalNoticeShown = true;
+            fresh.Save();
+        }
+        catch { /* harmless — at worst the notice shows again next launch */ }
     }
 
     /// <summary>If the user opted in (<see cref="AppConfig.ShowWhatsNewAfterUpdate"/>) and the

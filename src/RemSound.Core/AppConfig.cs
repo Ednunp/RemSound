@@ -147,6 +147,32 @@ public sealed class AppConfig
     /// days ago are deleted at startup. Range 1–30, default 14. Only consulted when that flag is on.</summary>
     public int PruneOldLogsDays { get; set; } = 14;
 
+    /// <summary>The keyboard shortcuts, machine-wide as of v4.4. Before v4.4 these lived on each
+    /// <see cref="Profile"/>, so a shortcut set on one profile didn't apply on another (issue #14).
+    /// They now live here — one set shared by every profile, loaded/saved via
+    /// <see cref="RemSoundSettingsStore"/>'s Load*/Save* hotkey methods. Null = use the built-in default
+    /// for that action. The old per-profile <see cref="HotkeyRecord"/> fields on <see cref="Profile"/>
+    /// are kept only so old profile JSONs still deserialise; they are no longer read or written.</summary>
+    public HotkeyRecord? ReceiveMuteHotkey { get; set; }
+    public HotkeyRecord? SendMuteHotkey { get; set; }
+    public HotkeyRecord? TrayHotkey { get; set; }
+    public HotkeyRecord? VolumeUpHotkey { get; set; }
+    public HotkeyRecord? VolumeDownHotkey { get; set; }
+    public HotkeyRecord? ToggleRecordingHotkey { get; set; }
+    public HotkeyRecord? RemoteVolumeUpHotkey { get; set; }
+    public HotkeyRecord? RemoteVolumeDownHotkey { get; set; }
+    public HotkeyRecord? RemoteMuteToggleHotkey { get; set; }
+    public HotkeyRecord? SystemVolumeUpHotkey { get; set; }
+    public HotkeyRecord? SystemVolumeDownHotkey { get; set; }
+    public HotkeyRecord? SystemMuteToggleHotkey { get; set; }
+    public HotkeyRecord? QuickProfileSwitchHotkey { get; set; }
+    public HotkeyRecord? SpeakStatusLineHotkey { get; set; }
+
+    /// <summary>True once the one-time "your keyboard shortcuts are now shared across profiles" notice
+    /// has been shown (to an upgrader), or silently marked done on a fresh install that had nothing to
+    /// reset. Stops the notice re-appearing. v4.4.</summary>
+    public bool KeyboardShortcutsGlobalNoticeShown { get; set; }
+
     /// <summary>If non-null and a profile with this title exists, RemSound skips the
     /// startup profile picker and loads this profile directly. Combine with
     /// <see cref="StartMinimised"/> + the Windows auto-start registry entry
