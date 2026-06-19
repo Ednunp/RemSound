@@ -20,6 +20,16 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v4.3.1
+
+        A gentler update sound. The cue that plays when
+        an update is on its way is now quieter by default
+        — enough to let you know it's coming, without
+        breaking your concentration while you're working.
+        As before, you can choose your own update sound,
+        or switch it off, on the Audio cues tab in
+        Preferences.
+
         RemSound v4.3
 
         Two additions for screen-reader users, and a
