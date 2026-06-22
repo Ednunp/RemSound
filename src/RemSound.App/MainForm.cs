@@ -1381,7 +1381,7 @@ public sealed class MainForm : Form
     private void RunStartupNotices()
     {
         if (IsDisposed) return;
-        MaybeShowKeyboardShortcutsGlobalNotice();
+        MaybeOfferKeyboardShortcutImport();
         if (IsDisposed) return;
         MaybeShowWhatsNewAfterUpdate();
         if (IsDisposed) return;
@@ -1433,53 +1433,118 @@ public sealed class MainForm : Form
         }
     }
 
-    /// <summary>One-time notice (v4.4) telling upgraders that keyboard shortcuts have moved from
-    /// per-profile to machine-wide storage (issue #14), so their shortcuts have reset to defaults and
-    /// need re-setting. Shown once to anyone who ran an earlier version; on a brand-new install (which
-    /// has nothing to reset) it's silently marked done and never shown. Must run BEFORE
-    /// <see cref="MaybeShowWhatsNewAfterUpdate"/>, which overwrites the LastWhatsNewVersion we read to
-    /// tell upgraders apart from fresh installs.</summary>
-    private void MaybeShowKeyboardShortcutsGlobalNotice()
+    /// <summary>One-time upgrade flow (replaces the v4.4 reset notice): keyboard shortcuts moved from
+    /// per-profile to machine-wide storage (issue #14). Offers upgraders the choice of copying their
+    /// shortcuts from one of their existing profiles (still readable in the profile files) or starting
+    /// fresh. Only offered to people coming straight from a PRE-v4.4 version (where shortcuts were still
+    /// per-profile), to spare them the reset — anyone who already went through v4.4's reset is left
+    /// alone (re-offering would only annoy them), as is a fresh install or a user with no saved shortcuts
+    /// to import. Runs BEFORE <see cref="MaybeShowWhatsNewAfterUpdate"/>, which overwrites the
+    /// LastWhatsNewVersion we read to tell upgraders apart from fresh installs.</summary>
+    private void MaybeOfferKeyboardShortcutImport()
     {
         if (IsDisposed) return;
         AppConfig cfg;
         try { cfg = AppConfig.Load(); }
         catch { return; }
-        if (cfg.KeyboardShortcutsGlobalNoticeShown) return;
+        if (cfg.KeyboardShortcutsImportOffered) return;
 
-        // A non-empty LastWhatsNewVersion means a previous version has run on this machine — i.e. this
-        // is an upgrade, so there were per-profile shortcuts that have now reset. A fresh install has it
-        // empty (it's set later, by MaybeShowWhatsNewAfterUpdate) and has nothing to reset.
+        // Leave the v4.4 crowd alone. v4.4's reset set KeyboardShortcutsGlobalNoticeShown for everyone
+        // who ran it; those people have already re-done their shortcuts, so re-offering an import would
+        // only annoy them. We only want to catch people coming straight from a PRE-v4.4 version (where
+        // shortcuts were still per-profile), before they lose anything.
+        if (cfg.KeyboardShortcutsGlobalNoticeShown) { MarkShortcutImportOffered(); return; }
+
+        // Only relevant to upgraders (a previous version ran here, so LastWhatsNewVersion is set) who
+        // actually have old per-profile shortcuts to bring across.
         var isUpgrade = !string.IsNullOrEmpty(cfg.LastWhatsNewVersion);
-        if (isUpgrade)
-        {
-            logFile.Event("keyboard shortcuts: showing one-time 'now shared across profiles' notice");
-            var page = new TaskDialogPage
-            {
-                Caption = "RemSound",
-                Heading = "Your keyboard shortcuts are now shared across profiles",
-                Text = "Keyboard shortcuts used to be saved separately for each profile, so a shortcut you set on one "
-                     + "profile wouldn't work on another. From this version they're shared across all your profiles "
-                     + "instead — one set for the whole app, which our users have requested.\n\n"
-                     + "Because of this change, your shortcuts have started fresh at their defaults. If you'd set up any "
-                     + "shortcuts of your own, please set them again in Options → Keyboard shortcuts (Ctrl+K). You only "
-                     + "need to do this once — from now on they'll stay put whatever profile you're on.",
-                Icon = TaskDialogIcon.Information,
-                Buttons = { TaskDialogButton.OK },
-                AllowCancel = true,
-            };
-            try { ForegroundDialog.Show(owner => TaskDialog.ShowDialog(owner, page)); }
-            catch (Exception ex) { logFile.Event($"keyboard shortcuts notice failed: {ex.GetType().Name}: {ex.Message}"); }
-        }
+        if (!isUpgrade) { MarkShortcutImportOffered(); return; }
 
-        // Mark done either way (shown to upgraders, silently to fresh installs) so it's strictly one-time.
+        var titles = ProfilesWithSavedShortcuts();
+        if (titles.Count == 0) { MarkShortcutImportOffered(); return; }
+
+        logFile.Event($"keyboard shortcuts: offering import from {titles.Count} profile(s) with saved shortcuts");
         try
         {
-            var fresh = AppConfig.Load();
-            fresh.KeyboardShortcutsGlobalNoticeShown = true;
-            fresh.Save();
+            using var dlg = new KeyboardShortcutImportDialog(titles);
+            var result = ForegroundDialog.Show(owner => dlg.ShowDialog(owner));
+            if (result != DialogResult.OK) return;  // dismissed (Escape) — offer again next launch
+
+            if (dlg.ChosenProfileTitle is { } title)
+            {
+                var imported = ImportShortcutsFromProfile(title);
+                logFile.Event($"keyboard shortcuts: imported {imported} shortcut(s) from profile \"{title}\"");
+                hotkeyController.ReloadAndReRegisterAll();
+            }
+            else
+            {
+                logFile.Event("keyboard shortcuts: user chose to start fresh with the defaults");
+            }
+            MarkShortcutImportOffered();
         }
-        catch { /* harmless — at worst the notice shows again next launch */ }
+        catch (Exception ex)
+        {
+            logFile.Event($"keyboard shortcuts import failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static void MarkShortcutImportOffered()
+    {
+        try { var c = AppConfig.Load(); c.KeyboardShortcutsImportOffered = true; c.Save(); }
+        catch { /* harmless — at worst the offer shows again next launch */ }
+    }
+
+    /// <summary>Titles of profiles that have at least one customised keyboard shortcut saved in their
+    /// file (the only ones worth importing — unchanged shortcuts were stored as null).</summary>
+    private List<string> ProfilesWithSavedShortcuts()
+    {
+        var result = new List<string>();
+        if (profileStore is null) return result;
+        try
+        {
+            foreach (var title in profileStore.ListProfileTitles())
+            {
+                try
+                {
+                    if (profileStore.Load(title) is { } p && ProfileHasAnyShortcut(p)) result.Add(title);
+                }
+                catch { /* skip an unreadable profile */ }
+            }
+        }
+        catch { /* enumeration failed — offer nothing */ }
+        return result;
+    }
+
+    private static bool ProfileHasAnyShortcut(Profile p) =>
+        p.ReceiveMuteHotkey is not null || p.SendMuteHotkey is not null || p.TrayHotkey is not null
+        || p.VolumeUpHotkey is not null || p.VolumeDownHotkey is not null || p.ToggleRecordingHotkey is not null
+        || p.RemoteVolumeUpHotkey is not null || p.RemoteVolumeDownHotkey is not null || p.RemoteMuteToggleHotkey is not null
+        || p.SystemVolumeUpHotkey is not null || p.SystemVolumeDownHotkey is not null || p.SystemMuteToggleHotkey is not null
+        || p.QuickProfileSwitchHotkey is not null || p.SpeakStatusLineHotkey is not null;
+
+    /// <summary>Copy a profile's saved (non-null) keyboard shortcuts into the machine-wide store, via the
+    /// settings store's now-global Save* methods. Returns how many were copied; shortcuts the profile
+    /// never customised (null) are left at the global default.</summary>
+    private int ImportShortcutsFromProfile(string title)
+    {
+        if (profileStore is null || profileStore.Load(title) is not { } p) return 0;
+        var n = 0;
+        void Copy(HotkeyRecord? rec, Action<HotkeyInfo> save) { if (rec is not null) { save(rec.ToHotkeyInfo()); n++; } }
+        Copy(p.ReceiveMuteHotkey, settings.SaveReceiveMuteHotkey);
+        Copy(p.SendMuteHotkey, settings.SaveSendMuteHotkey);
+        Copy(p.TrayHotkey, settings.SaveTrayHotkey);
+        Copy(p.VolumeUpHotkey, settings.SaveVolumeUpHotkey);
+        Copy(p.VolumeDownHotkey, settings.SaveVolumeDownHotkey);
+        Copy(p.ToggleRecordingHotkey, settings.SaveToggleRecordingHotkey);
+        Copy(p.RemoteVolumeUpHotkey, settings.SaveRemoteVolumeUpHotkey);
+        Copy(p.RemoteVolumeDownHotkey, settings.SaveRemoteVolumeDownHotkey);
+        Copy(p.RemoteMuteToggleHotkey, settings.SaveRemoteMuteToggleHotkey);
+        Copy(p.SystemVolumeUpHotkey, settings.SaveSystemVolumeUpHotkey);
+        Copy(p.SystemVolumeDownHotkey, settings.SaveSystemVolumeDownHotkey);
+        Copy(p.SystemMuteToggleHotkey, settings.SaveSystemMuteToggleHotkey);
+        Copy(p.QuickProfileSwitchHotkey, settings.SaveQuickProfileSwitchHotkey);
+        Copy(p.SpeakStatusLineHotkey, settings.SaveSpeakStatusLineHotkey);
+        return n;
     }
 
     /// <summary>If the user opted in (<see cref="AppConfig.ShowWhatsNewAfterUpdate"/>) and the

@@ -170,8 +170,16 @@ public sealed class AppConfig
 
     /// <summary>True once the one-time "your keyboard shortcuts are now shared across profiles" notice
     /// has been shown (to an upgrader), or silently marked done on a fresh install that had nothing to
-    /// reset. Stops the notice re-appearing. v4.4.</summary>
+    /// reset. Stops the notice re-appearing. v4.4. (Superseded by the import offer below; kept so the
+    /// flag on an existing v4.4 config still deserialises.)</summary>
     public bool KeyboardShortcutsGlobalNoticeShown { get; set; }
+
+    /// <summary>True once the one-time "bring your keyboard shortcuts across?" import offer has been
+    /// resolved (the user chose to import from a profile, or to start fresh). Deliberately SEPARATE from
+    /// <see cref="KeyboardShortcutsGlobalNoticeShown"/> so that users who already updated to v4.4 (and
+    /// were reset) are STILL offered the chance to import their old per-profile shortcuts — which remain
+    /// readable in their profile files.</summary>
+    public bool KeyboardShortcutsImportOffered { get; set; }
 
     /// <summary>If non-null and a profile with this title exists, RemSound skips the
     /// startup profile picker and loads this profile directly. Combine with

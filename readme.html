@@ -92,7 +92,7 @@ ul, ol { padding-left: 1.4em; }
 
 <h2 id="profiles">3. Profiles</h2>
 
-<p>RemSound saves your whole setup &mdash; which devices are ticked, whether you're sending or receiving, your sound quality settings, delay targets, hotkeys, your ASIO driver choice, remembered peers, currently connected peers &mdash; into a single settings file. Each saved setup is called a <em>profile</em>. You choose which profile to load every time you start the program. You might keep one profile for &ldquo;morning podcast&rdquo; and another for &ldquo;evening jam session&rdquo;, each with a different mix of devices ticked, and switch between them in a couple of clicks.</p>
+<p>RemSound saves your whole setup &mdash; which devices are ticked, whether you're sending or receiving, your sound quality settings, delay targets, your ASIO driver choice, remembered peers, currently connected peers &mdash; into a single settings file. Each saved setup is called a <em>profile</em>. You choose which profile to load every time you start the program. You might keep one profile for &ldquo;morning podcast&rdquo; and another for &ldquo;evening jam session&rdquo;, each with a different mix of devices ticked, and switch between them in a couple of clicks. (Your keyboard shortcuts are the one thing that <em>isn't</em> saved per profile &mdash; from version 4.4 they're shared across all your profiles; see <a href="#hotkeys">Global hotkeys</a>.)</p>
 
 <h3>The startup picker</h3>
 
@@ -113,7 +113,7 @@ ul, ol { padding-left: 1.4em; }
 
 <h3>What &ldquo;New profile&rdquo; means</h3>
 
-<p>A new profile is a one-off session with all the defaults: nothing ticked in any device list, neither Receive nor Send turned on, the standard sound settings, no ASIO driver chosen, no remembered peers, and the standard hotkeys. You'd pick it for a quick session you don't plan to save, or as a clean starting point for a new profile. The Save button is hidden while you're on a new profile &mdash; there's no existing setup to update, only a new one to save.</p>
+<p>A new profile is a one-off session with all the defaults: nothing ticked in any device list, neither Receive nor Send turned on, the standard sound settings, no ASIO driver chosen, and no remembered peers. (Your keyboard shortcuts aren't part of a profile, so starting a new profile doesn't change them.) You'd pick it for a quick session you don't plan to save, or as a clean starting point for a new profile. The Save button is hidden while you're on a new profile &mdash; there's no existing setup to update, only a new one to save.</p>
 
 <p><strong>Starting a new profile later:</strong> the picker only appears at startup, and if you've set RemSound to <em>start in a specific profile</em> you skip straight past it. So to start a brand-new profile at any time, use <strong>File &rarr; New profile</strong> (Ctrl+N, or Alt+F, W) &mdash; it opens a fresh, default session, ready for you to set up and then Save as. If your current profile has unsaved changes, it offers to save them first.</p>
 
@@ -153,7 +153,7 @@ ul, ol { padding-left: 1.4em; }
 <p>You can also <strong>copy a profile file from one computer to another</strong>: drop it into the other computer's profile folder and it will appear in that computer's startup dialog. If the other computer doesn't have the same equipment (different sound cards, different ASIO drivers), those device choices are simply skipped when the profile loads &mdash; RemSound won't show an error or a warning, the relevant lists just won't have those items ticked.</p>
 
 <div class="note">
-<strong>Tip:</strong> profile files are plain text and readable by people. If you ever want to change something by hand (for example, a hotkey) without opening the app, you can open the file in any text editor.
+<strong>Tip:</strong> profile files are plain text and readable by people. If you ever want to change something by hand (for example, a remembered peer) without opening the app, you can open the file in any text editor.
 </div>
 
 <h3>What is NOT saved in a profile</h3>
@@ -810,9 +810,9 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 
 <h2 id="hotkeys">15. Global hotkeys (work even when minimised)</h2>
 
-<p>Your keyboard shortcuts are <strong>shared across all your profiles</strong> — set one once and it works on every profile, and stays put when you switch between them. (Before version 4.4 they were saved separately inside each profile, so a shortcut set on one profile wouldn't work on another. If you're upgrading, your shortcuts will have gone back to their defaults the first time you run the new version — just set the ones you use again, once.)</p>
+<p>Your keyboard shortcuts are <strong>shared across all your profiles</strong> — set one once and it works on every profile, and stays put when you switch between them. (Before version 4.4 they were saved separately inside each profile, so a shortcut set on one profile wouldn't work on another. If you're upgrading from before version 4.4, the first time you run the new version RemSound offers to <strong>bring your shortcuts across</strong>: it shows a list of your profiles, and you pick the one you set your shortcuts up in &mdash; or choose to start fresh with the defaults.)</p>
 
-<p>You set these up in the Keyboard shortcuts dialog (Ctrl+K, or Options &rarr; Keyboard shortcuts). The dialog is a single list of every hotkey you can set: <strong>Enter</strong> sets the highlighted row, <strong>Del</strong> clears it (back to <em>not set</em>), and <strong>Escape</strong> or the Close button closes the dialog. The defaults:</p>
+<p>You set these up in the Keyboard shortcuts dialog (Ctrl+K, or Options &rarr; Keyboard shortcuts). The dialog is a single list of every hotkey you can set: <strong>Enter</strong> sets the highlighted row, and <strong>Del</strong> &mdash; or the <strong>Clear this shortcut</strong> button &mdash; clears it (back to <em>not set</em>). When you're setting a shortcut, you can press <strong>Delete</strong> inside that box to leave it unassigned. <strong>Escape</strong> or the Close button closes the dialog. The defaults:</p>
 
 <table>
 <tr><th>Hotkey</th><th>Action</th><th>Default</th></tr>
@@ -822,9 +822,9 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <tr><td>Quick profile switch</td><td>Pop up a list of all your profiles and switch to one &mdash; works from anywhere, even with RemSound in the tray (where it stays after the switch). See <em>Quick profile switch</em> below.</td><td>Unset</td></tr>
 <tr><td>Volume up / down</td><td>Adjust this computer's received-sound volume</td><td>Unset</td></tr>
 <tr><td>Start / Stop recording</td><td>Start or stop a recording on this computer. The same toggle as the Record menu's start/stop item and the in-app Ctrl+R, but it works system-wide (RemSound doesn't need to be the active window). See <a href="#recording">Recording to a file</a> for what gets captured.</td><td>Unset</td></tr>
-<tr><td>Send remote volume up to peers</td><td>Tell every connected peer to raise their RemSound volume slider by 5 points (only obeyed by peers that have ticked &ldquo;Accept remote volume commands&rdquo;). It doesn't change your own volume. See <a href="#remote-control">Remote control</a>.</td><td>Unset</td></tr>
-<tr><td>Send remote volume down to peers</td><td>The same, but lowering.</td><td>Unset</td></tr>
-<tr><td>Send remote receive mute toggle to peers</td><td>Tell every connected peer to toggle their RemSound receive mute.</td><td>Unset</td></tr>
+<tr><td>Send remote RemSound volume up to peers</td><td>Tell every connected peer to raise their RemSound volume slider by 5 points (only obeyed by peers that have ticked &ldquo;Accept remote volume commands&rdquo;). It doesn't change your own volume. See <a href="#remote-control">Remote control</a>.</td><td>Unset</td></tr>
+<tr><td>Send remote RemSound volume down to peers</td><td>The same, but lowering.</td><td>Unset</td></tr>
+<tr><td>Send remote RemSound receive mute toggle to peers</td><td>Tell every connected peer to toggle their RemSound receive mute.</td><td>Unset</td></tr>
 <tr><td>Send Windows global volume up to peers</td><td>Tell every connected peer to nudge their <em>Windows</em> volume up by one step (about 2%, the same as their keyboard volume key). This affects every app on the receiving computer, not just RemSound. Hold the hotkey down for bigger jumps. See <a href="#remote-control">Remote control</a>.</td><td>Unset</td></tr>
 <tr><td>Send Windows global volume down to peers</td><td>The same, but lowering.</td><td>Unset</td></tr>
 <tr><td>Send Windows global mute toggle to peers</td><td>Tell every connected peer to toggle their Windows mute.</td><td>Unset</td></tr>
@@ -875,8 +875,8 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <li>On the computer that should <em>respond</em> to remote commands (the one you're listening on &mdash; the laptop in the example): open <strong>Preferences</strong> (Ctrl+P) and tick <strong>Accept remote volume commands from peers</strong>. Save the profile (Ctrl+S) so the choice sticks. (One toggle covers both kinds of remote command.)</li>
 <li>On the computer that should <em>send</em> remote commands (the one your keyboard is driving &mdash; the desktop in the example): open the <strong>Keyboard shortcuts</strong> dialog (Ctrl+K). Set whichever of the six remote-control rows you want:
 <ul>
-<li><strong>Send remote volume up / down to peers</strong> &mdash; nudges the receiver's RemSound slider.</li>
-<li><strong>Send remote receive mute toggle to peers</strong> &mdash; toggles the receiver's RemSound mute.</li>
+<li><strong>Send remote RemSound volume up / down to peers</strong> &mdash; nudges the receiver's RemSound slider.</li>
+<li><strong>Send remote RemSound receive mute toggle to peers</strong> &mdash; toggles the receiver's RemSound mute.</li>
 <li><strong>Send Windows global volume up / down to peers</strong> &mdash; nudges the receiver's Windows volume.</li>
 <li><strong>Send Windows global mute toggle to peers</strong> &mdash; toggles the receiver's Windows mute.</li>
 </ul>

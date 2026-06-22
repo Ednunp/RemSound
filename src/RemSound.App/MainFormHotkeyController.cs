@@ -174,6 +174,41 @@ internal sealed class MainFormHotkeyController : IDisposable
         RegisterSpeakStatusLineHotkey();
     }
 
+    /// <summary>Re-read every hotkey from the (now machine-wide) settings store and re-register it.
+    /// Used after the one-time upgrade import writes a fresh set of shortcuts into the global config,
+    /// so the just-imported bindings take effect immediately without relaunching.</summary>
+    public void ReloadAndReRegisterAll()
+    {
+        sendMuteHotkey = settingsStore.LoadSendMuteHotkey();
+        receiveMuteHotkey = settingsStore.LoadReceiveMuteHotkey();
+        trayHotkey = settingsStore.LoadTrayHotkey();
+        volumeUpHotkey = settingsStore.LoadVolumeUpHotkey();
+        volumeDownHotkey = settingsStore.LoadVolumeDownHotkey();
+        toggleRecordingHotkey = settingsStore.LoadToggleRecordingHotkey();
+        remoteVolumeUpHotkey = settingsStore.LoadRemoteVolumeUpHotkey();
+        remoteVolumeDownHotkey = settingsStore.LoadRemoteVolumeDownHotkey();
+        remoteMuteToggleHotkey = settingsStore.LoadRemoteMuteToggleHotkey();
+        systemVolumeUpHotkey = settingsStore.LoadSystemVolumeUpHotkey();
+        systemVolumeDownHotkey = settingsStore.LoadSystemVolumeDownHotkey();
+        systemMuteToggleHotkey = settingsStore.LoadSystemMuteToggleHotkey();
+        quickProfileSwitchHotkey = settingsStore.LoadQuickProfileSwitchHotkey();
+        speakStatusLineHotkey = settingsStore.LoadSpeakStatusLineHotkey();
+        RegisterSendMuteHotkey();
+        RegisterReceiveMuteHotkey();
+        RegisterTrayHotkey();
+        RegisterVolumeUpHotkey();
+        RegisterVolumeDownHotkey();
+        RegisterToggleRecordingHotkey();
+        RegisterRemoteVolumeUpHotkey();
+        RegisterRemoteVolumeDownHotkey();
+        RegisterRemoteMuteToggleHotkey();
+        RegisterSystemVolumeUpHotkey();
+        RegisterSystemVolumeDownHotkey();
+        RegisterSystemMuteToggleHotkey();
+        RegisterQuickProfileSwitchHotkey();
+        RegisterSpeakStatusLineHotkey();
+    }
+
     public void ShowKeyboardShortcutsDialog(IWin32Window dialogOwner)
     {
         // Modeled on the SpaceBlaster menu dialogs:
@@ -224,7 +259,7 @@ internal sealed class MainFormHotkeyController : IDisposable
 
         var introLabel = new Label
         {
-            Text = "Arrow up and down to pick a shortcut. Press Enter to rebind it, Del to clear it. Escape closes the dialog.\n\n"
+            Text = "Arrow up and down to pick a shortcut. Press Enter to rebind it, or Del (or the Clear this shortcut button) to clear it. Escape closes the dialog.\n\n"
                  + "The remote-control rows send commands to connected peers; they only have an effect on peers that have 'Accept remote volume commands from peers' enabled.",
             AutoSize = true,
             MaximumSize = new Size(600, 0),
@@ -249,8 +284,14 @@ internal sealed class MainFormHotkeyController : IDisposable
             AutoSize = true,
             Padding = new Padding(0, 8, 0, 0),
         };
-        var closeButton = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.OK, TabIndex = 1 };
+        var closeButton = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.OK, TabIndex = 2 };
+        // Discoverable "clear" alongside the Del key — the Del shortcut isn't obvious to a screen-reader
+        // user. Clears whichever shortcut is selected in the list (UnsetSelected reads list.SelectedIndex,
+        // which the ListBox keeps even when focus is on this button).
+        var clearButton = new Button { Text = "&Clear this shortcut", AccessibleName = "Clear this shortcut", AutoSize = true, TabIndex = 1 };
+        clearButton.Click += (_, _) => UnsetSelected();
         buttonsPanel.Controls.Add(closeButton);
+        buttonsPanel.Controls.Add(clearButton);
         root.Controls.Add(buttonsPanel, 0, 2);
 
         dialog.Controls.Add(root);
@@ -274,9 +315,9 @@ internal sealed class MainFormHotkeyController : IDisposable
             list.Items.Add($"Volume up for received sound on this machine: {volumeUpHotkey}");
             list.Items.Add($"Volume down for received sound on this machine: {volumeDownHotkey}");
             list.Items.Add($"Start / Stop recording: {toggleRecordingHotkey}");
-            list.Items.Add($"Send remote volume up to peers: {remoteVolumeUpHotkey}");
-            list.Items.Add($"Send remote volume down to peers: {remoteVolumeDownHotkey}");
-            list.Items.Add($"Send remote receive mute toggle to peers: {remoteMuteToggleHotkey}");
+            list.Items.Add($"Send remote RemSound volume up to peers: {remoteVolumeUpHotkey}");
+            list.Items.Add($"Send remote RemSound volume down to peers: {remoteVolumeDownHotkey}");
+            list.Items.Add($"Send remote RemSound receive mute toggle to peers: {remoteMuteToggleHotkey}");
             list.Items.Add($"Send Windows global volume up to peers: {systemVolumeUpHotkey}");
             list.Items.Add($"Send Windows global volume down to peers: {systemVolumeDownHotkey}");
             list.Items.Add($"Send Windows global mute toggle to peers: {systemMuteToggleHotkey}");

@@ -20,6 +20,26 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v4.5
+
+        Keyboard shortcuts get easier to manage.
+
+        If you're updating from before version 4.4,
+        RemSound now offers to bring your shortcuts
+        across from one of your profiles instead of
+        resetting them — pick the profile you set them
+        up in, or start fresh.
+
+        The Keyboard shortcuts dialog has a new "Clear
+        this shortcut" button, and when you're setting a
+        shortcut you can press Delete to leave it
+        unassigned.
+
+        And the three remote-control rows now name
+        RemSound — "Send remote RemSound volume", and so
+        on — so they're easy to tell apart from the
+        Windows-volume ones.
+
         RemSound v4.4
 
         Keyboard shortcuts are now shared across all

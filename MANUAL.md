@@ -69,7 +69,7 @@ Let's assume you and a friend both have RemSound running, and that your two comp
 
 ## 3. Profiles
 
-RemSound saves your whole setup — which devices are ticked, whether you're sending or receiving, your sound quality settings, delay targets, hotkeys, your ASIO driver choice, remembered peers, currently connected peers — into a single settings file. Each saved setup is called a _profile_. You choose which profile to load every time you start the program. You might keep one profile for “morning podcast” and another for “evening jam session”, each with a different mix of devices ticked, and switch between them in a couple of clicks.
+RemSound saves your whole setup — which devices are ticked, whether you're sending or receiving, your sound quality settings, delay targets, your ASIO driver choice, remembered peers, currently connected peers — into a single settings file. Each saved setup is called a _profile_. You choose which profile to load every time you start the program. You might keep one profile for “morning podcast” and another for “evening jam session”, each with a different mix of devices ticked, and switch between them in a couple of clicks. (Your keyboard shortcuts are the one thing that _isn't_ saved per profile — from version 4.4 they're shared across all your profiles; see Global hotkeys.)
 
 ### The startup picker
 
@@ -89,7 +89,7 @@ The first profile in the list is highlighted to begin with, so on a fresh instal
 
 ### What “New profile” means
 
-A new profile is a one-off session with all the defaults: nothing ticked in any device list, neither Receive nor Send turned on, the standard sound settings, no ASIO driver chosen, no remembered peers, and the standard hotkeys. You'd pick it for a quick session you don't plan to save, or as a clean starting point for a new profile. The Save button is hidden while you're on a new profile — there's no existing setup to update, only a new one to save.
+A new profile is a one-off session with all the defaults: nothing ticked in any device list, neither Receive nor Send turned on, the standard sound settings, no ASIO driver chosen, and no remembered peers. (Your keyboard shortcuts aren't part of a profile, so starting a new profile doesn't change them.) You'd pick it for a quick session you don't plan to save, or as a clean starting point for a new profile. The Save button is hidden while you're on a new profile — there's no existing setup to update, only a new one to save.
 
 **Starting a new profile later:** the picker only appears at startup, and if you've set RemSound to _start in a specific profile_ you skip straight past it. So to start a brand-new profile at any time, use **File → New profile** (Ctrl+N, or Alt+F, W) — it opens a fresh, default session, ready for you to set up and then Save as. If your current profile has unsaved changes, it offers to save them first.
 
@@ -127,7 +127,7 @@ The folder named after your computer keeps each machine's profiles separate. If 
 
 You can also **copy a profile file from one computer to another** : drop it into the other computer's profile folder and it will appear in that computer's startup dialog. If the other computer doesn't have the same equipment (different sound cards, different ASIO drivers), those device choices are simply skipped when the profile loads — RemSound won't show an error or a warning, the relevant lists just won't have those items ticked.
 
-> **Tip:** profile files are plain text and readable by people. If you ever want to change something by hand (for example, a hotkey) without opening the app, you can open the file in any text editor.
+> **Tip:** profile files are plain text and readable by people. If you ever want to change something by hand (for example, a remembered peer) without opening the app, you can open the file in any text editor.
 
 ### What is NOT saved in a profile
 
@@ -768,9 +768,9 @@ Alt+F4| Close (the standard Windows shortcut)
 
 ## 15. Global hotkeys (work even when minimised)
 
-Your keyboard shortcuts are **shared across all your profiles** — set one once and it works on every profile, and stays put when you switch between them. (Before version 4.4 they were saved separately inside each profile, so a shortcut set on one profile wouldn't work on another. If you're upgrading, your shortcuts will have gone back to their defaults the first time you run the new version — just set the ones you use again, once.)
+Your keyboard shortcuts are **shared across all your profiles** — set one once and it works on every profile, and stays put when you switch between them. (Before version 4.4 they were saved separately inside each profile, so a shortcut set on one profile wouldn't work on another. If you're upgrading from before version 4.4, the first time you run the new version RemSound offers to **bring your shortcuts across** : it shows a list of your profiles, and you pick the one you set your shortcuts up in — or choose to start fresh with the defaults.)
 
-You set these up in the Keyboard shortcuts dialog (Ctrl+K, or Options → Keyboard shortcuts). The dialog is a single list of every hotkey you can set: **Enter** sets the highlighted row, **Del** clears it (back to _not set_), and **Escape** or the Close button closes the dialog. The defaults:
+You set these up in the Keyboard shortcuts dialog (Ctrl+K, or Options → Keyboard shortcuts). The dialog is a single list of every hotkey you can set: **Enter** sets the highlighted row, and **Del** — or the **Clear this shortcut** button — clears it (back to _not set_). When you're setting a shortcut, you can press **Delete** inside that box to leave it unassigned. **Escape** or the Close button closes the dialog. The defaults:
 
 Hotkey| Action| Default
 ---|---|---
@@ -780,9 +780,9 @@ Tray toggle| Show / hide the main window| Ctrl+Shift+F10
 Quick profile switch| Pop up a list of all your profiles and switch to one — works from anywhere, even with RemSound in the tray (where it stays after the switch). See _Quick profile switch_ below.| Unset
 Volume up / down| Adjust this computer's received-sound volume| Unset
 Start / Stop recording| Start or stop a recording on this computer. The same toggle as the Record menu's start/stop item and the in-app Ctrl+R, but it works system-wide (RemSound doesn't need to be the active window). See Recording to a file for what gets captured.| Unset
-Send remote volume up to peers| Tell every connected peer to raise their RemSound volume slider by 5 points (only obeyed by peers that have ticked “Accept remote volume commands”). It doesn't change your own volume. See Remote control.| Unset
-Send remote volume down to peers| The same, but lowering.| Unset
-Send remote receive mute toggle to peers| Tell every connected peer to toggle their RemSound receive mute.| Unset
+Send remote RemSound volume up to peers| Tell every connected peer to raise their RemSound volume slider by 5 points (only obeyed by peers that have ticked “Accept remote volume commands”). It doesn't change your own volume. See Remote control.| Unset
+Send remote RemSound volume down to peers| The same, but lowering.| Unset
+Send remote RemSound receive mute toggle to peers| Tell every connected peer to toggle their RemSound receive mute.| Unset
 Send Windows global volume up to peers| Tell every connected peer to nudge their _Windows_ volume up by one step (about 2%, the same as their keyboard volume key). This affects every app on the receiving computer, not just RemSound. Hold the hotkey down for bigger jumps. See Remote control.| Unset
 Send Windows global volume down to peers| The same, but lowering.| Unset
 Send Windows global mute toggle to peers| Tell every connected peer to toggle their Windows mute.| Unset
@@ -829,8 +829,8 @@ Both sets target the receiving computer. Neither one changes anything on the sen
 
   1. On the computer that should _respond_ to remote commands (the one you're listening on — the laptop in the example): open **Preferences** (Ctrl+P) and tick **Accept remote volume commands from peers**. Save the profile (Ctrl+S) so the choice sticks. (One toggle covers both kinds of remote command.)
   2. On the computer that should _send_ remote commands (the one your keyboard is driving — the desktop in the example): open the **Keyboard shortcuts** dialog (Ctrl+K). Set whichever of the six remote-control rows you want:
-     * **Send remote volume up / down to peers** — nudges the receiver's RemSound slider.
-     * **Send remote receive mute toggle to peers** — toggles the receiver's RemSound mute.
+     * **Send remote RemSound volume up / down to peers** — nudges the receiver's RemSound slider.
+     * **Send remote RemSound receive mute toggle to peers** — toggles the receiver's RemSound mute.
      * **Send Windows global volume up / down to peers** — nudges the receiver's Windows volume.
      * **Send Windows global mute toggle to peers** — toggles the receiver's Windows mute.
 Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift+Down for one set, and Ctrl+Alt+Up / Ctrl+Alt+Down for the other). These are global hotkeys: they work as long as RemSound is running, no matter which app is in front.

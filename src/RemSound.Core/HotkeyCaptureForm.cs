@@ -18,7 +18,7 @@ public sealed class HotkeyCaptureForm : Form
         KeyPreview = true;
         AccessibleName = "Change hotkey";
 
-        instructionLabel.Text = "Hold the full key combination, then release it to save it automatically.";
+        instructionLabel.Text = "Hold the full key combination, then release it to save it automatically. Press Delete to leave this shortcut unassigned.";
         instructionLabel.MaximumSize = new Size(360, 0);
         hotkeyTextBox.AccessibleName = "Current hotkey";
         hotkeyTextBox.Text = "Press a hotkey combination.";
@@ -88,6 +88,16 @@ public sealed class HotkeyCaptureForm : Form
         var alt = keyData.HasFlag(Keys.Alt);
 
         if (key == Keys.Escape) { DialogResult = DialogResult.Cancel; Close(); return; }
+
+        // Plain Delete (no modifiers) clears the binding — the action becomes unassigned, mirroring Del
+        // on the shortcuts list. Delete WITH modifiers is left to bind as a normal combination.
+        if (key == Keys.Delete && !control && !shift && !alt)
+        {
+            CapturedHotkey = HotkeyInfo.Unset;
+            DialogResult = DialogResult.OK;
+            Close();
+            return;
+        }
 
         if (IsModifier(key))
         {
