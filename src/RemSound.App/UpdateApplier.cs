@@ -72,6 +72,7 @@ internal static class UpdateApplier
                 RollBack(moved, created, Log);
                 TryDeleteDirectory(backupDir); // restored files were moved back out; drop the empty backup tree
                 WriteFailureMarker(target, logPath);
+                WhatsNewMarker.Consume(target); // a rolled-back update must never trigger "what's new"
                 Log("rolled back to previous version" + (noRestart ? "" : "; restarting it"));
                 if (!noRestart) RestartApp(target, resumeProfile, Log); // old version restored intact — safe to relaunch
                 CleanupStage(stageRoot, Log);
@@ -80,6 +81,10 @@ internal static class UpdateApplier
 
             TryDeleteDirectory(backupDir);
             WriteResumeSentinel(target, resumeProfile, Log);
+            // Positive one-shot signal that the update genuinely succeeded — drives the next launch's
+            // "what's new" popup. Written ONLY here, on the success path.
+            try { WhatsNewMarker.Write(target); Log("wrote what's-new marker"); }
+            catch (Exception ex) { Log($"could not write what's-new marker: {ex.Message}"); }
             Log("apply-update OK" + (noRestart ? "" : " — restarting RemSound"));
             if (!noRestart) RestartApp(target, resumeProfile, Log);
             CleanupStage(stageRoot, Log);

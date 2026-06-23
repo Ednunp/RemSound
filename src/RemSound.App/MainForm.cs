@@ -1580,28 +1580,26 @@ public sealed class MainForm : Form
         return n;
     }
 
-    /// <summary>If the user opted in (<see cref="AppConfig.ShowWhatsNewAfterUpdate"/>) and the
-    /// running version changed since the last launch we recorded, open the About box once so
-    /// they see what changed in the update just installed. Always records the current version
-    /// so the change is detected exactly once. A fresh install (no version recorded yet) does
-    /// NOT count as an update. 2026-05-31.</summary>
+    /// <summary>Show the About box once after a SUCCESSFUL in-app update, if the user opted in. Driven by
+    /// a one-shot marker the updater writes only on success (<see cref="RemSoundUpdater.WhatsNewMarkerName"/>
+    /// via <see cref="WhatsNewMarker"/>) — NOT by a running-version-vs-saved-version compare, which could
+    /// re-fire after a FAILED update when its best-effort flag save lost a race during the update churn
+    /// (that was the bug). The marker is consumed (deleted) here exactly once. Separately records
+    /// LastWhatsNewVersion as the "a version has run here" signal the keyboard-shortcut import offer uses
+    /// to tell an upgrade from a fresh install. 2026-06-23.</summary>
     private void MaybeShowWhatsNewAfterUpdate()
     {
         if (IsDisposed) return;
         var current = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "";
 
-        AppConfig cfg;
-        try { cfg = AppConfig.Load(); }
-        catch { return; }
+        var justUpdated = WhatsNewMarker.Exists(AppContext.BaseDirectory);
+        var cfg = AppConfig.Load();
 
-        var versionChanged = !string.IsNullOrEmpty(cfg.LastWhatsNewVersion)
-            && cfg.LastWhatsNewVersion != current;
-
-        if (cfg.ShowWhatsNewAfterUpdate && versionChanged)
+        if (justUpdated && cfg.ShowWhatsNewAfterUpdate)
         {
             try
             {
-                logFile.Event($"what's new: opening About after update {cfg.LastWhatsNewVersion} -> {current}");
+                logFile.Event($"what's new: opening About after a successful update (now v{current})");
                 using var dlg = new AboutDialog();
                 ForegroundDialog.Show(owner => dlg.ShowDialog(owner));
             }
@@ -1611,8 +1609,15 @@ public sealed class MainForm : Form
             }
         }
 
-        // Record the current version so the next change is detected once. Reload first so we
-        // don't clobber a concurrent config write (e.g. the startup update-check timestamp).
+        // Consume the marker so what's-new shows exactly once. Deleted whether or not we showed it, and
+        // only ever present after a genuine success — a failed update simply has nothing here to re-trigger.
+        if (justUpdated && !WhatsNewMarker.Consume(AppContext.BaseDirectory))
+        {
+            logFile.Event("what's new: could not delete the update marker (will re-show next launch)");
+        }
+
+        // Record "a version has run on this machine" for the upgrade-vs-fresh-install detection used by
+        // MaybeOfferKeyboardShortcutImport. Best-effort; no longer drives the what's-new popup.
         if (cfg.LastWhatsNewVersion != current)
         {
             try
@@ -1621,7 +1626,7 @@ public sealed class MainForm : Form
                 fresh.LastWhatsNewVersion = current;
                 fresh.Save();
             }
-            catch { /* harmless — at worst we re-show next launch */ }
+            catch { /* harmless */ }
         }
     }
 

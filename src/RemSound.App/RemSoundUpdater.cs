@@ -168,6 +168,14 @@ internal sealed class RemSoundUpdater : IDisposable
     /// drops the user back into the same profile they were running rather than at the picker.</summary>
     public const string ResumeProfileSentinelName = "_resume-after-update.txt";
 
+    /// <summary>Filename of the one-shot "an update just succeeded — show what's new once" marker.
+    /// Written into the install folder by <see cref="UpdateApplier"/> ONLY on a successful update
+    /// (never on a failed/rolled-back one); read and deleted by MainForm on the next startup. This is
+    /// the positive signal that drives the "what's new after an update" popup — so a FAILED update can't
+    /// trigger it. (The old running-version-vs-saved-version compare could re-fire after a failure when
+    /// its best-effort flag save lost a race during the update churn — that was the bug.)</summary>
+    public const string WhatsNewMarkerName = "_whats-new-after-update.txt";
+
     /// <summary>Download the update ZIP, stage it to a per-user temp folder, and launch the new
     /// version's in-app installer (<see cref="UpdateApplier"/>) to take over once this process
     /// exits. Returns true if the installer was launched (caller should Application.Exit
@@ -196,9 +204,11 @@ internal sealed class RemSoundUpdater : IDisposable
             var zipPath = Path.Combine(stageRoot, $"RemSound-update-{info.Tag}.zip");
             Directory.CreateDirectory(appDir);
 
-            // This attempt starts clean: clear any stale failure marker / resume sentinel in the install.
+            // This attempt starts clean: clear any stale failure marker / resume sentinel / what's-new
+            // marker in the install.
             TryDelete(Path.Combine(installDir, "update-failed.txt"));
             TryDelete(Path.Combine(installDir, ResumeProfileSentinelName));
+            TryDelete(Path.Combine(installDir, WhatsNewMarkerName));
 
             Log?.Invoke($"updater: downloading {info.DownloadUrl}");
             await using (var src = await http.GetStreamAsync(info.DownloadUrl, token).ConfigureAwait(false))

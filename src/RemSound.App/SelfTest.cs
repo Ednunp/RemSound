@@ -57,6 +57,7 @@ internal static class SelfTest
         RunStep(results, "Server wire-format compatibility", ServerWireCompat);
         RunStep(results, "App settings save and reload", SettingsRoundTrip);
         RunStep(results, "Profile save and reload", ProfileRoundTrip);
+        RunStep(results, "What's-new update marker", WhatsNewMarkerRoundTrip);
         RunStep(results, "Diagnostics report privacy", DiagnosticsPrivacy);
         RunStep(results, "Bundled resources present", ResourcesPresent);
         RunStep(results, "Dialog accessibility (names + mnemonics)", AccessibilityAudit);
@@ -129,6 +130,29 @@ internal static class SelfTest
         Check(RemSoundCrypto.Obfuscate(pw) != pw, "a stored password must not be plain text");
         Check(RemSoundCrypto.Deobfuscate(RemSoundCrypto.Obfuscate(pw)) == pw, "the stored-password scramble must round-trip");
         return "AES-256-GCM, PBKDF2 fingerprint, on-disk scramble";
+    }
+
+    /// <summary>The "what's new after a successful update" marker round-trips: present after Write,
+    /// Consume removes it exactly once, and a second Consume is a no-op. This is the contract the bug
+    /// fix rests on — a failed update writes no marker (no popup); a success writes one (shown once).</summary>
+    private static string? WhatsNewMarkerRoundTrip()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "rs-selftest-whatsnew-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            Check(!WhatsNewMarker.Exists(dir), "a fresh folder must have no marker");
+            WhatsNewMarker.Write(dir);
+            Check(WhatsNewMarker.Exists(dir), "marker must exist after Write");
+            Check(WhatsNewMarker.Consume(dir), "Consume must report it removed the marker");
+            Check(!WhatsNewMarker.Exists(dir), "marker must be gone after Consume");
+            Check(!WhatsNewMarker.Consume(dir), "a second Consume must be a no-op (shown exactly once)");
+            return "write / exists / consume-once / idempotent";
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort temp cleanup */ }
+        }
     }
 
     /// <summary>The packet header writes and reads back for every type, and malformed packets
