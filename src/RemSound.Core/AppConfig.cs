@@ -181,6 +181,21 @@ public sealed class AppConfig
     /// readable in their profile files.</summary>
     public bool KeyboardShortcutsImportOffered { get; set; }
 
+    /// <summary>If true, the "Use Windows default output" follower at the top of the received-sound
+    /// output list is ticked at startup, so received sound plays to whatever Windows currently calls
+    /// the default output and re-routes when that changes (plug in headphones, it follows). Unlike a
+    /// specific device tick — which can go stale and play to the wrong card — a follower can never be
+    /// wrong, so it's safe to persist. Default false (opt-in). <see cref="UseDefaultInputDevice"/> is
+    /// the same idea for the send-input list.</summary>
+    public bool UseDefaultOutputDevice { get; set; }
+    public bool UseDefaultInputDevice { get; set; }
+
+    /// <summary>Remembered answer to the "untick the other outputs/inputs when you turn on Use Windows
+    /// default?" prompt. Null = ask each time; true = always untick; false = never untick. Set when the
+    /// user ticks "Don't ask again" on that prompt. Machine-wide.</summary>
+    public bool? UntickOthersWhenUsingDefaultOutput { get; set; }
+    public bool? UntickOthersWhenUsingDefaultInput { get; set; }
+
     /// <summary>If non-null and a profile with this title exists, RemSound skips the
     /// startup profile picker and loads this profile directly. Combine with
     /// <see cref="StartMinimised"/> + the Windows auto-start registry entry

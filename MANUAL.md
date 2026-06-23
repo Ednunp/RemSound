@@ -262,14 +262,16 @@ Item| Shortcut| What it does
 
 ### Options menu
 
-The Options menu gathers everything you might want to configure about the app — recording settings, keyboard shortcuts, startup behaviour, and general preferences.
+The Options menu gathers everything you might want to configure about the app — recording settings, keyboard shortcuts, profile passwords, and general preferences.
 
 Item| Shortcut| What it does
 ---|---|---
 **Recording settings …**| Alt+O, S| Opens the Recording settings dialog. Up to five lists: _Recording source_ (Alt+S), _File format_ (Alt+F), _Audio format attributes_ (Alt+A), _FLAC compression level_ (Alt+L — only shown when FLAC is chosen), and _Channels_ (Alt+C). The attributes list changes to match the format you pick. OK saves to the current profile; Cancel discards.
-**Keyboard shortcuts …**| Ctrl+K, or Alt+O, K| Opens the global hotkey dialog (mute, volume, show/hide window, start/stop recording, remote-control commands).
-**Startup behaviour …**| Alt+O, T| Opens the Startup behaviour dialog. Choose whether to launch automatically with Windows, which profile to load by default, and whether to start hidden in the tray.
-**Preferences …**| Ctrl+P, or Alt+O, P| Opens the Preferences dialog, organised into four tabs (move between them with Ctrl+Tab, or the arrow keys when the tab names have focus): **General** — the profiles folder, accept remote volume commands, UPnP router opening, and keep-logs / write-logs-now; **Audio cues** — the cue list and its sounds (see Audio cue sounds); **Startup behaviour** — start minimised / with Windows / with a specific profile; and **Update settings** — the update checks and install options. Esc or the Close button dismisses it.
+**Keyboard shortcuts …**| Ctrl+K, or Alt+O, K| Opens the global hotkey dialog (mute, volume, show/hide window, start/stop recording, remote-control commands, speak the status line).
+**Profile passwords …**| Alt+O, W| Lists every profile alongside its password, so you can view or change any of them in one place.
+**Reset the default audio device prompt**|  Alt+O, R| Brings back the “use only the default audio device?” question if you previously ticked “Don't ask me this again” on it. See Following the Windows default audio device.
+**Enable / Disable Realtek ASIO**|  —| Only shown if a Realtek ASIO driver is installed. Lets you reverse the choice RemSound offered about disabling that driver (Realtek's generic ASIO driver tends to grab the wrong device and clash with your screen reader).
+**Preferences …**| Ctrl+P, or Alt+O, P| Opens the Preferences dialog, organised into five tabs (move between them with Ctrl+Tab, or the arrow keys when the tab names have focus): **General** — the profiles folder, accept remote volume commands, and UPnP router opening; **Audio cues** — the cue list and its sounds (see Audio cue sounds); **Startup behaviour** — start minimised / with Windows / with a specific profile; **Update settings** — the update checks and install options; and **Logging** — enable logs, write logs now, and the log-folder housekeeping (see Logs and diagnostics). Esc or the Close button dismisses it.
 
 ### Help menu
 
@@ -310,6 +312,14 @@ Control| Shortcut| What it does
 **ASIO inputs to send**|  Alt+2| (Shown when an ASIO driver is chosen.) Tick which ASIO channel pairs to capture and send.
 
 All the device lists are checkable lists — tick or untick an item to include or exclude that device. Profiles save which devices are ticked; a new profile starts with everything unticked.
+
+### Following the Windows default audio device
+
+At the very top of the **WASAPI outputs for received sound** list and the **WASAPI inputs to send** list there's a special entry: **Use Windows default audio device, follows Windows changes**. Tick it and RemSound uses whatever Windows currently treats as the default — the default speakers for received sound, the default microphone for sending — and, the useful part, it **follows that default on its own**. Make a headset your default and RemSound switches to it; unplug it and RemSound moves back, all without you touching the list.
+
+It works alongside the specific devices: tick the default entry _and_ particular cards, and the sound plays out of (or is captured from) all of them at once. When you first tick it, RemSound asks whether you'd like to untick the other devices in that list, so you can choose to use only the default — with a “Don't ask me this again” option. If you tick that and later want the question back, use **Options → Reset the default audio device prompt**.
+
+Unlike the specific device ticks (which start fresh each session), the “use default audio device” choice is remembered between launches. It's safe to remember because it can never point at the wrong card — it always resolves to whatever Windows is using right now.
 
 ### Receiving
 
@@ -751,7 +761,8 @@ Alt+F, M| Rename the current profile
 Alt+F, N| Minimise to tray
 Alt+O, S| Recording settings
 Alt+O, K| Keyboard shortcuts
-Alt+O, T| Startup behaviour
+Alt+O, W| Profile passwords
+Alt+O, R| Reset the default audio device prompt
 Alt+O, P| Preferences
 Alt+F, X| Exit
 
@@ -903,7 +914,7 @@ All of these cues play through your default Windows sound output, which is separ
 
 ### The Audio cues tab
 
-Open **File → Preferences** (or Ctrl+P) and go to the **Audio cues** tab. (Preferences is now organised into four tabs — General, Audio cues, Startup behaviour and Update settings — which you move between with Ctrl+Tab, or with the arrow keys when the row of tab names has focus.)
+Open **File → Preferences** (or Ctrl+P) and go to the **Audio cues** tab. (Preferences is organised into five tabs — General, Audio cues, Startup behaviour, Update settings and Logging — which you move between with Ctrl+Tab, or with the arrow keys when the row of tab names has focus.)
 
 The **Audio cue sounds (Alt+N)** list shows every cue by name. Use the up and down arrow keys to move between them — as you land on each cue, RemSound plays its current sound, so you can hear what's set just by arrowing through.
 
@@ -1004,7 +1015,7 @@ You'll see the window close, then reopen on the new version within a second or t
 
 When the install finishes and RemSound reopens, it loads the same profile that was running just before the update — you don't see the profile picker, and your devices, peer list, codec and latency settings all come back exactly as they were. This means a silent update in the middle of a session drops the audio briefly while the install finishes, then your session reconnects on its own. You don't have to be at the computer when it happens.
 
-This is a one-shot, just-after-the-update behaviour. The very next time you launch RemSound manually (from the desktop, the Start menu, or the tray icon), it follows your normal startup choice — the picker if that's how you've set it, or your chosen startup profile if you've picked one in Options → Startup behaviour.
+This is a one-shot, just-after-the-update behaviour. The very next time you launch RemSound manually (from the desktop, the Start menu, or the tray icon), it follows your normal startup choice — the picker if that's how you've set it, or your chosen startup profile if you've picked one in Preferences → Startup behaviour.
 
 If the profile that was running can't be found after the update (you'd renamed or moved it during the session, for example), RemSound falls back to your normal startup behaviour rather than getting stuck.
 

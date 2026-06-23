@@ -27,6 +27,13 @@ internal sealed record CodecChoice(string Label, AudioTransportCodec Codec, int 
 
 internal sealed record AudioDeviceChoice(string Name, string? DeviceId, CaptureKind Kind = CaptureKind.Loopback)
 {
+    /// <summary>True for the special "Use Windows default" pseudo-entry that sits at the top of the
+    /// receive-output and send-input lists. When ticked, the current Windows default device is
+    /// resolved live (Render for an output follower, Capture for an input follower — derived from
+    /// <see cref="Kind"/>) and re-resolved whenever Windows' default changes. Its <see cref="DeviceId"/>
+    /// is a sentinel, never a real endpoint id.</summary>
+    public bool IsDefaultFollower { get; init; }
+
     public override string ToString() => Name;
 }
 

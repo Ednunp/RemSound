@@ -400,6 +400,20 @@ public sealed class MainForm : Form
     // wired in the constructor; disposed in FormClosing (which unregisters the COM callback).
     private AudioDeviceChangeNotifier? deviceChangeNotifier;
 
+    // The "Use Windows default ..." follower entries sit at the top of the receive-output and
+    // send-input lists. Ticked, the current Windows default device is resolved live (and re-resolved
+    // when Windows' default changes). A synthetic sentinel DeviceId that can never collide
+    // with a real endpoint id (which looks like "{0.0.0.00000000}.{guid}").
+    private static readonly AudioDeviceChoice DefaultOutputFollower =
+        new("Use Windows default audio device, follows Windows changes", "__use-default-output__", CaptureKind.Loopback) { IsDefaultFollower = true };
+    private static readonly AudioDeviceChoice DefaultInputFollower =
+        new("Use Windows default audio device, follows Windows changes", "__use-default-input__", CaptureKind.Input) { IsDefaultFollower = true };
+    // The Windows-default device id we last routed to while following, per direction. A default-device
+    // change doesn't change the device SET, so the list-sync wouldn't catch it — we compare against
+    // these to spot it and re-route (see ReapplyIfFollowedDefaultChanged).
+    private string? lastFollowedDefaultOutputId;
+    private string? lastFollowedDefaultInputId;
+
     // Receive-output device IDs the user/profile selected — kept even while a device is unplugged,
     // so a card that returns is silently re-ticked and re-opened (issue #5: recover after USB
     // unplug). Receive-only: the send lists deliberately don't persist selection (AudioDeviceCatalog).
@@ -1042,15 +1056,25 @@ public sealed class MainForm : Form
         receiveOutputDevicesList.ItemCheck += (_, e) =>
         {
             if (suppressDeviceCheckChange) return;
-            // Track the user's intent so a card that's later unplugged is re-ticked + re-opened when
-            // it returns (issue #5). See ReapplyRememberedReceiveOutputs.
-            if (receiveOutputDevicesList.Items[e.Index] is AudioDeviceChoice c && c.DeviceId is { } rid)
+            if (receiveOutputDevicesList.Items[e.Index] is AudioDeviceChoice c)
             {
-                if (e.NewValue == CheckState.Checked) rememberedReceiveOutputIds.Add(rid);
-                else rememberedReceiveOutputIds.Remove(rid);
+                if (c.IsDefaultFollower)
+                {
+                    // Machine-wide preference (AppConfig), not part of the profile.
+                    var on = e.NewValue == CheckState.Checked;
+                    PersistUseDefaultDevice(output: true, on);
+                    if (on) BeginInvoke(new Action(() => MaybeUntickOthersForDefault(receiveOutputDevicesList, output: true)));
+                }
+                else if (c.DeviceId is { } rid)
+                {
+                    // Track the user's intent so a card that's later unplugged is re-ticked + re-opened
+                    // when it returns (issue #5). See ReapplyRememberedReceiveOutputs.
+                    if (e.NewValue == CheckState.Checked) rememberedReceiveOutputIds.Add(rid);
+                    else rememberedReceiveOutputIds.Remove(rid);
+                    MarkProfileDirty();
+                }
             }
             BeginInvoke(ApplyReceiveDevices);
-            MarkProfileDirty();
         };
         WireCheckedListAccessibility(sendOutputDevicesList, sendOutputDevicesStatusLabel, "output device");
         WireCheckedListAccessibility(sendInputDevicesList, sendInputDevicesStatusLabel, "input device");
@@ -1060,6 +1084,15 @@ public sealed class MainForm : Form
             if (suppressDeviceCheckChange) return;
             logFile.Event($"ui: capture (WASAPI mic) '{sendInputDevicesList.Items[args.Index]}' {(args.NewValue == CheckState.Checked ? "ticked" : "unticked")}");
             BeginInvoke(ApplyAudioRuntime);
+            if (sendInputDevicesList.Items[args.Index] is AudioDeviceChoice { IsDefaultFollower: true })
+            {
+                // Machine-wide preference (AppConfig), not part of the profile — and no mic-block check
+                // (the default mic could be anything; the runtime apply handles a blocked default).
+                var on = args.NewValue == CheckState.Checked;
+                PersistUseDefaultDevice(output: false, on);
+                if (on) BeginInvoke(new Action(() => MaybeUntickOthersForDefault(sendInputDevicesList, output: false)));
+                return;
+            }
             MarkProfileDirty();
             // Heads-up when the user ticks a WASAPI mic ON but Windows is blocking desktop-app
             // microphone access — capture would open but silently send nothing. Deferred so the
@@ -1826,6 +1859,15 @@ public sealed class MainForm : Form
         };
         profilePasswordsItem.Click += (_, _) => OpenProfilePasswordManager();
 
+        // Reset the one-time "untick the other devices?" prompt that appears when you turn on a
+        // "Use Windows default audio device" box — clears the remembered Yes/No so it asks again.
+        // Mirrors the Realtek toggle's "let the user reverse a one-time decision" pattern.
+        var resetDefaultDeviceItem = new ToolStripMenuItem("&Reset the default audio device prompt")
+        {
+            AccessibleName = "Reset the default audio device prompt",
+        };
+        resetDefaultDeviceItem.Click += (_, _) => ResetDefaultAudioDevicePrompt();
+
         // Realtek ASIO enable/disable toggle — only present when a Realtek ASIO driver is actually
         // installed. Lets the user reverse the disable decision (or disable a driver they kept).
         ToolStripMenuItem? realtekToggle = null;
@@ -1844,6 +1886,7 @@ public sealed class MainForm : Form
             recordingSettingsItem,
             keyboardItem,
             profilePasswordsItem,
+            resetDefaultDeviceItem,
         };
         if (realtekToggle is not null) optionItems.Add(realtekToggle);
         optionItems.Add(new ToolStripSeparator());
@@ -3932,10 +3975,25 @@ public sealed class MainForm : Form
         {
             if (item.DeviceId is { } id) specs.Add(new CaptureSourceSpec(id, CaptureKind.Loopback, item.Name));
         }
+        var addedInputIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string? followedDefaultInput = null;
         foreach (var item in sendInputDevicesList.CheckedItems.OfType<AudioDeviceChoice>())
         {
-            if (item.DeviceId is { } id) specs.Add(new CaptureSourceSpec(id, CaptureKind.Input, item.Name));
+            if (item.IsDefaultFollower)
+            {
+                // Resolve the current Windows default capture device live.
+                followedDefaultInput = ResolveDefaultDeviceId(NAudio.CoreAudioApi.DataFlow.Capture);
+                if (!string.IsNullOrEmpty(followedDefaultInput) && addedInputIds.Add(followedDefaultInput))
+                {
+                    specs.Add(new CaptureSourceSpec(followedDefaultInput, CaptureKind.Input, "Windows default audio device"));
+                }
+            }
+            else if (item.DeviceId is { } id && addedInputIds.Add(id))
+            {
+                specs.Add(new CaptureSourceSpec(id, CaptureKind.Input, item.Name));
+            }
         }
+        lastFollowedDefaultInputId = followedDefaultInput;
         foreach (var item in asioSendDevicesList.CheckedItems.OfType<AudioDeviceChoice>())
         {
             // ASIO channels have no Loopback/Input distinction — Kind is irrelevant for ASIO
@@ -3963,8 +4021,12 @@ public sealed class MainForm : Form
             // The user re-ticks once per session, avoiding the "wrong-device-still-selected"
             // failure mode after a card unplug or ID change.
             sendOutputDevicesSignature = SyncDeviceCheckedListBox(sendOutputDevicesList, outputs);
-            sendInputDevicesSignature = SyncDeviceCheckedListBox(sendInputDevicesList, inputs);
-            receiveOutputDevicesSignature = SyncDeviceCheckedListBox(receiveOutputDevicesList, outputs);
+            sendInputDevicesSignature = SyncDeviceCheckedListBox(sendInputDevicesList, WithDefaultFollower(inputs, DefaultInputFollower));
+            receiveOutputDevicesSignature = SyncDeviceCheckedListBox(receiveOutputDevicesList, WithDefaultFollower(outputs, DefaultOutputFollower));
+            // Re-tick the "Use Windows default" followers from the saved preference. They don't ride the
+            // per-session "all unticked" rule above — a follower can never go stale (it always resolves
+            // to the current default), so persisting it is the whole point of the feature.
+            RestoreDefaultFollowerChecks();
 
             // Ground-truth log so we can definitively see the device list and initial check state
             // each launch — diagnoses any "device was checked at startup" mystery.
@@ -4066,8 +4128,8 @@ public sealed class MainForm : Form
         }
 
         var sendOutputChanged = MaybeSyncList(sendOutputDevicesList, wasapiOutputs, ref sendOutputDevicesSignature);
-        var sendInputChanged = MaybeSyncList(sendInputDevicesList, wasapiInputs, ref sendInputDevicesSignature);
-        var receiveOutputChanged = MaybeSyncList(receiveOutputDevicesList, wasapiOutputs, ref receiveOutputDevicesSignature);
+        var sendInputChanged = MaybeSyncList(sendInputDevicesList, WithDefaultFollower(wasapiInputs, DefaultInputFollower), ref sendInputDevicesSignature);
+        var receiveOutputChanged = MaybeSyncList(receiveOutputDevicesList, WithDefaultFollower(wasapiOutputs, DefaultOutputFollower), ref receiveOutputDevicesSignature);
         bool asioSendChanged;
         bool asioReceiveChanged;
         if (asioProbeAttemptedAndFailed)
@@ -4094,6 +4156,9 @@ public sealed class MainForm : Form
         {
             ApplyReceiveDevices();
         }
+        // A default-device change leaves the device SET unchanged, so the syncs above don't fire — but
+        // if we're following the Windows default, the target device just moved. Catch that and re-route.
+        ReapplyIfFollowedDefaultChanged();
     }
 
     private void ClearAsioProbeCache()
@@ -4494,15 +4559,205 @@ public sealed class MainForm : Form
         // Combine WASAPI device-ids and ASIO synthetic-ids into one list. The
         // CompositeRenderBackend splits them internally and feeds each child the right subset.
         var ids = new List<string>();
+        var added = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string? followedDefault = null;
         foreach (var c in receiveOutputDevicesList.CheckedItems.OfType<AudioDeviceChoice>())
         {
-            if (!string.IsNullOrEmpty(c.DeviceId)) ids.Add(c.DeviceId);
+            if (c.IsDefaultFollower)
+            {
+                // Resolve the current Windows default render device live.
+                followedDefault = ResolveDefaultDeviceId(NAudio.CoreAudioApi.DataFlow.Render);
+                if (!string.IsNullOrEmpty(followedDefault) && added.Add(followedDefault)) ids.Add(followedDefault);
+            }
+            else if (!string.IsNullOrEmpty(c.DeviceId) && added.Add(c.DeviceId))
+            {
+                ids.Add(c.DeviceId);
+            }
         }
+        lastFollowedDefaultOutputId = followedDefault;
         foreach (var c in asioReceiveOutputDevicesList.CheckedItems.OfType<AudioDeviceChoice>())
         {
-            if (!string.IsNullOrEmpty(c.DeviceId)) ids.Add(c.DeviceId);
+            if (!string.IsNullOrEmpty(c.DeviceId) && added.Add(c.DeviceId)) ids.Add(c.DeviceId);
         }
         receiver.SetOutputDevices(ids);
+    }
+
+    // ===================== "Use Windows default device" follower support =====================
+
+    /// <summary>Returns a new list with <paramref name="follower"/> at the top, followed by
+    /// <paramref name="devices"/>. Used to put the "Use Windows default ..." entry first in the
+    /// receive-output and send-input lists.</summary>
+    private static IReadOnlyList<AudioDeviceChoice> WithDefaultFollower(IReadOnlyList<AudioDeviceChoice> devices, AudioDeviceChoice follower)
+    {
+        var list = new List<AudioDeviceChoice>(devices.Count + 1) { follower };
+        list.AddRange(devices);
+        return list;
+    }
+
+    /// <summary>The id of the current Windows default endpoint for the given direction, or null if
+    /// there isn't one / it can't be read. Best-effort.</summary>
+    private static string? ResolveDefaultDeviceId(NAudio.CoreAudioApi.DataFlow flow)
+    {
+        try
+        {
+            using var enumerator = new NAudio.CoreAudioApi.MMDeviceEnumerator();
+            if (!enumerator.HasDefaultAudioEndpoint(flow, NAudio.CoreAudioApi.Role.Multimedia)) return null;
+            using var device = enumerator.GetDefaultAudioEndpoint(flow, NAudio.CoreAudioApi.Role.Multimedia);
+            return device.ID;
+        }
+        catch { return null; }
+    }
+
+    private static bool IsFollowerChecked(CheckedListBox list) =>
+        list.CheckedItems.OfType<AudioDeviceChoice>().Any(c => c.IsDefaultFollower);
+
+    /// <summary>When following the Windows default and that default device changes, the device SET is
+    /// unchanged so the list-sync doesn't fire — so re-route here. Called from OnAudioEndpointsChanged,
+    /// which the change-notifier raises (among other things) on a default-device change.</summary>
+    private void ReapplyIfFollowedDefaultChanged()
+    {
+        if (IsFollowerChecked(receiveOutputDevicesList)
+            && ResolveDefaultDeviceId(NAudio.CoreAudioApi.DataFlow.Render) != lastFollowedDefaultOutputId)
+        {
+            ApplyReceiveDevices();
+        }
+        if (IsFollowerChecked(sendInputDevicesList)
+            && ResolveDefaultDeviceId(NAudio.CoreAudioApi.DataFlow.Capture) != lastFollowedDefaultInputId)
+        {
+            ApplySendSources();
+        }
+    }
+
+    private static void PersistUseDefaultDevice(bool output, bool on)
+    {
+        try
+        {
+            var c = AppConfig.Load();
+            if (output) c.UseDefaultOutputDevice = on; else c.UseDefaultInputDevice = on;
+            c.Save();
+        }
+        catch { /* harmless — choice just won't survive a restart */ }
+    }
+
+    private void RestoreDefaultFollowerChecks()
+    {
+        AppConfig cfg;
+        try { cfg = AppConfig.Load(); }
+        catch { return; }
+        SetFollowerChecked(receiveOutputDevicesList, cfg.UseDefaultOutputDevice);
+        SetFollowerChecked(sendInputDevicesList, cfg.UseDefaultInputDevice);
+    }
+
+    private void SetFollowerChecked(CheckedListBox list, bool on)
+    {
+        if (!on) return;
+        suppressDeviceCheckChange = true;
+        try
+        {
+            for (var i = 0; i < list.Items.Count; i++)
+            {
+                if (list.Items[i] is AudioDeviceChoice { IsDefaultFollower: true })
+                {
+                    list.SetItemChecked(i, true);
+                    break;
+                }
+            }
+        }
+        finally { suppressDeviceCheckChange = false; }
+    }
+
+    /// <summary>Offered when the user ticks a "Use Windows default" follower: optionally untick the
+    /// other devices in that list so only the default is used. Remembers the answer if the user ticks
+    /// "Don't ask again".</summary>
+    private void MaybeUntickOthersForDefault(CheckedListBox list, bool output)
+    {
+        if (IsDisposed) return;
+        AppConfig cfg;
+        try { cfg = AppConfig.Load(); }
+        catch { return; }
+        var remembered = output ? cfg.UntickOthersWhenUsingDefaultOutput : cfg.UntickOthersWhenUsingDefaultInput;
+        bool untick;
+        if (remembered is bool r)
+        {
+            untick = r;
+        }
+        else
+        {
+            var verification = new TaskDialogVerificationCheckBox("Don't ask me this again");
+            var page = new TaskDialogPage
+            {
+                Caption = "RemSound",
+                Heading = "Use only the default audio device?",
+                Text = output
+                    ? "You've turned on “Use Windows default audio device”. Do you want to untick the other outputs in this list, so received sound plays only to whatever Windows is using?\n\nChoose No to keep playing to those outputs as well as the default audio device."
+                    : "You've turned on “Use Windows default audio device”. Do you want to untick the other inputs in this list, so only the Windows default audio device is captured?\n\nChoose No to keep capturing those inputs as well as the default audio device.",
+                Icon = TaskDialogIcon.Information,
+                Buttons = { TaskDialogButton.Yes, TaskDialogButton.No },
+                DefaultButton = TaskDialogButton.No,
+                Verification = verification,
+            };
+            untick = TaskDialog.ShowDialog(this, page) == TaskDialogButton.Yes;
+            if (verification.Checked)
+            {
+                try
+                {
+                    var c2 = AppConfig.Load();
+                    if (output) c2.UntickOthersWhenUsingDefaultOutput = untick; else c2.UntickOthersWhenUsingDefaultInput = untick;
+                    c2.Save();
+                }
+                catch { /* harmless */ }
+            }
+        }
+        if (untick) UntickAllExceptDefaultFollower(list, output);
+    }
+
+    private void UntickAllExceptDefaultFollower(CheckedListBox list, bool output)
+    {
+        var anyChanged = false;
+        suppressDeviceCheckChange = true;
+        try
+        {
+            for (var i = 0; i < list.Items.Count; i++)
+            {
+                if (list.Items[i] is AudioDeviceChoice c && !c.IsDefaultFollower && list.GetItemChecked(i))
+                {
+                    list.SetItemChecked(i, false);
+                    if (output && c.DeviceId is { } id) rememberedReceiveOutputIds.Remove(id);
+                    anyChanged = true;
+                }
+            }
+        }
+        finally { suppressDeviceCheckChange = false; }
+        if (!anyChanged) return;
+        if (output) ApplyReceiveDevices(); else ApplyAudioRuntime();
+    }
+
+    /// <summary>Options-menu action: clear the remembered answer to the "untick the other devices?"
+    /// prompt (for both output and input), so it asks again next time the user turns on a "Use Windows
+    /// default audio device" box. The discoverable way back from the prompt's "Don't ask again".</summary>
+    private void ResetDefaultAudioDevicePrompt()
+    {
+        try
+        {
+            var c = AppConfig.Load();
+            c.UntickOthersWhenUsingDefaultOutput = null;
+            c.UntickOthersWhenUsingDefaultInput = null;
+            c.Save();
+            logFile.Event("default audio device: reset the untick-others prompt (will ask again)");
+        }
+        catch (Exception ex)
+        {
+            logFile.Event($"default audio device: reset prompt failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        var page = new TaskDialogPage
+        {
+            Caption = "RemSound",
+            Heading = "Default audio device prompt reset",
+            Text = "RemSound will ask again next time you turn on a “Use Windows default audio device” option.",
+            Icon = TaskDialogIcon.Information,
+            Buttons = { TaskDialogButton.OK },
+        };
+        TaskDialog.ShowDialog(this, page);
     }
 
     /// <summary>A receive-output card that was unplugged drops out of the WASAPI list (and its tick

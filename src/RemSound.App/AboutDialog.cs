@@ -20,6 +20,25 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v4.6
+
+        Follow your Windows default audio device.
+
+        Both device lists — the outputs for received
+        sound and the inputs to send — now have a "Use
+        Windows default audio device, follows Windows
+        changes" entry at the top. Tick it and RemSound
+        uses whatever Windows is currently using, and
+        switches with it on its own: make a headset your
+        default and RemSound follows, no clicking. You
+        can still tick specific devices alongside it.
+
+        When you turn it on, RemSound offers to untick
+        the other devices so you use only the default;
+        if you hide that question with "Don't ask
+        again", Options → Reset the default audio device
+        prompt brings it back.
+
         RemSound v4.5
 
         Keyboard shortcuts get easier to manage.
