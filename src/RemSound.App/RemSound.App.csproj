@@ -90,6 +90,17 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
+    <!-- Install Scripts (vendored). A .cmd / .ps1 that install the .NET 10 Desktop Runtime RemSound
+         needs, via winget, for the rare machine that doesn't have it yet. RemSound is a .NET 10 app, so
+         it can't install its own runtime — it can't start without it — hence a plain script (cmd/ps1
+         run on what's already in Windows). Shipped next to the exe in an "Install Scripts" folder; the
+         manual points users here if RemSound won't start. EnsureInstallScriptsPublished below makes the
+         publish copy marker-independent (same belt-and-braces as the cue WAVs / Tolk DLLs). -->
+    <Content Include="..\..\Install Scripts\*.cmd;..\..\Install Scripts\*.ps1">
+      <Link>Install Scripts\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
   </ItemGroup>
 
   <!-- Guarantee the cue WAVs land in a PUBLISHED build. The Content items above use
@@ -117,5 +128,14 @@
       <_TolkFiles Include="..\..\tolk\Tolk.dll;..\..\tolk\nvdaControllerClient64.dll;..\..\tolk\SAAPI64.dll;..\..\tolk\LICENSE-Tolk.txt" />
     </ItemGroup>
     <Copy SourceFiles="@(_TolkFiles)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="false" />
+  </Target>
+
+  <!-- Same marker-independent guarantee for the install scripts: always land them in a PUBLISHED build
+       so a release zip can never ship without the "Install Scripts" folder the manual points to. -->
+  <Target Name="EnsureInstallScriptsPublished" AfterTargets="Publish">
+    <ItemGroup>
+      <_InstallScripts Include="..\..\Install Scripts\*.cmd;..\..\Install Scripts\*.ps1" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_InstallScripts)" DestinationFolder="$(PublishDir)Install Scripts" SkipUnchangedFiles="false" />
   </Target>
 </Project>

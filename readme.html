@@ -74,6 +74,10 @@ ul, ol { padding-left: 1.4em; }
 
 <h2 id="quick-start">2. Quick start</h2>
 
+<div class="note">
+<strong>If RemSound won't start</strong> &mdash; if Windows says it needs &ldquo;.NET&rdquo; &mdash; RemSound runs on the <strong>Microsoft .NET 10 Desktop Runtime</strong>. Most up-to-date Windows machines already have it; if yours doesn't, open the <strong>Install Scripts</strong> folder sitting next to <code>RemSound.exe</code> and double-click <strong>Install .NET for RemSound.cmd</strong>. It fetches and installs it for you (using winget, the Windows package manager), and then RemSound will start. There's a <code>.ps1</code> version in the same folder for PowerShell users. If you'd rather do it by hand, the script opens Microsoft's download page, where you pick &ldquo;.NET Desktop Runtime&rdquo; for &ldquo;x64&rdquo;.
+</div>
+
 <p>Let's assume you and a friend both have RemSound running, and that your two computers can reach each other on the network (the same Wi-Fi, the same Tailscale account, and so on).</p>
 
 <ol>

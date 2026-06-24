@@ -53,6 +53,8 @@ There is no central server, no account, and nothing stored online. The sound goe
 
 ## 2. Quick start
 
+> **If RemSound won't start** — if Windows says it needs “.NET” — RemSound runs on the **Microsoft .NET 10 Desktop Runtime**. Most up-to-date Windows machines already have it; if yours doesn't, open the **Install Scripts** folder sitting next to `RemSound.exe` and double-click **Install .NET for RemSound.cmd**. It fetches and installs it for you (using winget, the Windows package manager), and then RemSound will start. There's a `.ps1` version in the same folder for PowerShell users. If you'd rather do it by hand, the script opens Microsoft's download page, where you pick “.NET Desktop Runtime” for “x64”.
+
 Let's assume you and a friend both have RemSound running, and that your two computers can reach each other on the network (the same Wi-Fi, the same Tailscale account, and so on).
 
   1. Start RemSound. The first thing you'll see is the **profile picker**. On a brand-new install your only choice is **New profile** — select it and press Enter or click OK. Later, once you've saved a setup or two of your own, this is the dialog where you choose which one to load. See Profiles for the full story.
