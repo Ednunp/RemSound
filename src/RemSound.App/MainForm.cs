@@ -3360,13 +3360,16 @@ public sealed class MainForm : Form
     private void SpeakStatusLine()
     {
         var now = DateTime.UtcNow;
-        var doublePress = now - lastSpeakStatusPressUtc <= TimeSpan.FromMilliseconds(600);
+        var withinDoublePressWindow = now - lastSpeakStatusPressUtc <= TimeSpan.FromMilliseconds(600);
         lastSpeakStatusPressUtc = now;
 
         var text = statusReadout.Text;
         if (string.IsNullOrWhiteSpace(text)) text = "No status information available.";
 
-        if (doublePress)
+        // Double press copies to the clipboard — but only if the user has left that on (Preferences →
+        // General). Read the flag only when the timing already qualifies, so a normal single press never
+        // touches the config file.
+        if (withinDoublePressWindow && AppConfig.Load().DoublePressStatusToCopy)
         {
             // Second quick press: copy the status to the clipboard so it can be shared. Clipboard access
             // needs the UI thread — this runs on it (the hotkey is marshalled onto the owner form).

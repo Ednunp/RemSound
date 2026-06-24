@@ -196,6 +196,11 @@ public sealed class AppConfig
     public bool? UntickOthersWhenUsingDefaultOutput { get; set; }
     public bool? UntickOthersWhenUsingDefaultInput { get; set; }
 
+    /// <summary>If true, pressing the "speak status" global hotkey twice in quick succession copies the
+    /// status text to the clipboard (instead of just reading it again). On by default; the user can turn
+    /// it off on the Preferences General tab. Machine-wide; a screen-reader convenience (Andre's idea).</summary>
+    public bool DoublePressStatusToCopy { get; set; } = true;
+
     /// <summary>If non-null and a profile with this title exists, RemSound skips the
     /// startup profile picker and loads this profile directly. Combine with
     /// <see cref="StartMinimised"/> + the Windows auto-start registry entry

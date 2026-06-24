@@ -210,6 +210,15 @@ internal sealed class PreferencesDialog : Form
         AutoSize = true,
     };
 
+    // Screen-reader convenience (machine-wide, AppConfig). On by default. When off, a double press of
+    // the speak-status hotkey just reads the status again rather than copying it.
+    private readonly AccessibleCheckBox doublePressCopyBox = new()
+    {
+        Text = "Double-press the speak-status hotkey to copy the status to the clipboard (Alt+&C)",
+        AccessibleName = "Double-press the speak-status hotkey to copy the status to the clipboard",
+        AutoSize = true,
+    };
+
     // Update settings — startup-check checkbox, frequency dropdown, manual check button,
     // silent-install checkbox. Sits above the logging row so users meet it during setup; the
     // canonical order in the dialog is "things related to the program staying current" before
@@ -566,6 +575,15 @@ internal sealed class PreferencesDialog : Form
         silentlyInstallUpdatesBox.Checked = cfgForLoad.SilentlyInstallUpdates;
         upnpEnabledBox.Checked = cfgForLoad.UpnpEnabled;
 
+        // Double-press-the-speak-status-hotkey-to-copy toggle (machine-wide, AppConfig). On by default.
+        doublePressCopyBox.Checked = cfgForLoad.DoublePressStatusToCopy;
+        doublePressCopyBox.CheckedChanged += (_, _) =>
+        {
+            var cfg = AppConfig.Load();
+            cfg.DoublePressStatusToCopy = doublePressCopyBox.Checked;
+            try { cfg.Save(); } catch { /* harmless — choice just won't survive a restart */ }
+        };
+
         checkForUpdatesOnStartupBox.CheckedChanged += (_, _) =>
         {
             var cfg = AppConfig.Load();
@@ -798,7 +816,7 @@ internal sealed class PreferencesDialog : Form
         // is a field (declared above) so OnShown can focus it when the dialog opens. Logging is its
         // own tab (2026-06-19); the two logging controls moved off the General tab to lead it.
         tabs.TabPages.Add(MakeTab("General",
-            browseProfilesFolderButton, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel));
+            browseProfilesFolderButton, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel, doublePressCopyBox));
         tabs.TabPages.Add(MakeTab("Audio cues", cueGroup));
         tabs.TabPages.Add(MakeTab("Startup behaviour",
             startMinimisedBox, startWithUserBox, startWithProfileBox, startupListPanel));
