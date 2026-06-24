@@ -2,7 +2,7 @@
 
 RemSound is a Windows program that sends live sound from one computer to another, with very little delay. Picture a private audio link between two or more computers: each one decides what sound it wants to send and what sound it wants to play, and the audio travels straight between them over your network.
 
-It was built for playing music together over the internet — a guitarist on one computer and a singer on another, hearing each other in real time — but it works just as well for listening to one room from another room in your house, co-hosting a podcast, or anything else where you want to get sound from one PC to another, fast.
+I built RemSound to solve a specific problem of my own. I do a lot of work on a powerful computer that I control remotely from a lighter machine, and I wanted to actually hear that powerful machine's audio on the laptop in front of me. There are other programs that can move sound between PCs, but none of them did it quite the way I wanted, so I made my own. It turns out the same thing is just as handy for listening to one room from another room in your house, playing music together over the internet with very little delay, co-hosting a podcast, or anything else where you want to get sound from one PC to another, fast.
 
 ## Table of contents
 

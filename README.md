@@ -6,7 +6,7 @@
 
 ---
 
-RemSound is for musicians, sound designers, podcasters, and anyone else who wants to share audio between two Windows machines with as little delay as possible.
+RemSound is for anyone who wants to get live audio from one Windows PC to another with as little delay as possible — listening to one machine while you work at another, playing music together over the internet, co-hosting a podcast, and plenty more besides.
 
 You sit at one computer, RemSound captures whatever is playing — a track in your music software, a video call, system sound from anything else running — and sends it cleanly to another computer where it plays through speakers or headphones in real time. The person at the other end hears what you're hearing, with a delay measured in milliseconds rather than seconds.
 
@@ -67,7 +67,7 @@ The full user manual is right here on GitHub: **[Read the user manual](MANUAL.md
 
 ## Who made this
 
-RemSound was built by a sound designer who wanted to listen to one of his computers while sitting at another, and couldn't find anything else that fit the bill. It's free, open-source, and yours to use however you like.
+RemSound was built to solve a specific problem: hearing the audio from a powerful computer while sitting at a lighter one, with that powerful machine running remotely. There are other programs that can move audio between PCs, but none of them did it quite the way I wanted, so I built my own. It's free, open-source, and yours to use however you like.
 
 ## Licence
 
