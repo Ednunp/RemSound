@@ -3370,10 +3370,9 @@ public sealed class MainForm : Form
         var text = statusReadout.Text;
         if (string.IsNullOrWhiteSpace(text)) text = "No status information available.";
 
-        // Double press copies to the clipboard — but only if the user has left that on (Preferences →
-        // General). Read the flag only when the timing already qualifies, so a normal single press never
-        // touches the config file.
-        if (withinDoublePressWindow && AppConfig.Load().DoublePressStatusToCopy)
+        // A quick second press copies the status to the clipboard instead of reading it again, so it can
+        // be shared. This is a deliberate double-tap, not a key repeat — a single press never reaches here.
+        if (withinDoublePressWindow)
         {
             // Second quick press: copy the status to the clipboard so it can be shared. Clipboard access
             // needs the UI thread — this runs on it (the hotkey is marshalled onto the owner form).

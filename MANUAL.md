@@ -815,7 +815,7 @@ The main window has a **status line** that updates every second with how long yo
 
 This hotkey is the cure. Give **Speak the RemSound status information** a key in the Keyboard shortcuts dialog, and from then on pressing it reads the whole status out loud, wherever you are — even when RemSound is tucked away in the tray or another program is in front. It's unset to start with, so the key is yours to choose.
 
-It reads the status out **a line at a time** — peers, ping, uptime, data rates, totals — so each piece lands as its own short phrase rather than one long run-on, and big totals show in gigabytes once they pass a gigabyte. A quick **double press** of the same hotkey **copies the status to the clipboard** instead of reading it, so you can paste it to someone if you're comparing notes. If you'd rather a double press just read it again, untick **Double-press the speak-status hotkey to copy the status to the clipboard** on the **General** tab of Preferences (it's on by default).
+It reads the status out **a line at a time** — peers, ping, uptime, data rates, totals — so each piece lands as its own short phrase rather than one long run-on, and big totals show in gigabytes once they pass a gigabyte. A quick **double press** of the same hotkey **copies the status to the clipboard** instead of reading it, so you can paste it to someone if you're comparing notes.
 
 This one is just for screen-reader users: it talks straight through your screen reader. It works with the screen readers RemSound's speech helper supports — **NVDA** , JAWS, Window-Eyes, System Access, SuperNova and ZoomText — and falls back to Windows' own built-in speech if none of those is running. If you don't use a screen reader, just leave this one unset.
 
