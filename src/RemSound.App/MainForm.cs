@@ -267,6 +267,8 @@ public sealed class MainForm : Form
     // Tracks when the FIRST healthy-peer transition happened in the current "connected"
     // span. Cleared when no peers are healthy. Used for the uptime line.
     private DateTime? statusConnectedSinceUtc;
+    // Time of the last "speak status" hotkey press, for double-press-to-copy detection.
+    private DateTime lastSpeakStatusPressUtc = DateTime.MinValue;
     // Per-list state (used by sync helpers — was per-method in the old dialog).
     private bool suppressConnectedCheck;
     private bool suppressDiscoveredCheck;
@@ -3348,18 +3350,40 @@ public sealed class MainForm : Form
         statusReadout.Text = text;
     }
 
-    /// <summary>Speak the current connection status line aloud through the active screen reader, via
-    /// Tolk (<see cref="ScreenReader"/>). Answers issue #13: NVDA sometimes can't see the status
-    /// readout ("no status line found"), so this reads it on demand. Triggered only by a user-set
-    /// global hotkey (screen-reader only, unset by default) — being a system-wide hotkey it works from
-    /// anywhere, whether or not RemSound is focused. Newlines become ". " so the multi-line readout
-    /// speaks as a sentence rather than running together.</summary>
+    /// <summary>Speak the current connection status aloud through the active screen reader, via Tolk
+    /// (<see cref="ScreenReader"/>). Answers issue #13: NVDA sometimes can't see the status readout
+    /// ("no status line found"), so this reads it on demand. Triggered only by a user-set global hotkey
+    /// (screen-reader only, unset by default) — being a system-wide hotkey it works from anywhere. The
+    /// status is read line by line (the multi-line text is passed straight to the screen reader, which
+    /// pauses at each line) rather than collapsed into a run-on sentence. A quick DOUBLE press copies
+    /// the same text to the clipboard instead, so it can be shared. (Andre's suggestion, 2026-06-24.)</summary>
     private void SpeakStatusLine()
     {
+        var now = DateTime.UtcNow;
+        var doublePress = now - lastSpeakStatusPressUtc <= TimeSpan.FromMilliseconds(600);
+        lastSpeakStatusPressUtc = now;
+
         var text = statusReadout.Text;
-        text = string.IsNullOrWhiteSpace(text)
-            ? "No status information available."
-            : text.Replace("\r\n", ". ").Replace("\n", ". ");
+        if (string.IsNullOrWhiteSpace(text)) text = "No status information available.";
+
+        if (doublePress)
+        {
+            // Second quick press: copy the status to the clipboard so it can be shared. Clipboard access
+            // needs the UI thread — this runs on it (the hotkey is marshalled onto the owner form).
+            try
+            {
+                Clipboard.SetText(text);
+                ScreenReader.Speak("RemSound status copied to the clipboard.");
+            }
+            catch (Exception ex)
+            {
+                logFile.Event($"speak status: clipboard copy failed: {ex.GetType().Name}: {ex.Message}");
+                ScreenReader.Speak("Could not copy the status to the clipboard.");
+            }
+            return;
+        }
+
+        // Single press: read it out, line by line (the screen reader pauses at each line break).
         ScreenReader.Speak(text);
     }
 
@@ -3446,8 +3470,18 @@ public sealed class MainForm : Form
         }
 
         sb.AppendLine($"Receiving {rxKbs:0.0} kB/s; sending {txKbs:0.0} kB/s.");
-        sb.Append($"Total received {receiver.BytesReceived / 1048576.0:0.0} MB; sent {sender.BytesSent / 1048576.0:0.0} MB.");
+        sb.Append($"Total received {FormatDataSize(receiver.BytesReceived)}; sent {FormatDataSize(sender.BytesSent)}.");
         return sb.ToString();
+    }
+
+    /// <summary>A running data total as MB, switching to GB once it reaches a gigabyte — "935.8 MB",
+    /// "4.5 GB" — so a big figure reads more naturally (Andre's suggestion). Binary units, matching the
+    /// 1048576-byte MB used elsewhere.</summary>
+    private static string FormatDataSize(long bytes)
+    {
+        const double mb = 1048576.0;
+        const double gb = 1073741824.0;
+        return bytes >= gb ? $"{bytes / gb:0.0} GB" : $"{bytes / mb:0.0} MB";
     }
 
     private static string FormatUptime(TimeSpan span)
