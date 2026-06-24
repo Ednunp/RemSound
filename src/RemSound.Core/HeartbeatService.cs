@@ -52,13 +52,6 @@ public sealed class HeartbeatService : IDisposable
     private readonly object gate = new();
     private readonly Dictionary<string, PeerState> peers = new(StringComparer.OrdinalIgnoreCase);
     private readonly Stopwatch monotonic = Stopwatch.StartNew();
-    // Source addresses of recently-received heartbeat Pings, keyed by IP only (the ping's
-    // source port is the peer's ephemeral / NAT port, never the audio port — same reasoning
-    // as the pong IP-only match in HandlePacket). MainForm reads this via
-    // GetUntrackedPingSources to recover from a stale-address situation: a peer we can't
-    // reach at its resolved (e.g. stale-DNS) address but which is pinging us from its real
-    // address. See TryAdoptLiveHeartbeatAddress in MainForm. 2026-05-15.
-    private readonly Dictionary<IPAddress, DateTime> recentPingSources = new();
 
     private CancellationTokenSource? cts;
     private Task? sendTask;
@@ -163,28 +156,6 @@ public sealed class HeartbeatService : IDisposable
                 result.Add(SnapshotHealthLocked(p, nowUtc));
             }
             return result;
-        }
-    }
-
-    /// <summary>
-    /// Addresses that have sent us a heartbeat Ping within the last <see cref="UnreachableWindow"/>
-    /// and are NOT currently tracked peers. Used by MainForm's stale-address recovery: when a
-    /// tracked peer has gone Unreachable but some other address is actively pinging us, that
-    /// address is very likely the same peer at its real location (DNS handed us a stale IP).
-    /// Keyed by IP only — heartbeat ping source ports are ephemeral and carry no peer identity.
-    /// </summary>
-    public IReadOnlyList<IPAddress> GetUntrackedPingSources()
-    {
-        lock (gate)
-        {
-            var cutoff = DateTime.UtcNow - UnreachableWindow;
-            // Prune entries older than the window while we're holding the lock.
-            foreach (var stale in recentPingSources.Where(kv => kv.Value < cutoff).Select(kv => kv.Key).ToList())
-            {
-                recentPingSources.Remove(stale);
-            }
-            var trackedAddrs = peers.Values.Select(p => p.AudioEndpoint.Address).ToHashSet();
-            return recentPingSources.Keys.Where(a => !trackedAddrs.Contains(a)).ToList();
         }
     }
 
@@ -316,9 +287,6 @@ public sealed class HeartbeatService : IDisposable
         if (kind == HeartbeatKind.Ping)
         {
             onDiagnostic?.Invoke($"recv ping from={remote}");
-            // Record the source so MainForm can spot a peer that's pinging us from an
-            // address we're not tracking (stale-DNS / DHCP-move recovery).
-            lock (gate) { recentPingSources[remote.Address] = DateTime.UtcNow; }
 
             // Echo the originator's timestamp back to them as a Pong. Reply target is the
             // remote source endpoint (whatever socket the ping came in on, that's where to

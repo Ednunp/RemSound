@@ -20,6 +20,35 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v4.7
+
+        Sound now comes back on its own after a reboot.
+
+        If RemSound started before your network or VPN
+        was up, it could latch onto a different machine
+        on your network and stay silent until you closed
+        and reopened it. It now keeps trying the peer you
+        chose and connects the moment it answers — no
+        manual reconnect. (Thank you to the singer who
+        reported this and sent the log that pinned it
+        down.)
+
+        A few improvements for screen-reader users. The
+        "Speak the RemSound status information" hotkey
+        now reads the status a line at a time, shows big
+        data totals in gigabytes, and a quick double
+        press copies the status to the clipboard so you
+        can share it. The status also now includes how
+        much CPU and memory RemSound itself is using.
+
+        If RemSound ever won't start because the .NET
+        runtime is missing, there's a new "Install
+        Scripts" folder next to the program with a
+        one-click installer for it.
+
+        And the "what's new" notes no longer pop up a
+        second time after an update that didn't finish.
+
         RemSound v4.6
 
         Follow your Windows default audio device.

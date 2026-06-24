@@ -1243,7 +1243,7 @@ Most likely your ASIO latency target is below the network's real-world jitter le
 
 ### A peer rebooted or changed address and the sound didn't come back
 
-RemSound follows a peer to its new address on its own. If the address you connected to stops responding but the same peer is still reaching you from a different address on your network — because they rebooted onto a new address, for example — RemSound re-points to the live address within a few seconds and the sound resumes without you doing anything. If it doesn't recover, the peer is genuinely unreachable (off, asleep, or a firewall is blocking the new path).
+RemSound keeps trying the address you connected to, so when a peer comes back at the same address — the usual case after a reboot — the sound returns on its own within a few seconds, with nothing for you to do. If the peer comes back at a _different_ address (a new DHCP lease, say), reconnect to it: pick it again from **Discovered peers** , or enter its new address with **Add peer by IP** (Connectivity tab, Alt+A). If the sound still doesn't return, the peer is genuinely unreachable — off, asleep, or a firewall is blocking the path.
 
 ### One side says “unreachable” even though sound is flowing
 

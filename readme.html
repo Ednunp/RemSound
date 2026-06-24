@@ -1292,7 +1292,7 @@ RemSound.exe --connect 192.168.1.42
 </ul>
 
 <h3>A peer rebooted or changed address and the sound didn't come back</h3>
-<p>RemSound follows a peer to its new address on its own. If the address you connected to stops responding but the same peer is still reaching you from a different address on your network &mdash; because they rebooted onto a new address, for example &mdash; RemSound re-points to the live address within a few seconds and the sound resumes without you doing anything. If it doesn't recover, the peer is genuinely unreachable (off, asleep, or a firewall is blocking the new path).</p>
+<p>RemSound keeps trying the address you connected to, so when a peer comes back at the same address &mdash; the usual case after a reboot &mdash; the sound returns on its own within a few seconds, with nothing for you to do. If the peer comes back at a <em>different</em> address (a new DHCP lease, say), reconnect to it: pick it again from <strong>Discovered peers</strong>, or enter its new address with <strong>Add peer by IP</strong> (Connectivity tab, Alt+A). If the sound still doesn't return, the peer is genuinely unreachable &mdash; off, asleep, or a firewall is blocking the path.</p>
 
 <h3>One side says &ldquo;unreachable&rdquo; even though sound is flowing</h3>
 <p>The health check-ins use the same channel as the audio, so if the sound gets through, the check-ins should too. If one side shows &ldquo;unreachable&rdquo; while the sound plays fine, make sure both computers are running the same version of RemSound &mdash; an older version on either end can speak a slightly different check-in language.</p>
