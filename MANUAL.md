@@ -188,7 +188,7 @@ The main window has three parts, stacked top to bottom:
 
   1. A **menu bar** at the top with four menus — _File_ , _Record_ , _Options_ and _Help_. See Menus.
   2. A **row of tabs** with three tabs — Connectivity, Audio inputs and outputs, Audio profile. Each tab has its own Alt+letter shortcuts that only work when that tab is the one showing — so the same letter can do different things on different tabs without clashing.
-  3. A **status line** at the bottom that updates once a second with how long you've been connected, how many peers you have, whether sound is flowing, and connection health.
+  3. A **status line** at the bottom that updates once a second with how long you've been connected, how many peers you have, whether sound is flowing, connection health, and RemSound's own CPU and memory usage.
 
 Tab| What it's for
 ---|---

@@ -269,6 +269,10 @@ public sealed class MainForm : Form
     private DateTime? statusConnectedSinceUtc;
     // Time of the last "speak status" hotkey press, for double-press-to-copy detection.
     private DateTime lastSpeakStatusPressUtc = DateTime.MinValue;
+    // Process CPU-time at the last status sample, for the status box's CPU-usage line. Cached Process
+    // handle so the once-a-second status tick doesn't allocate a new one each time.
+    private TimeSpan lastStatusCpuTime;
+    private readonly System.Diagnostics.Process statusSelfProcess = System.Diagnostics.Process.GetCurrentProcess();
     // Per-list state (used by sync helpers — was per-method in the old dialog).
     private bool suppressConnectedCheck;
     private bool suppressDiscoveredCheck;
@@ -3397,7 +3401,10 @@ public sealed class MainForm : Form
         var nowUtc = DateTime.UtcNow;
         var txBytes = sender.BytesSent;
         var rxBytes = receiver.BytesReceived;
-        double txKbs = 0, rxKbs = 0;
+        statusSelfProcess.Refresh();
+        var cpuTime = statusSelfProcess.TotalProcessorTime;
+        var workingSetBytes = statusSelfProcess.WorkingSet64;
+        double txKbs = 0, rxKbs = 0, cpuPercent = 0;
         if (lastStatusSampleUtc != DateTime.MinValue)
         {
             var elapsed = (nowUtc - lastStatusSampleUtc).TotalSeconds;
@@ -3405,11 +3412,17 @@ public sealed class MainForm : Form
             {
                 txKbs = (txBytes - lastStatusTxBytes) / 1024.0 / elapsed;
                 rxKbs = (rxBytes - lastStatusRxBytes) / 1024.0 / elapsed;
+                // CPU as a share of the whole machine (the Task Manager number): the process CPU-time
+                // delta over wall-clock, divided by the logical-core count.
+                var cpuDelta = (cpuTime - lastStatusCpuTime).TotalSeconds;
+                cpuPercent = cpuDelta / elapsed / Math.Max(1, Environment.ProcessorCount) * 100.0;
+                if (cpuPercent < 0) cpuPercent = 0;
             }
         }
         lastStatusSampleUtc = nowUtc;
         lastStatusTxBytes = txBytes;
         lastStatusRxBytes = rxBytes;
+        lastStatusCpuTime = cpuTime;
 
         // Healthy peers from heartbeat. Map each to its display label (the user-friendly
         // name from selectedPeerLabels, falling back to the address).
@@ -3473,7 +3486,8 @@ public sealed class MainForm : Form
         }
 
         sb.AppendLine($"Receiving {rxKbs:0.0} kB/s; sending {txKbs:0.0} kB/s.");
-        sb.Append($"Total received {FormatDataSize(receiver.BytesReceived)}; sent {FormatDataSize(sender.BytesSent)}.");
+        sb.AppendLine($"Total received {FormatDataSize(receiver.BytesReceived)}; sent {FormatDataSize(sender.BytesSent)}.");
+        sb.Append($"CPU usage {cpuPercent:0}% and memory {FormatDataSize(workingSetBytes)}.");
         return sb.ToString();
     }
 
