@@ -1245,6 +1245,10 @@ Most likely your ASIO latency target is below the network's real-world jitter le
 
 RemSound keeps trying the address you connected to, so when a peer comes back at the same address — the usual case after a reboot — the sound returns on its own within a few seconds, with nothing for you to do. If the peer comes back at a _different_ address (a new DHCP lease, say), reconnect to it: pick it again from **Discovered peers** , or enter its new address with **Add peer by IP** (Connectivity tab, Alt+A). If the sound still doesn't return, the peer is genuinely unreachable — off, asleep, or a firewall is blocking the path.
 
+### RemSound closed unexpectedly
+
+RemSound is normally very stable, but if it ever closes on its own, it writes a small crash file into your logs folder (the RemSound folder → **user settings and logs** → **logs** , named `crash-` followed by the date and time). There's nothing you need to do with it — but if it happens, sending that file along with your report records what went wrong, so it can be tracked down and fixed.
+
 ### One side says “unreachable” even though sound is flowing
 
 The health check-ins use the same channel as the audio, so if the sound gets through, the check-ins should too. If one side shows “unreachable” while the sound plays fine, make sure both computers are running the same version of RemSound — an older version on either end can speak a slightly different check-in language.

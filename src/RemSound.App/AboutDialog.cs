@@ -20,6 +20,26 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v4.8
+
+        A rare crash fixed, and crash reports for next
+        time.
+
+        If a peer was reachable at two addresses at once
+        — for example over a VPN and the local network at
+        the same time — RemSound could rapidly flip the
+        connection between the two, and in a fast enough
+        flip it could close unexpectedly. It now settles
+        on whichever address is working and stays there,
+        so that flipping (and the crash it could cause)
+        is gone.
+
+        And if RemSound ever does close unexpectedly, it
+        now writes a small crash file into your logs
+        folder. There's nothing for you to do with it,
+        but it means a problem that used to leave no
+        trace can now be sent in and pinned down.
+
         RemSound v4.7
 
         Sound now comes back on its own after a reboot.

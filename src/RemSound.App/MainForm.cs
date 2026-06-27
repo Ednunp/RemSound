@@ -382,6 +382,17 @@ public sealed class MainForm : Form
     // discovery has temporarily lost sight of them ("Foo (192.168.1.5) — offline").
     private readonly Dictionary<Guid, string> selectedPeerLabels = [];
 
+    // Anti-thrash state for the discovery-driven endpoint follow (see the peer-rebuild loop). A peer
+    // reachable at two addresses at once (a VPN address AND a LAN address, say) announces from both,
+    // and discovery reports whichever it heard last; following that blindly made the tracked endpoint
+    // ping-pong between the two, and a fast ping-pong tore the receiver's audio session down and back
+    // up quickly enough to crash the app (#16). A follow now needs the current endpoint to have been
+    // unreachable for a sustained spell and can't fire more than once per cooldown. Keyed by peer id.
+    private readonly Dictionary<Guid, DateTime> endpointUnreachableSinceUtc = [];
+    private readonly Dictionary<Guid, DateTime> lastEndpointMoveUtc = [];
+    private static readonly TimeSpan EndpointMoveUnreachableGrace = TimeSpan.FromSeconds(6);
+    private static readonly TimeSpan EndpointMoveCooldown = TimeSpan.FromSeconds(15);
+
     private readonly Dictionary<CheckedListBox, int> lastFocusedListIndices = [];
 
     private readonly System.Windows.Forms.Timer statusTimer = new() { Interval = 1000 };
@@ -5260,30 +5271,48 @@ public sealed class MainForm : Form
         knownPeers.Clear();
         foreach (var peer in byEndpoint.Values) knownPeers[peer.InstanceId] = peer;
 
-        // If a selected peer's announced address changed (DHCP renewal, network switch),
-        // update the cached endpoint so the sender follows the new IP — BUT only when the
-        // endpoint we're currently using has actually stopped working.
-        //
-        // Why the guard: a peer reachable at two addresses at once — e.g. a VPN address AND a
-        // LAN address — announces itself from both, and discovery reports whichever it heard
-        // last. Blindly following that made the tracked endpoint ping-pong between the two
-        // every couple of seconds. Because this one endpoint feeds the audio sender, the
-        // heartbeat, AND the receiver's allow-list, the ping-pong meant a chunk of audio was
-        // aimed at — or accepted only from — an address that doesn't actually reach the peer,
-        // heard as heavy crackle (Tech Singer's Win7-over-VPN report, 2026-05-31). Keeping the
-        // endpoint pinned while it's still passing heartbeats stops the thrash. A genuine move
-        // (DHCP renewal, Wi-Fi switch) makes the old endpoint go unreachable first, at which
-        // point the guard lets the move through.
+        // If a selected peer's announced address changed (DHCP renewal, network switch), follow it to
+        // the new address — but conservatively. A peer reachable at two addresses at once (e.g. a VPN
+        // address AND a LAN address) announces from both, and discovery reports whichever it heard
+        // last. Following that blindly made the tracked endpoint ping-pong between the two; because
+        // this one endpoint feeds the audio sender, the heartbeat AND the receiver's allow-list, the
+        // churn was heard as crackle (Tech Singer's Win7-over-VPN report, 2026-05-31) and, when it
+        // thrashed fast enough, tore the receiver's audio session down and back up quickly enough to
+        // crash the app (#16, same singer). So: never move off an address that's still answering
+        // heartbeats; only follow once the current one has been unreachable for a sustained spell,
+        // only TO an address that is itself answering, and never more than once per cooldown. Net
+        // effect — a peer you reach on a working address stays put; a genuine move (the old address
+        // really went away) is still followed a few seconds later.
+        var nowUtc = DateTime.UtcNow;
         foreach (var (id, oldEndpoint) in selectedPeerEndpoints.ToList())
         {
             if (!knownPeers.TryGetValue(id, out var peer)) continue;
-            var newEndpoint = new IPEndPoint(peer.Address, peer.AudioPort);
-            if (!newEndpoint.Equals(oldEndpoint) && !IsEndpointHeartbeatHealthy(oldEndpoint))
-            {
-                selectedPeerEndpoints[id] = newEndpoint;
-                logFile.Event($"peer {peer.Name} endpoint moved {oldEndpoint} -> {newEndpoint} (old endpoint not healthy)");
-            }
             selectedPeerLabels[id] = peer.Name;
+
+            var newEndpoint = new IPEndPoint(peer.Address, peer.AudioPort);
+            // Same address, or the one we're on is still healthy: nothing to do — and reset the
+            // unreachable-since clock so a brief future blip starts counting from zero.
+            if (newEndpoint.Equals(oldEndpoint) || IsEndpointHeartbeatHealthy(oldEndpoint))
+            {
+                endpointUnreachableSinceUtc.Remove(id);
+                continue;
+            }
+            // The current endpoint isn't answering. Start (or read) its unreachable-since clock, and
+            // don't act on the very first unhealthy tick — wait out the grace period.
+            if (!endpointUnreachableSinceUtc.TryGetValue(id, out var downSince))
+            {
+                endpointUnreachableSinceUtc[id] = nowUtc;
+                continue;
+            }
+            if (nowUtc - downSince < EndpointMoveUnreachableGrace) continue;   // not down long enough yet
+            if (!IsEndpointHeartbeatHealthy(newEndpoint)) continue;           // don't chase a dead address
+            if (lastEndpointMoveUtc.TryGetValue(id, out var lastMove)
+                && nowUtc - lastMove < EndpointMoveCooldown) continue;        // anti-thrash cooldown
+
+            selectedPeerEndpoints[id] = newEndpoint;
+            lastEndpointMoveUtc[id] = nowUtc;
+            endpointUnreachableSinceUtc.Remove(id);
+            logFile.Event($"peer {peer.Name} endpoint moved {oldEndpoint} -> {newEndpoint} (old endpoint unreachable {(int)(nowUtc - downSince).TotalSeconds}s)");
         }
 
         // Endpoints may have moved (DHCP/announcement-update path above) or selections may have
@@ -5349,19 +5378,6 @@ public sealed class MainForm : Form
         return false;
     }
 
-    /// <summary>
-    /// Stale-address recovery. When exactly one tracked peer has gone Unreachable (its
-    /// resolved address — often a stale DNS answer — has no host behind it) and exactly one
-    /// OTHER address is actively heartbeat-pinging us, that address is almost certainly the
-    /// same peer at its real location. Re-point the audio sender, heartbeat tracking and the
-    /// receiver allow-list at the live address.
-    ///
-    /// Deliberately conservative — it fires only on the unambiguous one-unreachable-and-one-
-    /// live case, only for private-range (RFC1918) live addresses (so a relay's public source
-    /// address can never hijack the sender), and with a 10 s cooldown so it can't thrash. The
-    /// messier multi-peer case is left for the user to sort out by hand. Runs once per second
-    /// from the status ticker. 2026-05-15.
-    /// </summary>
     /// <summary>
     /// Wipes the rolling max-gap window and pushes <see cref="lastSourceChangeUtc"/> forward,
     /// so the next continuous auto-tune tick has nothing to react to. Called whenever a user

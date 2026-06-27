@@ -12,6 +12,27 @@ internal static class Program
     // window. volatile for cross-thread visibility; RestoreFromTray marshals to the UI thread.
     private static volatile MainForm? activeMainForm;
 
+    // Writes an otherwise-fatal exception to a timestamped crash file in the logs folder, so a
+    // "RemSound just disappeared, no dialog" report (#16) leaves a stack behind to diagnose instead
+    // of nothing. Best-effort and self-contained — a crash handler must never throw.
+    private static void WriteCrashReport(string source, Exception? ex)
+    {
+        try
+        {
+            var dir = AppConfig.LogsDirectory;
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, $"crash-{DateTime.Now:yyyyMMdd-HHmmss-fff}.txt");
+            var report =
+                $"RemSound crash report{Environment.NewLine}" +
+                $"Version: {typeof(Program).Assembly.GetName().Version}{Environment.NewLine}" +
+                $"Time:    {DateTime.Now:O}{Environment.NewLine}" +
+                $"Source:  {source}{Environment.NewLine}{Environment.NewLine}" +
+                (ex?.ToString() ?? "(no exception object)");
+            File.WriteAllText(path, report);
+        }
+        catch { /* a crash handler must never throw */ }
+    }
+
     [STAThread]
     private static void Main(string[] args)
     {
@@ -24,6 +45,16 @@ internal static class Program
             UpdateApplier.Run(args);
             return;
         }
+
+        // Capture otherwise-fatal background-thread exceptions to a crash file, so a "RemSound just
+        // vanished with no dialog" report (#16) leaves a stack behind instead of nothing. Best-effort.
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            WriteCrashReport("AppDomain.UnhandledException", e.ExceptionObject as Exception);
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            WriteCrashReport("TaskScheduler.UnobservedTaskException", e.Exception);
+            e.SetObserved();
+        };
 
         // --config-dir <folder> (test / portable isolation): redirect ALL user state - config,
         // profiles, logs, cue sounds - to an explicit folder for THIS process only. Applied first,
