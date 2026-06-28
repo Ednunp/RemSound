@@ -20,6 +20,27 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v4.9
+
+        Lock a profile to fixed addresses.
+
+        RemSound normally finds the other computer by the
+        name it advertises on the network, and follows it
+        if it turns up at a new address. Handy — but not
+        what you want if a machine has two addresses (say
+        a VPN one and a local one) and you only ever want
+        the one you chose.
+
+        A new tickbox on the Connectivity tab — "Lock to
+        these exact peer addresses, no matter what" — pins
+        a profile to exactly the addresses you set. With
+        it on, RemSound never matches by name and never
+        switches address; if the address you set stops
+        working, the connection simply waits rather than
+        wandering to another. Off by default, and saved
+        per profile, so you can lock one profile down
+        while another keeps the automatic behaviour.
+
         RemSound v4.8
 
         A rare crash fixed, and crash reports for next
