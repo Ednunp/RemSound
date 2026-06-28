@@ -295,6 +295,7 @@ Control| Shortcut| What it does
 **Discovered peers**|  Alt+D| People RemSound has heard from in the last few seconds. Tick someone to connect to them.
 **Remembered peers**|  Alt+R| People you've connected to before, or added by address. This list is kept between sessions. Tick someone to reconnect.
 **Add peer by IP**|  Alt+A| Opens a small box where you type an address or computer name. It adds that peer to the remembered list and connects.
+**Lock to these exact peer addresses**|  Alt+L| When ticked, this profile uses only the exact addresses you set and never follows the other computer by name or switches to a different address — even if the address stops working. Off by default, saved with the profile. See Locking a profile to one exact address.
 **Connection status**|  Alt+S| A read-only box of text that sums up everything happening right now — how long you've been connected, how many peers you have, how much sound is flowing each way, and the connection health of each peer. Open it to read the current connection status.
 
 ## 7. Audio inputs and outputs tab
@@ -463,18 +464,28 @@ List| Contents| What ticking does
 
 There's also the **Add peer by IP (Alt+A)** button, which opens a small box for a computer name or address. It's useful for a first connection over a VPN, where discovery hasn't reached the other computer yet.
 
-### Connecting to one specific IP address (and only that one)
+### Locking a profile to one exact address (and only that one)
 
-RemSound can reach another computer two ways, and the difference matters if a computer has more than one IP address:
+There are two ways to reach another computer, and the difference matters if that computer has more than one address:
 
-  * **By name** — ticking someone in **Discovered peers**. RemSound found them from their announcement and the entry shows their computer name. This is the easy, automatic way on an ordinary network.
-  * **By a fixed IP** — **Add peer by IP (Alt+A)** , then type the exact address, for example `10.8.0.1`. RemSound talks to _that address and nothing else_ : it doesn't look up a name, so it can never drift to a different IP, and if that address isn't reachable, no connection is made at all.
+  * **By name** — ticking someone in **Discovered peers**. RemSound found them from their announcement, and the entry shows their computer name. This is the easy, automatic way on an ordinary network.
+  * **By a fixed address** — **Add peer by IP (Alt+A)** , then type the exact address, for example `10.8.0.1`.
 
 
 
-So to force a connection to one specific IP — say a machine that appears under two addresses and you only want one of them — add it by that IP and tick only that entry. If the same machine also turns up in Discovered peers under its _other_ address, it shows as a separate entry that you simply leave unticked; RemSound keeps the two apart by their actual address, so they never merge.
+Normally RemSound is helpful about addresses, even one you typed: it can recognise that the address belongs to a computer it also hears announcing itself on the network, and if that computer turns up at a _different_ address — a new IP after a reboot, or a second address over a VPN — RemSound follows it there automatically so your sound keeps flowing. Most of the time that is exactly what you want.
 
-Either way, **the profile remembers exactly what you ticked.** Tick a discovered name and the profile reconnects by that name next time; add and tick an IP and the profile reconnects to that exact IP. So the way to make a profile always use one specific IP is simply to add and tick it by that IP, then save the profile.
+Sometimes you want the opposite: connect to one specific address and nothing else, _ever_. For that, tick **Lock to these exact peer addresses, no matter what (Alt+L)** on the Connectivity tab. It is off by default and is saved with the profile, so you can lock one profile down while another keeps the automatic behaviour. When it is ticked, for that profile:
+
+  * RemSound uses **only the exact address you set** for each peer.
+  * It will **not** look the other computer up by the name it advertises on the network, and it will **not** switch to any other address it discovers — even if that same computer is reachable at a second address at the same moment.
+  * If the address you set stops working — the computer is off, the network is down, or it has moved to a new address — the connection simply **waits, or drops, until that exact address is reachable again**. RemSound will not go looking for another way through.
+
+
+
+**When you use this, set your peers by their IP address** (Add peer by IP, then type the address). That is the setting for a machine that appears under two addresses when you only ever want one of them: add that one IP, tick the box, and save the profile — the connection will use that address and never wander.
+
+With the box left unticked, RemSound behaves as it always has: the profile remembers exactly what you ticked, reconnects by that name or address next time, and quietly follows a peer that genuinely moves to a new address.
 
 ### You only hear peers you've ticked
 

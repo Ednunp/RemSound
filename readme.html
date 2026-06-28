@@ -333,6 +333,7 @@ ul, ol { padding-left: 1.4em; }
 <tr><td><strong>Discovered peers</strong></td><td>Alt+D</td><td>People RemSound has heard from in the last few seconds. Tick someone to connect to them.</td></tr>
 <tr><td><strong>Remembered peers</strong></td><td>Alt+R</td><td>People you've connected to before, or added by address. This list is kept between sessions. Tick someone to reconnect.</td></tr>
 <tr><td><strong>Add peer by IP</strong></td><td>Alt+A</td><td>Opens a small box where you type an address or computer name. It adds that peer to the remembered list and connects.</td></tr>
+<tr><td><strong>Lock to these exact peer addresses</strong></td><td>Alt+L</td><td>When ticked, this profile uses only the exact addresses you set and never follows the other computer by name or switches to a different address &mdash; even if the address stops working. Off by default, saved with the profile. See <a href="#lock-addresses">Locking a profile to one exact address</a>.</td></tr>
 <tr><td><strong>Connection status</strong></td><td>Alt+S</td><td>A read-only box of text that sums up everything happening right now &mdash; how long you've been connected, how many peers you have, how much sound is flowing each way, and the connection health of each peer. Open it to read the current connection status.</td></tr>
 </table>
 
@@ -510,14 +511,21 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 
 <p>There's also the <strong>Add peer by IP (Alt+A)</strong> button, which opens a small box for a computer name or address. It's useful for a first connection over a VPN, where discovery hasn't reached the other computer yet.</p>
 
-<h3>Connecting to one specific IP address (and only that one)</h3>
-<p>RemSound can reach another computer two ways, and the difference matters if a computer has more than one IP address:</p>
+<h3 id="lock-addresses">Locking a profile to one exact address (and only that one)</h3>
+<p>There are two ways to reach another computer, and the difference matters if that computer has more than one address:</p>
 <ul>
-<li><strong>By name</strong> &mdash; ticking someone in <strong>Discovered peers</strong>. RemSound found them from their announcement and the entry shows their computer name. This is the easy, automatic way on an ordinary network.</li>
-<li><strong>By a fixed IP</strong> &mdash; <strong>Add peer by IP (Alt+A)</strong>, then type the exact address, for example <code>10.8.0.1</code>. RemSound talks to <em>that address and nothing else</em>: it doesn't look up a name, so it can never drift to a different IP, and if that address isn't reachable, no connection is made at all.</li>
+<li><strong>By name</strong> &mdash; ticking someone in <strong>Discovered peers</strong>. RemSound found them from their announcement, and the entry shows their computer name. This is the easy, automatic way on an ordinary network.</li>
+<li><strong>By a fixed address</strong> &mdash; <strong>Add peer by IP (Alt+A)</strong>, then type the exact address, for example <code>10.8.0.1</code>.</li>
 </ul>
-<p>So to force a connection to one specific IP &mdash; say a machine that appears under two addresses and you only want one of them &mdash; add it by that IP and tick only that entry. If the same machine also turns up in Discovered peers under its <em>other</em> address, it shows as a separate entry that you simply leave unticked; RemSound keeps the two apart by their actual address, so they never merge.</p>
-<p>Either way, <strong>the profile remembers exactly what you ticked.</strong> Tick a discovered name and the profile reconnects by that name next time; add and tick an IP and the profile reconnects to that exact IP. So the way to make a profile always use one specific IP is simply to add and tick it by that IP, then save the profile.</p>
+<p>Normally RemSound is helpful about addresses, even one you typed: it can recognise that the address belongs to a computer it also hears announcing itself on the network, and if that computer turns up at a <em>different</em> address &mdash; a new IP after a reboot, or a second address over a VPN &mdash; RemSound follows it there automatically so your sound keeps flowing. Most of the time that is exactly what you want.</p>
+<p>Sometimes you want the opposite: connect to one specific address and nothing else, <em>ever</em>. For that, tick <strong>Lock to these exact peer addresses, no matter what (Alt+L)</strong> on the Connectivity tab. It is off by default and is saved with the profile, so you can lock one profile down while another keeps the automatic behaviour. When it is ticked, for that profile:</p>
+<ul>
+<li>RemSound uses <strong>only the exact address you set</strong> for each peer.</li>
+<li>It will <strong>not</strong> look the other computer up by the name it advertises on the network, and it will <strong>not</strong> switch to any other address it discovers &mdash; even if that same computer is reachable at a second address at the same moment.</li>
+<li>If the address you set stops working &mdash; the computer is off, the network is down, or it has moved to a new address &mdash; the connection simply <strong>waits, or drops, until that exact address is reachable again</strong>. RemSound will not go looking for another way through.</li>
+</ul>
+<p><strong>When you use this, set your peers by their IP address</strong> (Add peer by IP, then type the address). That is the setting for a machine that appears under two addresses when you only ever want one of them: add that one IP, tick the box, and save the profile &mdash; the connection will use that address and never wander.</p>
+<p>With the box left unticked, RemSound behaves as it always has: the profile remembers exactly what you ticked, reconnects by that name or address next time, and quietly follows a peer that genuinely moves to a new address.</p>
 
 <h3>You only hear peers you've ticked</h3>
 <p>Even if a peer is sending sound your way, you won't hear it until you've ticked their checkbox. This is deliberate &mdash; connecting is a step where you give your consent. A peer's name appears in Discovered the moment they come online, but they can't make any sound on your speakers until you say yes.</p>

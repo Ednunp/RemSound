@@ -238,6 +238,14 @@ public sealed class MainForm : Form
     private readonly CheckedListBox rememberedPeersList = new() { CheckOnClick = true, Width = 430, Height = 90, AccessibleName = "Remembered peers (Alt+R)" };
     private readonly Label rememberedPeersStatus = new() { AutoSize = true, Text = "No remembered peer selected." };
     private readonly Button manualAddButton = new() { Text = "Add peer by IP (Alt+&A)", AutoSize = true, AccessibleName = "Add peer by IP" };
+    // Per-profile "pin to exact addresses" toggle (#17). When ticked, RefreshKnownPeers skips the
+    // discovered-peer merge and the address-follow, so the profile's peers stay exactly as the user set.
+    private readonly AccessibleCheckBox lockPeerAddressesBox = new()
+    {
+        Text = "Lock to these exact peer addresses, no matter what — never follow names or switch (Alt+&L)",
+        AccessibleName = "Lock to these exact peer addresses, no matter what; never follow names or switch address",
+        AutoSize = true,
+    };
     // loggingBox + writeLogsNowButton field instances retired 2026-05-08 — both controls
     // now live inside PreferencesDialog. The form-level logFile.Enabled gate is set
     // directly from the settings store at startup (see ApplyLoggingEnabled).
@@ -2797,7 +2805,7 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
             ColumnCount = 2,
-            RowCount = 5,
+            RowCount = 6,
             AutoScroll = true,
         };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -2921,19 +2929,29 @@ public sealed class MainForm : Form
         // Preferences dialog (File → Preferences, Ctrl+P) as the last two items.
 
         // === Layout ===
-        // 5 rows: 0–2 the three peer lists, 3 manual-add, 4 connection-status readout.
-        panel.RowCount = 5;
+        // 6 rows: 0–2 the three peer lists, 3 manual-add, 4 the lock-to-fixed-addresses toggle, 5 status.
+        panel.RowCount = 6;
         FormLayoutRows.AddCheckedListRow(panel, 0, "Connected peers (Alt+&C)", connectedPeersList, connectedPeersStatus, FocusListControl);
         FormLayoutRows.AddCheckedListRow(panel, 1, "Discovered peers (Alt+&D)", discoveredPeersList, discoveredPeersStatus, FocusListControl);
         FormLayoutRows.AddCheckedListRow(panel, 2, "Remembered peers (Alt+&R)", rememberedPeersList, rememberedPeersStatus, FocusListControl);
         panel.Controls.Add(new Label { Text = "Manual peer", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 3);
         panel.Controls.Add(manualAddButton, 1, 3);
 
+        lockPeerAddressesBox.Checked = settings.LoadLockPeerAddresses();
+        lockPeerAddressesBox.CheckedChanged += (_, _) =>
+        {
+            settings.SaveLockPeerAddresses(lockPeerAddressesBox.Checked);
+            MarkProfileDirty();
+            logFile.Event($"lock peer addresses: {(lockPeerAddressesBox.Checked ? "on" : "off")}");
+        };
+        panel.Controls.Add(lockPeerAddressesBox, 0, 4);
+        panel.SetColumnSpan(lockPeerAddressesBox, 2);
+
         // Connection status readout — last row, tab-into-able.
         var statusLabel = new MnemonicLabel { Text = "Connection status (Alt+&S)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = statusReadout };
         statusLabel.Click += (_, _) => statusReadout.Focus();
-        panel.Controls.Add(statusLabel, 0, 4);
-        panel.Controls.Add(statusReadout, 1, 4);
+        panel.Controls.Add(statusLabel, 0, 5);
+        panel.Controls.Add(statusReadout, 1, 5);
 
         // Initial render so the box has content the moment the user tabs into it.
         RefreshStatusReadout();
@@ -5225,6 +5243,16 @@ public sealed class MainForm : Form
         // Discovered peers go in first so manual peers added by IP don't shadow them.
         foreach (var peer in discovery.Peers) knownPeers[peer.InstanceId] = peer;
         foreach (var peer in manualPeers.Values) knownPeers[peer.InstanceId] = peer;
+
+        // Locked-to-fixed-addresses profiles (#17): the user wants RemSound to use exactly the peer
+        // addresses they set and never substitute one found on the network. Skip the discovered-peer
+        // merge (which would attach a computer name to their selection) and the address-follow below;
+        // the selection's allow-list is still pushed so audio flows to those exact addresses, unchanged.
+        if (settings.LoadLockPeerAddresses())
+        {
+            PushAllowedReceiveSenders();
+            return;
+        }
 
         // Dedupe by endpoint (address:port). When a manual peer (typed by IP) and a discovered
         // peer (broadcasting hostname) point to the same machine, drop the manual entry and

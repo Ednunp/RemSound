@@ -177,6 +177,12 @@ public sealed class Profile
     /// list at save time. On load, RemSound auto-connects to any of these that resolve.</summary>
     public List<string> SelectedConnectedPeers { get; set; } = [];
 
+    /// <summary>When true, this profile is LOCKED to the exact peer addresses set above. RemSound uses
+    /// only those addresses, never matches the other computer by the name it advertises on the network,
+    /// and never switches to a different address it discovers — even if the set address stops working
+    /// (the connection simply waits or drops rather than moving). Off by default. (#17)</summary>
+    public bool LockPeerAddresses { get; set; }
+
     // === Hotkeys ===
     public HotkeyRecord? ReceiveMuteHotkey { get; set; }
     public HotkeyRecord? SendMuteHotkey { get; set; }

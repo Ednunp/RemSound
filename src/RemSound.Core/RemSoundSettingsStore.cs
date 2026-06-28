@@ -282,6 +282,19 @@ public sealed class RemSoundSettingsStore
         Save(s);
     }
 
+    /// <summary>When true, this profile is locked to the exact peer addresses the user set — RemSound
+    /// uses only those, never follows the other computer by its advertised name and never switches to a
+    /// discovered address. Off by default; opt in per profile. (#17)</summary>
+    public bool LoadLockPeerAddresses(bool defaultValue = false) =>
+        Try(() => Load()?.LockPeerAddresses) ?? defaultValue;
+
+    public void SaveLockPeerAddresses(bool value)
+    {
+        var s = Load() ?? new Settings();
+        s.LockPeerAddresses = value;
+        Save(s);
+    }
+
     /// <summary>Suppresses the connect/disconnect sound cues that play when a peer's health
     /// transitions to/from Healthy. Off by default — cues are on. Saved per-profile so users
     /// who don't want them in a given setup don't have to remember to mute every session.
@@ -537,6 +550,7 @@ public sealed class RemSoundSettingsStore
             SendRate = profile.SendRate,
             TightLatencyMode = profile.TightLatencyMode,
             PriorityMode = profile.PriorityMode,
+            LockPeerAddresses = profile.LockPeerAddresses,
             Smoothness = profile.Smoothness,
             ConcealmentArtifact = (ConcealmentArtifact)profile.ConcealmentArtifactRaw,
             MuteConnectionCues = profile.MuteConnectionCues,
@@ -581,6 +595,7 @@ public sealed class RemSoundSettingsStore
         if (s.SendRate is SendRate sr) profile.SendRate = sr;
         if (s.TightLatencyMode is bool tl) profile.TightLatencyMode = tl;
         if (s.PriorityMode is bool pm) profile.PriorityMode = pm;
+        if (s.LockPeerAddresses is bool lpa) profile.LockPeerAddresses = lpa;
         if (s.Smoothness is int sm) profile.Smoothness = sm;
         if (s.ConcealmentArtifact is ConcealmentArtifact ca) profile.ConcealmentArtifactRaw = (int)ca;
         if (s.MuteConnectionCues is bool mc) profile.MuteConnectionCues = mc;
@@ -626,6 +641,7 @@ public sealed class RemSoundSettingsStore
         public SendRate? SendRate { get; set; }
         public bool? TightLatencyMode { get; set; }
         public bool? PriorityMode { get; set; }
+        public bool? LockPeerAddresses { get; set; }
         public int? Smoothness { get; set; }
         public ConcealmentArtifact? ConcealmentArtifact { get; set; }
         public bool? MuteConnectionCues { get; set; }
