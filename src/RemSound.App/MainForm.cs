@@ -5682,7 +5682,21 @@ public sealed class MainForm : Form
     /// </summary>
     private void PushAllowedReceiveSenders()
     {
-        receiver.SetAllowedSenders(SelectedSendEndpoints());
+        // Accept audio from ANY source IP a selected peer is known to use, not only the single address
+        // we currently target. A multi-homed sender (on a LAN and a VPN at once) can egress audio from a
+        // different interface than the one we discovered or dialled; allow-listing just the one made the
+        // receiver silently drop that audio while heartbeats (which skip this check) kept the peer
+        // looking connected — connected but silent (#18). The SEND targets stay single-address; only the
+        // accept-list widens, and only to other addresses the SAME peer (by InstanceId) announced from.
+        var allowed = new List<IPEndPoint>();
+        var seen = new HashSet<IPAddress>();
+        foreach (var (id, ep) in selectedPeerEndpoints)
+        {
+            if (seen.Add(ep.Address)) allowed.Add(new IPEndPoint(ep.Address, 0));
+            foreach (var addr in discovery.GetKnownAddresses(id))
+                if (seen.Add(addr)) allowed.Add(new IPEndPoint(addr, 0));
+        }
+        receiver.SetAllowedSenders(allowed);
     }
 
     /// <summary>True if the heartbeat currently considers <paramref name="endpoint"/> healthy —

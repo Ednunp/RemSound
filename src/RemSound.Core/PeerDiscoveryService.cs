@@ -25,6 +25,11 @@ public sealed class PeerDiscoveryService : IDisposable
     private readonly Guid instanceId = Guid.NewGuid();
     private readonly object gate = new();
     private readonly Dictionary<Guid, PeerAnnouncement> peers = [];
+    // All source IPs each peer (by InstanceId) has recently announced from, with last-seen for expiry.
+    // A multi-homed peer (LAN + VPN at once) announces from several interfaces; we keep them all so the
+    // receiver can accept audio from whichever one a given packet egresses from (#18), not only the
+    // last-seen address. Guarded by gate; pruned on the same 8 s window as `peers`.
+    private readonly Dictionary<Guid, Dictionary<IPAddress, DateTime>> addressesById = [];
     private CancellationTokenSource? cts;
     private UdpClient? listener;
     private UdpClient? announcer;
@@ -178,6 +183,13 @@ public sealed class PeerDiscoveryService : IDisposable
                         || existing.CanReceive != peer.CanReceive
                         || !Equals(existing.Address, peer.Address);
                     peers[peer.InstanceId] = peer;
+                    // Remember this source IP for the peer (multi-homed senders announce from several).
+                    if (!addressesById.TryGetValue(peer.InstanceId, out var addrs))
+                    {
+                        addrs = [];
+                        addressesById[peer.InstanceId] = addrs;
+                    }
+                    addrs[peer.Address] = peer.LastSeenUtc;
                     PruneExpiredPeers();
                 }
                 if (changed) PeersChanged?.Invoke();
@@ -299,6 +311,27 @@ public sealed class PeerDiscoveryService : IDisposable
         foreach (var peer in peers.Values.Where(p => p.LastSeenUtc < cutoff).ToList())
         {
             peers.Remove(peer.InstanceId);
+        }
+        // Expire per-interface source addresses on the same window, and drop any peer left with none.
+        foreach (var (id, addrs) in addressesById.ToList())
+        {
+            foreach (var addr in addrs.Where(kv => kv.Value < cutoff).Select(kv => kv.Key).ToList())
+            {
+                addrs.Remove(addr);
+            }
+            if (addrs.Count == 0) addressesById.Remove(id);
+        }
+    }
+
+    /// <summary>All source IPs a peer (by InstanceId) has announced from within the expiry window. A
+    /// multi-homed peer announces from several; the receiver allow-lists all of them so audio egressing
+    /// from any of the peer's interfaces is accepted rather than silently dropped (#18).</summary>
+    public IReadOnlyCollection<IPAddress> GetKnownAddresses(Guid instanceId)
+    {
+        lock (gate)
+        {
+            PruneExpiredPeers();
+            return addressesById.TryGetValue(instanceId, out var addrs) ? addrs.Keys.ToArray() : [];
         }
     }
 
