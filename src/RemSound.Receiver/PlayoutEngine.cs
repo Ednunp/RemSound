@@ -45,6 +45,10 @@ internal sealed class PlayoutEngine : IWaveProvider
     // Both) the sender emits a single streamId so the dict still has one entry per peer,
     // identical to the pre-refactor behaviour. The new mode adds a second entry per peer.
     private readonly Dictionary<(IPEndPoint Endpoint, ushort StreamId), SessionPlayout> sessions = new();
+    // Per-peer pan+EQ, keyed by peer address, so a session created later (a reconnect) inherits its
+    // peer's shaping from frame zero — the same "applies to future sessions too" idea as the
+    // concealment artifact. Guarded by sessionsLock. A null value means explicitly cleared.
+    private readonly Dictionary<IPAddress, PeerDspChain?> peerDspByAddress = new();
     private SessionPlayout[] sessionsSnapshot = [];
     // Per-route scratch. Each IWaveProvider surface (Mixed / WasapiLane / AsioLane) runs on
     // its own consumer thread in BothIndependent mode (WASAPI master producer + ASIO render
@@ -133,6 +137,20 @@ internal sealed class PlayoutEngine : IWaveProvider
         concealmentArtifactRaw = (int)artifact;
         var snap = sessionsSnapshot;
         foreach (var s in snap) s.SetConcealmentArtifact(artifact);
+    }
+
+    /// <summary>Sets (or clears with null) the pan+EQ chain for every current and future session from
+    /// this peer address. Live-updates existing sessions and remembers it so a session created later
+    /// (a reconnect, or a peer that starts streaming after you set it) inherits it from frame zero.</summary>
+    public void SetPeerDsp(IPAddress address, PeerDspChain? chain)
+    {
+        lock (sessionsLock)
+        {
+            if (chain is null) peerDspByAddress.Remove(address);
+            else peerDspByAddress[address] = chain;
+            foreach (var s in sessions.Values)
+                if (s.Endpoint.Address.Equals(address)) s.SetDsp(chain);
+        }
     }
 
     public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(MixSampleRate, MixChannels);
@@ -305,6 +323,9 @@ internal sealed class PlayoutEngine : IWaveProvider
                 // gets the right artifact from frame zero (rather than the SessionPlayout
                 // default, which would only get overridden on the next SetConcealmentArtifact).
                 sp.SetConcealmentArtifact((ConcealmentArtifact)concealmentArtifactRaw);
+                // Inherit this peer's pan+EQ too, so a mid-stream / reconnect session is shaped from
+                // frame zero rather than only on the next SetPeerDsp call.
+                if (peerDspByAddress.TryGetValue(endpoint.Address, out var chain)) sp.SetDsp(chain);
                 sessions[key] = sp;
                 sessionsSnapshot = sessions.Values.ToArray();
             }

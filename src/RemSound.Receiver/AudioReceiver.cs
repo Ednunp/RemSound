@@ -193,6 +193,11 @@ public sealed class AudioReceiver : IDisposable
     public void SetConcealmentArtifact(ConcealmentArtifact artifact) =>
         playoutEngine.SetConcealmentArtifact(artifact);
 
+    /// <summary>Sets (or clears with null) the per-peer pan+EQ chain for the given peer address.
+    /// Applies to that peer's current and future sessions. Called from the UI thread.</summary>
+    public void SetPeerDsp(IPAddress address, PeerDspChain? chain) =>
+        playoutEngine.SetPeerDsp(address, chain);
+
     /// <summary>
     /// Optional callback invoked when the engine produces fully-processed mixed received
     /// audio (volume / mute / limiter all applied). Span is 48 kHz interleaved stereo

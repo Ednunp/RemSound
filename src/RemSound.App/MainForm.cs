@@ -151,6 +151,28 @@ public sealed class MainForm : Form
     private readonly TabPage connectivityTabPage = new("Connectivity");
     private readonly TabPage audioIOTabPage = new("Audio inputs and outputs");
     private readonly TabPage audioProfileTabPage = new("Audio profile");
+
+    // === Pan and EQ tab (per-peer shaping) — shown only when AppConfig.ShowPanEqTab is on. ===
+    private readonly TabPage panEqTabPage = new("Pan and EQ");
+    private readonly AccessibleCheckBox enableEqForPeersBox = new() { Text = "Enable &EQ for peers (Alt+E)", AccessibleName = "Enable EQ for peers", AutoSize = true };
+    private readonly AccessibleCheckBox enablePanForPeersBox = new() { Text = "Enable &pan for peers (Alt+P)", AccessibleName = "Enable pan for peers", AutoSize = true };
+    private readonly ListBox panEqPeerList = new() { Width = 430, Height = 90, AccessibleName = "Peer to shape" };
+    private readonly TrackBar panSlider = new() { Minimum = 0, Maximum = 100, Value = 50, SmallChange = 1, LargeChange = 10, TickFrequency = 25, Width = 320 };
+    private readonly Button resetPeerEqButton = new() { Text = "Set peer E&Q to default (Alt+Q)", AutoSize = true, AccessibleName = "Set peer EQ to default" };
+    private readonly ListBox eqModeList = new() { Width = 320, Height = 40, IntegralHeight = false, AccessibleName = "EQ mode" };
+    private readonly FlowLayoutPanel eqBandsPanel = new() { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+    // Working copy of the active profile's per-peer shaping, keyed by peer address string. Loaded on
+    // profile apply, saved by BuildCurrentProfile, mutated live as the user moves the controls.
+    private Dictionary<string, PeerShaping> peerShaping = new();
+    // Address string of the peer currently selected in panEqPeerList (the one the controls edit).
+    private string? selectedShapingKey;
+    // The band-gain sliders currently shown; rebuilt when the mode or selected peer changes.
+    private readonly List<TrackBar> eqBandSliders = new();
+    // True while we're pushing a peer's saved values INTO the controls, so those programmatic changes
+    // don't fire the apply/dirty handlers back at us.
+    private bool loadingPanEqControls;
+    // Signature of the peer list last rendered, so the 1 Hz refresh only rebuilds it on a real change.
+    private string lastPanEqPeerSignature = "";
     // profilesPrefsTabPage retired 2026-05-08 — its contents now live on the File menu.
 
     // connectivityTransportButton + ShowConnectivityTransportDialog removed in Phase 2/3 of
@@ -1679,10 +1701,13 @@ public sealed class MainForm : Form
         BuildConnectivityTab();
         BuildAudioIOTab();
         BuildAudioProfileTab();
+        BuildPanEqTab();
 
         mainTabControl.TabPages.Add(connectivityTabPage);
         mainTabControl.TabPages.Add(audioIOTabPage);
         mainTabControl.TabPages.Add(audioProfileTabPage);
+        // Insert the optional Pan-and-EQ tab (just before Audio profile) if the preference is on.
+        RefreshPanEqTabVisibility();
         // No SelectedIndexChanged handler. No focus management on tab change. Andre's
         // accessible app does ZERO event hooking on TabControl — relies entirely on
         // default WinForms + NVDA behaviour. Per Ed's repeated request: arrow keys cycle
@@ -2515,6 +2540,8 @@ public sealed class MainForm : Form
             unsubscribeUpnpStatusChanged: handler => routerPortMapper.StatusChanged -= handler);
         dialog.ShowDialog(this);
         if (dialog.ChangedAnyProfileSetting) MarkProfileDirty();
+        // The "Show pan and EQ tab" preference may have been toggled — add/remove the tab to match.
+        RefreshPanEqTabVisibility();
         // The Preferences dialog includes per-cue Browse buttons that can change custom
         // WAV paths in AppConfig.CustomCuePaths. Reload the cached SoundPlayer instances
         // here unconditionally — cheap, only six small files, and guarantees the next
@@ -3096,6 +3123,274 @@ public sealed class MainForm : Form
         audioProfileTabPage.Controls.Add(outerPanel);
     }
 
+    /// <summary>An item in the Pan-and-EQ peer picker. Keyed by peer address string (the same key the
+    /// per-profile <see cref="PeerShaping"/> dictionary uses, and what the receiver routes DSP by).</summary>
+    private sealed class PanEqPeerItem(string label, System.Net.IPAddress address, string key)
+    {
+        public string Label { get; } = label;
+        public System.Net.IPAddress Address { get; } = address;
+        public string Key { get; } = key;
+        public override string ToString() => Label;
+    }
+
+    /// <summary>Builds the "Pan and EQ" tab: two master enables, a connected-peer picker, then the
+    /// selected peer's pan slider, a reset-EQ button, an EQ-mode picker (3-band / 10-band) and that
+    /// mode's band sliders. Every control acts on the peer selected in the list, applies in real time,
+    /// and is saved per profile. See <see cref="PeerDspChain"/> / <see cref="PeerShaping"/>.</summary>
+    private void BuildPanEqTab()
+    {
+        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 8, AutoScroll = true };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        enableEqForPeersBox.CheckedChanged += (_, _) => { if (!loadingPanEqControls) { MarkProfileDirty(); ApplyAllPeerShaping(); } };
+        enablePanForPeersBox.CheckedChanged += (_, _) => { if (!loadingPanEqControls) { MarkProfileDirty(); ApplyAllPeerShaping(); } };
+        panEqPeerList.SelectedIndexChanged += (_, _) => OnPanEqPeerSelected();
+        panSlider.ValueChanged += (_, _) => OnPanChanged();
+        resetPeerEqButton.Click += (_, _) => OnResetPeerEq();
+        eqModeList.Items.Add("3 band basic EQ");
+        eqModeList.Items.Add("10 band advanced EQ");
+        eqModeList.SelectedIndexChanged += (_, _) => OnEqModeChanged();
+
+        var peerLabel = new MnemonicLabel { Text = "Peer to shape (Alt+&U)", AutoSize = true, MnemonicTarget = panEqPeerList };
+        var panLabel = new MnemonicLabel { Text = "Pa&n (Alt+N)", AutoSize = true, MnemonicTarget = panSlider };
+        var modeLabel = new MnemonicLabel { Text = "EQ &mode (Alt+M)", AutoSize = true, MnemonicTarget = eqModeList };
+
+        var panRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+        panRow.Controls.Add(panLabel);
+        panRow.Controls.Add(panSlider);
+        var modeRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+        modeRow.Controls.Add(modeLabel);
+        modeRow.Controls.Add(eqModeList);
+
+        panel.Controls.Add(enableEqForPeersBox, 0, 0);
+        panel.Controls.Add(enablePanForPeersBox, 0, 1);
+        panel.Controls.Add(peerLabel, 0, 2);
+        panel.Controls.Add(panEqPeerList, 0, 3);
+        panel.Controls.Add(panRow, 0, 4);
+        panel.Controls.Add(resetPeerEqButton, 0, 5);
+        panel.Controls.Add(modeRow, 0, 6);
+        panel.Controls.Add(eqBandsPanel, 0, 7);
+        panEqTabPage.Controls.Add(panel);
+
+        RefreshPanEqPeerList();
+        OnPanEqPeerSelected();
+    }
+
+    /// <summary>Adds (or removes) the Pan-and-EQ tab to match the machine-wide "Show pan and EQ tab"
+    /// preference. Placed just before the Audio profile tab. Called at build and after Preferences close.</summary>
+    private void RefreshPanEqTabVisibility()
+    {
+        bool show = AppConfig.Load().ShowPanEqTab;
+        bool present = mainTabControl.TabPages.Contains(panEqTabPage);
+        if (show && !present)
+        {
+            int idx = mainTabControl.TabPages.IndexOf(audioProfileTabPage);
+            if (idx < 0) idx = mainTabControl.TabPages.Count;
+            mainTabControl.TabPages.Insert(idx, panEqTabPage);
+        }
+        else if (!show && present)
+        {
+            mainTabControl.TabPages.Remove(panEqTabPage);
+        }
+    }
+
+    /// <summary>Rebuilds the peer picker from the currently-connected peers, one row per address. Runs
+    /// each tick but only rebuilds on a real change (so NVDA focus survives). On a change it also
+    /// re-pushes every connected peer's shaping, so a freshly-connected peer picks up its saved pan/EQ.</summary>
+    private void RefreshPanEqPeerList()
+    {
+        var desired = new List<PanEqPeerItem>();
+        var seen = new HashSet<string>();
+        foreach (var (id, ep) in selectedPeerEndpoints)
+        {
+            var key = ep.Address.ToString();
+            if (!seen.Add(key)) continue;
+            var label = selectedPeerLabels.GetValueOrDefault(id, key);
+            desired.Add(new PanEqPeerItem(label, ep.Address, key));
+        }
+        desired = desired.OrderBy(d => d.Label).ThenBy(d => d.Key).ToList();
+        var signature = string.Join("|", desired.Select(d => d.Key + "=" + d.Label));
+        if (signature == lastPanEqPeerSignature) return;
+        lastPanEqPeerSignature = signature;
+
+        var prevKey = (panEqPeerList.SelectedItem as PanEqPeerItem)?.Key ?? selectedShapingKey;
+        panEqPeerList.BeginUpdate();
+        panEqPeerList.Items.Clear();
+        int idx = -1;
+        foreach (var d in desired)
+        {
+            int i = panEqPeerList.Items.Add(d);
+            if (d.Key == prevKey) idx = i;
+        }
+        if (idx < 0 && panEqPeerList.Items.Count > 0) idx = 0;
+        if (idx >= 0) panEqPeerList.SelectedIndex = idx;
+        panEqPeerList.EndUpdate();
+
+        ApplyAllPeerShaping();
+    }
+
+    /// <summary>Loads the peer selected in the picker into the pan / mode / band controls.</summary>
+    private void OnPanEqPeerSelected()
+    {
+        selectedShapingKey = (panEqPeerList.SelectedItem as PanEqPeerItem)?.Key;
+        bool enabled = selectedShapingKey is not null;
+        loadingPanEqControls = true;
+        try
+        {
+            var s = GetOrCreateShaping(selectedShapingKey);
+            panSlider.Value = Math.Clamp((int)Math.Round(s.Pan * 50f) + 50, 0, 100);
+            UpdatePanAccessibleName();
+            eqModeList.SelectedIndex = s.EqMode == PeerEqMode.Advanced10Band ? 1 : 0;
+            RebuildEqBandSliders();
+            panSlider.Enabled = enabled;
+            resetPeerEqButton.Enabled = enabled;
+            eqModeList.Enabled = enabled;
+        }
+        finally { loadingPanEqControls = false; }
+    }
+
+    private PeerShaping? GetShaping(string? key) => key is not null && peerShaping.TryGetValue(key, out var s) ? s : null;
+
+    private PeerShaping GetOrCreateShaping(string? key)
+    {
+        if (key is null) return new PeerShaping();
+        if (!peerShaping.TryGetValue(key, out var s)) { s = new PeerShaping(); peerShaping[key] = s; }
+        return s;
+    }
+
+    private void OnPanChanged()
+    {
+        if (loadingPanEqControls || selectedShapingKey is null) return;
+        GetOrCreateShaping(selectedShapingKey).Pan = Math.Clamp((panSlider.Value - 50) / 50f, -1f, 1f);
+        UpdatePanAccessibleName();
+        ApplyPeerShaping(selectedShapingKey);
+        MarkProfileDirty();
+    }
+
+    private void UpdatePanAccessibleName()
+    {
+        int v = panSlider.Value;
+        string desc = v == 50 ? "centre" : v < 50 ? $"{(50 - v) * 2} percent left" : $"{(v - 50) * 2} percent right";
+        panSlider.AccessibleName = $"Pan: {desc}";
+    }
+
+    private void OnEqModeChanged()
+    {
+        if (loadingPanEqControls || selectedShapingKey is null) return;
+        GetOrCreateShaping(selectedShapingKey).EqMode = eqModeList.SelectedIndex == 1 ? PeerEqMode.Advanced10Band : PeerEqMode.Simple3Band;
+        RebuildEqBandSliders();
+        ApplyPeerShaping(selectedShapingKey);
+        MarkProfileDirty();
+    }
+
+    private void OnResetPeerEq()
+    {
+        if (selectedShapingKey is null) return;
+        var s = GetOrCreateShaping(selectedShapingKey);
+        Array.Clear(s.SimpleBandsDb);
+        Array.Clear(s.AdvancedBandsDb);
+        RebuildEqBandSliders();
+        ApplyPeerShaping(selectedShapingKey);
+        MarkProfileDirty();
+    }
+
+    /// <summary>Rebuilds the band sliders for the current EQ mode + selected peer, loading their gains.</summary>
+    private void RebuildEqBandSliders()
+    {
+        loadingPanEqControls = true;
+        try
+        {
+            eqBandsPanel.SuspendLayout();
+            while (eqBandsPanel.Controls.Count > 0)
+            {
+                var c = eqBandsPanel.Controls[0];
+                eqBandsPanel.Controls.RemoveAt(0);
+                c.Dispose();
+            }
+            eqBandSliders.Clear();
+
+            var s = GetShaping(selectedShapingKey);
+            var mode = eqModeList.SelectedIndex == 1 ? PeerEqMode.Advanced10Band : PeerEqMode.Simple3Band;
+            var bands = mode == PeerEqMode.Advanced10Band ? PeerEqBands.Advanced : PeerEqBands.Simple;
+            var gains = s is null ? null : (mode == PeerEqMode.Advanced10Band ? s.AdvancedBandsDb : s.SimpleBandsDb);
+
+            for (int i = 0; i < bands.Length; i++)
+            {
+                float gainDb = gains is not null && i < gains.Length ? gains[i] : 0f;
+                var slider = new TrackBar
+                {
+                    Minimum = 0,
+                    Maximum = 100,
+                    Value = Math.Clamp((int)Math.Round(gainDb / PeerEqBands.MaxGainDb * 50f) + 50, 0, 100),
+                    SmallChange = 1,
+                    LargeChange = 10,
+                    TickFrequency = 25,
+                    Width = 300,
+                    Tag = i,
+                    Enabled = selectedShapingKey is not null,
+                };
+                UpdateBandAccessibleName(slider, bands[i].Label);
+                slider.ValueChanged += (_, _) => OnBandChanged(slider);
+                var row = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+                row.Controls.Add(new MnemonicLabel { Text = bands[i].Label, AutoSize = true, MnemonicTarget = slider });
+                row.Controls.Add(slider);
+                eqBandsPanel.Controls.Add(row);
+                eqBandSliders.Add(slider);
+            }
+            eqBandsPanel.ResumeLayout();
+        }
+        finally { loadingPanEqControls = false; }
+    }
+
+    private void OnBandChanged(TrackBar slider)
+    {
+        if (loadingPanEqControls || selectedShapingKey is null || slider.Tag is not int i) return;
+        var s = GetOrCreateShaping(selectedShapingKey);
+        var mode = eqModeList.SelectedIndex == 1 ? PeerEqMode.Advanced10Band : PeerEqMode.Simple3Band;
+        var gains = mode == PeerEqMode.Advanced10Band ? s.AdvancedBandsDb : s.SimpleBandsDb;
+        var bands = mode == PeerEqMode.Advanced10Band ? PeerEqBands.Advanced : PeerEqBands.Simple;
+        if (i >= 0 && i < gains.Length)
+        {
+            gains[i] = (slider.Value - 50) / 50f * PeerEqBands.MaxGainDb;
+            UpdateBandAccessibleName(slider, bands[i].Label);
+        }
+        ApplyPeerShaping(selectedShapingKey);
+        MarkProfileDirty();
+    }
+
+    private static void UpdateBandAccessibleName(TrackBar slider, string label)
+    {
+        float db = (slider.Value - 50) / 50f * PeerEqBands.MaxGainDb;
+        string desc = MathF.Abs(db) < 0.5f ? "flat" : $"{(db > 0 ? "+" : "")}{db:0} dB";
+        slider.AccessibleName = $"{label}: {desc}";
+    }
+
+    /// <summary>Builds one peer's DSP chain (honouring the two master enables) and pushes it to the
+    /// receiver, so the change is heard immediately. A null chain (nothing to do) clears any prior one.</summary>
+    private void ApplyPeerShaping(string? key)
+    {
+        if (key is null) return;
+        System.Net.IPAddress? addr = null;
+        foreach (var (_, ep) in selectedPeerEndpoints)
+            if (ep.Address.ToString() == key) { addr = ep.Address; break; }
+        if (addr is null && !System.Net.IPAddress.TryParse(key, out addr)) return;
+        var chain = PeerDspChain.Build(GetShaping(key), enablePanForPeersBox.Checked, enableEqForPeersBox.Checked);
+        receiver.SetPeerDsp(addr, chain);
+    }
+
+    /// <summary>Pushes shaping for every currently-connected peer. Used when a master enable flips or a
+    /// profile loads / the connected set changes.</summary>
+    private void ApplyAllPeerShaping()
+    {
+        var seen = new HashSet<string>();
+        foreach (var (_, ep) in selectedPeerEndpoints)
+        {
+            if (!seen.Add(ep.Address.ToString())) continue;
+            var chain = PeerDspChain.Build(GetShaping(ep.Address.ToString()), enablePanForPeersBox.Checked, enableEqForPeersBox.Checked);
+            receiver.SetPeerDsp(ep.Address, chain);
+        }
+    }
+
     /// <summary>Send-side controls: codec + packet size on row 0, lock-to-audio-clock on
     /// row 1. The codec and packet-size combo share a row because they're tightly coupled
     /// (changing the codec resets the meaningful packet sizes). Lock-to-clock is a sender-
@@ -3360,6 +3655,7 @@ public sealed class MainForm : Form
         SyncConnectedList();
         SyncDiscoveredList();
         SyncRememberedList();
+        RefreshPanEqPeerList();
         RefreshStatusReadout();
     }
 
@@ -6310,6 +6606,14 @@ public sealed class MainForm : Form
             // exactly as if the user had typed it into the manual-peer field. Discovered peers
             // (no longer reachable / different IP) just fail gracefully — no popup.
             ReconnectSavedPeers(p.SelectedConnectedPeers);
+            // Per-peer pan/EQ: adopt this profile's saved shaping + the two master enables. The peer
+            // picker and the DSP re-apply on the next tick (once the peers above have reconnected);
+            // clearing the signature makes RefreshPanEqPeerList rebuild and re-push for this profile.
+            peerShaping = p.PeerShaping is null ? new() : new(p.PeerShaping);
+            loadingPanEqControls = true;
+            try { enablePanForPeersBox.Checked = p.EnablePanForPeers; enableEqForPeersBox.Checked = p.EnableEqForPeers; }
+            finally { loadingPanEqControls = false; }
+            lastPanEqPeerSignature = "";
         }
         catch (Exception ex)
         {
@@ -6486,6 +6790,9 @@ public sealed class MainForm : Form
         profile.SelectedWasapiSendInputs = ExtractCheckedDeviceIds(sendInputDevicesList);
         profile.SelectedAsioSendInputs = ExtractCheckedDeviceIds(asioSendDevicesList);
         profile.SelectedConnectedPeers = GatherSelectedPeerEntries();
+        profile.EnablePanForPeers = enablePanForPeersBox.Checked;
+        profile.EnableEqForPeers = enableEqForPeersBox.Checked;
+        profile.PeerShaping = peerShaping;
         return profile;
     }
 

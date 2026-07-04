@@ -271,6 +271,13 @@ internal sealed class PreferencesDialog : Form
         AutoSize = true,
     };
 
+    private readonly AccessibleCheckBox showPanEqTabBox = new()
+    {
+        Text = "Show the Pan and E&Q tab, for per-peer pan and EQ (Alt+Q)",
+        AccessibleName = "Show the Pan and EQ tab",
+        AutoSize = true,
+    };
+
     private readonly Label upnpStatusLabel = new()
     {
         Text = "",
@@ -565,6 +572,7 @@ internal sealed class PreferencesDialog : Form
         updateFrequencyBox.SelectedIndex = (int)cfgForLoad.UpdateCheckFrequency;
         silentlyInstallUpdatesBox.Checked = cfgForLoad.SilentlyInstallUpdates;
         upnpEnabledBox.Checked = cfgForLoad.UpnpEnabled;
+        showPanEqTabBox.Checked = cfgForLoad.ShowPanEqTab;
 
         checkForUpdatesOnStartupBox.CheckedChanged += (_, _) =>
         {
@@ -603,6 +611,13 @@ internal sealed class PreferencesDialog : Form
             try { cfg.Save(); } catch { /* harmless */ }
             applyUpnpEnabled(upnpEnabledBox.Checked);
             RefreshUpnpStatusLabel();
+        };
+
+        showPanEqTabBox.CheckedChanged += (_, _) =>
+        {
+            var cfg = AppConfig.Load();
+            cfg.ShowPanEqTab = showPanEqTabBox.Checked;
+            try { cfg.Save(); } catch { /* harmless — choice just won't survive a restart */ }
         };
 
         // Live UPnP status — the RouterPortMapper raises StatusChanged from a thread-pool
@@ -798,7 +813,7 @@ internal sealed class PreferencesDialog : Form
         // is a field (declared above) so OnShown can focus it when the dialog opens. Logging is its
         // own tab (2026-06-19); the two logging controls moved off the General tab to lead it.
         tabs.TabPages.Add(MakeTab("General",
-            browseProfilesFolderButton, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel));
+            browseProfilesFolderButton, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel, showPanEqTabBox));
         tabs.TabPages.Add(MakeTab("Audio cues", cueGroup));
         tabs.TabPages.Add(MakeTab("Startup behaviour",
             startMinimisedBox, startWithUserBox, startWithProfileBox, startupListPanel));

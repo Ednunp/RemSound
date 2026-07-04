@@ -68,6 +68,12 @@ public sealed class AppConfig
     /// already running quietly". Default false.</summary>
     public bool StartMinimised { get; set; }
 
+    /// <summary>If true, the main window shows a "Pan and EQ" tab (positioned before "Audio profile")
+    /// for setting per-peer panning and EQ. Off by default; toggled by "Show pan and EQ tab" on the
+    /// Preferences General tab. Machine-wide (a UI-visibility preference, like which tabs exist) — the
+    /// pan/EQ VALUES are saved per profile, in <see cref="Profile.PeerShaping"/>.</summary>
+    public bool ShowPanEqTab { get; set; }
+
     /// <summary>If true (the default), RemSound plays the startup cue once, right after this
     /// copy wins the single-instance takeover and before the profile loads. Machine-wide (not
     /// per-<see cref="Profile"/>) because it fires before any profile — and its per-profile

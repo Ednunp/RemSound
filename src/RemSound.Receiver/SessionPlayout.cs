@@ -98,6 +98,9 @@ internal sealed class SessionPlayout : IDisposable
     private float lastConcealSampleL;
     private float lastConcealSampleR;
     private volatile int concealmentArtifactRaw = (int)ConcealmentArtifact.NoiseBurst;
+    // Per-peer pan + EQ, or null when this peer isn't shaped. Built on the UI thread and swapped in
+    // atomically (volatile reference); the audio thread reads it once per block. See PeerDspChain.
+    private volatile PeerDspChain? dsp;
     // Per-session RNG for noise concealment. Seeded from process-level Shared so each session
     // gets a different sequence — but we don't care about reproducibility, just character.
     private readonly Random concealRng = new(Random.Shared.Next());
@@ -330,6 +333,10 @@ internal sealed class SessionPlayout : IDisposable
     /// the sender doesn't see this and wouldn't behave differently if it did.</summary>
     public void SetConcealmentArtifact(ConcealmentArtifact value) =>
         concealmentArtifactRaw = (int)value;
+
+    /// <summary>Sets (or clears with null) this session's per-peer pan+EQ chain. Takes effect on the
+    /// next block. Called from the UI thread; the audio thread reads the reference lock-free.</summary>
+    public void SetDsp(PeerDspChain? value) => dsp = value;
 
     /// <summary>UTC time of the most recent successful audio write. Used by <see cref="AudioReceiver"/>
     /// to prune long-idle sessions so the dictionary doesn't grow unboundedly.</summary>
@@ -621,6 +628,11 @@ internal sealed class SessionPlayout : IDisposable
 
         // Read through the resampler and apply concealment on full underruns.
         ReadThroughResampler(output, outFrames);
+        // Per-peer pan + EQ: this peer's block is fully decoded and isolated here, immediately before
+        // PlayoutEngine sums it into the mix — so shaping is per-peer and pre-mix, and being per-sample
+        // it adds no buffering latency. Null (unshaped peer) skips the whole stage.
+        var d = dsp;
+        d?.Process(output, outFrames);
         return outFrames;
     }
 

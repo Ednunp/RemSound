@@ -183,6 +183,19 @@ public sealed class Profile
     /// (the connection simply waits or drops rather than moving). Off by default. (#17)</summary>
     public bool LockPeerAddresses { get; set; }
 
+    // === Per-peer pan and EQ (jam mixing) ===
+    /// <summary>Master switch for this profile: apply each connected peer's saved PAN. Off by default.
+    /// The pan values themselves live in <see cref="PeerShaping"/>.</summary>
+    public bool EnablePanForPeers { get; set; }
+
+    /// <summary>Master switch for this profile: apply each connected peer's saved EQ. Off by default.</summary>
+    public bool EnableEqForPeers { get; set; }
+
+    /// <summary>Per-peer pan + EQ, keyed by the SAME peer-entry string used in
+    /// <see cref="SelectedConnectedPeers"/> (user text / discovery label / address:port). A peer with
+    /// no entry gets centre pan and flat EQ. Empty on a fresh profile.</summary>
+    public Dictionary<string, PeerShaping> PeerShaping { get; set; } = new();
+
     // === Hotkeys ===
     public HotkeyRecord? ReceiveMuteHotkey { get; set; }
     public HotkeyRecord? SendMuteHotkey { get; set; }
