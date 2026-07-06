@@ -823,6 +823,11 @@ public sealed class MainForm : Form
             settings,
             msg => logFile.Event($"recorder: {msg}"));
         recordingController.RecordingStateChanged += UpdateStartStopRecordingMenuLabel;
+        // Supply the connected peers when a split recording starts, so it can make one track per peer.
+        recordingController.ConnectedPeersProvider = () =>
+            selectedPeerEndpoints
+                .Select(kv => (kv.Value.Address, selectedPeerLabels.GetValueOrDefault(kv.Key, kv.Value.Address.ToString())))
+                .ToList();
 
         // --- Set accessibility names ---
         // For these four controls the keyboard shortcut is included explicitly in both the

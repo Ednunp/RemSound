@@ -1,3 +1,4 @@
+using System.Net;
 using RemSound.Core;
 using RemSound.Receiver;
 using RemSound.Sender;
@@ -22,6 +23,18 @@ internal sealed class RecordingController
     private readonly RemSoundSettingsStore settings;
     private readonly Action<string> diagnostic;
     private AudioRecorder? active;
+    // Multi-track (split) state — one recorder per connected peer (keyed by address), plus one for your
+    // own send. Built entirely at Start and only replaced with null at Stop, so the audio-thread tap can
+    // read the dictionary with a plain volatile read.
+    private volatile Dictionary<string, AudioRecorder>? peerRecorders;
+    private AudioRecorder? meRecorder;
+    // Single-file BYPASS state — sum each peer's RAW block per render, flush on the block boundary.
+    private float[] rawMixAccum = new float[4096];
+    private int rawMixLen;
+
+    /// <summary>Supplies the currently-connected peers (address + display name) at the moment a split
+    /// recording starts, so one track file is created per peer. Set by MainForm.</summary>
+    public Func<IReadOnlyList<(IPAddress Address, string Name)>>? ConnectedPeersProvider { get; set; }
 
     public RecordingController(AudioSender sender, AudioReceiver receiver, RemSoundSettingsStore settings, Action<string> diagnostic)
     {
@@ -31,7 +44,7 @@ internal sealed class RecordingController
         this.diagnostic = diagnostic;
     }
 
-    public bool IsRecording => active is not null;
+    public bool IsRecording => active is not null || meRecorder is not null || peerRecorders is not null;
 
     /// <summary>UTC clock at which the current recording started, or null when nothing is
     /// recording. Captured by <see cref="Start"/> and cleared by <see cref="Stop"/>. Used
@@ -49,15 +62,18 @@ internal sealed class RecordingController
     /// while recording, but the guard is here for safety).</summary>
     public void Start()
     {
-        if (active is not null) return;
+        if (IsRecording) return;
         var s = settings.LoadRecordingSettings();
+        var now = DateTime.Now;
         try
         {
-            active = new AudioRecorder(s, diagnostic, OnRecorderFinished);
+            if (s.SplitTracks) StartMultiTrack(s, now);
+            else StartSingleTrack(s, now);
         }
         catch (Exception ex)
         {
             diagnostic($"recording: failed to start: {ex.GetType().Name}: {ex.Message}");
+            CleanUpAfterFailedStart();
             MessageBox.Show(
                 $"Could not start recording:\n\n{ex.Message}",
                 "RemSound — recording",
@@ -65,13 +81,7 @@ internal sealed class RecordingController
                 MessageBoxIcon.Warning);
             return;
         }
-
-        // Wire taps. Each tap is independent — the recorder's source-mode filter decides
-        // whether to actually write the samples.
-        sender.OnSentSamples = active.WriteSent;
-        receiver.OnReceivedSamples = active.WriteReceived;
         RecordingStartedUtc = DateTime.UtcNow;
-        diagnostic($"recording: started → {active.FilePath} (source={s.Source}, format={s.FileFormat}, channels={s.ChannelMode})");
         RecordingStateChanged?.Invoke(true);
     }
 
@@ -80,30 +90,161 @@ internal sealed class RecordingController
     /// so the user knows where the file landed.</summary>
     public void Stop()
     {
-        var recorder = active;
-        if (recorder is null) return;
+        if (!IsRecording) return;
 
-        // Unhook taps FIRST so no more audio gets queued during the drain.
+        // Unhook every tap FIRST so no more audio is queued during the drain.
         sender.OnSentSamples = null;
         receiver.OnReceivedSamples = null;
+        receiver.SetPeerRecordTap(null, false);
+        receiver.OnRecordBlockComplete = null;
 
+        var single = active;
+        var me = meRecorder;
+        var peers = peerRecorders;
         active = null;
+        meRecorder = null;
+        peerRecorders = null;
+        rawMixLen = 0;
         RecordingStartedUtc = null;
-        try
-        {
-            recorder.Stop();
-            recorder.Dispose();
-        }
-        catch (Exception ex)
-        {
-            diagnostic($"recording: stop threw {ex.GetType().Name}: {ex.Message}");
-        }
+
+        StopRecorder(single);
+        StopRecorder(me);
+        if (peers is not null) foreach (var r in peers.Values) StopRecorder(r);
+
         RecordingStateChanged?.Invoke(false);
     }
 
     private void OnRecorderFinished(string path, long bytes)
     {
         diagnostic($"recording: finished → {path} ({bytes:N0} bytes)");
+    }
+
+    private void StartSingleTrack(RecordingSettings s, DateTime now)
+    {
+        var path = SingleTrackPath(s, now);
+        active = new AudioRecorder(s, diagnostic, OnRecorderFinished, path);
+        sender.OnSentSamples = active.WriteSent;
+        if (s.BypassShaping)
+        {
+            // Raw single file: the mixed receive tap is POST pan/EQ, so instead sum each peer's RAW
+            // block per render and flush it to the one recorder on the block boundary.
+            rawMixLen = 0;
+            receiver.SetPeerRecordTap(OnRawMixTap, raw: true);
+            receiver.OnRecordBlockComplete = FlushRawMix;
+        }
+        else
+        {
+            receiver.OnReceivedSamples = active.WriteReceived;   // the shaped mix — what you hear
+        }
+        diagnostic($"recording: started → {path} (source={s.Source}, format={s.FileFormat}, bypass={s.BypassShaping})");
+    }
+
+    private void StartMultiTrack(RecordingSettings s, DateTime now)
+    {
+        var folder = MultiTrackFolder(s, now);
+        Directory.CreateDirectory(folder);
+        var ext = AudioRecorder.ExtensionFor(s.FileFormat);
+        var time = now.ToString("HH-mm-ss");
+
+        // One track per connected peer (their received audio only), created up front on the UI thread
+        // so the audio-thread tap never has to open a file. Peers that join mid-recording aren't added.
+        var recs = new Dictionary<string, AudioRecorder>();
+        var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var byAddr = new Dictionary<string, string>();
+        foreach (var (addr, name) in ConnectedPeersProvider?.Invoke() ?? []) byAddr[addr.ToString()] = name;
+        foreach (var (addrKey, name) in byAddr)
+        {
+            var baseName = Sanitize(string.IsNullOrWhiteSpace(name) ? addrKey : name);
+            var fileName = $"{baseName} {time}";
+            if (!usedNames.Add(fileName)) fileName = $"{baseName} ({addrKey}) {time}";
+            var path = Path.Combine(folder, $"{fileName}.{ext}");
+            recs[addrKey] = new AudioRecorder(WithSource(s, RecordingSource.ReceivedOnly), diagnostic, OnRecorderFinished, path);
+        }
+        peerRecorders = recs;
+        receiver.SetPeerRecordTap(OnPeerRecordBlock, raw: s.BypassShaping);
+
+        // Your own track — your sent audio.
+        var mePath = Path.Combine(folder, $"{Sanitize(Environment.MachineName)} {time}.{ext}");
+        meRecorder = new AudioRecorder(WithSource(s, RecordingSource.SentOnly), diagnostic, OnRecorderFinished, mePath);
+        sender.OnSentSamples = meRecorder.WriteSent;
+
+        diagnostic($"recording: started multi-track → {folder} ({recs.Count} peer track(s), format={s.FileFormat}, bypass={s.BypassShaping})");
+    }
+
+    // Audio thread. Route each peer's block to that peer's recorder. peerRecorders is fully built at
+    // Start and only replaced with null at Stop, so a plain volatile read is safe.
+    private void OnPeerRecordBlock(IPEndPoint peer, ReadOnlyMemory<float> block)
+    {
+        var recs = peerRecorders;
+        if (recs is not null && recs.TryGetValue(peer.Address.ToString(), out var rec))
+            rec.WriteReceived(block, RenderRoute.Mixed);
+    }
+
+    // Audio thread. Sum a peer's raw block into the per-render mix for a single-file bypass recording.
+    private void OnRawMixTap(IPEndPoint peer, ReadOnlyMemory<float> block)
+    {
+        var span = block.Span;
+        if (rawMixAccum.Length < span.Length) rawMixAccum = new float[span.Length];
+        for (int i = 0; i < span.Length; i++) rawMixAccum[i] += span[i];
+        rawMixLen = span.Length;
+    }
+
+    // Audio thread. Flush the summed raw mix for this render to the single recorder, then reset.
+    private void FlushRawMix()
+    {
+        var rec = active;
+        int n = rawMixLen;
+        if (rec is not null && n > 0) rec.WriteReceived(rawMixAccum.AsMemory(0, n), RenderRoute.Mixed);
+        if (n > 0) { Array.Clear(rawMixAccum, 0, n); rawMixLen = 0; }
+    }
+
+    private void StopRecorder(AudioRecorder? r)
+    {
+        if (r is null) return;
+        try { r.Stop(); r.Dispose(); }
+        catch (Exception ex) { diagnostic($"recording: stop threw {ex.GetType().Name}: {ex.Message}"); }
+    }
+
+    private void CleanUpAfterFailedStart()
+    {
+        sender.OnSentSamples = null;
+        receiver.OnReceivedSamples = null;
+        receiver.SetPeerRecordTap(null, false);
+        receiver.OnRecordBlockComplete = null;
+        StopRecorder(active); active = null;
+        StopRecorder(meRecorder); meRecorder = null;
+        if (peerRecorders is not null) { foreach (var r in peerRecorders.Values) StopRecorder(r); peerRecorders = null; }
+    }
+
+    private static string BaseFolder(RecordingSettings s)
+    {
+        var f = s.ResolvedFolder();
+        return string.IsNullOrWhiteSpace(f) ? RecordingSettings.DefaultFolder() : f;
+    }
+
+    private static string DateFolder(RecordingSettings s, DateTime now) =>
+        Path.Combine(BaseFolder(s), now.ToString("yyyy-MM-dd"));
+
+    private static string SingleTrackPath(RecordingSettings s, DateTime now) =>
+        Path.Combine(DateFolder(s, now), $"{now:HH-mm-ss} RemSound recording.{AudioRecorder.ExtensionFor(s.FileFormat)}");
+
+    private static string MultiTrackFolder(RecordingSettings s, DateTime now) =>
+        Path.Combine(DateFolder(s, now), $"{now:HH-mm-ss} RemSound recording multi track");
+
+    private static RecordingSettings WithSource(RecordingSettings s, RecordingSource src)
+    {
+        var c = s.Clone();
+        c.Source = src;
+        return c;
+    }
+
+    private static string Sanitize(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var sb = new System.Text.StringBuilder(name.Length);
+        foreach (var ch in name) sb.Append(Array.IndexOf(invalid, ch) >= 0 ? '_' : ch);
+        var r = sb.ToString().Trim().TrimEnd('.').Trim();
+        return string.IsNullOrEmpty(r) ? "peer" : r;
     }
 
     /// <summary>Open the currently-configured recordings folder in Windows Explorer.

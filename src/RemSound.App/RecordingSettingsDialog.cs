@@ -125,6 +125,19 @@ internal sealed class RecordingSettingsDialog : Form
     private Control? compressionColumn;
     private TableLayoutPanel? grid;
 
+    private readonly AccessibleCheckBox splitTracksBox = new()
+    {
+        Text = "Split recording into separate &tracks — one file per peer, plus your own (Alt+T)",
+        AccessibleName = "Split recording into separate tracks, one file per peer plus your own send",
+        AutoSize = true,
+    };
+    private readonly AccessibleCheckBox bypassShapingBox = new()
+    {
+        Text = "Bypass pan and EQ when recording — record the &raw audio (Alt+R)",
+        AccessibleName = "Bypass pan and EQ when recording, record the raw audio",
+        AutoSize = true,
+    };
+
     private readonly Button okButton = new()
     {
         Text = "&OK",
@@ -153,6 +166,11 @@ internal sealed class RecordingSettingsDialog : Form
     public RecordingSettingsDialog(RecordingSettings current)
     {
         working = current?.Clone() ?? new RecordingSettings();
+
+        splitTracksBox.Checked = working.SplitTracks;
+        splitTracksBox.CheckedChanged += (_, _) => working.SplitTracks = splitTracksBox.Checked;
+        bypassShapingBox.Checked = working.BypassShaping;
+        bypassShapingBox.CheckedChanged += (_, _) => working.BypassShaping = bypassShapingBox.Checked;
         var initialSnapshot = working.Clone();
 
         Text = "Recording settings";
@@ -266,6 +284,20 @@ internal sealed class RecordingSettingsDialog : Form
         // Order: dialog body first (grid), then buttons docked beneath.
         Controls.Add(grid);
         Controls.Add(buttonRow);
+
+        // The two per-recording toggles sit across the top of the dialog. Added last so docking
+        // resolves them to the top strip, above the option columns.
+        var optionsRow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            FlowDirection = FlowDirection.TopDown,
+            AutoSize = true,
+            WrapContents = false,
+            Padding = new Padding(12, 12, 12, 0),
+        };
+        optionsRow.Controls.Add(splitTracksBox);
+        optionsRow.Controls.Add(bypassShapingBox);
+        Controls.Add(optionsRow);
 
         AcceptButton = okButton;
         CancelButton = cancelButton;

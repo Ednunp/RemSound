@@ -49,6 +49,10 @@ internal sealed class PlayoutEngine : IWaveProvider
     // peer's shaping from frame zero — the same "applies to future sessions too" idea as the
     // concealment artifact. Guarded by sessionsLock. A null value means explicitly cleared.
     private readonly Dictionary<IPAddress, PeerDspChain?> peerDspByAddress = new();
+    // Split-recording tap: one callback shared by every session (each passes its own Endpoint), plus
+    // whether to tap raw or shaped. Set on all current sessions and inherited by new ones, like the DSP.
+    private Action<IPEndPoint, ReadOnlyMemory<float>>? recordTap;
+    private bool recordTapRaw;
     private SessionPlayout[] sessionsSnapshot = [];
     // Per-route scratch. Each IWaveProvider surface (Mixed / WasapiLane / AsioLane) runs on
     // its own consumer thread in BothIndependent mode (WASAPI master producer + ASIO render
@@ -152,6 +156,22 @@ internal sealed class PlayoutEngine : IWaveProvider
                 if (s.Endpoint.Address.Equals(address)) s.SetDsp(chain);
         }
     }
+
+    /// <summary>Sets (or clears with null) the split-recording tap on every current and future session.
+    /// <paramref name="raw"/> selects the pre-pan/EQ (bypass) or post (shaped) block.</summary>
+    public void SetRecordTap(Action<IPEndPoint, ReadOnlyMemory<float>>? tap, bool raw)
+    {
+        lock (sessionsLock)
+        {
+            recordTap = tap;
+            recordTapRaw = raw;
+            foreach (var s in sessions.Values) s.SetRecordTap(tap, raw);
+        }
+    }
+
+    /// <summary>Fired once per rendered block, right after the mixed received tap — the block boundary a
+    /// single-file "bypass" recording uses to flush its per-peer sum.</summary>
+    public Action? OnRecordBlockComplete { get; set; }
 
     public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(MixSampleRate, MixChannels);
 
@@ -326,6 +346,7 @@ internal sealed class PlayoutEngine : IWaveProvider
                 // Inherit this peer's pan+EQ too, so a mid-stream / reconnect session is shaped from
                 // frame zero rather than only on the next SetPeerDsp call.
                 if (peerDspByAddress.TryGetValue(endpoint.Address, out var chain)) sp.SetDsp(chain);
+                if (recordTap is not null) sp.SetRecordTap(recordTap, recordTapRaw);
                 sessions[key] = sp;
                 sessionsSnapshot = sessions.Values.ToArray();
             }
@@ -801,6 +822,7 @@ internal sealed class PlayoutEngine : IWaveProvider
         // BothIndependent; without the tag both ended up in one recorder ring, doubling the
         // file's effective sample rate).
         DispatchReceivedSamples(mixBuf.AsMemory(0, outFloats), route);
+        OnRecordBlockComplete?.Invoke();
 
         Buffer.BlockCopy(mixBuf, 0, buffer, offset, outFloats * sizeof(float));
         return count;
@@ -877,6 +899,7 @@ internal sealed class PlayoutEngine : IWaveProvider
         // wasapi-slot ring (canonical single-lane slot in classic modes), so this fires
         // exactly once per real-time second.
         DispatchReceivedSamples(mixBuf.AsMemory(0, outFloats), RenderRoute.Mixed);
+        OnRecordBlockComplete?.Invoke();
 
         Buffer.BlockCopy(mixBuf, 0, buffer, offset, outFloats * sizeof(float));
         return count;

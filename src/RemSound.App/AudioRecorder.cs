@@ -135,19 +135,29 @@ internal sealed class AudioRecorder : IDisposable
     /// <summary>Constructs the recorder, opens the output file, and starts the writer
     /// thread. If anything fails the constructor throws and no cleanup is needed (no
     /// file has been opened yet).</summary>
-    public AudioRecorder(RecordingSettings settings, Action<string>? onDiagnostic, Action<string, long>? onFinished)
+    public AudioRecorder(RecordingSettings settings, Action<string>? onDiagnostic, Action<string, long>? onFinished, string? explicitPath = null)
     {
         this.settings = settings.Clone();
         this.onDiagnostic = onDiagnostic;
         this.onFinished = onFinished;
 
-        var folder = settings.ResolvedFolder();
-        if (string.IsNullOrWhiteSpace(folder)) folder = RecordingSettings.DefaultFolder();
-        Directory.CreateDirectory(folder);
+        if (explicitPath is not null)
+        {
+            // The RecordingController drives the folder/file naming (date folders, per-peer split
+            // tracks). Honour the path it hands us, creating the containing folder.
+            resolvedPath = explicitPath;
+            Directory.CreateDirectory(Path.GetDirectoryName(explicitPath) ?? RecordingSettings.DefaultFolder());
+        }
+        else
+        {
+            var folder = settings.ResolvedFolder();
+            if (string.IsNullOrWhiteSpace(folder)) folder = RecordingSettings.DefaultFolder();
+            Directory.CreateDirectory(folder);
 
-        var ext = ExtensionFor(settings.FileFormat);
-        var stamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
-        resolvedPath = Path.Combine(folder, $"RemSound-{stamp}.{ext}");
+            var ext = ExtensionFor(settings.FileFormat);
+            var stamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+            resolvedPath = Path.Combine(folder, $"RemSound-{stamp}.{ext}");
+        }
 
         // Writer creation happens on the constructor thread so any open errors are surfaced
         // synchronously to the caller.
@@ -565,7 +575,7 @@ internal sealed class AudioRecorder : IDisposable
     private float[] recvDirectionScratch = new float[DrainChunkFrames * MixChannels];
     private float[] monoScratch = new float[DrainChunkFrames];
 
-    private static string ExtensionFor(RecordingFileFormat format) => format switch
+    public static string ExtensionFor(RecordingFileFormat format) => format switch
     {
         RecordingFileFormat.Wav => "wav",
         RecordingFileFormat.Mp3 => "mp3",

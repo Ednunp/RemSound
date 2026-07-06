@@ -100,6 +100,16 @@ public sealed class RecordingSettings
     /// machine, the recorder falls back to the default and notes it in the diagnostics.</summary>
     public string? Folder { get; set; }
 
+    /// <summary>When true, a recording is written as a FOLDER of separate tracks instead of one mixed
+    /// file: one file per connected peer (only that peer's received audio) plus one file for your own
+    /// sent audio. Off by default. (Ed's multi-track request.)</summary>
+    public bool SplitTracks { get; set; }
+
+    /// <summary>When true, per-peer pan and EQ are BYPASSED for the recording — it captures the raw,
+    /// unshaped audio even though you still hear the shaped version live. When false (default), your
+    /// pan/EQ are baked into the recording (and on a split recording, into each peer's own track).</summary>
+    public bool BypassShaping { get; set; }
+
     public RecordingSettings Clone() => new()
     {
         Source = Source,
@@ -111,6 +121,8 @@ public sealed class RecordingSettings
         FlacBitsPerSample = FlacBitsPerSample,
         FlacCompressionLevel = FlacCompressionLevel,
         Folder = Folder,
+        SplitTracks = SplitTracks,
+        BypassShaping = BypassShaping,
     };
 
     /// <summary>Default folder path used when <see cref="Folder"/> is blank. Computed at

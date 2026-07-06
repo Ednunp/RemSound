@@ -198,6 +198,20 @@ public sealed class AudioReceiver : IDisposable
     public void SetPeerDsp(IPAddress address, PeerDspChain? chain) =>
         playoutEngine.SetPeerDsp(address, chain);
 
+    /// <summary>Sets (or clears with null) the split-recording tap on every current and future session,
+    /// so the recorder receives each peer's block separately. <paramref name="raw"/> = before pan/EQ
+    /// (bypass), else after. Called from the UI thread.</summary>
+    public void SetPeerRecordTap(Action<IPEndPoint, ReadOnlyMemory<float>>? tap, bool raw) =>
+        playoutEngine.SetRecordTap(tap, raw);
+
+    /// <summary>Fired once per rendered block, right after <see cref="OnReceivedSamples"/> — the block
+    /// boundary a single-file bypass recording uses to flush its per-peer sum.</summary>
+    public Action? OnRecordBlockComplete
+    {
+        get => playoutEngine.OnRecordBlockComplete;
+        set => playoutEngine.OnRecordBlockComplete = value;
+    }
+
     /// <summary>
     /// Optional callback invoked when the engine produces fully-processed mixed received
     /// audio (volume / mute / limiter all applied). Span is 48 kHz interleaved stereo

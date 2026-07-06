@@ -101,6 +101,13 @@ internal sealed class SessionPlayout : IDisposable
     // Per-peer pan + EQ, or null when this peer isn't shaped. Built on the UI thread and swapped in
     // atomically (volatile reference); the audio thread reads it once per block. See PeerDspChain.
     private volatile PeerDspChain? dsp;
+    // Split-recording tap: when set, each block this session produces is handed to the recorder as this
+    // one peer's audio — RAW (before pan/EQ) when recordRaw, else SHAPED (after). Set/cleared on the UI
+    // thread; read once per block on the audio thread. recordScratch is a reusable copy so the tap never
+    // allocates and never hands out the live output span.
+    private volatile Action<IPEndPoint, ReadOnlyMemory<float>>? recordTap;
+    private volatile bool recordRaw;
+    private float[] recordScratch = new float[2048];
     // Per-session RNG for noise concealment. Seeded from process-level Shared so each session
     // gets a different sequence — but we don't care about reproducibility, just character.
     private readonly Random concealRng = new(Random.Shared.Next());
@@ -337,6 +344,22 @@ internal sealed class SessionPlayout : IDisposable
     /// <summary>Sets (or clears with null) this session's per-peer pan+EQ chain. Takes effect on the
     /// next block. Called from the UI thread; the audio thread reads the reference lock-free.</summary>
     public void SetDsp(PeerDspChain? value) => dsp = value;
+
+    /// <summary>Sets (or clears with null) this session's split-recording tap. <paramref name="raw"/> =
+    /// deliver the block before pan/EQ (bypass); otherwise after. Takes effect on the next block.</summary>
+    public void SetRecordTap(Action<IPEndPoint, ReadOnlyMemory<float>>? tap, bool raw)
+    {
+        recordRaw = raw;
+        recordTap = tap;
+    }
+
+    private void EmitRecordTap(Action<IPEndPoint, ReadOnlyMemory<float>> tap, Span<float> block, int frames)
+    {
+        int n = frames * 2;
+        if (recordScratch.Length < n) recordScratch = new float[n];
+        block[..n].CopyTo(recordScratch);
+        tap(Endpoint, recordScratch.AsMemory(0, n));
+    }
 
     /// <summary>UTC time of the most recent successful audio write. Used by <see cref="AudioReceiver"/>
     /// to prune long-idle sessions so the dictionary doesn't grow unboundedly.</summary>
@@ -628,11 +651,16 @@ internal sealed class SessionPlayout : IDisposable
 
         // Read through the resampler and apply concealment on full underruns.
         ReadThroughResampler(output, outFrames);
+        // Split-recording tap, RAW variant — grab this peer's block BEFORE pan/EQ (bypass recording).
+        var tap = recordTap;
+        if (tap is not null && recordRaw) EmitRecordTap(tap, output, outFrames);
         // Per-peer pan + EQ: this peer's block is fully decoded and isolated here, immediately before
         // PlayoutEngine sums it into the mix — so shaping is per-peer and pre-mix, and being per-sample
         // it adds no buffering latency. Null (unshaped peer) skips the whole stage.
         var d = dsp;
         d?.Process(output, outFrames);
+        // Split-recording tap, SHAPED variant — after pan/EQ (the default, "record what you hear").
+        if (tap is not null && !recordRaw) EmitRecordTap(tap, output, outFrames);
         return outFrames;
     }
 
