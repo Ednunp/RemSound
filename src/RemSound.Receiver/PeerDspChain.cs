@@ -14,39 +14,46 @@ namespace RemSound.Receiver;
 /// </summary>
 public sealed class PeerDspChain
 {
-    private readonly float panL;
-    private readonly float panR;
-    private readonly bool hasPan;
+    // L/R output gains = pan (when enabled) folded together with the per-peer volume (always).
+    private readonly float gainL;
+    private readonly float gainR;
+    private readonly bool hasGain;
     // Same coefficients on both channels, but each needs its own filter instance because a biquad
     // carries per-channel state. left.Length == right.Length always.
     private readonly BiQuadFilter[] left;
     private readonly BiQuadFilter[] right;
 
-    private PeerDspChain(float panL, float panR, bool hasPan, BiQuadFilter[] left, BiQuadFilter[] right)
+    private PeerDspChain(float gainL, float gainR, bool hasGain, BiQuadFilter[] left, BiQuadFilter[] right)
     {
-        this.panL = panL;
-        this.panR = panR;
-        this.hasPan = hasPan;
+        this.gainL = gainL;
+        this.gainR = gainR;
+        this.hasGain = hasGain;
         this.left = left;
         this.right = right;
     }
 
-    /// <summary>True when this chain would do nothing (pan off/centre and EQ off/flat). Build returns
-    /// null in that case so an unshaped peer's <c>dsp</c> reference is null and it pays nothing.</summary>
-    public bool IsNoOp => !hasPan && left.Length == 0;
+    /// <summary>True when this chain would do nothing (unity gain — pan off/centre, volume 100% — and
+    /// EQ off/flat). Build returns null in that case so an unshaped peer's <c>dsp</c> reference is null
+    /// and it pays nothing.</summary>
+    public bool IsNoOp => !hasGain && left.Length == 0;
 
     /// <summary>Builds a chain for one peer from its saved shaping and the profile's two master
     /// switches. Returns null if there's nothing to do — pan disabled or centred, and EQ disabled or
     /// completely flat. Runs on the UI thread; the result is swapped onto the audio thread atomically.</summary>
     public static PeerDspChain? Build(PeerShaping? shaping, bool applyPan, bool applyEq)
     {
+        // Pan (only when enabled) and the per-peer volume (always applied) fold into one L/R gain.
         // Pan is a balance control: it keeps the peer's stereo image (never sums to mono). Centre is
         // unity on both sides; panning toward one side attenuates the OPPOSITE channel, reaching zero
-        // at the extreme. So a stereo signal just leans left or right rather than collapsing.
-        float pan = shaping is null ? 0f : Math.Clamp(shaping.Pan, -1f, 1f);
-        bool hasPan = applyPan && pan != 0f;
+        // at the extreme. Volume then scales both sides. So a stereo signal leans left/right and sits
+        // at the level you set, without ever collapsing to mono.
+        float pan = applyPan && shaping is not null ? Math.Clamp(shaping.Pan, -1f, 1f) : 0f;
         float panL = pan > 0f ? 1f - pan : 1f;
         float panR = pan < 0f ? 1f + pan : 1f;
+        float vol = shaping is null ? 1f : Math.Clamp(shaping.Volume, 0f, 1f);
+        float gainL = panL * vol;
+        float gainR = panR * vol;
+        bool hasGain = gainL != 1f || gainR != 1f;
 
         var l = new List<BiQuadFilter>();
         var r = new List<BiQuadFilter>();
@@ -64,7 +71,7 @@ public sealed class PeerDspChain
             }
         }
 
-        var chain = new PeerDspChain(panL, panR, hasPan, [.. l], [.. r]);
+        var chain = new PeerDspChain(gainL, gainR, hasGain, [.. l], [.. r]);
         return chain.IsNoOp ? null : chain;
     }
 
@@ -101,12 +108,12 @@ public sealed class PeerDspChain
                 output[2 * f + 1] = sr;
             }
         }
-        if (hasPan)
+        if (hasGain)
         {
             for (int f = 0; f < frames; f++)
             {
-                output[2 * f] *= panL;
-                output[2 * f + 1] *= panR;
+                output[2 * f] *= gainL;
+                output[2 * f + 1] *= gainR;
             }
         }
     }

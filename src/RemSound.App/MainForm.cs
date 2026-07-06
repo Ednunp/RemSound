@@ -157,6 +157,7 @@ public sealed class MainForm : Form
     private readonly AccessibleCheckBox enableEqForPeersBox = new() { Text = "Enable &EQ for peers (Alt+E)", AccessibleName = "Enable EQ for peers", AutoSize = true };
     private readonly AccessibleCheckBox enablePanForPeersBox = new() { Text = "Enable &pan for peers (Alt+P)", AccessibleName = "Enable pan for peers", AutoSize = true };
     private readonly ListBox panEqPeerList = new() { Width = 430, Height = 90, AccessibleName = "Peer to shape" };
+    private readonly TrackBar volumeSlider = new() { Minimum = 0, Maximum = 100, Value = 100, SmallChange = 1, LargeChange = 10, TickFrequency = 25, Width = 320 };
     private readonly TrackBar panSlider = new() { Minimum = 0, Maximum = 100, Value = 50, SmallChange = 1, LargeChange = 10, TickFrequency = 25, Width = 320 };
     private readonly Button resetPeerEqButton = new() { Text = "Set peer E&Q to default (Alt+Q)", AutoSize = true, AccessibleName = "Set peer EQ to default" };
     private readonly ListBox eqModeList = new() { Width = 320, Height = 40, IntegralHeight = false, AccessibleName = "EQ mode" };
@@ -3144,12 +3145,13 @@ public sealed class MainForm : Form
     /// and is saved per profile. See <see cref="PeerDspChain"/> / <see cref="PeerShaping"/>.</summary>
     private void BuildPanEqTab()
     {
-        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 8, AutoScroll = true };
+        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 9, AutoScroll = true };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
         enableEqForPeersBox.CheckedChanged += (_, _) => { if (!loadingPanEqControls) { MarkProfileDirty(); ApplyAllPeerShaping(); } };
         enablePanForPeersBox.CheckedChanged += (_, _) => { if (!loadingPanEqControls) { MarkProfileDirty(); ApplyAllPeerShaping(); } };
         panEqPeerList.SelectedIndexChanged += (_, _) => OnPanEqPeerSelected();
+        volumeSlider.ValueChanged += (_, _) => OnVolumeChanged();
         panSlider.ValueChanged += (_, _) => OnPanChanged();
         resetPeerEqButton.Click += (_, _) => OnResetPeerEq();
         eqModeList.Items.Add("3 band basic EQ");
@@ -3157,9 +3159,13 @@ public sealed class MainForm : Form
         eqModeList.SelectedIndexChanged += (_, _) => OnEqModeChanged();
 
         var peerLabel = new MnemonicLabel { Text = "Peer to shape (Alt+&U)", AutoSize = true, MnemonicTarget = panEqPeerList };
+        var volumeLabel = new MnemonicLabel { Text = "Vo&lume (Alt+L)", AutoSize = true, MnemonicTarget = volumeSlider };
         var panLabel = new MnemonicLabel { Text = "Pa&n (Alt+N)", AutoSize = true, MnemonicTarget = panSlider };
         var modeLabel = new MnemonicLabel { Text = "EQ &mode (Alt+M)", AutoSize = true, MnemonicTarget = eqModeList };
 
+        var volumeRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+        volumeRow.Controls.Add(volumeLabel);
+        volumeRow.Controls.Add(volumeSlider);
         var panRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
         panRow.Controls.Add(panLabel);
         panRow.Controls.Add(panSlider);
@@ -3171,10 +3177,11 @@ public sealed class MainForm : Form
         panel.Controls.Add(enablePanForPeersBox, 0, 1);
         panel.Controls.Add(peerLabel, 0, 2);
         panel.Controls.Add(panEqPeerList, 0, 3);
-        panel.Controls.Add(panRow, 0, 4);
-        panel.Controls.Add(resetPeerEqButton, 0, 5);
-        panel.Controls.Add(modeRow, 0, 6);
-        panel.Controls.Add(eqBandsPanel, 0, 7);
+        panel.Controls.Add(volumeRow, 0, 4);
+        panel.Controls.Add(panRow, 0, 5);
+        panel.Controls.Add(resetPeerEqButton, 0, 6);
+        panel.Controls.Add(modeRow, 0, 7);
+        panel.Controls.Add(eqBandsPanel, 0, 8);
         panEqTabPage.Controls.Add(panel);
 
         RefreshPanEqPeerList();
@@ -3243,10 +3250,13 @@ public sealed class MainForm : Form
         try
         {
             var s = GetOrCreateShaping(selectedShapingKey);
+            volumeSlider.Value = Math.Clamp((int)Math.Round(s.Volume * 100f), 0, 100);
+            UpdateVolumeAccessibleName();
             panSlider.Value = Math.Clamp((int)Math.Round(s.Pan * 50f) + 50, 0, 100);
             UpdatePanAccessibleName();
             eqModeList.SelectedIndex = s.EqMode == PeerEqMode.Advanced10Band ? 1 : 0;
             RebuildEqBandSliders();
+            volumeSlider.Enabled = enabled;
             panSlider.Enabled = enabled;
             resetPeerEqButton.Enabled = enabled;
             eqModeList.Enabled = enabled;
@@ -3278,6 +3288,17 @@ public sealed class MainForm : Form
         string desc = v == 50 ? "centre" : v < 50 ? $"{(50 - v) * 2} percent left" : $"{(v - 50) * 2} percent right";
         panSlider.AccessibleName = $"Pan: {desc}";
     }
+
+    private void OnVolumeChanged()
+    {
+        if (loadingPanEqControls || selectedShapingKey is null) return;
+        GetOrCreateShaping(selectedShapingKey).Volume = Math.Clamp(volumeSlider.Value / 100f, 0f, 1f);
+        UpdateVolumeAccessibleName();
+        ApplyPeerShaping(selectedShapingKey);
+        MarkProfileDirty();
+    }
+
+    private void UpdateVolumeAccessibleName() => volumeSlider.AccessibleName = $"Volume: {volumeSlider.Value} percent";
 
     private void OnEqModeChanged()
     {

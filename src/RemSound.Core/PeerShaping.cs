@@ -16,6 +16,10 @@ public sealed class PeerShaping
     /// <summary>-1 (full left) .. 0 (centre) .. +1 (full right).</summary>
     public float Pan { get; set; }
 
+    /// <summary>Per-peer playback level, 0..1 (1 = 100%, unity). An individual fader for this peer,
+    /// on top of the global volume. Always applied (no master switch); 100% is transparent.</summary>
+    public float Volume { get; set; } = 1f;
+
     /// <summary>Which EQ mode is currently active for this peer.</summary>
     public PeerEqMode EqMode { get; set; } = PeerEqMode.Simple3Band;
 
