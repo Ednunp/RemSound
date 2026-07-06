@@ -23,11 +23,19 @@ internal sealed class RecordingController
     private readonly RemSoundSettingsStore settings;
     private readonly Action<string> diagnostic;
     private AudioRecorder? active;
-    // Multi-track (split) state — one recorder per connected peer (keyed by address), plus one for your
-    // own send. Built entirely at Start and only replaced with null at Stop, so the audio-thread tap can
-    // read the dictionary with a plain volatile read.
-    private volatile Dictionary<string, AudioRecorder>? peerRecorders;
+    // Multi-track (split) state — one track per connected peer (keyed by address), plus one for your own
+    // send. Built entirely at Start and only replaced with null at Stop, so the audio-thread tap can read
+    // the dictionary with a plain volatile read. Each PeerTrack sums that peer's stream(s) per render and
+    // flushes once, so a peer sending on more than one lane is SUMMED (recorded as it sounds), not stacked.
+    private volatile Dictionary<string, PeerTrack>? peerTracks;
     private AudioRecorder? meRecorder;
+
+    private sealed class PeerTrack(AudioRecorder recorder)
+    {
+        public AudioRecorder Recorder { get; } = recorder;
+        public float[] Accum = new float[4096];
+        public int Len;
+    }
     // Single-file BYPASS state — sum each peer's RAW block per render, flush on the block boundary.
     private float[] rawMixAccum = new float[4096];
     private int rawMixLen;
@@ -44,7 +52,7 @@ internal sealed class RecordingController
         this.diagnostic = diagnostic;
     }
 
-    public bool IsRecording => active is not null || meRecorder is not null || peerRecorders is not null;
+    public bool IsRecording => active is not null || meRecorder is not null || peerTracks is not null;
 
     /// <summary>UTC clock at which the current recording started, or null when nothing is
     /// recording. Captured by <see cref="Start"/> and cleared by <see cref="Stop"/>. Used
@@ -100,16 +108,16 @@ internal sealed class RecordingController
 
         var single = active;
         var me = meRecorder;
-        var peers = peerRecorders;
+        var tracks = peerTracks;
         active = null;
         meRecorder = null;
-        peerRecorders = null;
+        peerTracks = null;
         rawMixLen = 0;
         RecordingStartedUtc = null;
 
         StopRecorder(single);
         StopRecorder(me);
-        if (peers is not null) foreach (var r in peers.Values) StopRecorder(r);
+        if (tracks is not null) foreach (var t in tracks.Values) StopRecorder(t.Recorder);
 
         RecordingStateChanged?.Invoke(false);
     }
@@ -148,7 +156,7 @@ internal sealed class RecordingController
 
         // One track per connected peer (their received audio only), created up front on the UI thread
         // so the audio-thread tap never has to open a file. Peers that join mid-recording aren't added.
-        var recs = new Dictionary<string, AudioRecorder>();
+        var recs = new Dictionary<string, PeerTrack>();
         var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var byAddr = new Dictionary<string, string>();
         foreach (var (addr, name) in ConnectedPeersProvider?.Invoke() ?? []) byAddr[addr.ToString()] = name;
@@ -158,10 +166,11 @@ internal sealed class RecordingController
             var fileName = $"{baseName} {time}";
             if (!usedNames.Add(fileName)) fileName = $"{baseName} ({addrKey}) {time}";
             var path = Path.Combine(folder, $"{fileName}.{ext}");
-            recs[addrKey] = new AudioRecorder(WithSource(s, RecordingSource.ReceivedOnly), diagnostic, OnRecorderFinished, path);
+            recs[addrKey] = new PeerTrack(new AudioRecorder(WithSource(s, RecordingSource.ReceivedOnly), diagnostic, OnRecorderFinished, path));
         }
-        peerRecorders = recs;
+        peerTracks = recs;
         receiver.SetPeerRecordTap(OnPeerRecordBlock, raw: s.BypassShaping);
+        receiver.OnRecordBlockComplete = FlushPeerTracks;
 
         // Your own track — your sent audio.
         var mePath = Path.Combine(folder, $"{Sanitize(Environment.MachineName)} {time}.{ext}");
@@ -175,9 +184,28 @@ internal sealed class RecordingController
     // Start and only replaced with null at Stop, so a plain volatile read is safe.
     private void OnPeerRecordBlock(IPEndPoint peer, ReadOnlyMemory<float> block)
     {
-        var recs = peerRecorders;
-        if (recs is not null && recs.TryGetValue(peer.Address.ToString(), out var rec))
-            rec.WriteReceived(block, RenderRoute.Mixed);
+        var tracks = peerTracks;
+        if (tracks is null || !tracks.TryGetValue(peer.Address.ToString(), out var t)) return;
+        // SUM this peer's block into their per-render buffer, so a peer sending on more than one lane is
+        // combined (recorded as it sounds) rather than the lanes stacking one after another.
+        var span = block.Span;
+        if (t.Accum.Length < span.Length) t.Accum = new float[span.Length];
+        for (int i = 0; i < span.Length; i++) t.Accum[i] += span[i];
+        t.Len = span.Length;
+    }
+
+    // Audio thread. Once per render, flush each peer's summed block to their file and reset.
+    private void FlushPeerTracks()
+    {
+        var tracks = peerTracks;
+        if (tracks is null) return;
+        foreach (var t in tracks.Values)
+        {
+            if (t.Len <= 0) continue;
+            t.Recorder.WriteReceived(t.Accum.AsMemory(0, t.Len), RenderRoute.Mixed);
+            Array.Clear(t.Accum, 0, t.Len);
+            t.Len = 0;
+        }
     }
 
     // Audio thread. Sum a peer's raw block into the per-render mix for a single-file bypass recording.
@@ -213,7 +241,7 @@ internal sealed class RecordingController
         receiver.OnRecordBlockComplete = null;
         StopRecorder(active); active = null;
         StopRecorder(meRecorder); meRecorder = null;
-        if (peerRecorders is not null) { foreach (var r in peerRecorders.Values) StopRecorder(r); peerRecorders = null; }
+        if (peerTracks is not null) { foreach (var t in peerTracks.Values) StopRecorder(t.Recorder); peerTracks = null; }
     }
 
     private static string BaseFolder(RecordingSettings s)
