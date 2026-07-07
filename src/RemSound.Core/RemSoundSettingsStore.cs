@@ -82,6 +82,10 @@ public sealed class RemSoundSettingsStore
         AppConfig.Load().SpeakStatusLineHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
     public void SaveSpeakStatusLineHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.SpeakStatusLineHotkey = HotkeyRecord.From(hotkey));
 
+    public HotkeyInfo LoadToggleAllPeerShapingHotkey() =>
+        AppConfig.Load().ToggleAllPeerShapingHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveToggleAllPeerShapingHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.ToggleAllPeerShapingHotkey = HotkeyRecord.From(hotkey));
+
     public bool LoadAcceptRemoteVolumeCommands(bool defaultValue = false) =>
         Try(() => Load()?.AcceptRemoteVolumeCommands) ?? defaultValue;
 

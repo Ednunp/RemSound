@@ -16,7 +16,7 @@ I built RemSound to solve a specific problem of my own. I do a lot of work on a 
   1. [Connectivity tab](#6-connectivity-tab)
   1. [Audio inputs and outputs tab](#7-audio-inputs-and-outputs-tab)
   1. [Audio profile tab](#8-audio-profile-tab)
-  1. [Pan and EQ tab](#9-pan-and-eq-tab)
+  1. [Volume, pan and EQ for peers tab](#9-volume-pan-and-eq-for-peers-tab)
   1. [ASIO and WASAPI](#10-asio-and-wasapi)
   1. [Peers — finding and connecting](#11-peers--finding-and-connecting)
   1. [How the network works (LAN, WAN, Tailscale)](#12-how-the-network-works-lan-wan-tailscale)
@@ -188,14 +188,14 @@ So in summary, on a locked profile:
 The main window has three parts, stacked top to bottom:
 
   1. A **menu bar** at the top with four menus — _File_ , _Record_ , _Options_ and _Help_. See Menus.
-  2. A **row of tabs** with three tabs — Connectivity, Audio inputs and outputs, Audio profile. A fourth tab, **Pan and EQ** , appears just before Audio profile if you switch it on in Preferences (it's off by default — see Pan and EQ tab). Each tab has its own Alt+letter shortcuts that only work when that tab is the one showing — so the same letter can do different things on different tabs without clashing.
+  2. A **row of tabs** with three tabs — Connectivity, Audio inputs and outputs, Audio profile. A fourth tab, **Volume, pan and EQ for peers** , appears just before Audio profile and is shown by default (you can hide it in Preferences — see Volume, pan and EQ for peers tab). Each tab has its own Alt+letter shortcuts that only work when that tab is the one showing — so the same letter can do different things on different tabs without clashing.
   3. A **status line** at the bottom that updates once a second with how long you've been connected, how many peers you have, whether sound is flowing, connection health, and RemSound's own CPU and memory usage.
 
 Tab| What it's for
 ---|---
 **Connectivity**|  Connected, discovered and remembered peers. Adding a peer by address. A connection status read-out.
 **Audio inputs and outputs**|  The ASIO driver picker (when an ASIO driver is installed), the Receive audio and Send my audio checkboxes, and all the device lists. Choosing a real driver in the picker brings up the ASIO device lists alongside the ordinary Windows ones; choosing _(none)_ hides them.
-**Pan and EQ** (optional)| Shape each connected peer's sound on its own — their volume, pan (left/right) and EQ. Hidden by default; tick “Show the Pan and EQ tab” on the General tab of Preferences to show it. See Pan and EQ tab.
+**Volume, pan and EQ for peers** (optional)| Shape each connected peer's sound on its own — their volume, pan (left/right) and EQ. Shown by default; untick “Show the volume, pan and EQ for peers tab” on the General tab of Preferences to hide it. See Volume, pan and EQ for peers tab.
 **Audio profile**|  Codec, packet size, lock-to-audio-clock, latency, continuous auto-tune, buffer smoothness, artefact sound. Split into an _Audio send parameters_ group and an _Audio receive parameters_ group.
 
 ### The system tray icon and its menu
@@ -275,7 +275,7 @@ Item| Shortcut| What it does
 **Profile passwords …**| Alt+O, W| Lists every profile alongside its password, so you can view or change any of them in one place.
 **Reset the default audio device prompt**|  Alt+O, R| Brings back the “use only the default audio device?” question if you previously ticked “Don't ask me this again” on it. See Following the Windows default audio device.
 **Enable / Disable Realtek ASIO**|  —| Only shown if a Realtek ASIO driver is installed. Lets you reverse the choice RemSound offered about disabling that driver (Realtek's generic ASIO driver tends to grab the wrong device and clash with your screen reader).
-**Preferences …**| Ctrl+P, or Alt+O, P| Opens the Preferences dialog, organised into five tabs (move between them with Ctrl+Tab, or the arrow keys when the tab names have focus): **General** — the profiles folder, accept remote volume commands, UPnP router opening, and “Show the Pan and EQ tab” (off by default; turns on the optional Pan and EQ tab); **Audio cues** — the cue list and its sounds (see Audio cue sounds); **Startup behaviour** — start minimised / with Windows / with a specific profile; **Update settings** — the update checks and install options; and **Logging** — enable logs, write logs now, and the log-folder housekeeping (see Logs and diagnostics). Esc or the Close button dismisses it.
+**Preferences …**| Ctrl+P, or Alt+O, P| Opens the Preferences dialog, organised into five tabs (move between them with Ctrl+Tab, or the arrow keys when the tab names have focus): **General** — the profiles folder, accept remote volume commands, UPnP router opening, and “Show the volume, pan and EQ for peers tab” (on by default; hides the Volume, pan and EQ for peers tab if you untick it); **Audio cues** — the cue list and its sounds (see Audio cue sounds); **Startup behaviour** — start minimised / with Windows / with a specific profile; **Update settings** — the update checks and install options; and **Logging** — enable logs, write logs now, and the log-folder housekeeping (see Logs and diagnostics). Esc or the Close button dismisses it.
 
 ### Help menu
 
@@ -310,7 +310,7 @@ Control| Shortcut| What it does
 **Receive audio**|  Alt+R| The master switch for receiving. When it's off, no sound plays out, no matter which output devices are ticked.
 **WASAPI outputs for received sound**|  Alt+3| Tick which ordinary Windows outputs (speakers, headsets) should play the received sound. Ticking more than one means the received sound plays out of all of them at once.
 **ASIO outputs for received sound**|  Alt+1| (Shown when an ASIO driver is chosen.) Tick which ASIO channel pairs should play the received sound.
-**Set volume for all received audio**|  Alt+V| A slider: the master volume for everything coming in. There is no separate volume per device or per person.
+**Master receive volume**|  Alt+V| A slider: the master volume for everything coming in. There is no separate volume per device here; per-person volume lives on the Volume, pan and EQ for peers tab.
 **Send my audio**|  Alt+S| The master switch for sending.
 **WASAPI outputs to send**|  Alt+4| Tick which Windows output devices to capture from — this captures whatever is currently playing on those speakers and sends it.
 **WASAPI inputs to send**|  Alt+5| Tick which Windows input devices to capture (microphones, line-ins).
@@ -399,30 +399,43 @@ Control| Shortcut| What it does
 
 Most people only need to pick a codec and a smoothness level, and leave everything else at its default.
 
-## 9. Pan and EQ tab
+## 9. Volume, pan and EQ for peers tab
 
-This tab lets you shape the sound of each peer you're connected to, one at a time. You can set how loud that person is, lean them to the left or right, and change their tone with an equaliser. It's handy when you have several people connected at once and want to mix them — for a jam session you might put the drummer over to the left, turn someone down a little, or brighten someone up.
+This tab lets you shape the sound of each peer you're connected to. You can set how loud that person is, lean them to the left or right, and change their tone with an equaliser. It's handy when you have several people connected at once and want to mix them — for a jam session you might put the drummer over to the left, turn someone down a little, or brighten someone up.
 
-The Pan and EQ tab is **optional and hidden by default**. To turn it on, tick **“ Show the Pan and EQ tab”** on the **General** tab of Preferences (Options → Preferences, or Ctrl+P). Once it's on, the tab appears just before the Audio profile tab.
+The tab is **shown by default**. If you don't want it, untick **“ Show the volume, pan and EQ for peers tab”** on the **General** tab of Preferences (Options → Preferences, or Ctrl+P). When it's on, the tab appears just before the Audio profile tab.
 
-### Shaping one peer at a time
+### Turning it on, and choosing who to shape
 
-You always work on a single peer. First pick the person you want from the peer list, then use the controls below it — they all act on whoever you've selected. The tab, from top to bottom:
+There's a single master switch, then a list of the people you're connected to. Tick a person in the list to shape them; whoever your cursor is on in the list is the person the controls below are editing. So you arrow to someone, tab down, and their volume, pan and EQ are right there. Unticking a person leaves their settings intact but passes their sound through untouched — a quick per-person bypass. The tab, from top to bottom:
 
 Control| What it does
 ---|---
-**Enable EQ for peers** (checkbox)| A master switch for the equaliser. When it's off, any EQ you've dialled in has no effect — but you can still set it up ready for when you turn it on.
-**Enable pan for peers** (checkbox)| A master switch for panning. When it's off, any panning you've set has no effect, though you can still set it up in advance. Volume is different — it has no switch and is always in effect (but at 100% it changes nothing).
-**Peer to shape** (list)| The peers you're currently connected to. Pick the one you want to work on. Everything below acts on the peer you select here.
+**Enable volume, pan and EQ for all peers** (checkbox)| The one master switch. When it's off, everyone passes through untouched — but you can still set everything up ready for when you turn it on. There's also a global keyboard shortcut to flip this switch from anywhere (you set the key yourself in Keyboard shortcuts — it starts unset).
+**Peers** (checklist)| The people you're currently connected to. Tick the ones you want shaped; untick to bypass a person while keeping their settings. Move your cursor onto a person to edit them — everything below acts on whoever the cursor is on.
 **Volume** (slider)| An individual level for that one peer, from 0 to 100% (100% means unchanged). It sits on top of your main volume, so you can balance people against each other.
 **Pan** (slider)| Leans the peer to the left or right. Centred by default. It keeps the peer's stereo sound — it never folds them down to mono.
-**Set peer EQ to default** (button)| Puts that peer's EQ sliders — both the 3-band and the 12-band — back to flat. It leaves the pan and volume alone.
-**EQ mode** (picker)| Two choices: _3 band basic EQ_ or _12 band advanced EQ_. This chooses which set of band sliders you see below.
-**EQ band sliders**|  The sliders for whichever EQ mode is chosen. Each one runs from −12 dB to +12 dB, with flat (no change) in the middle. The 3-band has **Bass, Mids, Treble**. The 12-band has **31 Hz, 63 Hz, 80 Hz, 125 Hz, 250 Hz, 500 Hz, 1 kHz, 2 kHz, 4 kHz, 6 kHz, 8 kHz** and **16 kHz**.
+**Set peer EQ to default** (button)| Puts that peer's EQ back to flat — all three modes at once (the 3-band, the 12-band and the parametric bands). It leaves the pan and volume alone.
+**EQ mode** (picker)| Three choices: _3 band simple EQ_ , _12 band advanced graphic EQ_ or _16 band parametric EQ_. This chooses which EQ controls you see below.
+**EQ controls**|  For the two graphic modes, a set of sliders (see below). For the parametric mode, an Add band button and a list of your bands. Details follow.
 
-The two EQ modes are kept separate. Switching between the 3-band and the 12-band keeps each one's own settings — nothing carries across from one to the other.
+### The three EQ modes
 
-Everything here updates in **real time** — you hear the change as you move a control — and it adds no extra delay to the audio. All of it (the two switches, and each peer's volume, pan and EQ) is saved with the profile.
+**3 band simple EQ** and **12 band advanced graphic EQ** are graphic equalisers: a set of sliders at fixed frequencies, each running from −12 dB to +12 dB with flat (no change) in the middle. The 3-band has **Bass, Mids, Treble**. The 12-band has **31 Hz, 63 Hz, 80 Hz, 125 Hz, 250 Hz, 500 Hz, 1 kHz, 2 kHz, 4 kHz, 6 kHz, 8 kHz** and **16 kHz**. Each slider reads its level out in words, for example “plus 3 dB”, “minus 6 dB” or “flat”.
+
+**16 band parametric EQ** lets you place your own bands wherever you want them, up to sixteen. Instead of fixed sliders you build a list of bands:
+
+  * Tab past the mode picker to the **Add band** button and press it. A small dialog opens with three boxes: a **start frequency** , an **end frequency** and a **gain in dB** (from −12 to +12). Each box you can type into or spin with the arrow keys; they only accept sensible numbers. As you change the values you hear the band on that peer straight away. Press **OK** to add it, or **Cancel** / **Escape** to drop it.
+  * Back on the tab, tab to the **Bands** list to hear your bands, one per row, each read out as its range and level — for example “200 Hz to 800 Hz, plus 3 dB”. The list is sorted low to high, so the bass bands are at the top and the treble at the bottom.
+  * To remove a band, land on it and press **Delete** , or use the **Delete band** button. You can select several at once (hold Shift and arrow, or hold Ctrl and arrow then Space to pick out individual ones) and delete them together.
+
+
+
+Each parametric band is a boost or cut spread across the range between its start and end frequencies. A wide range affects a broad sweep of the sound; a narrow one is more surgical.
+
+The three modes are kept separate. Switching between them keeps each one's own settings — nothing carries across from one to another. Only the mode you've picked is the one you hear.
+
+Everything here updates in **real time** — you hear the change as you move a control — and it adds no extra delay to the audio. All of it (the master switch's setting is saved, and each peer's tick, volume, pan and EQ) is stored with the profile. The one exception is the global “toggle everything” keyboard shortcut, which is machine-wide rather than per-profile. There's also a small EQ response graph on the tab; it's purely a visual picture of the shape you've dialled in and plays no part in how you use the tab with a screen reader.
 
 ## 10. ASIO and WASAPI
 
@@ -783,19 +796,21 @@ Alt+I| Focus the Auto-tune latency interval combo box. It drives the timing for 
 Alt+B| Focus Buffer smoothness
 Alt+A| Focus Artefact sound type
 
-### Pan and EQ tab
+### Volume, pan and EQ for peers tab
 
-Only present when the Pan and EQ tab is switched on (tick “Show the Pan and EQ tab” on the General tab of Preferences). See Pan and EQ tab.
+Present whenever the Volume, pan and EQ for peers tab is showing (it's shown by default; the toggle is “Show the volume, pan and EQ for peers tab” on the General tab of Preferences). See Volume, pan and EQ for peers tab.
 
 Key| Action
 ---|---
-Alt+E| Toggle Enable EQ for peers
-Alt+P| Toggle Enable pan for peers
-Alt+U| Focus the peer to shape
+Alt+E| Toggle Enable volume, pan and EQ for all peers
+Alt+U| Focus the Peers checklist
 Alt+L| Focus the Volume slider
 Alt+N| Focus the Pan slider
 Alt+Q| Set peer EQ to default
 Alt+M| Focus the EQ mode picker
+Alt+A| Add band (parametric EQ mode only)
+Alt+B| Focus the Bands list (parametric EQ mode only)
+Alt+D| Delete band (parametric EQ mode only)
 
 ### File menu shortcuts (work from any tab)
 
@@ -852,6 +867,7 @@ Send Windows global volume up to peers| Tell every connected peer to nudge their
 Send Windows global volume down to peers| The same, but lowering.| Unset
 Send Windows global mute toggle to peers| Tell every connected peer to toggle their Windows mute.| Unset
 Speak the RemSound status information| Read the whole status line out loud through your screen reader — the connection time, how many peers you have, whether sound is flowing, and how healthy the link is — from anywhere, even with RemSound in the tray. Just for screen-reader users; see Hearing the status on demand below.| Unset
+Toggle volume, pan and EQ for all peers| Flip the one master switch on the Volume, pan and EQ for peers tab from anywhere, so you can drop all your per-person shaping in and out without leaving the app you're in. See that tab for what the switch does.| Unset
 
 You can change any of these to whatever combination you prefer. Each accepts modifiers (Ctrl, Shift, Alt) plus one ordinary key.
 
@@ -1153,7 +1169,7 @@ Reached via **Record → Recording settings**. Two tickboxes sit at the top, the
 Control| What it does
 ---|---
 **Split recording into separate tracks** (tickbox)| Instead of one mixed file, a recording becomes a _folder_ with one file per connected peer — each holding only that peer's sound — plus one file for your own send. Which of those files you get follows the Recording source choice below: _Received only_ gives you the peer files; _Both_ gives the peer files plus your own; _Sent only_ gives just your own.
-**Bypass pan and EQ when recording** (tickbox)| Records the raw sound — before any volume, pan or EQ you've set on the Pan and EQ tab — even though you still hear the shaped version. Left off (the default), the recording captures what you actually hear, including your shaping; and on a split recording each peer's own file carries that peer's own shaping.
+**Bypass pan and EQ when recording** (tickbox)| Records the raw sound — before any volume, pan or EQ you've set on the Volume, pan and EQ for peers tab — even though you still hear the shaped version. Left off (the default), the recording captures what you actually hear, including your shaping; and on a split recording each peer's own file carries that peer's own shaping.
 List| Shortcut| What goes in it
 ---|---|---
 **Recording source**|  Alt+S| Receive only / Send only / Both. See the source explanation above.

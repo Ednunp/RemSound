@@ -1,0 +1,16 @@
+[Unit]
+Description=Periodic update check for remsound-relay
+
+[Timer]
+# Fires 2 minutes after boot, then every hour, with a 10-minute random
+# jitter so multiple relays don't all hit the GitHub API at the same
+# instant. Persistent=true means missed runs (host was off) catch up on
+# the next boot rather than silently skipping.
+OnBootSec=2min
+OnUnitActiveSec=1h
+RandomizedDelaySec=10min
+Persistent=true
+Unit=remsound-relay-update.service
+
+[Install]
+WantedBy=timers.target

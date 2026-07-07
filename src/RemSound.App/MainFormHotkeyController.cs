@@ -35,6 +35,9 @@ internal sealed class MainFormHotkeyController : IDisposable
     // specific (issue #13); unset by default. Global so it reads the status even when RemSound isn't
     // focused — the case NVDA can't otherwise cover.
     private readonly Action speakStatusLine;
+    // Toggle the "Enable volume, pan and EQ for all peers" master switch from anywhere. Unset by
+    // default; global so it works even when RemSound isn't focused.
+    private readonly Action toggleAllPeerShaping;
     private Form? owner;
     private HotkeyInfo sendMuteHotkey;
     private HotkeyInfo receiveMuteHotkey;
@@ -50,6 +53,7 @@ internal sealed class MainFormHotkeyController : IDisposable
     private HotkeyInfo systemMuteToggleHotkey;
     private HotkeyInfo quickProfileSwitchHotkey;
     private HotkeyInfo speakStatusLineHotkey;
+    private HotkeyInfo toggleAllPeerShapingHotkey;
     private GlobalHotkey? sendMuteGlobalHotkey;
     private GlobalHotkey? receiveMuteGlobalHotkey;
     private GlobalHotkey? trayGlobalHotkey;
@@ -64,6 +68,7 @@ internal sealed class MainFormHotkeyController : IDisposable
     private GlobalHotkey? systemMuteToggleGlobalHotkey;
     private GlobalHotkey? quickProfileSwitchGlobalHotkey;
     private GlobalHotkey? speakStatusLineGlobalHotkey;
+    private GlobalHotkey? toggleAllPeerShapingGlobalHotkey;
 
     /// <summary>Optional log sink. MainForm wires this to <c>logFile.Event(...)</c> so each
     /// hotkey change writes a clear trail of "user opened capture", "captured X", "registered X
@@ -94,7 +99,8 @@ internal sealed class MainFormHotkeyController : IDisposable
         Action sendSystemVolumeDown,
         Action sendSystemMuteToggle,
         Action quickProfileSwitch,
-        Action speakStatusLine)
+        Action speakStatusLine,
+        Action toggleAllPeerShaping)
     {
         this.settingsStore = settingsStore;
         this.toggleSend = toggleSend;
@@ -111,6 +117,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         this.sendSystemMuteToggle = sendSystemMuteToggle;
         this.quickProfileSwitch = quickProfileSwitch;
         this.speakStatusLine = speakStatusLine;
+        this.toggleAllPeerShaping = toggleAllPeerShaping;
         sendMuteHotkey = settingsStore.LoadSendMuteHotkey();
         receiveMuteHotkey = settingsStore.LoadReceiveMuteHotkey();
         trayHotkey = settingsStore.LoadTrayHotkey();
@@ -125,6 +132,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         systemMuteToggleHotkey = settingsStore.LoadSystemMuteToggleHotkey();
         quickProfileSwitchHotkey = settingsStore.LoadQuickProfileSwitchHotkey();
         speakStatusLineHotkey = settingsStore.LoadSpeakStatusLineHotkey();
+        toggleAllPeerShapingHotkey = settingsStore.LoadToggleAllPeerShapingHotkey();
     }
 
     public void Initialize(Form ownerForm)
@@ -144,6 +152,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         systemMuteToggleGlobalHotkey = new GlobalHotkey(ownerForm);
         quickProfileSwitchGlobalHotkey = new GlobalHotkey(ownerForm);
         speakStatusLineGlobalHotkey = new GlobalHotkey(ownerForm);
+        toggleAllPeerShapingGlobalHotkey = new GlobalHotkey(ownerForm);
         sendMuteGlobalHotkey.Pressed += () => InvokeOnOwner(toggleSend);
         receiveMuteGlobalHotkey.Pressed += () => InvokeOnOwner(toggleReceive);
         trayGlobalHotkey.Pressed += () => InvokeOnOwner(toggleTray);
@@ -158,6 +167,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         systemMuteToggleGlobalHotkey.Pressed += () => InvokeOnOwner(sendSystemMuteToggle);
         quickProfileSwitchGlobalHotkey.Pressed += () => InvokeOnOwner(quickProfileSwitch);
         speakStatusLineGlobalHotkey.Pressed += () => InvokeOnOwner(speakStatusLine);
+        toggleAllPeerShapingGlobalHotkey.Pressed += () => InvokeOnOwner(toggleAllPeerShaping);
         RegisterSendMuteHotkey();
         RegisterReceiveMuteHotkey();
         RegisterTrayHotkey();
@@ -172,6 +182,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         RegisterSystemMuteToggleHotkey();
         RegisterQuickProfileSwitchHotkey();
         RegisterSpeakStatusLineHotkey();
+        RegisterToggleAllPeerShapingHotkey();
     }
 
     /// <summary>Re-read every hotkey from the (now machine-wide) settings store and re-register it.
@@ -193,6 +204,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         systemMuteToggleHotkey = settingsStore.LoadSystemMuteToggleHotkey();
         quickProfileSwitchHotkey = settingsStore.LoadQuickProfileSwitchHotkey();
         speakStatusLineHotkey = settingsStore.LoadSpeakStatusLineHotkey();
+        toggleAllPeerShapingHotkey = settingsStore.LoadToggleAllPeerShapingHotkey();
         RegisterSendMuteHotkey();
         RegisterReceiveMuteHotkey();
         RegisterTrayHotkey();
@@ -207,6 +219,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         RegisterSystemMuteToggleHotkey();
         RegisterQuickProfileSwitchHotkey();
         RegisterSpeakStatusLineHotkey();
+        RegisterToggleAllPeerShapingHotkey();
     }
 
     public void ShowKeyboardShortcutsDialog(IWin32Window dialogOwner)
@@ -323,6 +336,7 @@ internal sealed class MainFormHotkeyController : IDisposable
             list.Items.Add($"Send Windows global mute toggle to peers: {systemMuteToggleHotkey}");
             list.Items.Add($"Quick profile switch (open a list of all profiles): {quickProfileSwitchHotkey}");
             list.Items.Add($"Speak the RemSound status information from anywhere (screen reader only): {speakStatusLineHotkey}");
+            list.Items.Add($"Toggle volume, pan and EQ for all peers: {toggleAllPeerShapingHotkey}");
             if (prev >= 0 && prev < list.Items.Count)
             {
                 list.SelectedIndex = prev;
@@ -361,6 +375,7 @@ internal sealed class MainFormHotkeyController : IDisposable
                 case 11: ChangeSystemMuteToggleHotkey(dialog); break;
                 case 12: ChangeQuickProfileSwitchHotkey(dialog); break;
                 case 13: ChangeSpeakStatusLineHotkey(dialog); break;
+                case 14: ChangeToggleAllPeerShapingHotkey(dialog); break;
                 default: return;
             }
             RefreshList();
@@ -394,6 +409,7 @@ internal sealed class MainFormHotkeyController : IDisposable
                 case 11: ApplyUnset("send-system-mute-toggle", h => systemMuteToggleHotkey = h, RegisterSystemMuteToggleHotkey, settingsStore.SaveSystemMuteToggleHotkey); break;
                 case 12: ApplyUnset("quick-profile-switch", h => quickProfileSwitchHotkey = h, RegisterQuickProfileSwitchHotkey, settingsStore.SaveQuickProfileSwitchHotkey); break;
                 case 13: ApplyUnset("speak-status-line", h => speakStatusLineHotkey = h, RegisterSpeakStatusLineHotkey, settingsStore.SaveSpeakStatusLineHotkey); break;
+                case 14: ApplyUnset("toggle-all-peer-shaping", h => toggleAllPeerShapingHotkey = h, RegisterToggleAllPeerShapingHotkey, settingsStore.SaveToggleAllPeerShapingHotkey); break;
                 default: return;
             }
             RefreshList();
@@ -475,6 +491,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         systemMuteToggleGlobalHotkey?.Dispose();
         quickProfileSwitchGlobalHotkey?.Dispose();
         speakStatusLineGlobalHotkey?.Dispose();
+        toggleAllPeerShapingGlobalHotkey?.Dispose();
     }
 
     public HotkeyInfo SendMuteHotkey => sendMuteHotkey;
@@ -491,6 +508,7 @@ internal sealed class MainFormHotkeyController : IDisposable
     public HotkeyInfo SystemMuteToggleHotkey => systemMuteToggleHotkey;
     public HotkeyInfo QuickProfileSwitchHotkey => quickProfileSwitchHotkey;
     public HotkeyInfo SpeakStatusLineHotkey => speakStatusLineHotkey;
+    public HotkeyInfo ToggleAllPeerShapingHotkey => toggleAllPeerShapingHotkey;
 
     /// <summary>Open the capture dialog, log what came back, and (on a successful capture)
     /// run <paramref name="apply"/> with the captured hotkey. Centralises the boilerplate
@@ -636,6 +654,13 @@ internal sealed class MainFormHotkeyController : IDisposable
         settingsStore.SaveSpeakStatusLineHotkey(h);
     });
 
+    private void ChangeToggleAllPeerShapingHotkey(IWin32Window dialogOwner) => ChangeHotkey(dialogOwner, "toggle-all-peer-shaping", h =>
+    {
+        toggleAllPeerShapingHotkey = h;
+        RegisterToggleAllPeerShapingHotkey();
+        settingsStore.SaveToggleAllPeerShapingHotkey(h);
+    });
+
     // Hotkeys come in two flavours and need different Windows-side registration:
     //   * Toggle hotkeys (mute, tray show/hide) — re-firing on hold would flip state back
     //     and forth. Registered with MOD_NOREPEAT (allowRepeat=false). One press, one fire.
@@ -667,6 +692,9 @@ internal sealed class MainFormHotkeyController : IDisposable
     // Speak status line is a one-shot (press → read the status aloud once); MOD_NOREPEAT (the default)
     // keeps a held key from re-triggering the speech over and over.
     private void RegisterSpeakStatusLineHotkey() => RegisterIfSet(speakStatusLineGlobalHotkey, speakStatusLineHotkey, "speak status line");
+    // Toggle all-peer shaping is a one-shot toggle; MOD_NOREPEAT (the default) stops a held key
+    // flipping the master switch on/off/on at auto-repeat rate.
+    private void RegisterToggleAllPeerShapingHotkey() => RegisterIfSet(toggleAllPeerShapingGlobalHotkey, toggleAllPeerShapingHotkey, "toggle all-peer shaping");
 
     private void RegisterIfSet(GlobalHotkey? globalHotkey, HotkeyInfo hotkey, string description, bool allowRepeat = false)
     {

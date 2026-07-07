@@ -183,12 +183,15 @@ public sealed class Profile
     /// (the connection simply waits or drops rather than moving). Off by default. (#17)</summary>
     public bool LockPeerAddresses { get; set; }
 
-    // === Per-peer pan and EQ (jam mixing) ===
-    /// <summary>Master switch for this profile: apply each connected peer's saved PAN. Off by default.
-    /// The pan values themselves live in <see cref="PeerShaping"/>.</summary>
-    public bool EnablePanForPeers { get; set; }
+    // === Per-peer volume, pan and EQ (jam mixing) ===
+    /// <summary>Single master switch for this profile: apply each connected peer's saved VOLUME, PAN and
+    /// EQ. Off by default. The values themselves live in <see cref="PeerShaping"/>; a peer can also be
+    /// bypassed individually via <see cref="RemSound.Core.PeerShaping.Enabled"/>.</summary>
+    public bool EnableAllPeerShaping { get; set; }
 
-    /// <summary>Master switch for this profile: apply each connected peer's saved EQ. Off by default.</summary>
+    /// <summary>Legacy separate master switches (pre-collapse). Kept only so older profile JSON still
+    /// deserialises and migrates: on load, either being true turns the single master switch on.</summary>
+    public bool EnablePanForPeers { get; set; }
     public bool EnableEqForPeers { get; set; }
 
     /// <summary>Per-peer pan + EQ, keyed by the SAME peer-entry string used in

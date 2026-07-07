@@ -1,0 +1,13 @@
+[Unit]
+Description=Check for and apply remsound-relay updates from GitHub
+Documentation=file:///usr/local/sbin/remsound-relay-update.sh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/remsound-relay-update.sh
+Restart=no
+# StandardOutput goes to the journal as well as the updater's log file.
+StandardOutput=journal
+StandardError=journal

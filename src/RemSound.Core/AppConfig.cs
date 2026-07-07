@@ -68,11 +68,12 @@ public sealed class AppConfig
     /// already running quietly". Default false.</summary>
     public bool StartMinimised { get; set; }
 
-    /// <summary>If true, the main window shows a "Pan and EQ" tab (positioned before "Audio profile")
-    /// for setting per-peer panning and EQ. Off by default; toggled by "Show pan and EQ tab" on the
-    /// Preferences General tab. Machine-wide (a UI-visibility preference, like which tabs exist) — the
-    /// pan/EQ VALUES are saved per profile, in <see cref="Profile.PeerShaping"/>.</summary>
-    public bool ShowPanEqTab { get; set; }
+    /// <summary>If true (the default), the main window shows a "Volume, pan and EQ for peers" tab
+    /// (positioned before "Audio profile") for setting per-peer volume, panning and EQ. Toggled by
+    /// "Show the volume, pan and EQ for peers tab" on the Preferences General tab. Machine-wide (a
+    /// UI-visibility preference, like which tabs exist) — the shaping VALUES are saved per profile, in
+    /// <see cref="Profile.PeerShaping"/>.</summary>
+    public bool ShowPanEqTab { get; set; } = true;
 
     /// <summary>If true (the default), RemSound plays the startup cue once, right after this
     /// copy wins the single-instance takeover and before the profile loads. Machine-wide (not
@@ -173,6 +174,10 @@ public sealed class AppConfig
     public HotkeyRecord? SystemMuteToggleHotkey { get; set; }
     public HotkeyRecord? QuickProfileSwitchHotkey { get; set; }
     public HotkeyRecord? SpeakStatusLineHotkey { get; set; }
+    /// <summary>Global shortcut that toggles the "Enable volume, pan and EQ for all peers" master
+    /// switch. Machine-wide and unset by default; NOT stored in any profile (unlike the shaping
+    /// values). The user binds it in Keyboard shortcuts.</summary>
+    public HotkeyRecord? ToggleAllPeerShapingHotkey { get; set; }
 
     /// <summary>True once the one-time "your keyboard shortcuts are now shared across profiles" notice
     /// has been shown (to an upgrader), or silently marked done on a fresh install that had nothing to

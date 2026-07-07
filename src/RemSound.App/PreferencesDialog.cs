@@ -273,8 +273,8 @@ internal sealed class PreferencesDialog : Form
 
     private readonly AccessibleCheckBox showPanEqTabBox = new()
     {
-        Text = "Show the Pan and E&Q tab, for per-peer pan and EQ (Alt+Q)",
-        AccessibleName = "Show the Pan and EQ tab",
+        Text = "Show the volume, pan and E&Q for peers tab (Alt+Q)",
+        AccessibleName = "Show the volume, pan and EQ for peers tab",
         AutoSize = true,
     };
 

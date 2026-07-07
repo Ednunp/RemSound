@@ -13,8 +13,10 @@ publish/
 CLAUDE.md
 
 # Dev notes — running development chronology and per-investigation plans. Useful locally
-# for the author; not intended for the public repo.
+# for the author; not intended for the public repo. The agent handover holds local paths,
+# the Pi address, and the SSH key path, so it must stay out of the public repo.
 HANDOVER.md
+REMSOUND_HANDOVER.md
 PLAN-*.md
 
 # IDE / editor

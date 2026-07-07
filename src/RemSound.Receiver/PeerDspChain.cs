@@ -37,29 +37,44 @@ public sealed class PeerDspChain
     /// and it pays nothing.</summary>
     public bool IsNoOp => !hasGain && left.Length == 0;
 
-    /// <summary>Builds a chain for one peer from its saved shaping and the profile's two master
-    /// switches. Returns null if there's nothing to do — pan disabled or centred, and EQ disabled or
-    /// completely flat. Runs on the UI thread; the result is swapped onto the audio thread atomically.</summary>
-    public static PeerDspChain? Build(PeerShaping? shaping, bool applyPan, bool applyEq)
+    /// <summary>Builds a chain for one peer from its saved shaping and the profile's single master
+    /// switch (volume + pan + EQ together). Returns null if there's nothing to do — master off, or pan
+    /// centred, volume 100% and EQ flat. Runs on the UI thread; the result is swapped onto the audio
+    /// thread atomically.</summary>
+    public static PeerDspChain? Build(PeerShaping? shaping, bool enabled)
     {
-        // Pan (only when enabled) and the per-peer volume (always applied) fold into one L/R gain.
-        // Pan is a balance control: it keeps the peer's stereo image (never sums to mono). Centre is
-        // unity on both sides; panning toward one side attenuates the OPPOSITE channel, reaching zero
-        // at the extreme. Volume then scales both sides. So a stereo signal leans left/right and sits
-        // at the level you set, without ever collapsing to mono.
-        float pan = applyPan && shaping is not null ? Math.Clamp(shaping.Pan, -1f, 1f) : 0f;
+        // Master off (or no saved shaping) → the peer passes through untouched.
+        if (!enabled || shaping is null) return null;
+
+        // Pan and the per-peer volume fold into one L/R gain. Pan is a balance control: it keeps the
+        // peer's stereo image (never sums to mono). Centre is unity on both sides; panning toward one
+        // side attenuates the OPPOSITE channel, reaching zero at the extreme. Volume then scales both
+        // sides. So a stereo signal leans left/right and sits at the level you set, never collapsing.
+        float pan = Math.Clamp(shaping.Pan, -1f, 1f);
         float panL = pan > 0f ? 1f - pan : 1f;
         float panR = pan < 0f ? 1f + pan : 1f;
-        float vol = shaping is null ? 1f : Math.Clamp(shaping.Volume, 0f, 1f);
+        float vol = Math.Clamp(shaping.Volume, 0f, 1f);
         float gainL = panL * vol;
         float gainR = panR * vol;
         bool hasGain = gainL != 1f || gainR != 1f;
 
         var l = new List<BiQuadFilter>();
         var r = new List<BiQuadFilter>();
-        if (applyEq && shaping is not null)
+        var mode = shaping.EqMode;
+        if (mode == PeerEqMode.Parametric16Band)
         {
-            var mode = shaping.EqMode;
+            foreach (var band in shaping.ParametricBands)
+            {
+                if (band is null || MathF.Abs(band.GainDb) < 0.05f) continue;   // flat band — skip
+                PeerEqBands.ParametricToPeaking(band.StartHz, band.EndHz, out float centre, out float q);
+                float nyquist = PeerEqBands.MixSampleRate / 2f;
+                if (centre <= 0f || centre >= nyquist) continue;
+                l.Add(BiQuadFilter.PeakingEQ(PeerEqBands.MixSampleRate, centre, q, band.GainDb));
+                r.Add(BiQuadFilter.PeakingEQ(PeerEqBands.MixSampleRate, centre, q, band.GainDb));
+            }
+        }
+        else
+        {
             var bands = mode == PeerEqMode.Advanced10Band ? PeerEqBands.Advanced : PeerEqBands.Simple;
             var gains = mode == PeerEqMode.Advanced10Band ? shaping.AdvancedBandsDb : shaping.SimpleBandsDb;
             for (int i = 0; i < bands.Length; i++)
