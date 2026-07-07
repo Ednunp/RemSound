@@ -306,6 +306,14 @@ internal sealed class RecordingSettingsDialog : Form
         // sits between attributes and channels in tab order so the Alt+L mnemonic and Tab
         // both land there when it's visible; when hidden it's still in tab order but
         // skipped because Visible=false controls aren't focusable.
+        // The two toggles (top of the dialog) come first in tab order, then the option columns, then
+        // the buttons. The CONTAINERS are ordered too — without this the grid's controls (sourceList)
+        // sat first and grabbed initial focus, landing the user partway down, past the checkboxes.
+        optionsRow.TabIndex = 0;
+        grid.TabIndex = 1;
+        buttonRow.TabIndex = 2;
+        splitTracksBox.TabIndex = 0;
+        bypassShapingBox.TabIndex = 1;
         sourceList.TabIndex = 0;
         formatList.TabIndex = 1;
         attributesList.TabIndex = 2;
@@ -313,6 +321,13 @@ internal sealed class RecordingSettingsDialog : Form
         channelList.TabIndex = 4;
         okButton.TabIndex = 5;
         cancelButton.TabIndex = 6;
+    }
+
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        // Land on the first checkbox at the top, not partway down on the option columns.
+        splitTracksBox.Focus();
     }
 
     /// <summary>Show or hide the FLAC compression column based on the current file-format
