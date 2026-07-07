@@ -52,18 +52,18 @@ public static class PeerEqBands
         ("Treble", 8000.0),
     ];
 
-    /// <summary>12-band graphic EQ — octave centres low down, finer through the presence region
-    /// (2/3/4/6/8 kHz) so there's a band between 4 and 8 kHz. All peaking.</summary>
+    /// <summary>12-band graphic EQ — 80 Hz added in the low end, finer through the presence region
+    /// (2/4/6/8 kHz) so there's a band between 4 and 8 kHz. All peaking.</summary>
     public static readonly (string Label, double Freq)[] Advanced =
     [
         ("31 Hz", 31.0),
         ("63 Hz", 63.0),
+        ("80 Hz", 80.0),
         ("125 Hz", 125.0),
         ("250 Hz", 250.0),
         ("500 Hz", 500.0),
         ("1 kHz", 1000.0),
         ("2 kHz", 2000.0),
-        ("3 kHz", 3000.0),
         ("4 kHz", 4000.0),
         ("6 kHz", 6000.0),
         ("8 kHz", 8000.0),
