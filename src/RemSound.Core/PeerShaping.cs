@@ -27,9 +27,9 @@ public sealed class PeerShaping
     /// (bass, mids, treble). Kept independently of the advanced bands.</summary>
     public float[] SimpleBandsDb { get; set; } = new float[3];
 
-    /// <summary>Gains in dB (-12..+12) for the 10 advanced graphic-EQ bands, in the order of
+    /// <summary>Gains in dB (-12..+12) for the 12 advanced graphic-EQ bands, in the order of
     /// <see cref="PeerEqBands.Advanced"/>. Kept independently of the simple bands.</summary>
-    public float[] AdvancedBandsDb { get; set; } = new float[10];
+    public float[] AdvancedBandsDb { get; set; } = new float[12];
 }
 
 /// <summary>The fixed EQ band layouts. The user sets each band's GAIN; the centre frequencies are
@@ -52,7 +52,8 @@ public static class PeerEqBands
         ("Treble", 8000.0),
     ];
 
-    /// <summary>10-band graphic EQ on ISO octave centres (all peaking).</summary>
+    /// <summary>12-band graphic EQ — octave centres low down, finer through the presence region
+    /// (2/3/4/6/8 kHz) so there's a band between 4 and 8 kHz. All peaking.</summary>
     public static readonly (string Label, double Freq)[] Advanced =
     [
         ("31 Hz", 31.0),
@@ -62,7 +63,9 @@ public static class PeerEqBands
         ("500 Hz", 500.0),
         ("1 kHz", 1000.0),
         ("2 kHz", 2000.0),
+        ("3 kHz", 3000.0),
         ("4 kHz", 4000.0),
+        ("6 kHz", 6000.0),
         ("8 kHz", 8000.0),
         ("16 kHz", 16000.0),
     ];

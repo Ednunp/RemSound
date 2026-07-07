@@ -3268,8 +3268,23 @@ public sealed class MainForm : Form
 
     private PeerShaping GetOrCreateShaping(string? key)
     {
-        if (key is null) return new PeerShaping();
+        if (key is null) return NormalizeBands(new PeerShaping());
         if (!peerShaping.TryGetValue(key, out var s)) { s = new PeerShaping(); peerShaping[key] = s; }
+        return NormalizeBands(s);
+    }
+
+    // Grow the band-gain arrays to the current band counts (e.g. a profile saved when the advanced EQ
+    // had 10 bands, now 12) so the new bands can be read and stored. New slots are 0 dB (flat).
+    private static PeerShaping NormalizeBands(PeerShaping s)
+    {
+        if (s.SimpleBandsDb.Length < PeerEqBands.Simple.Length)
+        {
+            var a = s.SimpleBandsDb; Array.Resize(ref a, PeerEqBands.Simple.Length); s.SimpleBandsDb = a;
+        }
+        if (s.AdvancedBandsDb.Length < PeerEqBands.Advanced.Length)
+        {
+            var a = s.AdvancedBandsDb; Array.Resize(ref a, PeerEqBands.Advanced.Length); s.AdvancedBandsDb = a;
+        }
         return s;
     }
 
