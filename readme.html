@@ -35,6 +35,7 @@ ul, ol { padding-left: 1.4em; }
 <li><a href="#tab-connectivity">Connectivity tab</a></li>
 <li><a href="#tab-io">Audio inputs and outputs tab</a></li>
 <li><a href="#tab-profile">Audio profile tab</a></li>
+<li><a href="#pan-eq">Pan and EQ tab</a></li>
 <li><a href="#asio-vs-wasapi">ASIO and WASAPI</a></li>
 <li><a href="#peers">Peers &mdash; finding and connecting</a></li>
 <li><a href="#network">How the network works (LAN, WAN, Tailscale)</a></li>
@@ -212,13 +213,13 @@ ul, ol { padding-left: 1.4em; }
 <strong>If a save prompt is blocking your shutdown right now:</strong> close it by pressing Esc (or click Cancel if you can see it), unlock by going File &rarr; Lock profile (read-only), then close RemSound. From this launch forward there'll be no prompt.
 </div>
 
-<h2 id="main-window">4. The main window: menu bar + three tabs</h2>
+<h2 id="main-window">4. The main window: menu bar + three tabs (or four)</h2>
 
 <p>The main window has three parts, stacked top to bottom:</p>
 
 <ol>
 <li>A <strong>menu bar</strong> at the top with four menus &mdash; <em>File</em>, <em>Record</em>, <em>Options</em> and <em>Help</em>. See <a href="#menu-bar">Menus</a>.</li>
-<li>A <strong>row of tabs</strong> with three tabs &mdash; Connectivity, Audio inputs and outputs, Audio profile. Each tab has its own Alt+letter shortcuts that only work when that tab is the one showing &mdash; so the same letter can do different things on different tabs without clashing.</li>
+<li>A <strong>row of tabs</strong> with three tabs &mdash; Connectivity, Audio inputs and outputs, Audio profile. A fourth tab, <strong>Pan and EQ</strong>, appears just before Audio profile if you switch it on in Preferences (it's off by default &mdash; see <a href="#pan-eq">Pan and EQ tab</a>). Each tab has its own Alt+letter shortcuts that only work when that tab is the one showing &mdash; so the same letter can do different things on different tabs without clashing.</li>
 <li>A <strong>status line</strong> at the bottom that updates once a second with how long you've been connected, how many peers you have, whether sound is flowing, connection health, and RemSound's own CPU and memory usage.</li>
 </ol>
 
@@ -226,6 +227,7 @@ ul, ol { padding-left: 1.4em; }
 <tr><th>Tab</th><th>What it's for</th></tr>
 <tr><td><strong>Connectivity</strong></td><td>Connected, discovered and remembered peers. Adding a peer by address. A connection status read-out.</td></tr>
 <tr><td><strong>Audio inputs and outputs</strong></td><td>The ASIO driver picker (when an ASIO driver is installed), the Receive audio and Send my audio checkboxes, and all the device lists. Choosing a real driver in the picker brings up the ASIO device lists alongside the ordinary Windows ones; choosing <em>(none)</em> hides them.</td></tr>
+<tr><td><strong>Pan and EQ</strong> (optional)</td><td>Shape each connected peer's sound on its own &mdash; their volume, pan (left/right) and EQ. Hidden by default; tick &ldquo;Show the Pan and EQ tab&rdquo; on the General tab of Preferences to show it. See <a href="#pan-eq">Pan and EQ tab</a>.</td></tr>
 <tr><td><strong>Audio profile</strong></td><td>Codec, packet size, lock-to-audio-clock, latency, continuous auto-tune, buffer smoothness, artefact sound. Split into an <em>Audio send parameters</em> group and an <em>Audio receive parameters</em> group.</td></tr>
 </table>
 
@@ -293,7 +295,7 @@ ul, ol { padding-left: 1.4em; }
 
 <table>
 <tr><th>Item</th><th>Shortcut</th><th>What it does</th></tr>
-<tr><td><strong>Start recording / Stop recording</strong></td><td>Ctrl+R, or Alt+K, R</td><td>A toggle. The label switches between &ldquo;Start recording&rdquo; and &ldquo;Stop recording&rdquo; to show whichever action the next press would do. Either label is activated by the letter R. Each time you start, RemSound plays a short cue sound (if you've enabled it in Preferences), then creates a new file in your recordings folder with a name like <code>RemSound-2026-05-19_14-30-00</code> and the right file extension. Stopping closes the file and plays the stop cue. Ctrl+R works from anywhere in the main window.</td></tr>
+<tr><td><strong>Start recording / Stop recording</strong></td><td>Ctrl+R, or Alt+K, R</td><td>A toggle. The label switches between &ldquo;Start recording&rdquo; and &ldquo;Stop recording&rdquo; to show whichever action the next press would do. Either label is activated by the letter R. Each time you start, RemSound plays a short cue sound (if you've enabled it in Preferences), then creates a new recording in your recordings folder, named by date and time (see <a href="#recording">Recording to a file</a>). Stopping closes the file and plays the stop cue. Ctrl+R works from anywhere in the main window.</td></tr>
 <tr><td><strong>Open current recordings folder</strong></td><td>Alt+K, O</td><td>Opens your recordings folder in Windows File Explorer. It creates the folder if it doesn't exist yet (which happens the first time on a fresh install).</td></tr>
 <tr><td><strong>Change recordings folder&hellip;</strong></td><td>Alt+K, C</td><td>A folder picker. Choose a different folder for future recordings. The choice is saved in the current profile, so different profiles can record to different places.</td></tr>
 </table>
@@ -309,7 +311,7 @@ ul, ol { padding-left: 1.4em; }
 <tr><td><strong>Profile passwords&hellip;</strong></td><td>Alt+O, W</td><td>Lists every profile alongside its password, so you can view or change any of them in one place.</td></tr>
 <tr><td><strong>Reset the default audio device prompt</strong></td><td>Alt+O, R</td><td>Brings back the &ldquo;use only the default audio device?&rdquo; question if you previously ticked &ldquo;Don't ask me this again&rdquo; on it. See <a href="#tab-io">Following the Windows default audio device</a>.</td></tr>
 <tr><td><strong>Enable / Disable Realtek ASIO</strong></td><td>&mdash;</td><td>Only shown if a Realtek ASIO driver is installed. Lets you reverse the choice RemSound offered about disabling that driver (Realtek's generic ASIO driver tends to grab the wrong device and clash with your screen reader).</td></tr>
-<tr><td><strong>Preferences&hellip;</strong></td><td>Ctrl+P, or Alt+O, P</td><td>Opens the Preferences dialog, organised into five tabs (move between them with Ctrl+Tab, or the arrow keys when the tab names have focus): <strong>General</strong> &mdash; the profiles folder, accept remote volume commands, and UPnP router opening; <strong>Audio cues</strong> &mdash; the cue list and its sounds (see <a href="#audio-cues">Audio cue sounds</a>); <strong>Startup behaviour</strong> &mdash; start minimised / with Windows / with a specific profile; <strong>Update settings</strong> &mdash; the update checks and install options; and <strong>Logging</strong> &mdash; enable logs, write logs now, and the log-folder housekeeping (see <a href="#logs">Logs and diagnostics</a>). Esc or the Close button dismisses it.</td></tr>
+<tr><td><strong>Preferences&hellip;</strong></td><td>Ctrl+P, or Alt+O, P</td><td>Opens the Preferences dialog, organised into five tabs (move between them with Ctrl+Tab, or the arrow keys when the tab names have focus): <strong>General</strong> &mdash; the profiles folder, accept remote volume commands, UPnP router opening, and &ldquo;Show the Pan and EQ tab&rdquo; (off by default; turns on the optional <a href="#pan-eq">Pan and EQ tab</a>); <strong>Audio cues</strong> &mdash; the cue list and its sounds (see <a href="#audio-cues">Audio cue sounds</a>); <strong>Startup behaviour</strong> &mdash; start minimised / with Windows / with a specific profile; <strong>Update settings</strong> &mdash; the update checks and install options; and <strong>Logging</strong> &mdash; enable logs, write logs now, and the log-folder housekeeping (see <a href="#logs">Logs and diagnostics</a>). Esc or the Close button dismisses it.</td></tr>
 </table>
 
 <h3>Help menu</h3>
@@ -444,7 +446,33 @@ ul, ol { padding-left: 1.4em; }
 
 <p>Most people only need to pick a codec and a smoothness level, and leave everything else at its default.</p>
 
-<h2 id="asio-vs-wasapi">9. ASIO and WASAPI</h2>
+<h2 id="pan-eq">9. Pan and EQ tab</h2>
+
+<p>This tab lets you shape the sound of each peer you're connected to, one at a time. You can set how loud that person is, lean them to the left or right, and change their tone with an equaliser. It's handy when you have several people connected at once and want to mix them &mdash; for a jam session you might put the drummer over to the left, turn someone down a little, or brighten someone up.</p>
+
+<p>The Pan and EQ tab is <strong>optional and hidden by default</strong>. To turn it on, tick <strong>&ldquo;Show the Pan and EQ tab&rdquo;</strong> on the <strong>General</strong> tab of Preferences (Options &rarr; Preferences, or Ctrl+P). Once it's on, the tab appears just before the Audio profile tab.</p>
+
+<h3>Shaping one peer at a time</h3>
+
+<p>You always work on a single peer. First pick the person you want from the peer list, then use the controls below it &mdash; they all act on whoever you've selected. The tab, from top to bottom:</p>
+
+<table>
+<tr><th>Control</th><th>What it does</th></tr>
+<tr><td><strong>Enable EQ for peers</strong> (checkbox)</td><td>A master switch for the equaliser. When it's off, any EQ you've dialled in has no effect &mdash; but you can still set it up ready for when you turn it on.</td></tr>
+<tr><td><strong>Enable pan for peers</strong> (checkbox)</td><td>A master switch for panning. When it's off, any panning you've set has no effect, though you can still set it up in advance. Volume is different &mdash; it has no switch and is always in effect (but at 100% it changes nothing).</td></tr>
+<tr><td><strong>Peer to shape</strong> (list)</td><td>The peers you're currently connected to. Pick the one you want to work on. Everything below acts on the peer you select here.</td></tr>
+<tr><td><strong>Volume</strong> (slider)</td><td>An individual level for that one peer, from 0 to 100% (100% means unchanged). It sits on top of your main volume, so you can balance people against each other.</td></tr>
+<tr><td><strong>Pan</strong> (slider)</td><td>Leans the peer to the left or right. Centred by default. It keeps the peer's stereo sound &mdash; it never folds them down to mono.</td></tr>
+<tr><td><strong>Set peer EQ to default</strong> (button)</td><td>Puts that peer's EQ sliders &mdash; both the 3-band and the 12-band &mdash; back to flat. It leaves the pan and volume alone.</td></tr>
+<tr><td><strong>EQ mode</strong> (picker)</td><td>Two choices: <em>3 band basic EQ</em> or <em>12 band advanced EQ</em>. This chooses which set of band sliders you see below.</td></tr>
+<tr><td><strong>EQ band sliders</strong></td><td>The sliders for whichever EQ mode is chosen. Each one runs from &minus;12 dB to +12 dB, with flat (no change) in the middle. The 3-band has <strong>Bass, Mids, Treble</strong>. The 12-band has <strong>31 Hz, 63 Hz, 80 Hz, 125 Hz, 250 Hz, 500 Hz, 1 kHz, 2 kHz, 4 kHz, 6 kHz, 8 kHz</strong> and <strong>16 kHz</strong>.</td></tr>
+</table>
+
+<p>The two EQ modes are kept separate. Switching between the 3-band and the 12-band keeps each one's own settings &mdash; nothing carries across from one to the other.</p>
+
+<p>Everything here updates in <strong>real time</strong> &mdash; you hear the change as you move a control &mdash; and it adds no extra delay to the audio. All of it (the two switches, and each peer's volume, pan and EQ) is saved with the profile.</p>
+
+<h2 id="asio-vs-wasapi">10. ASIO and WASAPI</h2>
 
 <p>RemSound can use two different ways of handling sound. Which one it uses depends on the <strong>ASIO driver (Alt+D)</strong> list at the top of the Audio inputs and outputs tab.</p>
 
@@ -498,7 +526,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <h3>Same driver, sending and receiving, on one computer</h3>
 <p>RemSound supports this &mdash; you can capture from your audio interface and play received sound out of the same interface at the same time, on the same computer. Most modern professional audio drivers handle this fine.</p>
 
-<h2 id="peers">10. Peers &mdash; finding and connecting</h2>
+<h2 id="peers">11. Peers &mdash; finding and connecting</h2>
 
 <p>A &ldquo;peer&rdquo; is another computer running RemSound that you want to talk to. You manage peers on the <strong>Connectivity</strong> tab. It has three lists, all of them checkable:</p>
 
@@ -533,7 +561,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <h3>Connection health</h3>
 <p>For each connected peer, the status read-out at the bottom of the window shows a small health note: the latest round-trip time in milliseconds, or <strong>pending</strong>, <strong>stale</strong> or <strong>unreachable</strong> if the regular check-in messages have stopped. (Round-trip time is how long sound takes to travel to the other computer and back.) RemSound plays a connect cue (a short sound) when a peer becomes healthy and a disconnect cue when one becomes unreachable. You can silence both cues using <strong>Audio cue sounds</strong> in the Preferences dialog (Options &rarr; Preferences, or Ctrl+P).</p>
 
-<h2 id="network">11. How the network works (LAN, WAN, Tailscale)</h2>
+<h2 id="network">12. How the network works (LAN, WAN, Tailscale)</h2>
 
 <p>RemSound communicates on two network channels:</p>
 
@@ -603,7 +631,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <tr><td>100 ms+</td><td>Something is wrong, or you're talking across the world. Playing music together is hard.</td></tr>
 </table>
 
-<h2 id="encryption">12. Passwords and encryption</h2>
+<h2 id="encryption">13. Passwords and encryption</h2>
 
 <p>From v3.3, <strong>all the audio RemSound sends is encrypted</strong> &mdash; scrambled as it leaves your computer and only unscrambled at the other end. Anyone in between (your internet provider, a shared Wi-Fi, anyone watching the connection) just sees noise. This means you no longer need a VPN simply to keep your audio private. And it adds no delay you could ever notice &mdash; the scrambling happens in millionths of a second, far less time than the audio itself takes.</p>
 
@@ -640,7 +668,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <li><strong>The password lives with the profile.</strong> It's stored (lightly scrambled) inside the profile file, so it travels with the profile if you copy it to another machine or sync it through something like Dropbox. That's handy, but it means you should keep the profile file private &mdash; protect it the way you'd protect the password itself.</li>
 </ul>
 
-<h2 id="latency">13. Latency and audio quality</h2>
+<h2 id="latency">14. Latency and audio quality</h2>
 
 <p>Latency is the small delay between sound leaving one computer and arriving at the other. Five controls together shape the trade-off between latency and sound quality, all on the Audio profile tab:</p>
 
@@ -748,7 +776,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 
 <p>Both Opus choices can automatically repair a single missing packet (see the section just above), so single drops are inaudible on both. PCM doesn't have that ability.</p>
 
-<h2 id="shortcuts">14. Keyboard shortcuts (within the main window)</h2>
+<h2 id="shortcuts">15. Keyboard shortcuts (within the main window)</h2>
 
 <p>Each tab has its own Alt+letter shortcuts. The same letter can do different things on different tabs without clashing &mdash; the shortcuts only work on the tab that's showing. Move between tabs with Ctrl+Tab and Ctrl+Shift+Tab.</p>
 
@@ -797,6 +825,21 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <tr><td>Alt+A</td><td>Focus Artefact sound type</td></tr>
 </table>
 
+<h3>Pan and EQ tab</h3>
+
+<p>Only present when the Pan and EQ tab is switched on (tick &ldquo;Show the Pan and EQ tab&rdquo; on the General tab of Preferences). See <a href="#pan-eq">Pan and EQ tab</a>.</p>
+
+<table>
+<tr><th>Key</th><th>Action</th></tr>
+<tr><td>Alt+E</td><td>Toggle Enable EQ for peers</td></tr>
+<tr><td>Alt+P</td><td>Toggle Enable pan for peers</td></tr>
+<tr><td>Alt+U</td><td>Focus the peer to shape</td></tr>
+<tr><td>Alt+L</td><td>Focus the Volume slider</td></tr>
+<tr><td>Alt+N</td><td>Focus the Pan slider</td></tr>
+<tr><td>Alt+Q</td><td>Set peer EQ to default</td></tr>
+<tr><td>Alt+M</td><td>Focus the EQ mode picker</td></tr>
+</table>
+
 <h3>File menu shortcuts (work from any tab)</h3>
 <table>
 <tr><th>Key</th><th>Action</th></tr>
@@ -831,7 +874,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <tr><td>Alt+F4</td><td>Close (the standard Windows shortcut)</td></tr>
 </table>
 
-<h2 id="hotkeys">15. Global hotkeys (work even when minimised)</h2>
+<h2 id="hotkeys">16. Global hotkeys (work even when minimised)</h2>
 
 <p>Your keyboard shortcuts are <strong>shared across all your profiles</strong> — set one once and it works on every profile, and stays put when you switch between them. (Before version 4.4 they were saved separately inside each profile, so a shortcut set on one profile wouldn't work on another. If you're upgrading from before version 4.4, the first time you run the new version RemSound offers to <strong>bring your shortcuts across</strong>: it shows a list of your profiles, and you pick the one you set your shortcuts up in &mdash; or choose to start fresh with the defaults.)</p>
 
@@ -876,7 +919,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 
 <p>Once a hotkey is set, your screen reader reads it out whenever you land on the menu item or control it's tied to &mdash; for example, moving onto <strong>File &rarr; Open profile</strong> announces &ldquo;Ctrl+O&rdquo;, and a control with a global hotkey announces &ldquo;press [your key] anywhere&rdquo;. So you can learn and confirm your shortcuts just by arrowing around the window, without coming back to this dialog.</p>
 
-<h2 id="remote-control">16. Remote control: adjusting a peer's listening volume from your end</h2>
+<h2 id="remote-control">17. Remote control: adjusting a peer's listening volume from your end</h2>
 
 <p>Here's the situation this is for: you're on your laptop, listening to sound coming from your desktop, and you've got NVDA Remote open so you can drive the desktop using your laptop's keyboard. Every key you press goes to the desktop &mdash; including any volume key on the laptop, which now never reaches the laptop itself. There's no way from inside that NVDA Remote session to nudge the laptop's listening volume without breaking out of the session.</p>
 
@@ -930,7 +973,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <strong>Tip for troubleshooting:</strong> the log file (Preferences dialog &rarr; Enable logs) records every remote-control command sent and received, including <code>IGNORED</code> entries when an incoming command was turned down &mdash; either because the sender wasn't in your list of ticked peers, or because &ldquo;Accept remote volume commands&rdquo; was off. Handy for working out &ldquo;why isn't my hotkey doing anything&rdquo; without guessing.
 </div>
 
-<h2 id="startup">17. Startup behaviour</h2>
+<h2 id="startup">18. Startup behaviour</h2>
 
 <p>Startup behaviour now lives on the <strong>Startup behaviour</strong> tab of the Preferences dialog (<strong>File &rarr; Preferences</strong>, or Ctrl+P). It has three independent toggles, plus a profile picker that appears when the third one is on. Each tick is saved straight away &mdash; there's no OK or Apply button. (It used to be a separate item on the Options menu; it moved into Preferences in the 2026 cue overhaul.)</p>
 
@@ -955,7 +998,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <strong>Where these are stored:</strong> the start-minimised choice and the start-with-profile name are kept in a small settings file on this computer. The auto-start toggle is kept in Windows' standard startup list &mdash; you turn it on or off from this dialog, or from Task Manager &rarr; Startup.
 </div>
 
-<h2 id="audio-cues">18. Audio cue sounds</h2>
+<h2 id="audio-cues">19. Audio cue sounds</h2>
 
 <p>RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called <strong>cue sounds</strong>. Seventeen kinds of event have a cue:</p>
 
@@ -1040,7 +1083,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <strong>Tip for sound designers:</strong> the defaults are deliberately short and simple so they stay out of the way. If you'd like the cues to feel more in-character with a particular profile, the custom-sound feature is designed for exactly that. Keep WAV files short (well under a second usually works best) so cues don't overlap with each other on a busy day.
 </div>
 
-<h2 id="updates">19. Updating RemSound</h2>
+<h2 id="updates">20. Updating RemSound</h2>
 
 <p>RemSound can check for a newer version on a schedule you choose, prompt you to install it, and either ask first or do it quietly. There's also a one-press &ldquo;check now&rdquo; button so you don't have to wait for the timer.</p>
 
@@ -1102,7 +1145,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <p>To see which version you're on without checking for updates, open <strong>Help &rarr; About RemSound</strong> (Alt+H, A). The dialog shows the version number and the release notes for the version you're running, in a scrollable read-only box. Close (or Esc) dismisses it.</p>
 
-<h2 id="recording">20. Recording to a file</h2>
+<h2 id="recording">21. Recording to a file</h2>
 
 <p>RemSound can save the sound passing through it to a file on your computer &mdash; useful for keeping a copy of a music session, capturing a long jam for editing later, or just saving a one-off voice exchange you want to come back to.</p>
 
@@ -1136,7 +1179,14 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <h3>Where recordings go</h3>
 
-<p>By default, recordings live in <code>&lt;RemSound install folder&gt;\recordings\&lt;computer name&gt;\</code>. Each recording creates a new file with a name like <code>RemSound-2026-05-19_14-30-00</code>, so files never overwrite each other.</p>
+<p>Inside your recordings folder, RemSound keeps a folder for each <strong>date</strong> &mdash; for example <code>2026-07-04</code> &mdash; so your recordings sort neatly in order. Everything from a given day goes into that day's folder.</p>
+
+<p>All the times below are written 24-hour, as hours-minutes-seconds (<code>HH-MM-SS</code>), so files and folders line up in time order in Explorer.</p>
+
+<ul>
+<li>A normal (non-split) recording is a single file named like <code>14-30-05 RemSound recording DESKTOP-ABC.wav</code> &mdash; the time, then &ldquo;RemSound recording&rdquo;, then this computer's name (and the right extension for your chosen format).</li>
+<li>A <strong>split</strong> recording (when you tick &ldquo;Split recording into separate tracks&rdquo;) is instead a <em>folder</em> named like <code>14-30-05 RemSound recording multi track</code>. Inside it there's one file per peer, named <code>&lt;peer name&gt; 14-30-05.wav</code> (the peer's computer name, or its address if it has no name), plus your own send as <code>&lt;your computer name&gt; 14-30-05.wav</code>.</li>
+</ul>
 
 <p>You can change the folder via <strong>Record &rarr; Change recordings folder</strong>. Choosing a different folder saves that location into your current profile, so it travels with the rest of your settings &mdash; switching profiles can switch your recording destination too. If a saved profile points at a folder that doesn't exist on the computer loading it, the recorder quietly falls back to the default location for that computer.</p>
 
@@ -1156,7 +1206,13 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <h3>Recording settings dialog</h3>
 
-<p>Reached via <strong>Record &rarr; Recording settings</strong>. Up to five keyboard-navigable lists, laid out left to right. FLAC's compression level has its own list, but it only shows when the file format is FLAC.</p>
+<p>Reached via <strong>Record &rarr; Recording settings</strong>. Two tickboxes sit at the top, then up to five keyboard-navigable lists laid out left to right. FLAC's compression level has its own list, but it only shows when the file format is FLAC.</p>
+
+<table>
+<tr><th>Control</th><th>What it does</th></tr>
+<tr><td><strong>Split recording into separate tracks</strong> (tickbox)</td><td>Instead of one mixed file, a recording becomes a <em>folder</em> with one file per connected peer &mdash; each holding only that peer's sound &mdash; plus one file for your own send. Which of those files you get follows the Recording source choice below: <em>Received only</em> gives you the peer files; <em>Both</em> gives the peer files plus your own; <em>Sent only</em> gives just your own.</td></tr>
+<tr><td><strong>Bypass pan and EQ when recording</strong> (tickbox)</td><td>Records the raw sound &mdash; before any volume, pan or EQ you've set on the <a href="#pan-eq">Pan and EQ tab</a> &mdash; even though you still hear the shaped version. Left off (the default), the recording captures what you actually hear, including your shaping; and on a split recording each peer's own file carries that peer's own shaping.</td></tr>
+</table>
 
 <table>
 <tr><th>List</th><th>Shortcut</th><th>What goes in it</th></tr>
@@ -1169,7 +1225,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <p>OK (Alt+O) saves your choices to the current profile. Cancel (Alt+N) or Esc discards them. Settings are saved with the profile as usual &mdash; changes here mark the profile as having unsaved changes, and you'll be asked about them on exit if you haven't saved.</p>
 
-<h2 id="logs">21. Logs and diagnostics</h2>
+<h2 id="logs">22. Logs and diagnostics</h2>
 
 <p>Everything to do with logging lives on its own <strong>Logging</strong> tab in the Preferences dialog (Options &rarr; Preferences, or Ctrl+P). If logging is turned on (the <strong>Enable logs</strong> checkbox there, on by default), RemSound writes a log file each session into a <code>logs</code> folder inside <strong>user settings and logs</strong> &mdash; the same folder your settings and profiles live in. One file per launch.</p>
 
@@ -1203,7 +1259,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <li><strong>OpusUnrecoveredGaps</strong> &mdash; a running total of multi-packet losses that Opus couldn't repair. Each one is an audible click. It stays at 0 on a clean connection; small numbers are normal over the internet.</li>
 </ul>
 
-<h2 id="command-line">22. Command-line options</h2>
+<h2 id="command-line">23. Command-line options</h2>
 
 <p>RemSound is normally a windowed program you click to open. But it can also take <strong>command-line options</strong> &mdash; short text instructions you type after the program name. They are handy for three things: checking a machine quickly (what devices are present, does the audio path work at all), getting a support report to send to whoever helps you, and starting RemSound a particular way from a shortcut or a script.</p>
 
@@ -1254,7 +1310,7 @@ RemSound.exe --connect 192.168.1.42
 
 <p>A common support sequence: ask the person to run <code>--diagnostics</code> and send you the file, then have them run <code>--selftest</code> &mdash; if that says PASS, capture, encoding and the audio path are all sound on their machine and the problem is somewhere in the connection between you.</p>
 
-<h2 id="troubleshooting">23. Troubleshooting</h2>
+<h2 id="troubleshooting">24. Troubleshooting</h2>
 
 <h3>I don't hear my friend</h3>
 <ol>
@@ -1329,7 +1385,7 @@ RemSound.exe --connect 192.168.1.42
 </ul>
 <p>If none of those apply, just fall back to Tailscale &mdash; it works without involving the router at all.</p>
 
-<h2 id="glossary">24. Glossary</h2>
+<h2 id="glossary">25. Glossary</h2>
 
 <table>
 <tr><th>Term</th><th>Meaning</th></tr>

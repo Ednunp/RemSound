@@ -11,27 +11,28 @@ I built RemSound to solve a specific problem of my own. I do a lot of work on a 
   1. [What RemSound does](#1-what-remsound-does)
   1. [Quick start](#2-quick-start)
   1. [Profiles](#3-profiles)
-  1. [The main window: menu bar + three tabs](#4-the-main-window-menu-bar--three-tabs)
+  1. [The main window: menu bar + three tabs (or four)](#4-the-main-window-menu-bar--three-tabs-or-four)
   1. [Menus (File, Record, Options, Help)](#5-menus-file-record-options-help)
   1. [Connectivity tab](#6-connectivity-tab)
   1. [Audio inputs and outputs tab](#7-audio-inputs-and-outputs-tab)
   1. [Audio profile tab](#8-audio-profile-tab)
-  1. [ASIO and WASAPI](#9-asio-and-wasapi)
-  1. [Peers — finding and connecting](#10-peers--finding-and-connecting)
-  1. [How the network works (LAN, WAN, Tailscale)](#11-how-the-network-works-lan-wan-tailscale)
-  1. [Passwords and encryption](#12-passwords-and-encryption)
-  1. [Latency and audio quality](#13-latency-and-audio-quality)
-  1. [Keyboard shortcuts (within the main window)](#14-keyboard-shortcuts-within-the-main-window)
-  1. [Global hotkeys (work even when minimised)](#15-global-hotkeys-work-even-when-minimised)
-  1. [Remote control: adjusting a peer's listening volume from your end](#16-remote-control-adjusting-a-peers-listening-volume-from-your-end)
-  1. [Startup behaviour](#17-startup-behaviour)
-  1. [Audio cue sounds](#18-audio-cue-sounds)
-  1. [Updating RemSound](#19-updating-remsound)
-  1. [Recording to a file](#20-recording-to-a-file)
-  1. [Logs and diagnostics](#21-logs-and-diagnostics)
-  1. [Command-line options](#22-command-line-options)
-  1. [Troubleshooting](#23-troubleshooting)
-  1. [Glossary](#24-glossary)
+  1. [Pan and EQ tab](#9-pan-and-eq-tab)
+  1. [ASIO and WASAPI](#10-asio-and-wasapi)
+  1. [Peers — finding and connecting](#11-peers--finding-and-connecting)
+  1. [How the network works (LAN, WAN, Tailscale)](#12-how-the-network-works-lan-wan-tailscale)
+  1. [Passwords and encryption](#13-passwords-and-encryption)
+  1. [Latency and audio quality](#14-latency-and-audio-quality)
+  1. [Keyboard shortcuts (within the main window)](#15-keyboard-shortcuts-within-the-main-window)
+  1. [Global hotkeys (work even when minimised)](#16-global-hotkeys-work-even-when-minimised)
+  1. [Remote control: adjusting a peer's listening volume from your end](#17-remote-control-adjusting-a-peers-listening-volume-from-your-end)
+  1. [Startup behaviour](#18-startup-behaviour)
+  1. [Audio cue sounds](#19-audio-cue-sounds)
+  1. [Updating RemSound](#20-updating-remsound)
+  1. [Recording to a file](#21-recording-to-a-file)
+  1. [Logs and diagnostics](#22-logs-and-diagnostics)
+  1. [Command-line options](#23-command-line-options)
+  1. [Troubleshooting](#24-troubleshooting)
+  1. [Glossary](#25-glossary)
 
 
 ## 1. What RemSound does
@@ -182,18 +183,19 @@ So in summary, on a locked profile:
 
 > **If a save prompt is blocking your shutdown right now:** close it by pressing Esc (or click Cancel if you can see it), unlock by going File → Lock profile (read-only), then close RemSound. From this launch forward there'll be no prompt.
 
-## 4. The main window: menu bar + three tabs
+## 4. The main window: menu bar + three tabs (or four)
 
 The main window has three parts, stacked top to bottom:
 
   1. A **menu bar** at the top with four menus — _File_ , _Record_ , _Options_ and _Help_. See Menus.
-  2. A **row of tabs** with three tabs — Connectivity, Audio inputs and outputs, Audio profile. Each tab has its own Alt+letter shortcuts that only work when that tab is the one showing — so the same letter can do different things on different tabs without clashing.
+  2. A **row of tabs** with three tabs — Connectivity, Audio inputs and outputs, Audio profile. A fourth tab, **Pan and EQ** , appears just before Audio profile if you switch it on in Preferences (it's off by default — see Pan and EQ tab). Each tab has its own Alt+letter shortcuts that only work when that tab is the one showing — so the same letter can do different things on different tabs without clashing.
   3. A **status line** at the bottom that updates once a second with how long you've been connected, how many peers you have, whether sound is flowing, connection health, and RemSound's own CPU and memory usage.
 
 Tab| What it's for
 ---|---
 **Connectivity**|  Connected, discovered and remembered peers. Adding a peer by address. A connection status read-out.
 **Audio inputs and outputs**|  The ASIO driver picker (when an ASIO driver is installed), the Receive audio and Send my audio checkboxes, and all the device lists. Choosing a real driver in the picker brings up the ASIO device lists alongside the ordinary Windows ones; choosing _(none)_ hides them.
+**Pan and EQ** (optional)| Shape each connected peer's sound on its own — their volume, pan (left/right) and EQ. Hidden by default; tick “Show the Pan and EQ tab” on the General tab of Preferences to show it. See Pan and EQ tab.
 **Audio profile**|  Codec, packet size, lock-to-audio-clock, latency, continuous auto-tune, buffer smoothness, artefact sound. Split into an _Audio send parameters_ group and an _Audio receive parameters_ group.
 
 ### The system tray icon and its menu
@@ -258,7 +260,7 @@ The recording feature can save what you're sending, what you're receiving, or bo
 
 Item| Shortcut| What it does
 ---|---|---
-**Start recording / Stop recording**|  Ctrl+R, or Alt+K, R| A toggle. The label switches between “Start recording” and “Stop recording” to show whichever action the next press would do. Either label is activated by the letter R. Each time you start, RemSound plays a short cue sound (if you've enabled it in Preferences), then creates a new file in your recordings folder with a name like `RemSound-2026-05-19_14-30-00` and the right file extension. Stopping closes the file and plays the stop cue. Ctrl+R works from anywhere in the main window.
+**Start recording / Stop recording**|  Ctrl+R, or Alt+K, R| A toggle. The label switches between “Start recording” and “Stop recording” to show whichever action the next press would do. Either label is activated by the letter R. Each time you start, RemSound plays a short cue sound (if you've enabled it in Preferences), then creates a new recording in your recordings folder, named by date and time (see Recording to a file). Stopping closes the file and plays the stop cue. Ctrl+R works from anywhere in the main window.
 **Open current recordings folder**|  Alt+K, O| Opens your recordings folder in Windows File Explorer. It creates the folder if it doesn't exist yet (which happens the first time on a fresh install).
 **Change recordings folder …**| Alt+K, C| A folder picker. Choose a different folder for future recordings. The choice is saved in the current profile, so different profiles can record to different places.
 
@@ -273,7 +275,7 @@ Item| Shortcut| What it does
 **Profile passwords …**| Alt+O, W| Lists every profile alongside its password, so you can view or change any of them in one place.
 **Reset the default audio device prompt**|  Alt+O, R| Brings back the “use only the default audio device?” question if you previously ticked “Don't ask me this again” on it. See Following the Windows default audio device.
 **Enable / Disable Realtek ASIO**|  —| Only shown if a Realtek ASIO driver is installed. Lets you reverse the choice RemSound offered about disabling that driver (Realtek's generic ASIO driver tends to grab the wrong device and clash with your screen reader).
-**Preferences …**| Ctrl+P, or Alt+O, P| Opens the Preferences dialog, organised into five tabs (move between them with Ctrl+Tab, or the arrow keys when the tab names have focus): **General** — the profiles folder, accept remote volume commands, and UPnP router opening; **Audio cues** — the cue list and its sounds (see Audio cue sounds); **Startup behaviour** — start minimised / with Windows / with a specific profile; **Update settings** — the update checks and install options; and **Logging** — enable logs, write logs now, and the log-folder housekeeping (see Logs and diagnostics). Esc or the Close button dismisses it.
+**Preferences …**| Ctrl+P, or Alt+O, P| Opens the Preferences dialog, organised into five tabs (move between them with Ctrl+Tab, or the arrow keys when the tab names have focus): **General** — the profiles folder, accept remote volume commands, UPnP router opening, and “Show the Pan and EQ tab” (off by default; turns on the optional Pan and EQ tab); **Audio cues** — the cue list and its sounds (see Audio cue sounds); **Startup behaviour** — start minimised / with Windows / with a specific profile; **Update settings** — the update checks and install options; and **Logging** — enable logs, write logs now, and the log-folder housekeeping (see Logs and diagnostics). Esc or the Close button dismisses it.
 
 ### Help menu
 
@@ -397,7 +399,32 @@ Control| Shortcut| What it does
 
 Most people only need to pick a codec and a smoothness level, and leave everything else at its default.
 
-## 9. ASIO and WASAPI
+## 9. Pan and EQ tab
+
+This tab lets you shape the sound of each peer you're connected to, one at a time. You can set how loud that person is, lean them to the left or right, and change their tone with an equaliser. It's handy when you have several people connected at once and want to mix them — for a jam session you might put the drummer over to the left, turn someone down a little, or brighten someone up.
+
+The Pan and EQ tab is **optional and hidden by default**. To turn it on, tick **“ Show the Pan and EQ tab”** on the **General** tab of Preferences (Options → Preferences, or Ctrl+P). Once it's on, the tab appears just before the Audio profile tab.
+
+### Shaping one peer at a time
+
+You always work on a single peer. First pick the person you want from the peer list, then use the controls below it — they all act on whoever you've selected. The tab, from top to bottom:
+
+Control| What it does
+---|---
+**Enable EQ for peers** (checkbox)| A master switch for the equaliser. When it's off, any EQ you've dialled in has no effect — but you can still set it up ready for when you turn it on.
+**Enable pan for peers** (checkbox)| A master switch for panning. When it's off, any panning you've set has no effect, though you can still set it up in advance. Volume is different — it has no switch and is always in effect (but at 100% it changes nothing).
+**Peer to shape** (list)| The peers you're currently connected to. Pick the one you want to work on. Everything below acts on the peer you select here.
+**Volume** (slider)| An individual level for that one peer, from 0 to 100% (100% means unchanged). It sits on top of your main volume, so you can balance people against each other.
+**Pan** (slider)| Leans the peer to the left or right. Centred by default. It keeps the peer's stereo sound — it never folds them down to mono.
+**Set peer EQ to default** (button)| Puts that peer's EQ sliders — both the 3-band and the 12-band — back to flat. It leaves the pan and volume alone.
+**EQ mode** (picker)| Two choices: _3 band basic EQ_ or _12 band advanced EQ_. This chooses which set of band sliders you see below.
+**EQ band sliders**|  The sliders for whichever EQ mode is chosen. Each one runs from −12 dB to +12 dB, with flat (no change) in the middle. The 3-band has **Bass, Mids, Treble**. The 12-band has **31 Hz, 63 Hz, 80 Hz, 125 Hz, 250 Hz, 500 Hz, 1 kHz, 2 kHz, 4 kHz, 6 kHz, 8 kHz** and **16 kHz**.
+
+The two EQ modes are kept separate. Switching between the 3-band and the 12-band keeps each one's own settings — nothing carries across from one to the other.
+
+Everything here updates in **real time** — you hear the change as you move a control — and it adds no extra delay to the audio. All of it (the two switches, and each peer's volume, pan and EQ) is saved with the profile.
+
+## 10. ASIO and WASAPI
 
 RemSound can use two different ways of handling sound. Which one it uses depends on the **ASIO driver (Alt+D)** list at the top of the Audio inputs and outputs tab.
 
@@ -452,7 +479,7 @@ RemSound has no buffer-size control of its own. To change the ASIO buffer size, 
 
 RemSound supports this — you can capture from your audio interface and play received sound out of the same interface at the same time, on the same computer. Most modern professional audio drivers handle this fine.
 
-## 10. Peers — finding and connecting
+## 11. Peers — finding and connecting
 
 A “peer” is another computer running RemSound that you want to talk to. You manage peers on the **Connectivity** tab. It has three lists, all of them checkable:
 
@@ -495,7 +522,7 @@ Even if a peer is sending sound your way, you won't hear it until you've ticked 
 
 For each connected peer, the status read-out at the bottom of the window shows a small health note: the latest round-trip time in milliseconds, or **pending** , **stale** or **unreachable** if the regular check-in messages have stopped. (Round-trip time is how long sound takes to travel to the other computer and back.) RemSound plays a connect cue (a short sound) when a peer becomes healthy and a disconnect cue when one becomes unreachable. You can silence both cues using **Audio cue sounds** in the Preferences dialog (Options → Preferences, or Ctrl+P).
 
-## 11. How the network works (LAN, WAN, Tailscale)
+## 12. How the network works (LAN, WAN, Tailscale)
 
 RemSound communicates on two network channels:
 
@@ -569,7 +596,7 @@ Round-trip time| What you'll experience
 50–100 ms| Tailscale via a relay, or one end on Wi-Fi a long way off. Still usable, but you start to notice it for music.
 100 ms+| Something is wrong, or you're talking across the world. Playing music together is hard.
 
-## 12. Passwords and encryption
+## 13. Passwords and encryption
 
 From v3.3, **all the audio RemSound sends is encrypted** — scrambled as it leaves your computer and only unscrambled at the other end. Anyone in between (your internet provider, a shared Wi-Fi, anyone watching the connection) just sees noise. This means you no longer need a VPN simply to keep your audio private. And it adds no delay you could ever notice — the scrambling happens in millionths of a second, far less time than the audio itself takes.
 
@@ -605,7 +632,7 @@ If you connect to someone whose password is different from yours, RemSound shows
 
 
 
-## 13. Latency and audio quality
+## 14. Latency and audio quality
 
 Latency is the small delay between sound leaving one computer and arriving at the other. Five controls together shape the trade-off between latency and sound quality, all on the Audio profile tab:
 
@@ -708,7 +735,7 @@ PCM gives the very best sound with no quality loss at all, but it uses about ten
 
 Both Opus choices can automatically repair a single missing packet (see the section just above), so single drops are inaudible on both. PCM doesn't have that ability.
 
-## 14. Keyboard shortcuts (within the main window)
+## 15. Keyboard shortcuts (within the main window)
 
 Each tab has its own Alt+letter shortcuts. The same letter can do different things on different tabs without clashing — the shortcuts only work on the tab that's showing. Move between tabs with Ctrl+Tab and Ctrl+Shift+Tab.
 
@@ -756,6 +783,20 @@ Alt+I| Focus the Auto-tune latency interval combo box. It drives the timing for 
 Alt+B| Focus Buffer smoothness
 Alt+A| Focus Artefact sound type
 
+### Pan and EQ tab
+
+Only present when the Pan and EQ tab is switched on (tick “Show the Pan and EQ tab” on the General tab of Preferences). See Pan and EQ tab.
+
+Key| Action
+---|---
+Alt+E| Toggle Enable EQ for peers
+Alt+P| Toggle Enable pan for peers
+Alt+U| Focus the peer to shape
+Alt+L| Focus the Volume slider
+Alt+N| Focus the Pan slider
+Alt+Q| Set peer EQ to default
+Alt+M| Focus the EQ mode picker
+
 ### File menu shortcuts (work from any tab)
 
 Key| Action
@@ -790,7 +831,7 @@ Spacebar| Tick or untick an item in any device list, or toggle the focused check
 Up / Down| Move between items in any list
 Alt+F4| Close (the standard Windows shortcut)
 
-## 15. Global hotkeys (work even when minimised)
+## 16. Global hotkeys (work even when minimised)
 
 Your keyboard shortcuts are **shared across all your profiles** — set one once and it works on every profile, and stays put when you switch between them. (Before version 4.4 they were saved separately inside each profile, so a shortcut set on one profile wouldn't work on another. If you're upgrading from before version 4.4, the first time you run the new version RemSound offers to **bring your shortcuts across** : it shows a list of your profiles, and you pick the one you set your shortcuts up in — or choose to start fresh with the defaults.)
 
@@ -834,7 +875,7 @@ This one is just for screen-reader users: it talks straight through your screen 
 
 Once a hotkey is set, your screen reader reads it out whenever you land on the menu item or control it's tied to — for example, moving onto **File → Open profile** announces “Ctrl+O”, and a control with a global hotkey announces “press [your key] anywhere”. So you can learn and confirm your shortcuts just by arrowing around the window, without coming back to this dialog.
 
-## 16. Remote control: adjusting a peer's listening volume from your end
+## 17. Remote control: adjusting a peer's listening volume from your end
 
 Here's the situation this is for: you're on your laptop, listening to sound coming from your desktop, and you've got NVDA Remote open so you can drive the desktop using your laptop's keyboard. Every key you press goes to the desktop — including any volume key on the laptop, which now never reaches the laptop itself. There's no way from inside that NVDA Remote session to nudge the laptop's listening volume without breaking out of the session.
 
@@ -881,7 +922,7 @@ The feature is symmetric: both computers can both send and accept. If you set up
 
 > **Tip for troubleshooting:** the log file (Preferences dialog → Enable logs) records every remote-control command sent and received, including `IGNORED` entries when an incoming command was turned down — either because the sender wasn't in your list of ticked peers, or because “Accept remote volume commands” was off. Handy for working out “why isn't my hotkey doing anything” without guessing.
 
-## 17. Startup behaviour
+## 18. Startup behaviour
 
 Startup behaviour now lives on the **Startup behaviour** tab of the Preferences dialog (**File → Preferences**, or Ctrl+P). It has three independent toggles, plus a profile picker that appears when the third one is on. Each tick is saved straight away — there's no OK or Apply button. (It used to be a separate item on the Options menu; it moved into Preferences in the 2026 cue overhaul.)
 
@@ -903,7 +944,7 @@ Toggle| What it does
 
 > **Where these are stored:** the start-minimised choice and the start-with-profile name are kept in a small settings file on this computer. The auto-start toggle is kept in Windows' standard startup list — you turn it on or off from this dialog, or from Task Manager → Startup.
 
-## 18. Audio cue sounds
+## 19. Audio cue sounds
 
 RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called **cue sounds**. Seventeen kinds of event have a cue:
 
@@ -985,7 +1026,7 @@ If a cue's WAV file is missing — either the default file doesn't exist or a cu
 
 > **Tip for sound designers:** the defaults are deliberately short and simple so they stay out of the way. If you'd like the cues to feel more in-character with a particular profile, the custom-sound feature is designed for exactly that. Keep WAV files short (well under a second usually works best) so cues don't overlap with each other on a busy day.
 
-## 19. Updating RemSound
+## 20. Updating RemSound
 
 RemSound can check for a newer version on a schedule you choose, prompt you to install it, and either ask first or do it quietly. There's also a one-press “check now” button so you don't have to wait for the timer.
 
@@ -1046,7 +1087,7 @@ A step-by-step record of every update is kept in a file called `updater.log` in 
 
 To see which version you're on without checking for updates, open **Help → About RemSound** (Alt+H, A). The dialog shows the version number and the release notes for the version you're running, in a scrollable read-only box. Close (or Esc) dismisses it.
 
-## 20. Recording to a file
+## 21. Recording to a file
 
 RemSound can save the sound passing through it to a file on your computer — useful for keeping a copy of a music session, capturing a long jam for editing later, or just saving a one-off voice exchange you want to come back to.
 
@@ -1079,7 +1120,14 @@ RemSound plays a short ding when a recording starts and another when it stops, s
 
 ### Where recordings go
 
-By default, recordings live in `<RemSound install folder>\recordings\<computer name>\`. Each recording creates a new file with a name like `RemSound-2026-05-19_14-30-00`, so files never overwrite each other.
+Inside your recordings folder, RemSound keeps a folder for each **date** — for example `2026-07-04` — so your recordings sort neatly in order. Everything from a given day goes into that day's folder.
+
+All the times below are written 24-hour, as hours-minutes-seconds (`HH-MM-SS`), so files and folders line up in time order in Explorer.
+
+  * A normal (non-split) recording is a single file named like `14-30-05 RemSound recording DESKTOP-ABC.wav` — the time, then “RemSound recording”, then this computer's name (and the right extension for your chosen format).
+  * A **split** recording (when you tick “Split recording into separate tracks”) is instead a _folder_ named like `14-30-05 RemSound recording multi track`. Inside it there's one file per peer, named `<peer name> 14-30-05.wav` (the peer's computer name, or its address if it has no name), plus your own send as `<your computer name> 14-30-05.wav`.
+
+
 
 You can change the folder via **Record → Change recordings folder**. Choosing a different folder saves that location into your current profile, so it travels with the rest of your settings — switching profiles can switch your recording destination too. If a saved profile points at a folder that doesn't exist on the computer loading it, the recorder quietly falls back to the default location for that computer.
 
@@ -1100,8 +1148,12 @@ Recording happens in the background, so it doesn't affect the sound or the netwo
 
 ### Recording settings dialog
 
-Reached via **Record → Recording settings**. Up to five keyboard-navigable lists, laid out left to right. FLAC's compression level has its own list, but it only shows when the file format is FLAC.
+Reached via **Record → Recording settings**. Two tickboxes sit at the top, then up to five keyboard-navigable lists laid out left to right. FLAC's compression level has its own list, but it only shows when the file format is FLAC.
 
+Control| What it does
+---|---
+**Split recording into separate tracks** (tickbox)| Instead of one mixed file, a recording becomes a _folder_ with one file per connected peer — each holding only that peer's sound — plus one file for your own send. Which of those files you get follows the Recording source choice below: _Received only_ gives you the peer files; _Both_ gives the peer files plus your own; _Sent only_ gives just your own.
+**Bypass pan and EQ when recording** (tickbox)| Records the raw sound — before any volume, pan or EQ you've set on the Pan and EQ tab — even though you still hear the shaped version. Left off (the default), the recording captures what you actually hear, including your shaping; and on a split recording each peer's own file carries that peer's own shaping.
 List| Shortcut| What goes in it
 ---|---|---
 **Recording source**|  Alt+S| Receive only / Send only / Both. See the source explanation above.
@@ -1112,7 +1164,7 @@ List| Shortcut| What goes in it
 
 OK (Alt+O) saves your choices to the current profile. Cancel (Alt+N) or Esc discards them. Settings are saved with the profile as usual — changes here mark the profile as having unsaved changes, and you'll be asked about them on exit if you haven't saved.
 
-## 21. Logs and diagnostics
+## 22. Logs and diagnostics
 
 Everything to do with logging lives on its own **Logging** tab in the Preferences dialog (Options → Preferences, or Ctrl+P). If logging is turned on (the **Enable logs** checkbox there, on by default), RemSound writes a log file each session into a `logs` folder inside **user settings and logs** — the same folder your settings and profiles live in. One file per launch.
 
@@ -1146,7 +1198,7 @@ Logs are plain text and can be opened in any text editor, or in a spreadsheet. T
 
 
 
-## 22. Command-line options
+## 23. Command-line options
 
 RemSound is normally a windowed program you click to open. But it can also take **command-line options** — short text instructions you type after the program name. They are handy for three things: checking a machine quickly (what devices are present, does the audio path work at all), getting a support report to send to whoever helps you, and starting RemSound a particular way from a shortcut or a script.
 
@@ -1201,7 +1253,7 @@ Option| What it does
 
 A common support sequence: ask the person to run `--diagnostics` and send you the file, then have them run `--selftest` — if that says PASS, capture, encoding and the audio path are all sound on their machine and the problem is somewhere in the connection between you.
 
-## 23. Troubleshooting
+## 24. Troubleshooting
 
 ### I don't hear my friend
 
@@ -1292,7 +1344,7 @@ The most common reasons:
 
 If none of those apply, just fall back to Tailscale — it works without involving the router at all.
 
-## 24. Glossary
+## 25. Glossary
 
 Term| Meaning
 ---|---
