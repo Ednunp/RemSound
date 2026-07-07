@@ -75,6 +75,11 @@ public sealed class AppConfig
     /// <see cref="Profile.PeerShaping"/>.</summary>
     public bool ShowPanEqTab { get; set; } = true;
 
+    /// <summary>Custom friendly names the user has given to peers, keyed by the peer's stable identity —
+    /// its machine name when known, otherwise its address. Machine-wide (a name applies in every profile)
+    /// and shown wherever that peer appears. Empty by default. See the Connectivity tab's Rename peer.</summary>
+    public Dictionary<string, string> PeerFriendlyNames { get; set; } = new();
+
     /// <summary>If true (the default), RemSound plays the startup cue once, right after this
     /// copy wins the single-instance takeover and before the profile loads. Machine-wide (not
     /// per-<see cref="Profile"/>) because it fires before any profile — and its per-profile

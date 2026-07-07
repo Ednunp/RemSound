@@ -268,6 +268,9 @@ public sealed class MainForm : Form
     private readonly CheckedListBox rememberedPeersList = new() { CheckOnClick = true, Width = 430, Height = 90, AccessibleName = "Remembered peers (Alt+R)" };
     private readonly Label rememberedPeersStatus = new() { AutoSize = true, Text = "No remembered peer selected." };
     private readonly Button manualAddButton = new() { Text = "Add peer by IP (Alt+&A)", AutoSize = true, AccessibleName = "Add peer by IP" };
+    // Read-only details for the peer highlighted in the connected list, and a button to give it a name.
+    private readonly TextBox peerDetailsBox = new() { Multiline = true, ReadOnly = true, Width = 430, Height = 132, ScrollBars = ScrollBars.Vertical, AccessibleName = "Peer details (Alt+E)" };
+    private readonly Button renamePeerButton = new() { Text = "Rena&me peer (Alt+M)", AutoSize = true, AccessibleName = "Rename peer" };
     // Per-profile "pin to exact addresses" toggle (#17). When ticked, RefreshKnownPeers skips the
     // discovered-peer merge and the address-follow, so the profile's peers stay exactly as the user set.
     private readonly AccessibleCheckBox lockPeerAddressesBox = new()
@@ -419,6 +422,12 @@ public sealed class MainForm : Form
     // Display labels for selected peers so we can render them in the dialog list even when
     // discovery has temporarily lost sight of them ("Foo (192.168.1.5) — offline").
     private readonly Dictionary<Guid, string> selectedPeerLabels = [];
+    // Custom friendly names, keyed by peer identity (machine name, else address). Loaded from AppConfig
+    // (machine-wide) at startup and mirrored back on rename. Resolved to display names everywhere a peer
+    // shows — connected/discovered lists, the volume/pan/EQ list, the status line, split recordings.
+    private Dictionary<string, string> peerFriendlyNames = new(StringComparer.OrdinalIgnoreCase);
+    // When each connected peer (by per-run InstanceId) first went healthy — for the "connected for" line.
+    private readonly Dictionary<Guid, DateTime> peerConnectedSinceUtc = [];
 
     // Anti-thrash state for the discovery-driven endpoint follow (see the peer-rebuild loop). A peer
     // reachable at two addresses at once (a VPN address AND a LAN address, say) announces from both,
@@ -841,6 +850,11 @@ public sealed class MainForm : Form
             selectedPeerEndpoints
                 .Select(kv => (kv.Value.Address, selectedPeerLabels.GetValueOrDefault(kv.Key, kv.Value.Address.ToString())))
                 .ToList();
+
+        // Load the machine-wide friendly-name book and make every peer list resolve display names
+        // through it. Set before any list is built so names show from the first render.
+        peerFriendlyNames = new Dictionary<string, string>(AppConfig.Load().PeerFriendlyNames ?? new(), StringComparer.OrdinalIgnoreCase);
+        PeerListItem.DisplayNameProvider = ResolvePeerDisplayName;
 
         // --- Set accessibility names ---
         // For these four controls the keyboard shortcut is included explicitly in both the
@@ -2974,13 +2988,24 @@ public sealed class MainForm : Form
         // Preferences dialog (File → Preferences, Ctrl+P) as the last two items.
 
         // === Layout ===
-        // 6 rows: 0–2 the three peer lists, 3 manual-add, 4 the lock-to-fixed-addresses toggle, 5 status.
-        panel.RowCount = 6;
+        // 8 rows: 0 connected peers, 1 the details box + 2 rename button (both about the highlighted
+        // connected peer), 3–4 discovered & remembered lists, 5 manual-add, 6 the lock toggle, 7 status.
+        panel.RowCount = 8;
         FormLayoutRows.AddCheckedListRow(panel, 0, "Connected peers (Alt+&C)", connectedPeersList, connectedPeersStatus, FocusListControl);
-        FormLayoutRows.AddCheckedListRow(panel, 1, "Discovered peers (Alt+&D)", discoveredPeersList, discoveredPeersStatus, FocusListControl);
-        FormLayoutRows.AddCheckedListRow(panel, 2, "Remembered peers (Alt+&R)", rememberedPeersList, rememberedPeersStatus, FocusListControl);
-        panel.Controls.Add(new Label { Text = "Manual peer", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 3);
-        panel.Controls.Add(manualAddButton, 1, 3);
+
+        // Details of, and a rename for, the peer highlighted in the connected list above.
+        var detailsLabel = new MnemonicLabel { Text = "Peer d&etails (Alt+E)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = peerDetailsBox };
+        detailsLabel.Click += (_, _) => peerDetailsBox.Focus();
+        panel.Controls.Add(detailsLabel, 0, 1);
+        panel.Controls.Add(peerDetailsBox, 1, 1);
+        renamePeerButton.Click += (_, _) => OnRenamePeer();
+        panel.Controls.Add(renamePeerButton, 1, 2);
+        connectedPeersList.SelectedIndexChanged += (_, _) => UpdatePeerDetails();
+
+        FormLayoutRows.AddCheckedListRow(panel, 3, "Discovered peers (Alt+&D)", discoveredPeersList, discoveredPeersStatus, FocusListControl);
+        FormLayoutRows.AddCheckedListRow(panel, 4, "Remembered peers (Alt+&R)", rememberedPeersList, rememberedPeersStatus, FocusListControl);
+        panel.Controls.Add(new Label { Text = "Manual peer", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 5);
+        panel.Controls.Add(manualAddButton, 1, 5);
 
         lockPeerAddressesBox.Checked = settings.LoadLockPeerAddresses();
         lockPeerAddressesBox.CheckedChanged += (_, _) =>
@@ -2989,14 +3014,15 @@ public sealed class MainForm : Form
             MarkProfileDirty();
             logFile.Event($"lock peer addresses: {(lockPeerAddressesBox.Checked ? "on" : "off")}");
         };
-        panel.Controls.Add(lockPeerAddressesBox, 0, 4);
+        panel.Controls.Add(lockPeerAddressesBox, 0, 6);
         panel.SetColumnSpan(lockPeerAddressesBox, 2);
 
         // Connection status readout — last row, tab-into-able.
         var statusLabel = new MnemonicLabel { Text = "Connection status (Alt+&S)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = statusReadout };
         statusLabel.Click += (_, _) => statusReadout.Focus();
-        panel.Controls.Add(statusLabel, 0, 5);
-        panel.Controls.Add(statusReadout, 1, 5);
+        panel.Controls.Add(statusLabel, 0, 7);
+        panel.Controls.Add(statusReadout, 1, 7);
+        UpdatePeerDetails();
 
         // Initial render so the box has content the moment the user tabs into it.
         RefreshStatusReadout();
@@ -3495,10 +3521,17 @@ public sealed class MainForm : Form
 
     // dB spoken as words — most NVDA users run with punctuation off and would never hear a "+" sign,
     // so a boost must say "plus". ("minus" comes through on its own, but we spell both for symmetry.)
+    // The graphic sliders read whole dB; the parametric list keeps up to one decimal (e.g. 1.5 dB).
     private static string FormatGainDb(float db)
     {
         if (MathF.Abs(db) < 0.5f) return "flat";
         return db > 0 ? $"plus {db:0} dB" : $"minus {MathF.Abs(db):0} dB";
+    }
+
+    private static string FormatGainDbPrecise(float db)
+    {
+        if (MathF.Abs(db) < 0.05f) return "flat";
+        return db > 0 ? $"plus {db:0.#} dB" : $"minus {MathF.Abs(db):0.#} dB";
     }
 
     /// <summary>Whether a given peer is shaped right now: the profile-wide master switch AND that peer's
@@ -3649,7 +3682,7 @@ public sealed class MainForm : Form
     private sealed class ParametricBandItem(ParametricBand band)
     {
         public ParametricBand Band { get; } = band;
-        public override string ToString() => $"{Band.StartHz:0} Hz to {Band.EndHz:0} Hz, {FormatGainDb(Band.GainDb)}";
+        public override string ToString() => $"{Band.StartHz:0} Hz to {Band.EndHz:0} Hz, {FormatGainDbPrecise(Band.GainDb)}";
     }
 
     /// <summary>Send-side controls: codec + packet size on row 0, lock-to-audio-clock on
@@ -4189,11 +4222,145 @@ public sealed class MainForm : Form
                 ? RoundToFive(rtt)
                 : null;
 
+            // Keep the friendly-name label fresh for the pan/EQ list, status line and recordings, and
+            // track when this peer first went healthy for the "connected for" line.
+            selectedPeerLabels[item.Peer.InstanceId] = ResolvePeerDisplayName(item.Peer);
+            if (isHealthy) { if (!peerConnectedSinceUtc.ContainsKey(item.Peer.InstanceId)) peerConnectedSinceUtc[item.Peer.InstanceId] = DateTime.UtcNow; }
+            else peerConnectedSinceUtc.Remove(item.Peer.InstanceId);
+
             if (item.ToString() != prevText)
             {
                 connectedPeersList.RefreshItemPublic(i);
             }
         }
+        UpdatePeerDetails();
+    }
+
+    // === Peer identity, friendly names, and the details box ===
+
+    /// <summary>The stable key a friendly name is stored under: the peer's machine name when it's a real
+    /// name, otherwise its address (the manual-by-IP case, where Name equals the address string).</summary>
+    private static string PeerIdentityKey(PeerAnnouncement peer)
+    {
+        var addr = peer.Address.ToString();
+        return string.IsNullOrWhiteSpace(peer.Name) || peer.Name == addr ? addr : peer.Name;
+    }
+
+    /// <summary>The name to show for a peer: its custom friendly name if set, else its machine name
+    /// (which for a manual-by-IP peer is the address). Used by every peer list via
+    /// <see cref="PeerListItem.DisplayNameProvider"/>.</summary>
+    private string ResolvePeerDisplayName(PeerAnnouncement peer)
+        => peerFriendlyNames.TryGetValue(PeerIdentityKey(peer), out var custom) && !string.IsNullOrWhiteSpace(custom)
+            ? custom
+            : peer.Name;
+
+    private PeerListItem? SelectedConnectedPeer() => SafeSelectedItem(connectedPeersList) as PeerListItem;
+
+    /// <summary>Refreshes the read-only details box for whichever peer is highlighted in the connected
+    /// list. Runs on selection change and each status tick (so "connected for" and ping stay live).</summary>
+    private void UpdatePeerDetails()
+    {
+        var item = SelectedConnectedPeer();
+        renamePeerButton.Enabled = item is not null;
+        var text = item is null ? "Select a connected peer to see its details." : BuildPeerDetailsText(item);
+        if (peerDetailsBox.Text != text) peerDetailsBox.Text = text;
+    }
+
+    private string BuildPeerDetailsText(PeerListItem item)
+    {
+        var peer = item.Peer;
+        var lines = new List<string>();
+        var display = ResolvePeerDisplayName(peer);
+        var machine = string.IsNullOrWhiteSpace(peer.Name) || peer.Name == peer.Address.ToString() ? null : peer.Name;
+
+        if (!string.Equals(display, machine, StringComparison.Ordinal) && !string.Equals(display, peer.Address.ToString(), StringComparison.Ordinal))
+            lines.Add($"Name: {display}");
+        lines.Add($"Machine name: {machine ?? "(unknown — added by address)"}");
+        lines.Add($"Address: {peer.Address}");
+
+        if (peerConnectedSinceUtc.TryGetValue(peer.InstanceId, out var since))
+            lines.Add($"Connected for: {DescribeDuration(DateTime.UtcNow - since)}");
+
+        if (item.Status.Connected)
+            lines.Add(item.Status.RttMs is { } rtt ? $"Link: healthy, ping {rtt} ms" : "Link: healthy");
+        else
+            lines.Add("Link: not connected");
+
+        lines.Add("Sending: " + DescribeSending(peer));
+        lines.Add("Receiving your audio: " + (item.Status.Sending ? "yes" : "no"));
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    /// <summary>"2 devices on ASIO at 48 kHz, Opus" — built from the live receive streams (each stream is
+    /// one capture device; its lane tells us WASAPI vs ASIO). Falls back gracefully when we're not
+    /// receiving that peer.</summary>
+    private string DescribeSending(PeerAnnouncement peer)
+    {
+        var formats = receiver.ActiveFormatsFromAddress(peer.Address);
+        if (formats.Count == 0)
+            return peer.CanSend ? "yes — turn on Receive audio to see the details" : "no";
+
+        string deviceWord = formats.Count == 1 ? "1 device" : $"{formats.Count} devices";
+
+        var apis = formats.Select(f => f.Lane == RenderRoute.AsioLane ? "ASIO" : "WASAPI").Distinct().OrderBy(a => a).ToList();
+        string apiPart = apis.Count == 1 ? $" on {apis[0]}" : $" on {string.Join(" and ", apis)}";
+
+        var rates = formats.Select(f => f.SampleRate).Distinct().ToList();
+        string ratePart = rates.Count == 1 ? $" at {rates[0]} Hz" : "";
+
+        var codecs = formats.Select(f => ((AudioTransportCodec)f.Codec) == AudioTransportCodec.Opus ? "Opus" : "PCM").Distinct().ToList();
+        string codecPart = codecs.Count == 1 ? $", {codecs[0]}" : "";
+
+        return $"{deviceWord}{apiPart}{ratePart}{codecPart}";
+    }
+
+    private static string DescribeDuration(TimeSpan d)
+    {
+        if (d.TotalSeconds < 60) return $"{(int)d.TotalSeconds} seconds";
+        if (d.TotalMinutes < 60) return $"{(int)d.TotalMinutes} minute{((int)d.TotalMinutes == 1 ? "" : "s")}";
+        int hours = (int)d.TotalHours;
+        int mins = d.Minutes;
+        return mins == 0 ? $"{hours} hour{(hours == 1 ? "" : "s")}" : $"{hours} hour{(hours == 1 ? "" : "s")} {mins} minute{(mins == 1 ? "" : "s")}";
+    }
+
+    private void OnRenamePeer()
+    {
+        var item = SelectedConnectedPeer();
+        if (item is null) return;
+        var peer = item.Peer;
+        var key = PeerIdentityKey(peer);
+        var machineForDisplay = string.IsNullOrWhiteSpace(peer.Name) || peer.Name == peer.Address.ToString()
+            ? peer.Address.ToString()
+            : peer.Name;
+        peerFriendlyNames.TryGetValue(key, out var current);
+
+        using var dlg = new RenamePeerDialog(machineForDisplay, current);
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        ApplyFriendlyName(key, dlg.FriendlyName);
+    }
+
+    /// <summary>Store (or clear) a peer's friendly name in the machine-wide book, persist it, and
+    /// refresh every place a peer name shows.</summary>
+    private void ApplyFriendlyName(string identityKey, string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) peerFriendlyNames.Remove(identityKey);
+        else peerFriendlyNames[identityKey] = name.Trim();
+
+        try
+        {
+            var cfg = AppConfig.Load();
+            cfg.PeerFriendlyNames = new Dictionary<string, string>(peerFriendlyNames, StringComparer.OrdinalIgnoreCase);
+            cfg.Save();
+        }
+        catch (Exception ex) { logFile.Event($"peer rename: failed to save friendly name: {ex.Message}"); }
+
+        // Refresh everywhere: connected/discovered lists rebuild their labels, the pan/EQ list re-reads
+        // its peer names, and the details box updates.
+        lastPanEqPeerSignature = "";
+        SyncAllPeerLists();
+        RefreshPanEqPeerList();
+        UpdatePeerDetails();
     }
 
     private void SyncDiscoveredList()
@@ -5872,7 +6039,7 @@ public sealed class MainForm : Form
         foreach (var (id, oldEndpoint) in selectedPeerEndpoints.ToList())
         {
             if (!knownPeers.TryGetValue(id, out var peer)) continue;
-            selectedPeerLabels[id] = peer.Name;
+            selectedPeerLabels[id] = ResolvePeerDisplayName(peer);
 
             var newEndpoint = new IPEndPoint(peer.Address, peer.AudioPort);
             // Same address, or the one we're on is still healthy: nothing to do — and reset the
@@ -5912,7 +6079,7 @@ public sealed class MainForm : Form
     private void SelectPeer(PeerAnnouncement peer, bool fromProfileRestore)
     {
         selectedPeerEndpoints[peer.InstanceId] = new IPEndPoint(peer.Address, peer.AudioPort);
-        selectedPeerLabels[peer.InstanceId] = peer.Name;
+        selectedPeerLabels[peer.InstanceId] = ResolvePeerDisplayName(peer);
         logFile.Event($"peer selected: {peer.Name} {peer.Address}:{peer.AudioPort}");
         InvalidateAutoTuneHistory();
         PushAllowedReceiveSenders();

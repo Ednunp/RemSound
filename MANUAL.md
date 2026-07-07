@@ -294,11 +294,19 @@ This is where you manage peers and reach the logging options. The controls on th
 Control| Shortcut| What it does
 ---|---|---
 **Connected peers**|  Alt+C| The people you currently have sound flowing with. Unticking a row disconnects that peer.
+**Peer details**|  Alt+E| A read-only box describing whichever connected peer you're on in the list above. Arrow through it to read: their name, their machine name, their IP address, how long you've been connected, the link health and ping, what they're sending (how many devices, on WASAPI or ASIO, at what sample rate and codec), and whether they're receiving your audio. The device and WASAPI/ASIO detail only shows while you're actually receiving that peer.
+**Rename peer**|  Alt+M| Give the highlighted peer a friendly name of your choosing. It opens a box with the name and a **Clear custom name** button. The name sticks to that machine for good — across restarts, IP changes and networks — and shows everywhere that peer appears: the lists here, the volume, pan and EQ for peers tab, the status line and split-recording filenames. See below.
 **Discovered peers**|  Alt+D| People RemSound has heard from in the last few seconds. Tick someone to connect to them.
 **Remembered peers**|  Alt+R| People you've connected to before, or added by address. This list is kept between sessions. Tick someone to reconnect.
 **Add peer by IP**|  Alt+A| Opens a small box where you type an address or computer name. It adds that peer to the remembered list and connects.
 **Lock to these exact peer addresses**|  Alt+L| When ticked, this profile uses only the exact addresses you set and never follows the other computer by name or switches to a different address — even if the address stops working. Off by default, saved with the profile. See Locking a profile to one exact address.
 **Connection status**|  Alt+S| A read-only box of text that sums up everything happening right now — how long you've been connected, how many peers you have, how much sound is flowing each way, and the connection health of each peer. Open it to read the current connection status.
+
+### Giving a peer a friendly name
+
+Highlight a peer in the **Connected peers** list and press **Rename peer (Alt+M)** to call them whatever you like — “Andre's desktop” instead of “ANDRE-DESKTOP”. The name is tied to that _machine_ , not to its address, so it survives their restarting RemSound, their address changing, and their reaching you on a different network (local network one day, Tailscale the next). Once set, it replaces the machine name everywhere that peer shows up — both peer lists, the volume, pan and EQ for peers list, the connection status, and the per-peer files a split recording makes.
+
+In the rename box, type the name and press OK, or press **Clear custom name (Alt+C)** to drop back to the machine name. (Leaving the box empty and pressing OK does the same.) The names are kept per machine you're using RemSound on, and apply in every profile. One case to know about: a peer you added purely by address that never announces a name has no machine name to pin to, so its friendly name is tied to the address instead and would need re-setting if that address changes.
 
 ## 7. Audio inputs and outputs tab
 
@@ -757,6 +765,8 @@ Each tab has its own Alt+letter shortcuts. The same letter can do different thin
 Key| Action
 ---|---
 Alt+C| Focus the Connected peers list
+Alt+E| Focus the Peer details box (for the highlighted connected peer)
+Alt+M| Rename the highlighted connected peer
 Alt+D| Focus the Discovered peers list
 Alt+R| Focus the Remembered peers list
 Alt+A| Add peer by IP

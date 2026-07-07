@@ -63,6 +63,11 @@ internal sealed class PeerLineStatus
 
 internal sealed class PeerListItem
 {
+    /// <summary>Optional resolver mapping a peer to the display name to show — e.g. a user-set friendly
+    /// name. Set once by MainForm. When null (or it returns the machine name) behaviour is unchanged,
+    /// so this covers the connected AND discovered lists in one place.</summary>
+    public static Func<PeerAnnouncement, string>? DisplayNameProvider;
+
     public PeerAnnouncement Peer { get; }
     public PeerLineStatus Status { get; } = new();
 
@@ -79,7 +84,8 @@ internal sealed class PeerListItem
         // Base label: "hostname (ip)" for discovered peers, just "ip" for manual-by-IP entries
         // (where hostname equals the IP address). Avoids "192.168.1.95 (192.168.1.95)" duplication.
         var addr = Peer.Address.ToString();
-        var basePart = Peer.Name == addr ? addr : $"{Peer.Name} ({addr})";
+        var name = DisplayNameProvider?.Invoke(Peer) ?? Peer.Name;
+        var basePart = name == addr ? addr : $"{name} ({addr})";
 
         if (!Status.Connected)
         {

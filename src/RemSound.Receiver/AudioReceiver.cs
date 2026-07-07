@@ -865,6 +865,32 @@ public sealed class AudioReceiver : IDisposable
     }
 
     /// <summary>
+    /// The format of every currently-active (non-idle) receive session from the given peer IP — one
+    /// entry per stream, i.e. per capture device the peer is sending. Each carries its sample rate,
+    /// codec and lane (WASAPI vs ASIO), so the UI can say "sending N devices on ASIO at 48 kHz, Opus"
+    /// with no protocol change. Empty when nothing is arriving from that peer.
+    /// </summary>
+    public IReadOnlyList<AudioFormatInfo> ActiveFormatsFromAddress(IPAddress address)
+    {
+        var now = DateTime.UtcNow;
+        var fresh = new List<SessionPlayout>();
+        foreach (var sp in playoutEngine.ActiveSessions)
+        {
+            if (!sp.Endpoint.Address.Equals(address)) continue;
+            if (now - sp.LastWriteUtc > SessionIdleTimeout) continue;
+            fresh.Add(sp);
+        }
+        var formats = new List<AudioFormatInfo>();
+        lock (sessionsLock)
+        {
+            foreach (var sp in fresh)
+                if (sessions.TryGetValue((sp.Endpoint, sp.StreamId), out var session) && session.Format is not null)
+                    formats.Add(session.Format);
+        }
+        return formats;
+    }
+
+    /// <summary>
     /// The wire codec of the freshest currently-active receive session across all peers, or
     /// null when nothing is being received. Surfaced in the SNAP log's Codec column so a
     /// receive-only node reports what it is actually decoding rather than its dormant send-codec
