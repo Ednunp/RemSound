@@ -127,11 +127,10 @@ public sealed class RecordingSettings
 
     /// <summary>Default folder path used when <see cref="Folder"/> is blank. Computed at
     /// call time (not cached) so a launch from a different exe directory picks up that
-    /// directory rather than the first-load one. The per-machine subfolder lets two
-    /// machines sharing a Dropbox-backed RemSound install keep their recordings tidily
-    /// separated by sender identity.</summary>
+    /// directory rather than the first-load one. Recordings nest by DATE inside this — the
+    /// machine name lives in the split-track file names, not a top-level folder.</summary>
     public static string DefaultFolder() =>
-        Path.Combine(AppContext.BaseDirectory, "recordings", Environment.MachineName);
+        Path.Combine(AppContext.BaseDirectory, "recordings");
 
     /// <summary>Returns the resolved folder this profile would record into right now —
     /// either the explicit <see cref="Folder"/> if set, or <see cref="DefaultFolder"/>.

@@ -154,30 +154,40 @@ internal sealed class RecordingController
         var ext = AudioRecorder.ExtensionFor(s.FileFormat);
         var time = now.ToString("HH-mm-ss");
 
+        // Multi-track follows the Source setting like single-file recording does: peer (received)
+        // tracks unless "sent only", and your own (sent) track only when you're actually recording
+        // your send ("both" or "sent only") — so a receive-only recording no longer makes a "me" file.
+
         // One track per connected peer (their received audio only), created up front on the UI thread
         // so the audio-thread tap never has to open a file. Peers that join mid-recording aren't added.
-        var recs = new Dictionary<string, PeerTrack>();
-        var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var byAddr = new Dictionary<string, string>();
-        foreach (var (addr, name) in ConnectedPeersProvider?.Invoke() ?? []) byAddr[addr.ToString()] = name;
-        foreach (var (addrKey, name) in byAddr)
+        if (s.Source != RecordingSource.SentOnly)
         {
-            var baseName = Sanitize(string.IsNullOrWhiteSpace(name) ? addrKey : name);
-            var fileName = $"{baseName} {time}";
-            if (!usedNames.Add(fileName)) fileName = $"{baseName} ({addrKey}) {time}";
-            var path = Path.Combine(folder, $"{fileName}.{ext}");
-            recs[addrKey] = new PeerTrack(new AudioRecorder(WithSource(s, RecordingSource.ReceivedOnly), diagnostic, OnRecorderFinished, path));
+            var recs = new Dictionary<string, PeerTrack>();
+            var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var byAddr = new Dictionary<string, string>();
+            foreach (var (addr, name) in ConnectedPeersProvider?.Invoke() ?? []) byAddr[addr.ToString()] = name;
+            foreach (var (addrKey, name) in byAddr)
+            {
+                var baseName = Sanitize(string.IsNullOrWhiteSpace(name) ? addrKey : name);
+                var fileName = $"{baseName} {time}";
+                if (!usedNames.Add(fileName)) fileName = $"{baseName} ({addrKey}) {time}";
+                var path = Path.Combine(folder, $"{fileName}.{ext}");
+                recs[addrKey] = new PeerTrack(new AudioRecorder(WithSource(s, RecordingSource.ReceivedOnly), diagnostic, OnRecorderFinished, path));
+            }
+            peerTracks = recs;
+            receiver.SetPeerRecordTap(OnPeerRecordBlock, raw: s.BypassShaping);
+            receiver.OnRecordBlockComplete = FlushPeerTracks;
         }
-        peerTracks = recs;
-        receiver.SetPeerRecordTap(OnPeerRecordBlock, raw: s.BypassShaping);
-        receiver.OnRecordBlockComplete = FlushPeerTracks;
 
         // Your own track — your sent audio.
-        var mePath = Path.Combine(folder, $"{Sanitize(Environment.MachineName)} {time}.{ext}");
-        meRecorder = new AudioRecorder(WithSource(s, RecordingSource.SentOnly), diagnostic, OnRecorderFinished, mePath);
-        sender.OnSentSamples = meRecorder.WriteSent;
+        if (s.Source != RecordingSource.ReceivedOnly)
+        {
+            var mePath = Path.Combine(folder, $"{Sanitize(Environment.MachineName)} {time}.{ext}");
+            meRecorder = new AudioRecorder(WithSource(s, RecordingSource.SentOnly), diagnostic, OnRecorderFinished, mePath);
+            sender.OnSentSamples = meRecorder.WriteSent;
+        }
 
-        diagnostic($"recording: started multi-track → {folder} ({recs.Count} peer track(s), format={s.FileFormat}, bypass={s.BypassShaping})");
+        diagnostic($"recording: started multi-track → {folder} ({(peerTracks?.Count ?? 0)} peer track(s){(meRecorder is not null ? " + your send" : "")}, source={s.Source}, format={s.FileFormat}, bypass={s.BypassShaping})");
     }
 
     // Audio thread. Route each peer's block to that peer's recorder. peerRecorders is fully built at
