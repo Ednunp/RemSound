@@ -3155,7 +3155,7 @@ public sealed class MainForm : Form
         panSlider.ValueChanged += (_, _) => OnPanChanged();
         resetPeerEqButton.Click += (_, _) => OnResetPeerEq();
         eqModeList.Items.Add("3 band basic EQ");
-        eqModeList.Items.Add("10 band advanced EQ");
+        eqModeList.Items.Add("12 band advanced EQ");
         eqModeList.SelectedIndexChanged += (_, _) => OnEqModeChanged();
 
         var peerLabel = new MnemonicLabel { Text = "Peer to shape (Alt+&U)", AutoSize = true, MnemonicTarget = panEqPeerList };

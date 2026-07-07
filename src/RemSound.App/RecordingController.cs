@@ -264,7 +264,7 @@ internal sealed class RecordingController
         Path.Combine(BaseFolder(s), now.ToString("yyyy-MM-dd"));
 
     private static string SingleTrackPath(RecordingSettings s, DateTime now) =>
-        Path.Combine(DateFolder(s, now), $"{now:HH-mm-ss} RemSound recording.{AudioRecorder.ExtensionFor(s.FileFormat)}");
+        Path.Combine(DateFolder(s, now), $"{now:HH-mm-ss} RemSound recording {Sanitize(Environment.MachineName)}.{AudioRecorder.ExtensionFor(s.FileFormat)}");
 
     private static string MultiTrackFolder(RecordingSettings s, DateTime now) =>
         Path.Combine(DateFolder(s, now), $"{now:HH-mm-ss} RemSound recording multi track");
