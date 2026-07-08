@@ -293,7 +293,7 @@ internal sealed class PreferencesDialog : Form
         Width = 320,
         Height = 96,
         IntegralHeight = false,
-        AccessibleName = "Main tab order (Alt+O), then Move up / Move down to reorder",
+        AccessibleName = "Tab order (Alt+O), press the move up and move down buttons to reorder",
     };
     private readonly Button moveTabUpButton = new() { Text = "Move &up (Alt+U)", AutoSize = true, AccessibleName = "Move tab up" };
     private readonly Button moveTabDownButton = new() { Text = "Move dow&n (Alt+N)", AutoSize = true, AccessibleName = "Move tab down" };
@@ -721,7 +721,7 @@ internal sealed class PreferencesDialog : Form
         moveTabUpButton.Click += (_, _) => MoveTab(-1);
         moveTabDownButton.Click += (_, _) => MoveTab(1);
 
-        var tabOrderLabel = new MnemonicLabel { Text = "Main tab &order (Alt+O)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = tabOrderList };
+        var tabOrderLabel = new MnemonicLabel { Text = "Tab &order (Alt+O)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = tabOrderList };
         var tabOrderButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 2, 0, 0) };
         tabOrderButtons.Controls.Add(moveTabUpButton);
         tabOrderButtons.Controls.Add(moveTabDownButton);
