@@ -3062,6 +3062,21 @@ public sealed class MainForm : Form
         panel.Controls.Add(statusReadout, 1, 8);
         UpdatePeerDetails();
 
+        // Tab order — the AUTHORITATIVE setting for this tab (SetTabOrder no longer touches it). The
+        // three lists are each wrapped in a FlowLayoutPanel by AddCheckedListRow, so the WRAPPER (the
+        // list's Parent) is what sorts among the tab's controls; setting the list's own TabIndex only
+        // orders it inside its wrapper (where it's alone) and does nothing to the overall order — that
+        // was the long-standing bug. Set the wrappers and the directly-added controls in sequence:
+        // connected, details, rename, discovered, remembered, add-by-IP, lock, status.
+        if (connectedPeersList.Parent is { } connectedWrap) connectedWrap.TabIndex = 0;
+        peerDetailsBox.TabIndex = 1;
+        renamePeerButton.TabIndex = 2;
+        if (discoveredPeersList.Parent is { } discoveredWrap) discoveredWrap.TabIndex = 3;
+        if (rememberedPeersList.Parent is { } rememberedWrap) rememberedWrap.TabIndex = 4;
+        manualAddButton.TabIndex = 5;
+        lockPeerAddressesBox.TabIndex = 6;
+        statusReadout.TabIndex = 7;
+
         // Initial render so the box has content the moment the user tabs into it.
         RefreshStatusReadout();
 
@@ -4682,18 +4697,9 @@ public sealed class MainForm : Form
         // the existing relative order from the pre-tab single-form layout so the user's
         // muscle memory is preserved.
         //
-        // Connectivity tab. This is the authoritative tab order (it overrides layout add-order), so it
-        // must list EVERY focusable control on the tab or the unlisted ones collapse to TabIndex 0 and
-        // land in the wrong place. Order: connected, details, rename, discovered, remembered, add-by-IP,
-        // lock, status.
-        connectedPeersList.TabIndex = 0;
-        peerDetailsBox.TabIndex = 1;
-        renamePeerButton.TabIndex = 2;
-        discoveredPeersList.TabIndex = 3;
-        rememberedPeersList.TabIndex = 4;
-        manualAddButton.TabIndex = 5;
-        lockPeerAddressesBox.TabIndex = 6;
-        statusReadout.TabIndex = 7;
+        // Connectivity tab order lives in BuildConnectivityTab now — it has to set the list WRAPPERS'
+        // TabIndex (the lists are nested in FlowLayoutPanels), which this central method can't reach
+        // cleanly. Don't set it here or it fights the correct settings there.
         // Audio I/O tab. The driver picker is row 0 when present (a real driver chosen here
         // is what enables ASIO). Audio-mode listbox retired 2026-05-11.
         asioDriverBox.TabIndex = 0;
