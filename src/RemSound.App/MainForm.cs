@@ -422,10 +422,12 @@ public sealed class MainForm : Form
     // Display labels for selected peers so we can render them in the dialog list even when
     // discovery has temporarily lost sight of them ("Foo (192.168.1.5) — offline").
     private readonly Dictionary<Guid, string> selectedPeerLabels = [];
-    // Custom friendly names, keyed by peer identity (machine name, else address). Loaded from AppConfig
-    // (machine-wide) at startup and mirrored back on rename. Resolved to display names everywhere a peer
+    // The "named peers" book, keyed by peer identity (machine name, else address). Loaded from AppConfig
+    // (machine-wide) at startup and mirrored back on change. Resolved to display names everywhere a peer
     // shows — connected/discovered lists, the volume/pan/EQ list, the status line, split recordings.
-    private Dictionary<string, string> peerFriendlyNames = new(StringComparer.OrdinalIgnoreCase);
+    // Only deliberately-renamed peers live here. Last address / last-seen updated as they connect.
+    private Dictionary<string, NamedPeer> namedPeers = new(StringComparer.OrdinalIgnoreCase);
+    private bool namedPeersDirty;   // an address changed this session; flush on the next tick
     // When each connected peer (by per-run InstanceId) first went healthy — for the "connected for" line.
     private readonly Dictionary<Guid, DateTime> peerConnectedSinceUtc = [];
 
@@ -851,9 +853,17 @@ public sealed class MainForm : Form
                 .Select(kv => (kv.Value.Address, selectedPeerLabels.GetValueOrDefault(kv.Key, kv.Value.Address.ToString())))
                 .ToList();
 
-        // Load the machine-wide friendly-name book and make every peer list resolve display names
-        // through it. Set before any list is built so names show from the first render.
-        peerFriendlyNames = new Dictionary<string, string>(AppConfig.Load().PeerFriendlyNames ?? new(), StringComparer.OrdinalIgnoreCase);
+        // Load the machine-wide named-peers book and make every peer list resolve display names through
+        // it. Set before any list is built so names show from the first render.
+        var startupCfg = AppConfig.Load();
+        namedPeers = new Dictionary<string, NamedPeer>(startupCfg.NamedPeers ?? new(), StringComparer.OrdinalIgnoreCase);
+        // Migrate the legacy flat friendly-name map (pre-registry configs) into the book, once.
+        if (namedPeers.Count == 0 && startupCfg.PeerFriendlyNames is { Count: > 0 } legacy)
+        {
+            foreach (var (k, v) in legacy)
+                if (!string.IsNullOrWhiteSpace(v)) namedPeers[k] = new NamedPeer { MachineName = k, FriendlyName = v };
+            if (namedPeers.Count > 0) SaveNamedPeers();
+        }
         PeerListItem.DisplayNameProvider = ResolvePeerDisplayName;
 
         // --- Set accessibility names ---
@@ -1942,6 +1952,13 @@ public sealed class MainForm : Form
         };
         profilePasswordsItem.Click += (_, _) => OpenProfilePasswordManager();
 
+        // Manage the machine-wide named-peers book. 'n' mnemonic (ma&nage/&named) is free in Options.
+        var manageNamedPeersItem = new ToolStripMenuItem("Manage &named peers...")
+        {
+            AccessibleName = "Manage named peers",
+        };
+        manageNamedPeersItem.Click += (_, _) => ShowManageNamedPeersDialog();
+
         // Reset the one-time "untick the other devices?" prompt that appears when you turn on a
         // "Use Windows default audio device" box — clears the remembered Yes/No so it asks again.
         // Mirrors the Realtek toggle's "let the user reverse a one-time decision" pattern.
@@ -1969,6 +1986,7 @@ public sealed class MainForm : Form
             recordingSettingsItem,
             keyboardItem,
             profilePasswordsItem,
+            manageNamedPeersItem,
             resetDefaultDeviceItem,
         };
         if (realtekToggle is not null) optionItems.Add(realtekToggle);
@@ -4235,11 +4253,21 @@ public sealed class MainForm : Form
             if (isHealthy) { if (!peerConnectedSinceUtc.ContainsKey(item.Peer.InstanceId)) peerConnectedSinceUtc[item.Peer.InstanceId] = DateTime.UtcNow; }
             else peerConnectedSinceUtc.Remove(item.Peer.InstanceId);
 
+            // For a NAMED peer, record where and when we last saw it (for Manage named peers). Only
+            // an address change forces a disk write; the timestamp is flushed on close.
+            if (isHealthy && namedPeers.TryGetValue(PeerIdentityKey(item.Peer), out var np))
+            {
+                var addr = item.Peer.Address.ToString();
+                if (np.LastAddress != addr) { np.LastAddress = addr; namedPeersDirty = true; }
+                np.LastSeenUtc = DateTime.UtcNow;
+            }
+
             if (item.ToString() != prevText)
             {
                 connectedPeersList.RefreshItemPublic(i);
             }
         }
+        if (namedPeersDirty) { namedPeersDirty = false; SaveNamedPeers(); }
         UpdatePeerDetails();
     }
 
@@ -4257,8 +4285,8 @@ public sealed class MainForm : Form
     /// (which for a manual-by-IP peer is the address). Used by every peer list via
     /// <see cref="PeerListItem.DisplayNameProvider"/>.</summary>
     private string ResolvePeerDisplayName(PeerAnnouncement peer)
-        => peerFriendlyNames.TryGetValue(PeerIdentityKey(peer), out var custom) && !string.IsNullOrWhiteSpace(custom)
-            ? custom
+        => namedPeers.TryGetValue(PeerIdentityKey(peer), out var np) && !string.IsNullOrWhiteSpace(np.FriendlyName)
+            ? np.FriendlyName
             : peer.Name;
 
     private PeerListItem? SelectedConnectedPeer() => SafeSelectedItem(connectedPeersList) as PeerListItem;
@@ -4340,27 +4368,29 @@ public sealed class MainForm : Form
         var machineForDisplay = string.IsNullOrWhiteSpace(peer.Name) || peer.Name == peer.Address.ToString()
             ? peer.Address.ToString()
             : peer.Name;
-        peerFriendlyNames.TryGetValue(key, out var current);
+        namedPeers.TryGetValue(key, out var current);
 
-        using var dlg = new RenamePeerDialog(machineForDisplay, current);
+        using var dlg = new RenamePeerDialog(machineForDisplay, current?.FriendlyName);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
-        ApplyFriendlyName(key, dlg.FriendlyName);
+        ApplyFriendlyName(key, machineForDisplay, peer.Address.ToString(), dlg.FriendlyName);
     }
 
     /// <summary>Store (or clear) a peer's friendly name in the machine-wide book, persist it, and
-    /// refresh every place a peer name shows.</summary>
-    private void ApplyFriendlyName(string identityKey, string? name)
+    /// refresh every place a peer name shows. A blank/cleared name removes the entry entirely.</summary>
+    private void ApplyFriendlyName(string identityKey, string machineName, string? address, string? name)
     {
-        if (string.IsNullOrWhiteSpace(name)) peerFriendlyNames.Remove(identityKey);
-        else peerFriendlyNames[identityKey] = name.Trim();
-
-        try
+        if (string.IsNullOrWhiteSpace(name))
         {
-            var cfg = AppConfig.Load();
-            cfg.PeerFriendlyNames = new Dictionary<string, string>(peerFriendlyNames, StringComparer.OrdinalIgnoreCase);
-            cfg.Save();
+            namedPeers.Remove(identityKey);
         }
-        catch (Exception ex) { logFile.Event($"peer rename: failed to save friendly name: {ex.Message}"); }
+        else
+        {
+            if (!namedPeers.TryGetValue(identityKey, out var np)) { np = new NamedPeer(); namedPeers[identityKey] = np; }
+            np.MachineName = string.IsNullOrWhiteSpace(machineName) ? identityKey : machineName;
+            np.FriendlyName = name.Trim();
+            if (!string.IsNullOrWhiteSpace(address)) { np.LastAddress = address; np.LastSeenUtc = DateTime.UtcNow; }
+        }
+        SaveNamedPeers();
 
         // Refresh everywhere: connected/discovered lists rebuild their labels, the pan/EQ list re-reads
         // its peer names, and the details box updates.
@@ -4368,6 +4398,139 @@ public sealed class MainForm : Form
         SyncAllPeerLists();
         RefreshPanEqPeerList();
         UpdatePeerDetails();
+    }
+
+    /// <summary>Writes the in-memory named-peers book to the machine-wide config, and clears the legacy
+    /// flat map so it isn't written back.</summary>
+    private void SaveNamedPeers()
+    {
+        try
+        {
+            var cfg = AppConfig.Load();
+            cfg.NamedPeers = new Dictionary<string, NamedPeer>(namedPeers, StringComparer.OrdinalIgnoreCase);
+            cfg.PeerFriendlyNames = new();
+            cfg.Save();
+        }
+        catch (Exception ex) { logFile.Event($"named peers: failed to save: {ex.Message}"); }
+    }
+
+    /// <summary>Options → Manage named peers. Lists the peers the user has renamed, with their machine
+    /// name and where/when last seen, and lets them rename (F2 / button) or delete (Del / button) any.</summary>
+    private void ShowManageNamedPeersDialog()
+    {
+        using var dialog = new Form
+        {
+            Text = "Manage named peers",
+            StartPosition = FormStartPosition.CenterParent,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MinimizeBox = false,
+            MaximizeBox = false,
+            ShowInTaskbar = false,
+            KeyPreview = true,
+            ClientSize = new Size(600, 420),
+        };
+
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 4 };
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        var intro = new Label
+        {
+            Text = "The peers you've given a name to. Rename or delete any of them. Deleting forgets the "
+                 + "name only — the peer still connects as normal, under its machine name.",
+            AutoSize = true,
+            MaximumSize = new Size(560, 0),
+            Margin = new Padding(0, 0, 0, 8),
+        };
+        root.Controls.Add(intro, 0, 0);
+
+        // Plain label with '&' focuses the next control in tab order (the list).
+        var peersLabel = new Label { Text = "&Peers", AutoSize = true, Anchor = AnchorStyles.Left };
+        root.Controls.Add(peersLabel, 0, 1);
+
+        var list = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false, AccessibleName = "Peers (Alt+P)", TabIndex = 0 };
+        root.Controls.Add(list, 0, 2);
+
+        var renameBtn = new Button { Text = "&Rename (Alt+R)", AutoSize = true, AccessibleName = "Rename", TabIndex = 1 };
+        var deleteBtn = new Button { Text = "&Delete (Alt+D)", AutoSize = true, AccessibleName = "Delete", TabIndex = 2 };
+        var closeBtn = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.OK, TabIndex = 3 };
+        var buttonRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, AutoSize = true, Padding = new Padding(0, 8, 0, 0) };
+        buttonRow.Controls.Add(renameBtn);
+        buttonRow.Controls.Add(deleteBtn);
+        buttonRow.Controls.Add(closeBtn);
+        root.Controls.Add(buttonRow, 0, 3);
+
+        dialog.Controls.Add(root);
+        dialog.AcceptButton = closeBtn;
+        dialog.CancelButton = closeBtn;
+
+        void Refresh()
+        {
+            var prev = list.SelectedIndex;
+            list.BeginUpdate();
+            list.Items.Clear();
+            foreach (var kv in namedPeers.OrderBy(k => k.Value.FriendlyName, StringComparer.CurrentCultureIgnoreCase))
+                list.Items.Add(new NamedPeerItem(kv.Key, kv.Value));
+            list.EndUpdate();
+            if (list.Items.Count > 0) list.SelectedIndex = Math.Clamp(prev < 0 ? 0 : prev, 0, list.Items.Count - 1);
+            renameBtn.Enabled = deleteBtn.Enabled = list.Items.Count > 0;
+        }
+
+        void RenameSelected()
+        {
+            if (list.SelectedItem is not NamedPeerItem it) return;
+            using var rename = new RenamePeerDialog(it.Peer.MachineName, it.Peer.FriendlyName);
+            if (rename.ShowDialog(dialog) != DialogResult.OK) return;
+            ApplyFriendlyName(it.Key, it.Peer.MachineName, it.Peer.LastAddress, rename.FriendlyName);
+            Refresh();
+        }
+
+        void DeleteSelected()
+        {
+            if (list.SelectedItem is not NamedPeerItem it) return;
+            namedPeers.Remove(it.Key);
+            SaveNamedPeers();
+            lastPanEqPeerSignature = "";
+            SyncAllPeerLists();
+            RefreshPanEqPeerList();
+            UpdatePeerDetails();
+            Refresh();
+        }
+
+        renameBtn.Click += (_, _) => RenameSelected();
+        deleteBtn.Click += (_, _) => DeleteSelected();
+        list.DoubleClick += (_, _) => RenameSelected();
+        list.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.F2) { RenameSelected(); e.Handled = e.SuppressKeyPress = true; }
+            else if (e.KeyCode == Keys.Delete) { DeleteSelected(); e.Handled = e.SuppressKeyPress = true; }
+        };
+        dialog.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Escape) { dialog.DialogResult = DialogResult.OK; dialog.Close(); }
+        };
+
+        Refresh();
+        dialog.Load += (_, _) => list.Focus();
+        dialog.ShowDialog(this);
+    }
+
+    // One row in the Manage named peers list: "Andre's desktop — ANDRE-DESKTOP — last seen 8 Jul 2026, 100.72.4.13".
+    private sealed class NamedPeerItem(string key, NamedPeer peer)
+    {
+        public string Key { get; } = key;
+        public NamedPeer Peer { get; } = peer;
+        public override string ToString()
+        {
+            string seen = Peer.LastSeenUtc == default
+                ? "not seen yet"
+                : $"last seen {Peer.LastSeenUtc.ToLocalTime():d MMM yyyy}"
+                  + (string.IsNullOrWhiteSpace(Peer.LastAddress) ? "" : $", {Peer.LastAddress}");
+            return $"{Peer.FriendlyName} — {Peer.MachineName} — {seen}";
+        }
     }
 
     private void SyncDiscoveredList()
@@ -8884,6 +9047,10 @@ public sealed class MainForm : Form
         // we want the on-disk file finalised before the form closes, so opening the
         // recordings folder right after exit shows the file at its full size.
         try { recordingController.Stop(); } catch { /* recording cleanup is best-effort */ }
+
+        // Flush named-peers last-seen timestamps (updated in memory each tick, only saved to disk on
+        // address change during the session) so the Manage named peers dialog shows fresh times next run.
+        if (namedPeers.Count > 0) SaveNamedPeers();
 
         base.OnFormClosing(e);
     }
