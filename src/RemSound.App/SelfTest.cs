@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Windows.Forms;
 using RemSound.Core;
+using RemSound.Receiver;
 
 namespace RemSound.App;
 
@@ -56,6 +57,8 @@ internal static class SelfTest
         RunStep(results, "Packet framing and rejection", PacketFraming);
         RunStep(results, "Server wire-format compatibility", ServerWireCompat);
         RunStep(results, "App settings save and reload", SettingsRoundTrip);
+        RunStep(results, "Per-peer shaping DSP", PeerShapingDsp);
+        RunStep(results, "v5 settings and shaping round-trip", V5ConfigRoundTrip);
         RunStep(results, "Profile save and reload", ProfileRoundTrip);
         RunStep(results, "What's-new update marker", WhatsNewMarkerRoundTrip);
         RunStep(results, "Diagnostics report privacy", DiagnosticsPrivacy);
@@ -216,6 +219,76 @@ internal static class SelfTest
         Check(BinaryPrimitives.ReadUInt32LittleEndian(h.Slice(8, 4)) == 0xAABBCCDD,
             "sequence must be a little-endian uint32 at offset 8");
         return "12-byte 'RMND' header; relay-visible fields unchanged";
+    }
+
+    /// <summary>Per-peer volume/pan/EQ DSP: nothing-to-do builds a null chain, the master-off state
+    /// bypasses, a real volume actually attenuates the signal, and the parametric range→peaking maths
+    /// is sane. This is the receive-side shaping that also feeds recordings.</summary>
+    private static string? PeerShapingDsp()
+    {
+        Check(PeerDspChain.Build(null, enabled: true) is null, "no shaping must build a null (do-nothing) chain");
+        Check(PeerDspChain.Build(new PeerShaping(), enabled: true) is null, "default (unity) shaping must build a null chain");
+
+        var half = new PeerShaping { Volume = 0.5f };
+        Check(PeerDspChain.Build(half, enabled: false) is null, "master switch off must bypass shaping (null chain)");
+
+        var chain = PeerDspChain.Build(half, enabled: true);
+        Check(chain is { IsNoOp: false }, "a 50% volume must build a real chain");
+        var buf = new float[8];
+        Array.Fill(buf, 1.0f);
+        chain!.Process(buf, buf.Length / 2);   // 4 stereo frames
+        Check(buf.All(v => Math.Abs(v - 0.5f) < 0.001f), $"volume 50% must halve the signal (got {buf[0]:0.000})");
+
+        var para = new PeerShaping { EqMode = PeerEqMode.Parametric16Band };
+        para.ParametricBands.Add(new ParametricBand { StartHz = 200, EndHz = 800, GainDb = 6 });
+        Check(PeerDspChain.Build(para, enabled: true) is { IsNoOp: false }, "a parametric band must build a real chain");
+        PeerEqBands.ParametricToPeaking(200, 800, out var centre, out var q);
+        Check(centre > 200 && centre < 800 && q is > 0.1f and < 12f,
+            $"parametric range→peaking must give a sane centre ({centre:0} Hz) and Q ({q:0.00})");
+        return "unity→null, master-off→null, volume, parametric";
+    }
+
+    /// <summary>The v5 machine-wide settings and per-peer shaping survive a JSON save/reload: new
+    /// AppConfig defaults, the named-peers book, the main tab order, per-peer shaping with parametric
+    /// bands, and the new recording default. All in-memory — the real config/profiles aren't touched.</summary>
+    private static string? V5ConfigRoundTrip()
+    {
+        var fresh = new AppConfig();
+        Check(fresh.ShowPanEqTab, "ShowPanEqTab must default to true");
+        Check(fresh.ThemeMode == "system", "ThemeMode must default to 'system'");
+        Check(fresh.ShowDiscoveredPeers && fresh.ShowRememberedPeers, "the peer lists must default to shown");
+
+        var cfg = new AppConfig
+        {
+            ThemeMode = "dark",
+            MainTabOrder = ["audioio", "connectivity", "paneq", "audioprofile"],
+            ShowDiscoveredPeers = false,
+        };
+        cfg.NamedPeers["ANDRE-PC"] = new NamedPeer
+        {
+            MachineName = "ANDRE-PC",
+            FriendlyName = "Andre's desktop",
+            LastAddress = "100.72.4.13",
+            LastSeenUtc = new DateTime(2026, 7, 8, 12, 0, 0, DateTimeKind.Utc),
+        };
+        var json = JsonSerializer.Serialize(cfg, new JsonSerializerOptions { WriteIndented = true });
+        var back = JsonSerializer.Deserialize<AppConfig>(json);
+        Check(back is not null, "config must deserialise");
+        Check(back!.ThemeMode == "dark" && !back.ShowDiscoveredPeers, "theme and list toggles must round-trip");
+        Check(back.MainTabOrder is { Count: 4 } && back.MainTabOrder[0] == "audioio", "tab order must round-trip");
+        Check(back.NamedPeers.TryGetValue("ANDRE-PC", out var np)
+              && np.FriendlyName == "Andre's desktop" && np.LastAddress == "100.72.4.13",
+            "named peers must round-trip");
+
+        var shaping = new PeerShaping { Volume = 0.7f, Pan = -0.5f, EqMode = PeerEqMode.Parametric16Band };
+        shaping.ParametricBands.Add(new ParametricBand { StartHz = 100, EndHz = 500, GainDb = 3.5f });
+        var sback = JsonSerializer.Deserialize<PeerShaping>(JsonSerializer.Serialize(shaping));
+        Check(sback is not null && sback.EqMode == PeerEqMode.Parametric16Band
+              && sback.ParametricBands.Count == 1 && Math.Abs(sback.ParametricBands[0].GainDb - 3.5f) < 0.001f,
+            "peer shaping (with parametric bands) must round-trip");
+
+        Check(new RecordingSettings().Source == RecordingSource.Both, "recording source must default to Both");
+        return "config defaults, named peers, tab order, parametric shaping, recording default";
     }
 
     /// <summary>App settings survive a save-and-reload (the same JSON serialisation

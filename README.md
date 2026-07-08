@@ -22,8 +22,10 @@ It works with a simple shared password. You and the person you're connecting to 
 
 * **Listen to one of your computers from another room.** Sit at your laptop and hear what's playing on your desktop. Walk around the house — the sound follows you.
 * **Play music together over the internet.** Two musicians at different houses can play along together with very low delay. Much faster than a video call, fast enough that timing-sensitive playing works.
+* **Mix everyone as you go.** With several people connected, set each person's volume, lean them left or right, and shape their tone with a built-in equaliser (simple 3-band, 12-band graphic, or a full 16-band parametric) — all live, and it's captured in your recordings.
 * **Send a finished mix to a producer or client** in real time, without uploading a file and waiting.
-* **Record what comes through the connection** to WAV, MP3, OGG-Opus, or FLAC. Save sessions for review later.
+* **Record what comes through the connection** to WAV, MP3, OGG-Opus, or FLAC — the whole mix, or **each person on their own separate track** to mix afterwards.
+* **Give the people you connect to names that stick**, and see who's connected and what they're sending at a glance.
 * **Drive it from the command line.** As well as its normal window, RemSound takes command-line options — list your audio devices, run a self-test of the whole capture-to-playback path, write a diagnostics report to send for help, or start straight into a profile from a shortcut or script. See [Command-line options](MANUAL.md#22-command-line-options) in the manual.
 
 ## Three quality settings, simple choice

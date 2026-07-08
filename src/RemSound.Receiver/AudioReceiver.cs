@@ -206,7 +206,7 @@ public sealed class AudioReceiver : IDisposable
 
     /// <summary>Fired once per rendered block, right after <see cref="OnReceivedSamples"/> — the block
     /// boundary a single-file bypass recording uses to flush its per-peer sum.</summary>
-    public Action? OnRecordBlockComplete
+    public Action<int>? OnRecordBlockComplete
     {
         get => playoutEngine.OnRecordBlockComplete;
         set => playoutEngine.OnRecordBlockComplete = value;

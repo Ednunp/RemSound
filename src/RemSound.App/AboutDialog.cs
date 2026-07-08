@@ -20,6 +20,18 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v5.0
+
+        A big one. Shape each person, record everyone separately, name your peers, and make the window your own.
+
+        Shape each peer. A new "Volume, pan and EQ for peers" tab lets you set how loud each connected person is, lean them left or right, and change their tone with an equaliser — a simple 3-band, a 12-band graphic, or a full 16-band parametric where you place each band yourself. It's all live, adds no delay, and what you dial in is captured in your recordings too.
+
+        Record everyone on their own track. Recording can now save each connected peer to its own separate file, so you can take a jam or a chat away and mix the parts afterwards.
+
+        Name your peers. Give the people you connect to friendly names that stick to their machine for good, and a new details view shows who's connected, for how long, and what they're sending. Manage them all under Options, Manage named peers.
+
+        Make it yours. RemSound now follows your Windows light or dark theme, has a fresh look and its own icon, and a new Appearance tab in Preferences lets you reorder or hide the window's tabs. Jump straight to any tab with Ctrl and its number.
+
         RemSound v4.9
 
         Lock a profile to fixed addresses.

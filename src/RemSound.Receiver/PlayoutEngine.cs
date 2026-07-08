@@ -170,8 +170,10 @@ internal sealed class PlayoutEngine : IWaveProvider
     }
 
     /// <summary>Fired once per rendered block, right after the mixed received tap — the block boundary a
-    /// single-file "bypass" recording uses to flush its per-peer sum.</summary>
-    public Action? OnRecordBlockComplete { get; set; }
+    /// split / "bypass" recording uses to flush its per-peer sum. The argument is the block's interleaved
+    /// float count (frames × channels), so the recorder can pad any peer that produced nothing this block
+    /// with silence and keep every track sample-locked to the render clock.</summary>
+    public Action<int>? OnRecordBlockComplete { get; set; }
 
     public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(MixSampleRate, MixChannels);
 
@@ -822,7 +824,7 @@ internal sealed class PlayoutEngine : IWaveProvider
         // BothIndependent; without the tag both ended up in one recorder ring, doubling the
         // file's effective sample rate).
         DispatchReceivedSamples(mixBuf.AsMemory(0, outFloats), route);
-        OnRecordBlockComplete?.Invoke();
+        OnRecordBlockComplete?.Invoke(outFloats);
 
         Buffer.BlockCopy(mixBuf, 0, buffer, offset, outFloats * sizeof(float));
         return count;
@@ -899,7 +901,7 @@ internal sealed class PlayoutEngine : IWaveProvider
         // wasapi-slot ring (canonical single-lane slot in classic modes), so this fires
         // exactly once per real-time second.
         DispatchReceivedSamples(mixBuf.AsMemory(0, outFloats), RenderRoute.Mixed);
-        OnRecordBlockComplete?.Invoke();
+        OnRecordBlockComplete?.Invoke(outFloats);
 
         Buffer.BlockCopy(mixBuf, 0, buffer, offset, outFloats * sizeof(float));
         return count;

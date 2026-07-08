@@ -80,6 +80,10 @@ internal static class CommandLine
                     return WithConsole(PrintVersion);
                 case "--devices": case "--list-devices":
                     return WithConsole(() => { WriteDevices(Console.Out); return 0; });
+                case "--profiles": case "--list-profiles":
+                    return WithConsole(ListProfiles);
+                case "--named-peers": case "--list-named-peers":
+                    return WithConsole(ListNamedPeers);
                 case "--selftest": case "--self-test": case "--smoke-test": case "--smoketest":
                     return WithConsole(() => SelfTest.Run(args));
                 case "--perftest": case "--perf-test":
@@ -139,6 +143,37 @@ internal static class CommandLine
         return 0;
     }
 
+    /// <summary>--list-profiles: print the saved profile titles (read-only).</summary>
+    private static int ListProfiles()
+    {
+        var cfg = AppConfig.Load();
+        var store = new ProfileStore(cfg.ProfilesDirectory ?? AppConfig.ProfilesBaseDirectory);
+        var titles = store.ListProfileTitles();
+        if (titles.Count == 0) { Console.WriteLine("No saved profiles."); return 0; }
+        Console.WriteLine($"Saved profiles ({titles.Count}):");
+        foreach (var t in titles) Console.WriteLine($"  {t}");
+        return 0;
+    }
+
+    /// <summary>--list-named-peers: print the machine-wide named-peers book (read-only) — the friendly
+    /// names you've given peers, with where and when each was last seen.</summary>
+    private static int ListNamedPeers()
+    {
+        var named = AppConfig.Load().NamedPeers;
+        if (named.Count == 0) { Console.WriteLine("No named peers."); return 0; }
+        Console.WriteLine($"Named peers ({named.Count}):");
+        foreach (var kv in named.OrderBy(k => k.Value.FriendlyName, StringComparer.CurrentCultureIgnoreCase))
+        {
+            var np = kv.Value;
+            var seen = np.LastSeenUtc == default
+                ? "not seen yet"
+                : $"last seen {np.LastSeenUtc.ToLocalTime():d MMM yyyy}"
+                  + (string.IsNullOrWhiteSpace(np.LastAddress) ? "" : $", {np.LastAddress}");
+            Console.WriteLine($"  {np.FriendlyName}  ({np.MachineName})  - {seen}");
+        }
+        return 0;
+    }
+
     private static int PrintHelp()
     {
         Console.WriteLine($"RemSound {AppVersion} - command-line options");
@@ -150,6 +185,9 @@ internal static class CommandLine
         Console.WriteLine("  --version             Show the installed version.");
         Console.WriteLine("  --devices             List all microphones, outputs and ASIO drivers,");
         Console.WriteLine("                        with their formats and device ids.");
+        Console.WriteLine("  --list-profiles       List your saved profile names.");
+        Console.WriteLine("  --list-named-peers    List the friendly names you've given peers, with");
+        Console.WriteLine("                        where and when each was last seen.");
         Console.WriteLine("  --selftest [--seconds N]  Run the built-in self-test - a localhost audio");
         Console.WriteLine("  (or --smoke-test)     round-trip plus checks of encryption, the wire format,");
         Console.WriteLine("                        settings, profiles, dialog accessibility and bundled files.");

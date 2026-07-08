@@ -2599,6 +2599,8 @@ public sealed class MainForm : Form
         // Appearance-tab changes (tab order, show pan/EQ tab, show discovered/remembered lists) apply now.
         ApplyMainTabLayout();
         RefreshConnectivityListVisibility();
+        var appearanceCfg = AppConfig.Load();
+        logFile.Event($"appearance applied: theme={appearanceCfg.ThemeMode}, tabs=[{string.Join(", ", mainTabControl.TabPages.Cast<TabPage>().Select(t => t.Text))}], discovered-list={appearanceCfg.ShowDiscoveredPeers}, remembered-list={appearanceCfg.ShowRememberedPeers}");
         // The Preferences dialog includes per-cue Browse buttons that can change custom
         // WAV paths in AppConfig.CustomCuePaths. Reload the cached SoundPlayer instances
         // here unconditionally — cheap, only six small files, and guarantees the next
@@ -3260,7 +3262,7 @@ public sealed class MainForm : Form
         var panel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 9, AutoScroll = true };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        enableAllPeerShapingBox.CheckedChanged += (_, _) => { if (!loadingPanEqControls) { MarkProfileDirty(); ApplyAllPeerShaping(); } };
+        enableAllPeerShapingBox.CheckedChanged += (_, _) => { if (!loadingPanEqControls) { logFile.Event($"shaping: master switch {(enableAllPeerShapingBox.Checked ? "on" : "off")} ({peerShaping.Count} peer(s) with saved shaping)"); MarkProfileDirty(); ApplyAllPeerShaping(); } };
         panEqPeerList.SelectedIndexChanged += (_, _) => OnPanEqPeerSelected();
         panEqPeerList.ItemCheck += OnPeerShapeToggled;
         // First-letter navigation on some Windows configs can accidentally toggle the checkbox; do the
@@ -3520,7 +3522,9 @@ public sealed class MainForm : Form
     private void OnEqModeChanged()
     {
         if (loadingPanEqControls || selectedShapingKey is null) return;
-        GetOrCreateShaping(selectedShapingKey).EqMode = ModeForIndex(eqModeList.SelectedIndex);
+        var mode = ModeForIndex(eqModeList.SelectedIndex);
+        GetOrCreateShaping(selectedShapingKey).EqMode = mode;
+        logFile.Event($"shaping: EQ mode → {mode} for {selectedShapingKey}");
         RebuildEqBandSliders();
         ApplyPeerShaping(selectedShapingKey);
         UpdateEqCurve();
@@ -3744,6 +3748,7 @@ public sealed class MainForm : Form
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             s.ParametricBands.Add(dlg.Result);
+            logFile.Event($"shaping: added parametric band {dlg.Result.StartHz:0}-{dlg.Result.EndHz:0} Hz {dlg.Result.GainDb:0.#} dB for {selectedShapingKey} ({s.ParametricBands.Count} band(s))");
             RefreshParametricBandList();
             MarkProfileDirty();
         }
@@ -3759,6 +3764,7 @@ public sealed class MainForm : Form
         int firstIdx = parametricBandList.SelectedIndex;
         var toRemove = parametricBandList.SelectedItems.Cast<ParametricBandItem>().Select(x => x.Band).ToList();
         foreach (var band in toRemove) s.ParametricBands.Remove(band);
+        logFile.Event($"shaping: deleted {toRemove.Count} parametric band(s) for {selectedShapingKey} ({s.ParametricBands.Count} left)");
         RefreshParametricBandList();
         // Put focus on whatever now occupies the first removed slot so NVDA announces it.
         if (parametricBandList.Items.Count > 0)
@@ -4482,6 +4488,9 @@ public sealed class MainForm : Form
     /// refresh every place a peer name shows. A blank/cleared name removes the entry entirely.</summary>
     private void ApplyFriendlyName(string identityKey, string machineName, string? address, string? name)
     {
+        logFile.Event(string.IsNullOrWhiteSpace(name)
+            ? $"named peer: cleared name for {identityKey}"
+            : $"named peer: {identityKey} → \"{name.Trim()}\"");
         if (string.IsNullOrWhiteSpace(name))
         {
             namedPeers.Remove(identityKey);
@@ -4597,6 +4606,7 @@ public sealed class MainForm : Form
         void DeleteSelected()
         {
             if (list.SelectedItem is not NamedPeerItem it) return;
+            logFile.Event($"named peer: deleted \"{it.Peer.FriendlyName}\" ({it.Key})");
             namedPeers.Remove(it.Key);
             SaveNamedPeers();
             lastPanEqPeerSignature = "";

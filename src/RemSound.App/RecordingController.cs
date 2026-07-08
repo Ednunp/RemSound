@@ -204,16 +204,21 @@ internal sealed class RecordingController
         t.Len = span.Length;
     }
 
-    // Audio thread. Once per render, flush each peer's summed block to their file and reset.
-    private void FlushPeerTracks()
+    // Audio thread. Once per render, flush each peer's summed block to their file. Every peer track gets
+    // EXACTLY one render block per callback: a peer that produced nothing this block — because it went
+    // quiet and its session was dropped, or it disconnected — is padded with silence to the same length.
+    // That keeps every track sample-locked to the single render clock, so the tracks can never drift
+    // apart from each other however long the recording runs, and they all end up the same length.
+    private void FlushPeerTracks(int floats)
     {
         var tracks = peerTracks;
-        if (tracks is null) return;
+        if (tracks is null || floats <= 0) return;
         foreach (var t in tracks.Values)
         {
-            if (t.Len <= 0) continue;
-            t.Recorder.WriteReceived(t.Accum.AsMemory(0, t.Len), RenderRoute.Mixed);
-            Array.Clear(t.Accum, 0, t.Len);
+            if (t.Accum.Length < floats) { var a = t.Accum; Array.Resize(ref a, floats); t.Accum = a; }
+            for (int i = t.Len; i < floats; i++) t.Accum[i] = 0f;   // pad an empty/short block with silence
+            t.Recorder.WriteReceived(t.Accum.AsMemory(0, floats), RenderRoute.Mixed);
+            Array.Clear(t.Accum, 0, floats);
             t.Len = 0;
         }
     }
@@ -227,13 +232,17 @@ internal sealed class RecordingController
         rawMixLen = span.Length;
     }
 
-    // Audio thread. Flush the summed raw mix for this render to the single recorder, then reset.
-    private void FlushRawMix()
+    // Audio thread. Flush the summed raw mix for this render to the single recorder, padding a silent
+    // block so the file stays aligned to real time even through total silence, then reset.
+    private void FlushRawMix(int floats)
     {
         var rec = active;
-        int n = rawMixLen;
-        if (rec is not null && n > 0) rec.WriteReceived(rawMixAccum.AsMemory(0, n), RenderRoute.Mixed);
-        if (n > 0) { Array.Clear(rawMixAccum, 0, n); rawMixLen = 0; }
+        if (rec is null || floats <= 0) return;
+        if (rawMixAccum.Length < floats) { var a = rawMixAccum; Array.Resize(ref a, floats); rawMixAccum = a; }
+        for (int i = rawMixLen; i < floats; i++) rawMixAccum[i] = 0f;
+        rec.WriteReceived(rawMixAccum.AsMemory(0, floats), RenderRoute.Mixed);
+        Array.Clear(rawMixAccum, 0, floats);
+        rawMixLen = 0;
     }
 
     private void StopRecorder(AudioRecorder? r)
