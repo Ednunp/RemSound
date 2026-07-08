@@ -166,7 +166,7 @@ public sealed class MainForm : Form
     // Parametric-mode controls (built into eqBandsPanel when the 16-band mode is active).
     private readonly Button addBandButton = new() { Text = "&Add band (Alt+A)", AutoSize = true, AccessibleName = "Add band" };
     private readonly Button deleteBandButton = new() { Text = "&Delete band (Alt+D)", AutoSize = true, AccessibleName = "Delete band" };
-    private readonly ListBox parametricBandList = new() { Width = 430, Height = 150, IntegralHeight = false, SelectionMode = SelectionMode.MultiExtended, AccessibleName = "Bands (Alt+B)" };
+    private readonly ListBox parametricBandList = new() { Width = 430, Height = 150, IntegralHeight = false, SelectionMode = SelectionMode.MultiExtended, AccessibleName = "Bands (Alt+B), left and right arrow change the selected band's gain" };
     // Purely-visual EQ response graph (invisible to NVDA). See EqCurveControl.
     private readonly EqCurveControl eqCurve = new() { Width = 430, Height = 110, Margin = new Padding(0, 8, 0, 0) };
     // Working copy of the active profile's per-peer shaping, keyed by peer address string. Loaded on
@@ -3724,8 +3724,15 @@ public sealed class MainForm : Form
             ApplyPeerShaping(selectedShapingKey);
             UpdateEqCurve();
             MarkProfileDirty();
-            // Make NVDA re-read the focused band with its new dB value.
-            WinEventNotifier.NotifyFocus(parametricBandList);
+            // Speak the new gain through the screen reader as it moves — a UIA notification (NVDA reads
+            // it natively; not an extra speech layer). A plain listbox item won't announce on its own.
+            if (parametricBandList.SelectedItem is ParametricBandItem focused)
+            {
+                parametricBandList.AccessibilityObject.RaiseAutomationNotification(
+                    System.Windows.Forms.Automation.AutomationNotificationKind.ActionCompleted,
+                    System.Windows.Forms.Automation.AutomationNotificationProcessing.MostRecent,
+                    FormatGainDbPrecise(focused.Band.GainDb));
+            }
             e.Handled = true;
             e.SuppressKeyPress = true;
         }
@@ -4675,12 +4682,18 @@ public sealed class MainForm : Form
         // the existing relative order from the pre-tab single-form layout so the user's
         // muscle memory is preserved.
         //
-        // Connectivity tab.
+        // Connectivity tab. This is the authoritative tab order (it overrides layout add-order), so it
+        // must list EVERY focusable control on the tab or the unlisted ones collapse to TabIndex 0 and
+        // land in the wrong place. Order: connected, details, rename, add-by-IP, discovered, remembered,
+        // lock, status.
         connectedPeersList.TabIndex = 0;
-        discoveredPeersList.TabIndex = 1;
-        rememberedPeersList.TabIndex = 2;
+        peerDetailsBox.TabIndex = 1;
+        renamePeerButton.TabIndex = 2;
         manualAddButton.TabIndex = 3;
-        statusReadout.TabIndex = 4;
+        discoveredPeersList.TabIndex = 4;
+        rememberedPeersList.TabIndex = 5;
+        lockPeerAddressesBox.TabIndex = 6;
+        statusReadout.TabIndex = 7;
         // Audio I/O tab. The driver picker is row 0 when present (a real driver chosen here
         // is what enables ASIO). Audio-mode listbox retired 2026-05-11.
         asioDriverBox.TabIndex = 0;
