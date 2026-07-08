@@ -10,6 +10,10 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
+    <!-- Modern Windows UI font app-wide (was the legacy default). Purely visual; screen-reader
+         behaviour is unaffected. Applied by ApplicationConfiguration.Initialize() to every form. -->
+    <ApplicationDefaultFont>Segoe UI, 9pt</ApplicationDefaultFont>
+    <ApplicationIcon>remsound.ico</ApplicationIcon>
     <!-- Release version. The self-updater (RemSoundUpdater) compares this against the
          tag_name on the latest GitHub release; bump it on every public release. The
          AssemblyVersion / FileVersion default to this value, and Assembly.GetName().Version
@@ -18,6 +22,9 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- App icon (also set via ApplicationIcon for the exe). Embedded so the forms and the tray icon
+         can load the full multi-size icon at runtime for crisp title-bar / taskbar / tray rendering. -->
+    <EmbeddedResource Include="remsound.ico" />
     <ProjectReference Include="..\RemSound.Core\RemSound.Core.csproj" />
     <ProjectReference Include="..\RemSound.Sender\RemSound.Sender.csproj" />
     <ProjectReference Include="..\RemSound.Receiver\RemSound.Receiver.csproj" />

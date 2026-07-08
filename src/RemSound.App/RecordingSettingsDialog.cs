@@ -197,7 +197,7 @@ internal sealed class RecordingSettingsDialog : Form
         sourceList.SelectedIndexChanged += (_, _) =>
         {
             if (sourceList.SelectedIndex < 0) return;
-            working.Source = (RecordingSource)sourceList.SelectedIndex;
+            working.Source = SourceOrder[sourceList.SelectedIndex];
         };
 
         formatList.SelectedIndexChanged += (_, _) =>
@@ -372,10 +372,11 @@ internal sealed class RecordingSettingsDialog : Form
     {
         sourceList.BeginUpdate();
         sourceList.Items.Clear();
-        // Order MUST match RecordingSource enum values 0/1/2.
+        // Display order is decoupled from the enum via SourceOrder (both first as the default, then
+        // received, then sent). Add the labels in that same order.
+        sourceList.Items.Add("Record both sent and received audio");
         sourceList.Items.Add("Record all received audio");
         sourceList.Items.Add("Record all sent audio");
-        sourceList.Items.Add("Record both sent and received audio");
         sourceList.EndUpdate();
     }
 
@@ -489,9 +490,14 @@ internal sealed class RecordingSettingsDialog : Form
         channelList.EndUpdate();
     }
 
+    // Display order for the recording-source list (decoupled from the RecordingSource enum values): both
+    // at the top as the default, then received, then sent.
+    private static readonly RecordingSource[] SourceOrder =
+        [RecordingSource.Both, RecordingSource.ReceivedOnly, RecordingSource.SentOnly];
+
     private void SelectFromSource(RecordingSource src)
     {
-        var idx = (int)src;
+        var idx = Array.IndexOf(SourceOrder, src);
         if (idx >= 0 && idx < sourceList.Items.Count) sourceList.SelectedIndex = idx;
     }
 

@@ -75,6 +75,11 @@ public sealed class AppConfig
     /// <see cref="Profile.PeerShaping"/>.</summary>
     public bool ShowPanEqTab { get; set; } = true;
 
+    /// <summary>Which colour theme the window uses: "system" (follow Windows light/dark — the default),
+    /// "light", or "dark". Read once at startup by Program.Main and applied via Application.SetColorMode;
+    /// changing it takes effect on the next launch. Machine-wide, purely visual.</summary>
+    public string ThemeMode { get; set; } = "system";
+
     /// <summary>The machine-wide "named peers" book — peers the user has deliberately renamed, keyed by
     /// the peer's stable identity (machine name, or address for a nameless manual peer). A name applies in
     /// every profile and shows wherever that peer appears. Managed via the Connectivity tab's Rename peer

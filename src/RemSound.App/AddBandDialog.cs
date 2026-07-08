@@ -76,14 +76,18 @@ internal sealed class AddBandDialog : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
             ColumnCount = 2,
-            RowCount = 4,
+            RowCount = 5,
         };
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
-        AddRow(grid, 0, "&Start frequency in Hz (Alt+S)", startFreq);
-        AddRow(grid, 1, "&End frequency in Hz (Alt+E)", endFreq);
-        AddRow(grid, 2, "&Gain in dB (Alt+G)", gainDb);
+        var heading = Theme.Heading("Add EQ band");
+        grid.Controls.Add(heading, 0, 0);
+        grid.SetColumnSpan(heading, 2);
+
+        AddRow(grid, 1, "&Start frequency in Hz (Alt+S)", startFreq);
+        AddRow(grid, 2, "&End frequency in Hz (Alt+E)", endFreq);
+        AddRow(grid, 3, "&Gain in dB (Alt+G)", gainDb);
 
         var okButton = new Button { Text = "OK", AutoSize = true, DialogResult = DialogResult.None, TabIndex = 0 };
         var cancelButton = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel, TabIndex = 1 };
@@ -99,7 +103,7 @@ internal sealed class AddBandDialog : Form
         };
         buttonRow.Controls.Add(okButton);
         buttonRow.Controls.Add(cancelButton);
-        grid.Controls.Add(buttonRow, 1, 3);
+        grid.Controls.Add(buttonRow, 1, 4);
 
         Controls.Add(grid);
         AcceptButton = okButton;
@@ -109,6 +113,10 @@ internal sealed class AddBandDialog : Form
         {
             box.ValueChanged += (_, _) => Preview();
             box.TextChanged += (_, _) => Preview();
+            // Select the whole value when the box gains focus, so a typed number REPLACES what's there
+            // instead of being inserted next to it (which parsed as junk and reverted). Deferred so it
+            // runs after focus settles.
+            box.Enter += (_, _) => box.BeginInvoke(() => box.Select(0, box.Text.Length));
         }
 
         Shown += (_, _) =>

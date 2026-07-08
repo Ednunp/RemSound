@@ -83,7 +83,7 @@ internal sealed class MainFormTrayController : IDisposable
         // user hid + re-showed the icon. By computing the right text once, just before
         // we set Visible = true for the first time, the shell sees the live state from
         // NIM_ADD onward.
-        trayIcon.Icon = SystemIcons.Application;
+        trayIcon.Icon = Theme.AppIcon ?? SystemIcons.Application;
         trayIcon.Visible = false;
         trayIcon.DoubleClick += (_, _) => Restore();
 

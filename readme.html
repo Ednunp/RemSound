@@ -83,8 +83,8 @@ ul, ol { padding-left: 1.4em; }
 
 <ol>
 <li>Start RemSound. The first thing you'll see is the <strong>profile picker</strong>. On a brand-new install your only choice is <strong>New profile</strong> &mdash; select it and press Enter or click OK. Later, once you've saved a setup or two of your own, this is the dialog where you choose which one to load. See <a href="#profiles">Profiles</a> for the full story.</li>
-<li>Once the main window opens, go to the <strong>Audio inputs and outputs</strong> tab. Tick <strong>Receive audio (Alt+R)</strong>, then tick the device you want incoming sound played through in <strong>WASAPI outputs for received sound (Alt+3)</strong>.</li>
-<li>On the same tab, tick <strong>Send my audio (Alt+S)</strong> and tick your microphone in <strong>WASAPI inputs to send (Alt+5)</strong>.</li>
+<li>Once the main window opens, go to the <strong>Audio inputs and outputs</strong> tab. Tick <strong>Receive audio (Alt+R)</strong>, then tick the device you want incoming sound played through in <strong>WASAPI outputs for received audio (Alt+3)</strong>.</li>
+<li>On the same tab, tick <strong>Send my audio (Alt+S)</strong> and tick your microphone in <strong>WASAPI audio inputs to send (Alt+5)</strong>.</li>
 <li>Go to the <strong>Connectivity</strong> tab, find your friend in the <strong>Discovered peers (Alt+D)</strong> list, and tick them. If they aren't showing up, use <strong>Add peer by IP (Alt+A)</strong> and type their address.</li>
 <li>Have your friend do the same with you on their computer.</li>
 <li>Within a second or two, both of you will hear each other.</li>
@@ -312,7 +312,7 @@ ul, ol { padding-left: 1.4em; }
 <tr><td><strong>Manage named peers&hellip;</strong></td><td>Alt+O, N</td><td>Opens a list of every peer you've given a friendly name to, showing each one's machine name and where and when you last connected to it. Pick one and <strong>Rename (Alt+R</strong>, or F2) to change its name, or <strong>Delete (Alt+D</strong>, or the Del key) to forget it &mdash; deleting only drops the name, the peer still connects as normal under its machine name. See <a href="#tab-connectivity">the peer-naming notes on the Connectivity tab</a>.</td></tr>
 <tr><td><strong>Reset the default audio device prompt</strong></td><td>Alt+O, R</td><td>Brings back the &ldquo;use only the default audio device?&rdquo; question if you previously ticked &ldquo;Don't ask me this again&rdquo; on it. See <a href="#tab-io">Following the Windows default audio device</a>.</td></tr>
 <tr><td><strong>Enable / Disable Realtek ASIO</strong></td><td>&mdash;</td><td>Only shown if a Realtek ASIO driver is installed. Lets you reverse the choice RemSound offered about disabling that driver (Realtek's generic ASIO driver tends to grab the wrong device and clash with your screen reader).</td></tr>
-<tr><td><strong>Preferences&hellip;</strong></td><td>Ctrl+P, or Alt+O, P</td><td>Opens the Preferences dialog, organised into five tabs (move between them with Ctrl+Tab, or the arrow keys when the tab names have focus): <strong>General</strong> &mdash; the profiles folder, accept remote volume commands, UPnP router opening, and &ldquo;Show the volume, pan and EQ for peers tab&rdquo; (on by default; hides the <a href="#pan-eq">Volume, pan and EQ for peers tab</a> if you untick it); <strong>Audio cues</strong> &mdash; the cue list and its sounds (see <a href="#audio-cues">Audio cue sounds</a>); <strong>Startup behaviour</strong> &mdash; start minimised / with Windows / with a specific profile; <strong>Update settings</strong> &mdash; the update checks and install options; and <strong>Logging</strong> &mdash; enable logs, write logs now, and the log-folder housekeeping (see <a href="#logs">Logs and diagnostics</a>). Esc or the Close button dismisses it.</td></tr>
+<tr><td><strong>Preferences&hellip;</strong></td><td>Ctrl+P, or Alt+O, P</td><td>Opens the Preferences dialog, organised into five tabs (move between them with Ctrl+Tab, or the arrow keys when the tab names have focus): <strong>General</strong> &mdash; the profiles folder, accept remote volume commands, UPnP router opening, &ldquo;Show the volume, pan and EQ for peers tab&rdquo; (on by default; hides the <a href="#pan-eq">Volume, pan and EQ for peers tab</a> if you untick it), and <strong>Colour theme (Alt+T)</strong> &mdash; Match Windows (the default), Light, or Dark; this only changes how the window looks, takes effect the next time you start RemSound, and has no effect on the screen reader; <strong>Audio cues</strong> &mdash; the cue list and its sounds (see <a href="#audio-cues">Audio cue sounds</a>); <strong>Startup behaviour</strong> &mdash; start minimised / with Windows / with a specific profile; <strong>Update settings</strong> &mdash; the update checks and install options; and <strong>Logging</strong> &mdash; enable logs, write logs now, and the log-folder housekeeping (see <a href="#logs">Logs and diagnostics</a>). Esc or the Close button dismisses it.</td></tr>
 </table>
 
 <h3>Help menu</h3>
@@ -335,9 +335,9 @@ ul, ol { padding-left: 1.4em; }
 <tr><td><strong>Connected peers</strong></td><td>Alt+C</td><td>The people you currently have sound flowing with. Unticking a row disconnects that peer.</td></tr>
 <tr><td><strong>Peer details</strong></td><td>Alt+E</td><td>A read-only box describing whichever connected peer you're on in the list above. Arrow through it to read: their name, their machine name, their IP address, how long you've been connected, the link health and ping, what they're sending (how many devices, on WASAPI or ASIO, at what sample rate and codec), and whether they're receiving your audio. The device and WASAPI/ASIO detail only shows while you're actually receiving that peer.</td></tr>
 <tr><td><strong>Rename peer</strong></td><td>Alt+M or F2</td><td>Give the highlighted peer a friendly name of your choosing. It opens a box with the name and a <strong>Clear custom name</strong> button. The name sticks to that machine for good &mdash; across restarts, IP changes and networks &mdash; and shows everywhere that peer appears: the lists here, the volume, pan and EQ for peers tab, the status line and split-recording filenames. See below.</td></tr>
+<tr><td><strong>Add peer by IP</strong></td><td>Alt+A</td><td>Opens a small box where you type an address or computer name. It adds that peer to the remembered list and connects.</td></tr>
 <tr><td><strong>Discovered peers</strong></td><td>Alt+D</td><td>People RemSound has heard from in the last few seconds. Tick someone to connect to them.</td></tr>
 <tr><td><strong>Remembered peers</strong></td><td>Alt+R</td><td>People you've connected to before, or added by address. This list is kept between sessions. Tick someone to reconnect.</td></tr>
-<tr><td><strong>Add peer by IP</strong></td><td>Alt+A</td><td>Opens a small box where you type an address or computer name. It adds that peer to the remembered list and connects.</td></tr>
 <tr><td><strong>Lock to these exact peer addresses</strong></td><td>Alt+L</td><td>When ticked, this profile uses only the exact addresses you set and never follows the other computer by name or switches to a different address &mdash; even if the address stops working. Off by default, saved with the profile. See <a href="#lock-addresses">Locking a profile to one exact address</a>.</td></tr>
 <tr><td><strong>Connection status</strong></td><td>Alt+S</td><td>A read-only box of text that sums up everything happening right now &mdash; how long you've been connected, how many peers you have, how much sound is flowing each way, and the connection health of each peer. Open it to read the current connection status.</td></tr>
 </table>
@@ -358,20 +358,20 @@ ul, ol { padding-left: 1.4em; }
 <tr><th>Control</th><th>Shortcut</th><th>What it does</th></tr>
 <tr><td><strong>ASIO driver</strong></td><td>Alt+D</td><td>A list that starts with <em>(none)</em>. Pick <em>(none)</em> and the app uses the ordinary Windows sound path only; pick a real driver and the ASIO device lists appear below, and the Audio profile tab gains a second delay setting. If your computer has no ASIO drivers installed, this control is hidden completely.</td></tr>
 <tr><td><strong>Receive audio</strong></td><td>Alt+R</td><td>The master switch for receiving. When it's off, no sound plays out, no matter which output devices are ticked.</td></tr>
-<tr><td><strong>WASAPI outputs for received sound</strong></td><td>Alt+3</td><td>Tick which ordinary Windows outputs (speakers, headsets) should play the received sound. Ticking more than one means the received sound plays out of all of them at once.</td></tr>
-<tr><td><strong>ASIO outputs for received sound</strong></td><td>Alt+1</td><td>(Shown when an ASIO driver is chosen.) Tick which ASIO channel pairs should play the received sound.</td></tr>
-<tr><td><strong>Master receive volume</strong></td><td>Alt+V</td><td>A slider: the master volume for everything coming in. There is no separate volume per device here; per-person volume lives on the Volume, pan and EQ for peers tab.</td></tr>
+<tr><td><strong>WASAPI outputs for received audio</strong></td><td>Alt+3</td><td>Tick which ordinary Windows outputs (speakers, headsets) should play the received sound. Ticking more than one means the received sound plays out of all of them at once.</td></tr>
+<tr><td><strong>ASIO outputs for received audio</strong></td><td>Alt+1</td><td>(Shown when an ASIO driver is chosen.) Tick which ASIO channel pairs should play the received sound.</td></tr>
+<tr><td><strong>Master volume for received audio</strong></td><td>Alt+V</td><td>A slider: the master volume for everything coming in. There is no separate volume per device here; per-person volume lives on the Volume, pan and EQ for peers tab.</td></tr>
 <tr><td><strong>Send my audio</strong></td><td>Alt+S</td><td>The master switch for sending.</td></tr>
-<tr><td><strong>WASAPI outputs to send</strong></td><td>Alt+4</td><td>Tick which Windows output devices to capture from &mdash; this captures whatever is currently playing on those speakers and sends it.</td></tr>
-<tr><td><strong>WASAPI inputs to send</strong></td><td>Alt+5</td><td>Tick which Windows input devices to capture (microphones, line-ins).</td></tr>
-<tr><td><strong>ASIO inputs to send</strong></td><td>Alt+2</td><td>(Shown when an ASIO driver is chosen.) Tick which ASIO channel pairs to capture and send.</td></tr>
+<tr><td><strong>WASAPI audio outputs to send</strong></td><td>Alt+4</td><td>Tick which Windows output devices to capture from &mdash; this captures whatever is currently playing on those speakers and sends it.</td></tr>
+<tr><td><strong>WASAPI audio inputs to send</strong></td><td>Alt+5</td><td>Tick which Windows input devices to capture (microphones, line-ins).</td></tr>
+<tr><td><strong>ASIO audio inputs to send</strong></td><td>Alt+2</td><td>(Shown when an ASIO driver is chosen.) Tick which ASIO channel pairs to capture and send.</td></tr>
 </table>
 
 <p>All the device lists are checkable lists &mdash; tick or untick an item to include or exclude that device. Profiles save which devices are ticked; a new profile starts with everything unticked.</p>
 
 <h3>Following the Windows default audio device</h3>
 
-<p>At the very top of the <strong>WASAPI outputs for received sound</strong> list and the <strong>WASAPI inputs to send</strong> list there's a special entry: <strong>Use Windows default audio device, follows Windows changes</strong>. Tick it and RemSound uses whatever Windows currently treats as the default &mdash; the default speakers for received sound, the default microphone for sending &mdash; and, the useful part, it <strong>follows that default on its own</strong>. Make a headset your default and RemSound switches to it; unplug it and RemSound moves back, all without you touching the list.</p>
+<p>At the very top of the <strong>WASAPI outputs for received audio</strong> list and the <strong>WASAPI audio inputs to send</strong> list there's a special entry: <strong>Use Windows default audio device, follows Windows changes</strong>. Tick it and RemSound uses whatever Windows currently treats as the default &mdash; the default speakers for received sound, the default microphone for sending &mdash; and, the useful part, it <strong>follows that default on its own</strong>. Make a headset your default and RemSound switches to it; unplug it and RemSound moves back, all without you touching the list.</p>
 
 <p>It works alongside the specific devices: tick the default entry <em>and</em> particular cards, and the sound plays out of (or is captured from) all of them at once. When you first tick it, RemSound asks whether you'd like to untick the other devices in that list, so you can choose to use only the default &mdash; with a &ldquo;Don't ask me this again&rdquo; option. If you tick that and later want the question back, use <strong>Options &rarr; Reset the default audio device prompt</strong>.</p>
 
@@ -396,19 +396,19 @@ ul, ol { padding-left: 1.4em; }
 
 <table>
 <tr><th>List</th><th>What it captures</th><th>Typical use</th></tr>
-<tr><td>WASAPI outputs to send</td><td>Whatever Windows is currently playing through that output. So picking your &ldquo;Speakers&rdquo; device captures whatever you're hearing.</td><td>Sharing music playback, sharing the sound from a video call, anything coming out of your own speakers.</td></tr>
-<tr><td>WASAPI inputs to send</td><td>Sound captured straight from a microphone or line input.</td><td>Your USB microphone, a headset mic, a line-in.</td></tr>
-<tr><td>ASIO inputs to send</td><td>An ASIO channel pair &mdash; usually a hardware input on a professional audio interface.</td><td>An instrument input on an Audient EVO, a microphone preamp on a Focusrite, and so on.</td></tr>
+<tr><td>WASAPI audio outputs to send</td><td>Whatever Windows is currently playing through that output. So picking your &ldquo;Speakers&rdquo; device captures whatever you're hearing.</td><td>Sharing music playback, sharing the sound from a video call, anything coming out of your own speakers.</td></tr>
+<tr><td>WASAPI audio inputs to send</td><td>Sound captured straight from a microphone or line input.</td><td>Your USB microphone, a headset mic, a line-in.</td></tr>
+<tr><td>ASIO audio inputs to send</td><td>An ASIO channel pair &mdash; usually a hardware input on a professional audio interface.</td><td>An instrument input on an Audient EVO, a microphone preamp on a Focusrite, and so on.</td></tr>
 </table>
 
 <p>Tick any combination across the three lists. RemSound mixes them together into one stream and sends that to all your chosen peers. So you can send a mic plus a guitar plus your system sound all at once, mixed together, and your friends hear all three.</p>
 
 <div class="note">
-<strong>Capturing your speakers can cause an echo loop.</strong> If you tick the same device both in &ldquo;WASAPI outputs to send&rdquo; and in &ldquo;WASAPI outputs for received sound&rdquo;, then the received sound plays out of that device, gets captured again, and gets sent back. The other person ends up hearing their own voice on a delay. Don't tick the same device on both sides at once.
+<strong>Capturing your speakers can cause an echo loop.</strong> If you tick the same device both in &ldquo;WASAPI audio outputs to send&rdquo; and in &ldquo;WASAPI outputs for received audio&rdquo;, then the received sound plays out of that device, gets captured again, and gets sent back. The other person ends up hearing their own voice on a delay. Don't tick the same device on both sides at once.
 </div>
 
 <div class="note">
-<strong>If your microphone sends silence:</strong> Windows can block desktop apps from using the microphone, and when it does, RemSound's mic capture still switches on but only sends silence &mdash; so you look like you're sending, but the other person hears nothing. RemSound watches for this: when you tick a microphone in <strong>WASAPI inputs to send</strong> while Windows is blocking it &mdash; or load a profile that already has one ticked &mdash; a message pops up telling you, with the exact two settings to turn on &mdash; open Windows Settings &rarr; Privacy &amp; security &rarr; Microphone, then turn on both <em>Microphone access</em> and <em>Let desktop apps access your microphone</em>. The check also catches the sneakier kinds of block: one aimed at RemSound alone in that same Settings page's per-app list, and one set by an administrator or workplace policy &mdash; that last kind doesn't show up as a switch you can flip, so if the warning says a policy is involved, it needs whoever manages the computer to lift it. (ASIO inputs aren't affected, because ASIO talks straight to the hardware and bypasses that Windows privacy gate.) It doesn't change anything you receive &mdash; only sending your own mic.
+<strong>If your microphone sends silence:</strong> Windows can block desktop apps from using the microphone, and when it does, RemSound's mic capture still switches on but only sends silence &mdash; so you look like you're sending, but the other person hears nothing. RemSound watches for this: when you tick a microphone in <strong>WASAPI audio inputs to send</strong> while Windows is blocking it &mdash; or load a profile that already has one ticked &mdash; a message pops up telling you, with the exact two settings to turn on &mdash; open Windows Settings &rarr; Privacy &amp; security &rarr; Microphone, then turn on both <em>Microphone access</em> and <em>Let desktop apps access your microphone</em>. The check also catches the sneakier kinds of block: one aimed at RemSound alone in that same Settings page's per-app list, and one set by an administrator or workplace policy &mdash; that last kind doesn't show up as a switch you can flip, so if the warning says a policy is involved, it needs whoever manages the computer to lift it. (ASIO inputs aren't affected, because ASIO talks straight to the hardware and bypasses that Windows privacy gate.) It doesn't change anything you receive &mdash; only sending your own mic.
 </div>
 
 <h2 id="tab-profile">8. Audio profile tab</h2>
@@ -486,7 +486,7 @@ ul, ol { padding-left: 1.4em; }
 
 <ul>
 <li>Tab past the mode picker to the <strong>Add band</strong> button and press it. A small dialog opens with three boxes: a <strong>start frequency</strong>, an <strong>end frequency</strong> and a <strong>gain in dB</strong> (from &minus;12 to +12). Each box you can type into or spin with the arrow keys; they only accept sensible numbers. As you change the values you hear the band on that peer straight away. Press <strong>OK</strong> to add it, or <strong>Cancel</strong> / <strong>Escape</strong> to drop it.</li>
-<li>Back on the tab, tab to the <strong>Bands</strong> list to hear your bands, one per row, each read out as its range and level &mdash; for example &ldquo;200 Hz to 800 Hz, plus 3 dB&rdquo;. The list is sorted low to high, so the bass bands are at the top and the treble at the bottom.</li>
+<li>Back on the tab, tab to the <strong>Bands</strong> list to hear your bands, one per row, each read out as its range and level &mdash; for example &ldquo;200 Hz to 800 Hz, plus 3 dB&rdquo;. The list is sorted low to high, so the bass bands are at the top and the treble at the bottom. Up and down arrow move between bands; <strong>left and right arrow nudge the selected band's gain down or up by half a dB</strong>, so you can fine-tune it on the fly and hear the change straight away.</li>
 <li>To remove a band, land on it and press <strong>Delete</strong>, or use the <strong>Delete band</strong> button. You can select several at once (hold Shift and arrow, or hold Ctrl and arrow then Space to pick out individual ones) and delete them together.</li>
 </ul>
 
@@ -823,11 +823,11 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <tr><th>Key</th><th>Action</th></tr>
 <tr><td>Alt+D</td><td>Focus the ASIO driver list (hidden if no ASIO drivers are installed)</td></tr>
 <tr><td>Alt+R</td><td>Toggle Receive audio</td></tr>
-<tr><td>Alt+1</td><td>Focus ASIO outputs for received sound</td></tr>
-<tr><td>Alt+2</td><td>Focus ASIO inputs to send</td></tr>
-<tr><td>Alt+3</td><td>Focus WASAPI outputs for received sound</td></tr>
-<tr><td>Alt+4</td><td>Focus WASAPI outputs to send</td></tr>
-<tr><td>Alt+5</td><td>Focus WASAPI inputs to send</td></tr>
+<tr><td>Alt+1</td><td>Focus ASIO outputs for received audio</td></tr>
+<tr><td>Alt+2</td><td>Focus ASIO audio inputs to send</td></tr>
+<tr><td>Alt+3</td><td>Focus WASAPI outputs for received audio</td></tr>
+<tr><td>Alt+4</td><td>Focus WASAPI audio outputs to send</td></tr>
+<tr><td>Alt+5</td><td>Focus WASAPI audio inputs to send</td></tr>
 <tr><td>Alt+V</td><td>Focus the volume slider</td></tr>
 <tr><td>Alt+S</td><td>Toggle Send my audio</td></tr>
 </table>
@@ -1183,9 +1183,9 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <p>Recording captures the sound at fully-mixed, fully-finished points: for the received side, after volume and mute have been applied (so the file matches what you hear); for the sent side, the raw captured sound just before it's packaged for sending (so the file is the same whatever codec you chose). The three source choices:</p>
 
 <ul>
-<li><strong>Record all received audio</strong> &mdash; the full mix of everything coming in from connected peers. This is the default.</li>
+<li><strong>Record both sent and received audio</strong> &mdash; a single file with both directions mixed gently together. This is the default, and the right choice for capturing a complete two-way exchange.</li>
+<li><strong>Record all received audio</strong> &mdash; the full mix of everything coming in from connected peers.</li>
 <li><strong>Record all sent audio</strong> &mdash; what your microphones, captured speakers and ASIO inputs are sending out. Useful for checking what your collaborators are actually hearing from you.</li>
-<li><strong>Record both sent and received audio</strong> &mdash; a single file with both directions mixed gently together. The right choice for capturing a complete two-way exchange.</li>
 </ul>
 
 <h3>File formats</h3>
@@ -1420,7 +1420,7 @@ RemSound.exe --connect 192.168.1.42
 <tr><th>Term</th><th>Meaning</th></tr>
 <tr><td>WASAPI</td><td>The normal Windows way of handling sound. Every speaker and microphone in your Windows sound settings works this way. The delay it adds is around 10&ndash;30 ms.</td></tr>
 <tr><td>ASIO</td><td>A faster, more direct way of handling sound, used by professional audio equipment. It talks straight to the hardware, giving a delay of under 5 ms. It only works if your audio interface came with an ASIO driver.</td></tr>
-<tr><td>Loopback capture</td><td>Capturing what's currently being played out of an output device, rather than what's coming in from a microphone. The &ldquo;WASAPI outputs to send&rdquo; list does loopback capture.</td></tr>
+<tr><td>Loopback capture</td><td>Capturing what's currently being played out of an output device, rather than what's coming in from a microphone. The &ldquo;WASAPI audio outputs to send&rdquo; list does loopback capture.</td></tr>
 <tr><td>Channel pair</td><td>A stereo pair of channels on an ASIO driver. Pair 1 is channels 1 and 2, Pair 2 is channels 3 and 4, and so on.</td></tr>
 <tr><td>Codec</td><td>The method RemSound uses to package the sound before sending it. RemSound offers PCM (no compression) and Opus (compressed).</td></tr>
 <tr><td>Opus</td><td>A high-quality codec that compresses sound to use much less network bandwidth, and can repair single lost packets on its own. The right choice for internet connections.</td></tr>

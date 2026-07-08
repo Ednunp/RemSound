@@ -68,8 +68,19 @@ internal sealed class EqCurveControl : Panel
             pts[x] = new PointF(x, y);
         }
 
-        using var curvePen = new Pen(dark ? Color.FromArgb(90, 200, 255) : Color.FromArgb(0, 120, 200), 2f);
-        if (w >= 2) g.DrawLines(curvePen, pts);
+        Color curveColor = dark ? Color.FromArgb(90, 200, 255) : Color.FromArgb(0, 120, 200);
+        if (w >= 2)
+        {
+            // Soft translucent fill between the curve and the 0 dB line, then the line on top.
+            var fill = new PointF[pts.Length + 2];
+            Array.Copy(pts, fill, pts.Length);
+            fill[^2] = new PointF(w - 1, midY);
+            fill[^1] = new PointF(0, midY);
+            using (var fillBrush = new SolidBrush(Color.FromArgb(38, curveColor)))
+                g.FillPolygon(fillBrush, fill);
+            using var curvePen = new Pen(curveColor, 2f);
+            g.DrawLines(curvePen, pts);
+        }
     }
 
     /// <summary>Approximate combined EQ response in dB at one frequency. Cosmetic only — analytic bell /

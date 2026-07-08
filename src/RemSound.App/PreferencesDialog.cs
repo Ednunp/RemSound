@@ -278,6 +278,15 @@ internal sealed class PreferencesDialog : Form
         AutoSize = true,
     };
 
+    // Colour theme picker — "Match Windows (system)" / Light / Dark. Applied at startup via
+    // Application.SetColorMode, so a change takes effect on the next launch. Purely visual.
+    private readonly ComboBox themeBox = new()
+    {
+        DropDownStyle = ComboBoxStyle.DropDownList,
+        Width = 200,
+        AccessibleName = "Colour theme (Alt+T)",
+    };
+
     private readonly Label upnpStatusLabel = new()
     {
         Text = "",
@@ -620,6 +629,26 @@ internal sealed class PreferencesDialog : Form
             try { cfg.Save(); } catch { /* harmless — choice just won't survive a restart */ }
         };
 
+        themeBox.Items.AddRange(["Match Windows (system)", "Light", "Dark"]);
+        themeBox.SelectedIndex = (cfgForLoad.ThemeMode ?? "system").Trim().ToLowerInvariant() switch
+        {
+            "light" => 1,
+            "dark" => 2,
+            _ => 0,
+        };
+        themeBox.SelectedIndexChanged += (_, _) =>
+        {
+            var cfg = AppConfig.Load();
+            cfg.ThemeMode = themeBox.SelectedIndex switch { 1 => "light", 2 => "dark", _ => "system" };
+            try { cfg.Save(); } catch { /* harmless — choice just won't survive a restart */ }
+        };
+        var themeLabel = new MnemonicLabel { Text = "Colour &theme (Alt+T)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = themeBox };
+        var themeHint = new Label { Text = "— takes effect next launch", AutoSize = true, ForeColor = SystemColors.GrayText, Anchor = AnchorStyles.Left, Padding = new Padding(8, 4, 0, 0) };
+        var themeRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 4, 0, 0) };
+        themeRow.Controls.Add(themeLabel);
+        themeRow.Controls.Add(themeBox);
+        themeRow.Controls.Add(themeHint);
+
         // Live UPnP status — the RouterPortMapper raises StatusChanged from a thread-pool
         // thread, so marshal back onto the UI thread before touching the label. Subscribe
         // on show and unsubscribe on close to avoid leaking the handler past the dialog.
@@ -813,7 +842,7 @@ internal sealed class PreferencesDialog : Form
         // is a field (declared above) so OnShown can focus it when the dialog opens. Logging is its
         // own tab (2026-06-19); the two logging controls moved off the General tab to lead it.
         tabs.TabPages.Add(MakeTab("General",
-            browseProfilesFolderButton, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel, showPanEqTabBox));
+            themeRow, browseProfilesFolderButton, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel, showPanEqTabBox));
         tabs.TabPages.Add(MakeTab("Audio cues", cueGroup));
         tabs.TabPages.Add(MakeTab("Startup behaviour",
             startMinimisedBox, startWithUserBox, startWithProfileBox, startupListPanel));

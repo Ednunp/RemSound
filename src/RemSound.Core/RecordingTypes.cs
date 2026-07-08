@@ -60,7 +60,7 @@ public enum RecordingChannelMode
 /// </summary>
 public sealed class RecordingSettings
 {
-    public RecordingSource Source { get; set; } = RecordingSource.ReceivedOnly;
+    public RecordingSource Source { get; set; } = RecordingSource.Both;
     public RecordingFileFormat FileFormat { get; set; } = RecordingFileFormat.Wav;
     public RecordingChannelMode ChannelMode { get; set; } = RecordingChannelMode.Stereo;
 

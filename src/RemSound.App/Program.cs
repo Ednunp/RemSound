@@ -85,6 +85,23 @@ internal static class Program
 
         ApplicationConfiguration.Initialize();
 
+        // Follow the user's chosen colour theme — "system" (match Windows light/dark) by default. This
+        // is an experimental WinForms API; guarded so any failure just leaves the classic light theme
+        // rather than stopping RemSound launching. Colours only — no effect on the screen reader.
+        try
+        {
+            var mode = (AppConfig.Load().ThemeMode ?? "system").Trim().ToLowerInvariant();
+#pragma warning disable WFO5001
+            Application.SetColorMode(mode switch
+            {
+                "light" => SystemColorMode.Classic,
+                "dark" => SystemColorMode.Dark,
+                _ => SystemColorMode.System,
+            });
+#pragma warning restore WFO5001
+        }
+        catch { /* older runtime or API change — stay on the classic light theme */ }
+
         // Consolidate every older layout (loose files, or the interim config\ folder) into the single
         // "user settings and logs" folder before anything reads config/profiles/logs. Idempotent +
         // best-effort; upgrades users from any older build. Shown to the user once if files moved.

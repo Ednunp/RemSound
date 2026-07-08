@@ -211,6 +211,9 @@ public sealed class MainForm : Form
     // Profile-management buttons retired 2026-05-08 — these actions live in File menu now.
     // The methods (SaveProfileAs / UpdateExistingProfile) are still here; they're called from
     // the menu item Click handlers in BuildFileMenu.
+    // A colour cue for connection health (green streaming / amber idle / grey disconnected) beside the
+    // health text. Purely visual — invisible to NVDA; the health text is unchanged.
+    private readonly StatusDot healthDot = new();
     private readonly Label healthLabel = new() { Text = "Health: disconnected", AutoSize = true };
     private readonly Label statusLabel = new() { Text = "Disconnected", AutoSize = true };
 
@@ -750,6 +753,7 @@ public sealed class MainForm : Form
         Height = 600;
         MinimumSize = new Size(560, 520);
         StartPosition = FormStartPosition.CenterScreen;
+        if (Theme.AppIcon is { } appIcon) Icon = appIcon;   // window title bar + Alt+Tab + taskbar
         // No AccessibleName / AccessibleRole on the form. Andre's accessible app does not
         // set these and NVDA reads cleanly there; setting them here was over-engineering.
 
@@ -881,16 +885,16 @@ public sealed class MainForm : Form
         // AccessibleName text guarantees NVDA announces it consistently right after the
         // control name. CheckBoxes own their own &-mnemonic via their Text and don't need
         // the suffix in AccessibleName — they're left as bare names.
-        volumeBar.AccessibleName = "Set volume for all received audio (Alt+V)";
-        receiveOutputDevicesList.AccessibleName = "WASAPI outputs for received sound (Alt+3)";
+        volumeBar.AccessibleName = "Master volume for received audio (Alt+V)";
+        receiveOutputDevicesList.AccessibleName = "WASAPI outputs for received audio (Alt+3)";
         receiveOutputDevicesStatusLabel.AccessibleName = "Selected receive output device status";
-        sendOutputDevicesList.AccessibleName = "WASAPI outputs to send (Alt+4)";
+        sendOutputDevicesList.AccessibleName = "WASAPI audio outputs to send (Alt+4)";
         sendOutputDevicesStatusLabel.AccessibleName = "Selected output device status";
-        sendInputDevicesList.AccessibleName = "WASAPI inputs to send (Alt+5)";
+        sendInputDevicesList.AccessibleName = "WASAPI audio inputs to send (Alt+5)";
         sendInputDevicesStatusLabel.AccessibleName = "Selected input device status";
-        asioReceiveOutputDevicesList.AccessibleName = "ASIO outputs for received sound (Alt+1)";
+        asioReceiveOutputDevicesList.AccessibleName = "ASIO outputs for received audio (Alt+1)";
         asioReceiveOutputDevicesStatusLabel.AccessibleName = "Selected ASIO receive channel status";
-        asioSendDevicesList.AccessibleName = "ASIO inputs to send (Alt+2)";
+        asioSendDevicesList.AccessibleName = "ASIO audio inputs to send (Alt+2)";
         asioSendDevicesStatusLabel.AccessibleName = "Selected ASIO send channel status";
         // Keyboard shortcuts / Minimise to tray / Save / Save as buttons retired 2026-05-08
         // (now File menu items in BuildFileMenu).
@@ -1769,6 +1773,7 @@ public sealed class MainForm : Form
             WrapContents = false,
             Padding = new Padding(8, 4, 8, 4),
         };
+        statusPanel.Controls.Add(healthDot);
         statusPanel.Controls.Add(healthLabel);
         statusPanel.Controls.Add(new Label { Text = "  ", AutoSize = true });
         statusPanel.Controls.Add(statusLabel);
@@ -3013,24 +3018,32 @@ public sealed class MainForm : Form
         // Preferences dialog (File → Preferences, Ctrl+P) as the last two items.
 
         // === Layout ===
-        // 8 rows: 0 connected peers, 1 the details box + 2 rename button (both about the highlighted
-        // connected peer), 3–4 discovered & remembered lists, 5 manual-add, 6 the lock toggle, 7 status.
-        panel.RowCount = 8;
-        FormLayoutRows.AddCheckedListRow(panel, 0, "Connected peers (Alt+&C)", connectedPeersList, connectedPeersStatus, FocusListControl);
+        // Tab order (row order = add order): 0 "Peers" header; 1 connected peers; 2 details box; 3 rename;
+        // 4 add-by-IP; 5 discovered; 6 remembered; 7 lock toggle; 8 status. The "Peers" header is a
+        // visual grouping only. Add-by-IP sits with the connected-peer actions, per Ed's requested order.
+        panel.RowCount = 9;
+
+        var peersHeader = Theme.SectionHeader("Peers");
+        panel.Controls.Add(peersHeader, 0, 0);
+        panel.SetColumnSpan(peersHeader, 2);
+
+        FormLayoutRows.AddCheckedListRow(panel, 1, "Connected peers (Alt+&C)", connectedPeersList, connectedPeersStatus, FocusListControl);
 
         // Details of, and a rename for, the peer highlighted in the connected list above.
         var detailsLabel = new MnemonicLabel { Text = "Peer d&etails (Alt+E)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = peerDetailsBox };
         detailsLabel.Click += (_, _) => peerDetailsBox.Focus();
-        panel.Controls.Add(detailsLabel, 0, 1);
-        panel.Controls.Add(peerDetailsBox, 1, 1);
+        panel.Controls.Add(detailsLabel, 0, 2);
+        panel.Controls.Add(peerDetailsBox, 1, 2);
         renamePeerButton.Click += (_, _) => OnRenamePeer();
-        panel.Controls.Add(renamePeerButton, 1, 2);
+        panel.Controls.Add(renamePeerButton, 1, 3);
         connectedPeersList.SelectedIndexChanged += (_, _) => UpdatePeerDetails();
 
-        FormLayoutRows.AddCheckedListRow(panel, 3, "Discovered peers (Alt+&D)", discoveredPeersList, discoveredPeersStatus, FocusListControl);
-        FormLayoutRows.AddCheckedListRow(panel, 4, "Remembered peers (Alt+&R)", rememberedPeersList, rememberedPeersStatus, FocusListControl);
-        panel.Controls.Add(new Label { Text = "Manual peer", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 5);
-        panel.Controls.Add(manualAddButton, 1, 5);
+        // Add a peer by address — grouped with the connected-peer actions, before the discovery lists.
+        panel.Controls.Add(new Label { Text = "Manual peer", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 4);
+        panel.Controls.Add(manualAddButton, 1, 4);
+
+        FormLayoutRows.AddCheckedListRow(panel, 5, "Discovered peers (Alt+&D)", discoveredPeersList, discoveredPeersStatus, FocusListControl);
+        FormLayoutRows.AddCheckedListRow(panel, 6, "Remembered peers (Alt+&R)", rememberedPeersList, rememberedPeersStatus, FocusListControl);
 
         lockPeerAddressesBox.Checked = settings.LoadLockPeerAddresses();
         lockPeerAddressesBox.CheckedChanged += (_, _) =>
@@ -3039,14 +3052,14 @@ public sealed class MainForm : Form
             MarkProfileDirty();
             logFile.Event($"lock peer addresses: {(lockPeerAddressesBox.Checked ? "on" : "off")}");
         };
-        panel.Controls.Add(lockPeerAddressesBox, 0, 6);
+        panel.Controls.Add(lockPeerAddressesBox, 0, 7);
         panel.SetColumnSpan(lockPeerAddressesBox, 2);
 
         // Connection status readout — last row, tab-into-able.
         var statusLabel = new MnemonicLabel { Text = "Connection status (Alt+&S)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = statusReadout };
         statusLabel.Click += (_, _) => statusReadout.Focus();
-        panel.Controls.Add(statusLabel, 0, 7);
-        panel.Controls.Add(statusReadout, 1, 7);
+        panel.Controls.Add(statusLabel, 0, 8);
+        panel.Controls.Add(statusReadout, 1, 8);
         UpdatePeerDetails();
 
         // Initial render so the box has content the moment the user tabs into it.
@@ -3112,15 +3125,15 @@ public sealed class MainForm : Form
         var receiveCheckboxPanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         receiveCheckboxPanel.Controls.Add(receiveAudioCheckbox);
         panel.Controls.Add(receiveCheckboxPanel, 1, 2);
-        receiveOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 3, "WASAPI outputs for received sound (Alt+&3)", receiveOutputDevicesList, receiveOutputDevicesStatusLabel, FocusListControl);
-        asioReceiveOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 4, "ASIO outputs for received sound (Alt+&1)", asioReceiveOutputDevicesList, asioReceiveOutputDevicesStatusLabel, FocusListControl);
-        FormLayoutRows.AddRow(panel, 5, "Set volume for all received audio (Alt+&V)", volumeBar, FocusControl);
+        receiveOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 3, "WASAPI outputs for received audio (Alt+&3)", receiveOutputDevicesList, receiveOutputDevicesStatusLabel, FocusListControl);
+        asioReceiveOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 4, "ASIO outputs for received audio (Alt+&1)", asioReceiveOutputDevicesList, asioReceiveOutputDevicesStatusLabel, FocusListControl);
+        FormLayoutRows.AddRow(panel, 5, "Master volume for received audio (Alt+&V)", volumeBar, FocusControl);
         var sendCheckboxPanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         sendCheckboxPanel.Controls.Add(sendMyAudioCheckbox);
         panel.Controls.Add(sendCheckboxPanel, 1, 6);
-        sendOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 7, "WASAPI outputs to send (Alt+&4)", sendOutputDevicesList, sendOutputDevicesStatusLabel, FocusListControl);
-        sendInputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 8, "WASAPI inputs to send (Alt+&5)", sendInputDevicesList, sendInputDevicesStatusLabel, FocusListControl);
-        asioSendDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 9, "ASIO inputs to send (Alt+&2)", asioSendDevicesList, asioSendDevicesStatusLabel, FocusListControl);
+        sendOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 7, "WASAPI audio outputs to send (Alt+&4)", sendOutputDevicesList, sendOutputDevicesStatusLabel, FocusListControl);
+        sendInputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 8, "WASAPI audio inputs to send (Alt+&5)", sendInputDevicesList, sendInputDevicesStatusLabel, FocusListControl);
+        asioSendDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 9, "ASIO audio inputs to send (Alt+&2)", asioSendDevicesList, asioSendDevicesStatusLabel, FocusListControl);
 
         audioIOTabPage.Controls.Add(panel);
     }
@@ -3695,6 +3708,24 @@ public sealed class MainForm : Form
         if (e.KeyCode == Keys.Delete)
         {
             OnDeleteParametricBands();
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return;
+        }
+        // Left / Right nudge the selected band(s) gain by half a dB — quick on-the-fly editing, heard
+        // in real time. Up / Down still move between bands as normal.
+        if ((e.KeyCode == Keys.Left || e.KeyCode == Keys.Right)
+            && selectedShapingKey is not null && parametricBandList.SelectedItems.Count > 0)
+        {
+            float delta = e.KeyCode == Keys.Right ? 0.5f : -0.5f;
+            foreach (var it in parametricBandList.SelectedItems.Cast<ParametricBandItem>())
+                it.Band.GainDb = Math.Clamp(it.Band.GainDb + delta, -PeerEqBands.MaxGainDb, PeerEqBands.MaxGainDb);
+            parametricBandList.Invalidate();   // redraw the rows with their updated dB (ToString reads live)
+            ApplyPeerShaping(selectedShapingKey);
+            UpdateEqCurve();
+            MarkProfileDirty();
+            // Make NVDA re-read the focused band with its new dB value.
+            WinEventNotifier.NotifyFocus(parametricBandList);
             e.Handled = true;
             e.SuppressKeyPress = true;
         }
@@ -4430,12 +4461,15 @@ public sealed class MainForm : Form
             ClientSize = new Size(600, 420),
         };
 
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 4 };
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 5 };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        root.Controls.Add(Theme.Heading("Named peers"), 0, 0);
 
         var intro = new Label
         {
@@ -4445,14 +4479,14 @@ public sealed class MainForm : Form
             MaximumSize = new Size(560, 0),
             Margin = new Padding(0, 0, 0, 8),
         };
-        root.Controls.Add(intro, 0, 0);
+        root.Controls.Add(intro, 0, 1);
 
         // Plain label with '&' focuses the next control in tab order (the list).
         var peersLabel = new Label { Text = "&Peers", AutoSize = true, Anchor = AnchorStyles.Left };
-        root.Controls.Add(peersLabel, 0, 1);
+        root.Controls.Add(peersLabel, 0, 2);
 
         var list = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false, AccessibleName = "Peers (Alt+P)", TabIndex = 0 };
-        root.Controls.Add(list, 0, 2);
+        root.Controls.Add(list, 0, 3);
 
         var renameBtn = new Button { Text = "&Rename (Alt+R)", AutoSize = true, AccessibleName = "Rename", TabIndex = 1 };
         var deleteBtn = new Button { Text = "&Delete (Alt+D)", AutoSize = true, AccessibleName = "Delete", TabIndex = 2 };
@@ -4461,7 +4495,7 @@ public sealed class MainForm : Form
         buttonRow.Controls.Add(renameBtn);
         buttonRow.Controls.Add(deleteBtn);
         buttonRow.Controls.Add(closeBtn);
-        root.Controls.Add(buttonRow, 0, 3);
+        root.Controls.Add(buttonRow, 0, 4);
 
         dialog.Controls.Add(root);
         dialog.AcceptButton = closeBtn;
@@ -6605,9 +6639,11 @@ public sealed class MainForm : Form
         var peerCount = knownPeers.Count;
         var hbSummary = heartbeatService?.GetHealthSummary() ?? "no peers";
         statusLabel.Text = $"Connected for {since}. {peerCount} peer(s) known. {sendText}. {receiveText}. Heartbeat: {hbSummary}.";
+        bool streaming = connected && (sender.IsRunning || receiver.IsRunning);
         healthLabel.Text = connected
-            ? sender.IsRunning || receiver.IsRunning ? "Health: streaming" : "Health: idle"
+            ? streaming ? "Health: streaming" : "Health: idle"
             : "Health: disconnected";
+        healthDot.SetColor(!connected ? Theme.Neutral : streaming ? Theme.Healthy : Theme.Warning);
     }
 
     private void SnapshotLogIfDue()
