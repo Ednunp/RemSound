@@ -11,7 +11,7 @@ I built RemSound to solve a specific problem of my own. I do a lot of work on a 
   1. [What RemSound does](#1-what-remsound-does)
   1. [Quick start](#2-quick-start)
   1. [Profiles](#3-profiles)
-  1. [The main window: menu bar + three tabs (or four)](#4-the-main-window-menu-bar--three-tabs-or-four)
+  1. [The main window: menu bar and tabs](#4-the-main-window-menu-bar-and-tabs)
   1. [Menus (File, Record, Options, Help)](#5-menus-file-record-options-help)
   1. [Connectivity tab](#6-connectivity-tab)
   1. [Audio inputs and outputs tab](#7-audio-inputs-and-outputs-tab)
@@ -183,19 +183,19 @@ So in summary, on a locked profile:
 
 > **If a save prompt is blocking your shutdown right now:** close it by pressing Esc (or click Cancel if you can see it), unlock by going File → Lock profile (read-only), then close RemSound. From this launch forward there'll be no prompt.
 
-## 4. The main window: menu bar + three tabs (or four)
+## 4. The main window: menu bar and tabs
 
 The main window has three parts, stacked top to bottom:
 
   1. A **menu bar** at the top with four menus — _File_ , _Record_ , _Options_ and _Help_. See Menus.
-  2. A **row of tabs** with three tabs — Connectivity, Audio inputs and outputs, Audio profile. A fourth tab, **Volume, pan and EQ for peers** , appears just before Audio profile and is shown by default (you can hide it in Preferences — see Volume, pan and EQ for peers tab). Each tab has its own Alt+letter shortcuts that only work when that tab is the one showing — so the same letter can do different things on different tabs without clashing.
+  2. A **row of tabs** — Connectivity, Audio inputs and outputs, Volume, pan and EQ for peers, and Audio profile — so four by default. The Volume, pan and EQ tab can be hidden, and you can reorder or hide any of the tabs (and jump straight to one with Ctrl and its number) from the **Appearance** tab in Preferences. Each tab has its own Alt+letter shortcuts that only work when that tab is the one showing — so the same letter can do different things on different tabs without clashing.
   3. A **status line** at the bottom that updates once a second with how long you've been connected, how many peers you have, whether sound is flowing, connection health, and RemSound's own CPU and memory usage.
 
 Tab| What it's for
 ---|---
 **Connectivity**|  Connected, discovered and remembered peers. Adding a peer by address. A connection status read-out.
 **Audio inputs and outputs**|  The ASIO driver picker (when an ASIO driver is installed), the Receive audio and Send my audio checkboxes, and all the device lists. Choosing a real driver in the picker brings up the ASIO device lists alongside the ordinary Windows ones; choosing _(none)_ hides them.
-**Volume, pan and EQ for peers** (optional)| Shape each connected peer's sound on its own — their volume, pan (left/right) and EQ. Shown by default; untick “Show the volume, pan and EQ for peers tab” on the General tab of Preferences to hide it. See Volume, pan and EQ for peers tab.
+**Volume, pan and EQ for peers** (optional)| Shape each connected peer's sound on its own — their volume, pan (left/right) and EQ. Shown by default; untick “Show the volume, pan and EQ for peers tab” on the Appearance tab of Preferences to hide it. See Volume, pan and EQ for peers tab.
 **Audio profile**|  Codec, packet size, lock-to-audio-clock, latency, continuous auto-tune, buffer smoothness, artefact sound. Split into an _Audio send parameters_ group and an _Audio receive parameters_ group.
 
 ### The system tray icon and its menu
@@ -270,7 +270,7 @@ The Options menu gathers everything you might want to configure about the app �
 
 Item| Shortcut| What it does
 ---|---|---
-**Recording settings …**| Alt+O, S| Opens the Recording settings dialog. Up to five lists: _Recording source_ (Alt+S), _File format_ (Alt+F), _Audio format attributes_ (Alt+A), _FLAC compression level_ (Alt+L — only shown when FLAC is chosen), and _Channels_ (Alt+C). The attributes list changes to match the format you pick. OK saves to the current profile; Cancel discards.
+**Recording settings …**| Alt+O, S| Opens the Recording settings dialog. Up to five lists: _Recording source_ (Alt+S), _File format_ (Alt+F), _Audio format attributes_ (Alt+A), _FLAC compression level_ (Alt+L — only shown when FLAC is chosen), and _Channels_ (Alt+C) — plus two tickboxes: _Split recording into separate tracks_ (one file per peer) and _Bypass pan and EQ when recording_ (record the raw audio). The attributes list changes to match the format you pick. OK saves to the current profile; Cancel discards.
 **Keyboard shortcuts …**| Ctrl+K, or Alt+O, K| Opens the global hotkey dialog (mute, volume, show/hide window, start/stop recording, remote-control commands, speak the status line).
 **Profile passwords …**| Alt+O, W| Lists every profile alongside its password, so you can view or change any of them in one place.
 **Manage named peers …**| Alt+O, N| Opens a list of every peer you've given a friendly name to, showing each one's machine name and where and when you last connected to it. Pick one and **Rename (Alt+R** , or F2) to change its name, or **Delete (Alt+D** , or the Del key) to forget it — deleting only drops the name, the peer still connects as normal under its machine name. See the peer-naming notes on the Connectivity tab.
@@ -288,6 +288,18 @@ Item| Shortcut| What it does
 **Check for updates**|  Alt+H, C| Asks the RemSound website whether a newer version is available. If there is one, you get a confirmation dialog with the release notes and a Yes / No to install. If you're already up to date, a popup tells you so. (To have RemSound check on its own instead of pressing this button, see Updating RemSound.)
 **About RemSound**|  Alt+H, A| A small dialog showing the version you're running and the latest release notes in a scrollable read-only box. Close (or Esc) dismisses it.
 
+### The Appearance tab (Preferences)
+
+The **Appearance** tab of Preferences (Options → Preferences, or Ctrl+P) controls how the window looks and is laid out. Nothing here affects the sound or the screen reader. Changes take effect as soon as you close Preferences — except the colour theme, which applies the next time you start RemSound.
+
+Control| Shortcut| What it does
+---|---|---
+**Colour theme**|  Alt+T|  _Match Windows_ (the default), _Light_ , or _Dark_. RemSound follows your Windows light/dark setting unless you pick a fixed one.
+**Show the volume, pan and EQ for peers tab**|  Alt+Q| On by default. Untick to hide the Volume, pan and EQ for peers tab from the main window.
+**Tab order**|  Alt+O| A list of the main window's tabs. Pick one, then use **Move up (Alt+U)** and **Move down (Alt+N)** to change the order the tabs appear in — which also sets their Ctrl+number (Ctrl+1 is always whichever tab is first). All four tabs are listed even when the volume/pan/EQ tab is hidden.
+**Enable the discovered peers list on the Connectivity tab**|  Alt+D| On by default. Untick to hide the Discovered peers list from the Connectivity tab.
+**Enable the remembered peers list on the Connectivity tab**|  Alt+R| On by default. Untick to hide the Remembered peers list from the Connectivity tab.
+
 ## 6. Connectivity tab
 
 This is where you manage peers and reach the logging options. The controls on this tab, in tab order:
@@ -297,11 +309,13 @@ Control| Shortcut| What it does
 **Connected peers**|  Alt+C| The people you currently have sound flowing with. Unticking a row disconnects that peer.
 **Peer details**|  Alt+E| A read-only box describing whichever connected peer you're on in the list above. Arrow through it to read: their name, their machine name, their IP address, how long you've been connected, the link health and ping, what they're sending (how many devices, on WASAPI or ASIO, at what sample rate and codec), and whether they're receiving your audio. The device and WASAPI/ASIO detail only shows while you're actually receiving that peer.
 **Rename peer**|  Alt+M or F2| Give the highlighted peer a friendly name of your choosing. It opens a box with the name and a **Clear custom name** button. The name sticks to that machine for good — across restarts, IP changes and networks — and shows everywhere that peer appears: the lists here, the volume, pan and EQ for peers tab, the status line and split-recording filenames. See below.
-**Add peer by IP**|  Alt+A| Opens a small box where you type an address or computer name. It adds that peer to the remembered list and connects.
 **Discovered peers**|  Alt+D| People RemSound has heard from in the last few seconds. Tick someone to connect to them.
 **Remembered peers**|  Alt+R| People you've connected to before, or added by address. This list is kept between sessions. Tick someone to reconnect.
+**Add peer by IP**|  Alt+A| Opens a small box where you type an address or computer name. It adds that peer to the remembered list and connects.
 **Lock to these exact peer addresses**|  Alt+L| When ticked, this profile uses only the exact addresses you set and never follows the other computer by name or switches to a different address — even if the address stops working. Off by default, saved with the profile. See Locking a profile to one exact address.
 **Connection status**|  Alt+S| A read-only box of text that sums up everything happening right now — how long you've been connected, how many peers you have, how much sound is flowing each way, and the connection health of each peer. Open it to read the current connection status.
+
+The **Discovered** and **Remembered** peer lists can each be hidden if you don't use them — untick them on the Appearance tab of Preferences. Hiding one just removes it from this tab; it changes nothing about how you connect.
 
 ### Giving a peer a friendly name
 
@@ -414,7 +428,7 @@ Most people only need to pick a codec and a smoothness level, and leave everythi
 
 This tab lets you shape the sound of each peer you're connected to. You can set how loud that person is, lean them to the left or right, and change their tone with an equaliser. It's handy when you have several people connected at once and want to mix them — for a jam session you might put the drummer over to the left, turn someone down a little, or brighten someone up.
 
-The tab is **shown by default**. If you don't want it, untick **“ Show the volume, pan and EQ for peers tab”** on the **General** tab of Preferences (Options → Preferences, or Ctrl+P). When it's on, the tab appears just before the Audio profile tab.
+The tab is **shown by default**. If you don't want it, untick **“ Show the volume, pan and EQ for peers tab”** on the **Appearance** tab of Preferences (Options → Preferences, or Ctrl+P). When it's on, the tab appears just before the Audio profile tab.
 
 ### Turning it on, and choosing who to shape
 
@@ -422,12 +436,12 @@ There's a single master switch, then a list of the people you're connected to. T
 
 Control| What it does
 ---|---
-**Enable volume, pan and EQ for all peers** (checkbox)| The one master switch. When it's off, everyone passes through untouched — but you can still set everything up ready for when you turn it on. There's also a global keyboard shortcut to flip this switch from anywhere (you set the key yourself in Keyboard shortcuts — it starts unset).
-**Peers** (checklist)| The people you're currently connected to. Tick the ones you want shaped; untick to bypass a person while keeping their settings. Move your cursor onto a person to edit them — everything below acts on whoever the cursor is on.
-**Volume** (slider)| An individual level for that one peer, from 0 to 100% (100% means unchanged). It sits on top of your main volume, so you can balance people against each other.
-**Pan** (slider)| Leans the peer to the left or right. Centred by default. It keeps the peer's stereo sound — it never folds them down to mono.
-**Set peer EQ to default** (button)| Puts that peer's EQ back to flat — all three modes at once (the 3-band, the 12-band and the parametric bands). It leaves the pan and volume alone.
-**EQ mode** (picker)| Three choices: _3 band simple EQ_ , _12 band advanced graphic EQ_ or _16 band parametric EQ_. This chooses which EQ controls you see below.
+**Enable volume, pan and EQ for all peers (Alt+E)** (checkbox)| The one master switch. When it's off, everyone passes through untouched — but you can still set everything up ready for when you turn it on. There's also a global keyboard shortcut to flip this switch from anywhere (you set the key yourself in Keyboard shortcuts — it starts unset).
+**Peers (Alt+U)** (checklist)| The people you're currently connected to. Tick the ones you want shaped; untick to bypass a person while keeping their settings. Move your cursor onto a person to edit them — everything below acts on whoever the cursor is on.
+**Volume (Alt+L)** (slider)| An individual level for that one peer, from 0 to 100% (100% means unchanged). It sits on top of your main volume, so you can balance people against each other.
+**Pan (Alt+N)** (slider)| Leans the peer to the left or right. Centred by default. It keeps the peer's stereo sound — it never folds them down to mono.
+**Set peer EQ to default (Alt+Q)** (button)| Puts that peer's EQ back to flat — all three modes at once (the 3-band, the 12-band and the parametric bands). It leaves the pan and volume alone.
+**EQ mode (Alt+M)** (picker)| Three choices: _3 band simple EQ_ , _12 band advanced graphic EQ_ or _16 band parametric EQ_. This chooses which EQ controls you see below.
 **EQ controls**|  For the two graphic modes, a set of sliders (see below). For the parametric mode, an Add band button and a list of your bands. Details follow.
 
 ### The three EQ modes
@@ -773,6 +787,7 @@ Alt+M or F2| Rename the highlighted connected peer (F2 matches the Windows Explo
 Alt+D| Focus the Discovered peers list
 Alt+R| Focus the Remembered peers list
 Alt+A| Add peer by IP
+Alt+L| Toggle Lock to these exact peer addresses
 Alt+S| Focus the Connection status read-out
 
 (The logging controls — Enable logs, Write logs now and the log-folder housekeeping — are on the Logging tab of the Preferences dialog; reach it via Options → Preferences or Ctrl+P, then use Alt+L / Alt+W within the dialog.)
@@ -811,7 +826,7 @@ Alt+A| Focus Artefact sound type
 
 ### Volume, pan and EQ for peers tab
 
-Present whenever the Volume, pan and EQ for peers tab is showing (it's shown by default; the toggle is “Show the volume, pan and EQ for peers tab” on the General tab of Preferences). See Volume, pan and EQ for peers tab.
+Present whenever the Volume, pan and EQ for peers tab is showing (it's shown by default; the toggle is “Show the volume, pan and EQ for peers tab” on the Appearance tab of Preferences). See Volume, pan and EQ for peers tab.
 
 Key| Action
 ---|---
@@ -844,6 +859,7 @@ Alt+F, N| Minimise to tray
 Alt+O, S| Recording settings
 Alt+O, K| Keyboard shortcuts
 Alt+O, W| Profile passwords
+Alt+O, N| Manage named peers
 Alt+O, R| Reset the default audio device prompt
 Alt+O, P| Preferences
 Alt+F, X| Exit
@@ -976,7 +992,7 @@ Toggle| What it does
 
 ## 19. Audio cue sounds
 
-RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called **cue sounds**. Seventeen kinds of event have a cue:
+RemSound plays a short sound at moments where you might want an audible confirmation that something just happened. These are called **cue sounds**. A range of events have a cue:
 
 Cue| Plays when
 ---|---
@@ -1155,7 +1171,7 @@ Inside your recordings folder, RemSound keeps a folder for each **date** — for
 All the times below are written 24-hour, as hours-minutes-seconds (`HH-MM-SS`), so files and folders line up in time order in Explorer.
 
   * A normal (non-split) recording is a single file named like `14-30-05 RemSound recording DESKTOP-ABC.wav` — the time, then “RemSound recording”, then this computer's name (and the right extension for your chosen format).
-  * A **split** recording (when you tick “Split recording into separate tracks”) is instead a _folder_ named like `14-30-05 RemSound recording multi track`. Inside it there's one file per peer, named `<peer name> 14-30-05.wav` (the peer's computer name, or its address if it has no name), plus your own send as `<your computer name> 14-30-05.wav`.
+  * A **split** recording (when you tick “Split recording into separate tracks”) is instead a _folder_ named like `14-30-05 RemSound recording multi track`. Inside it there's one file per peer, named `<peer name> 14-30-05.wav` (the friendly name you've given the peer if it has one, otherwise its computer name, or its address if it has neither), plus your own send as `<your computer name> 14-30-05.wav`.
 
 
 
@@ -1182,11 +1198,11 @@ Reached via **Record → Recording settings**. Two tickboxes sit at the top, the
 
 Control| What it does
 ---|---
-**Split recording into separate tracks** (tickbox)| Instead of one mixed file, a recording becomes a _folder_ with one file per connected peer — each holding only that peer's sound — plus one file for your own send. Which of those files you get follows the Recording source choice below: _Received only_ gives you the peer files; _Both_ gives the peer files plus your own; _Sent only_ gives just your own.
+**Split recording into separate tracks** (tickbox)| Instead of one mixed file, a recording becomes a _folder_ with one file per connected peer — each holding only that peer's sound — plus one file for your own send. Which of those files you get follows the Recording source choice below: _Record all received_ gives you the peer files; _Record both sent and received_ gives the peer files plus your own; _Record all sent_ gives just your own.
 **Bypass pan and EQ when recording** (tickbox)| Records the raw sound — before any volume, pan or EQ you've set on the Volume, pan and EQ for peers tab — even though you still hear the shaped version. Left off (the default), the recording captures what you actually hear, including your shaping; and on a split recording each peer's own file carries that peer's own shaping.
 List| Shortcut| What goes in it
 ---|---|---
-**Recording source**|  Alt+S| Receive only / Send only / Both. See the source explanation above.
+**Recording source**|  Alt+S| Record both sent and received (the default), Record all received, or Record all sent. See the source explanation above.
 **File format**|  Alt+F| WAV / MP3 / Ogg-Opus / FLAC. The attributes list (and FLAC compression list) to the right change whenever you change this.
 **Audio format attributes**|  Alt+A| Changes to match the format, with the 48 kHz sample rate stated on every row so there's no ambiguity. WAV: three rows (16-bit / 24-bit / 32-bit float). MP3: four rows (128 / 192 / 256 / 320 kbps). OGG-Opus: four rows (96 / 128 / 192 / 256 kbps). FLAC: two rows (16-bit / 24-bit).
 **FLAC compression level**|  Alt+L| Shown **only when FLAC is the chosen file format**. Nine rows for levels 0 to 8, with friendly labels on the ends (“0 — fastest, biggest file”, “5 — default”, “8 — slowest, smallest file”). Every level produces an identical, no-loss recording — it's purely a trade-off between encoding speed and file size.
@@ -1396,10 +1412,10 @@ UPnP| Short for “Universal Plug and Play”. A feature most home routers suppo
 NAT| Short for “Network Address Translation”. The way your router lets several computers share a single internet connection — one public address on the outside, lots of private addresses on the inside. Most home networks use NAT, which is why you usually need port forwarding (or UPnP, or a VPN) for two computers in different places to reach each other directly.
 Carrier-grade NAT| An extra layer of NAT that some internet providers (especially on mobile broadband and some cable connections) put in between your router and the rest of the internet. Your home router opens a port fine, but the provider's NAT in front of it still blocks incoming connections. RemSound's UPnP status line warns you when this is the case — the way through it is a VPN like Tailscale, or the relay server.
 Auto-tune| RemSound automatically adjusting the latency target based on how evenly packets are arriving. Off by default; turn it on with the Continuous auto-tune checkbox on the Audio profile tab.
-Profile| A saved snapshot of every RemSound setting and choice — device ticks, send / receive states, codec, latency, peers, hotkeys, ASIO driver choice, the lot. Stored as one settings file. You pick one at startup, and can switch with File → Open profile.
+Profile| A saved snapshot of every RemSound setting and choice — device ticks, send / receive states, codec, latency, peers, ASIO driver choice, the lot. (Keyboard shortcuts are the exception — they're shared across all profiles, not saved per profile.) Stored as one settings file. You pick one at startup, and can switch with File → Open profile.
 New profile| An entry in the startup profile picker that begins a session with all the defaults — nothing ticked, no peers, no saved name. A clean starting point for a new profile, or for a one-off session you don't plan to save.
 Lock to audio clock| A sending-side timing mode that takes its timing straight from the sound device's hardware clock instead of from Windows. Removes a few milliseconds of wobble at tight latency targets. Off by default. Set with the checkbox of the same name on the Audio profile tab.
 Concealment| A receiving-side feature that fills brief gaps in the playback reserve with a small noise burst (the default) or an obvious click. You choose which on the Audio profile tab, in the _Artefact sound type_ list. Opus also has its own repair of lost packets on top of this.
-Remote control| A RemSound feature that lets one connected peer adjust another peer's listening volume (or toggle their receive mute) using global hotkeys. There are two sets of commands: one adjusts the receiver's RemSound volume slider, the other adjusts the receiver's Windows volume. Off by default on both ends; the receiver opts in via “Accept remote volume commands from peers” in the Preferences dialog (Ctrl+P), and the sender sets up hotkeys in the Keyboard shortcuts dialog (Ctrl+K). Designed for the “I'm NVDA-Remote'd into my desktop and want to nudge the laptop's volume” case. See section 15.
+Remote control| A RemSound feature that lets one connected peer adjust another peer's listening volume (or toggle their receive mute) using global hotkeys. There are two sets of commands: one adjusts the receiver's RemSound volume slider, the other adjusts the receiver's Windows volume. Off by default on both ends; the receiver opts in via “Accept remote volume commands from peers” in the Preferences dialog (Ctrl+P), and the sender sets up hotkeys in the Keyboard shortcuts dialog (Ctrl+K). Designed for the “I'm NVDA-Remote'd into my desktop and want to nudge the laptop's volume” case. See Remote control.
 
 * * *
