@@ -2903,6 +2903,13 @@ public sealed class MainForm : Form
                 args.Handled = true;
                 args.SuppressKeyPress = true;
             }
+            // F2 renames the highlighted peer — the Windows Explorer idiom.
+            else if (args.KeyCode == Keys.F2)
+            {
+                OnRenamePeer();
+                args.Handled = true;
+                args.SuppressKeyPress = true;
+            }
         };
 
         // Discovered list: items are unchecked. Checking connects + auto-remembers. Delete

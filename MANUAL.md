@@ -295,7 +295,7 @@ Control| Shortcut| What it does
 ---|---|---
 **Connected peers**|  Alt+C| The people you currently have sound flowing with. Unticking a row disconnects that peer.
 **Peer details**|  Alt+E| A read-only box describing whichever connected peer you're on in the list above. Arrow through it to read: their name, their machine name, their IP address, how long you've been connected, the link health and ping, what they're sending (how many devices, on WASAPI or ASIO, at what sample rate and codec), and whether they're receiving your audio. The device and WASAPI/ASIO detail only shows while you're actually receiving that peer.
-**Rename peer**|  Alt+M| Give the highlighted peer a friendly name of your choosing. It opens a box with the name and a **Clear custom name** button. The name sticks to that machine for good — across restarts, IP changes and networks — and shows everywhere that peer appears: the lists here, the volume, pan and EQ for peers tab, the status line and split-recording filenames. See below.
+**Rename peer**|  Alt+M or F2| Give the highlighted peer a friendly name of your choosing. It opens a box with the name and a **Clear custom name** button. The name sticks to that machine for good — across restarts, IP changes and networks — and shows everywhere that peer appears: the lists here, the volume, pan and EQ for peers tab, the status line and split-recording filenames. See below.
 **Discovered peers**|  Alt+D| People RemSound has heard from in the last few seconds. Tick someone to connect to them.
 **Remembered peers**|  Alt+R| People you've connected to before, or added by address. This list is kept between sessions. Tick someone to reconnect.
 **Add peer by IP**|  Alt+A| Opens a small box where you type an address or computer name. It adds that peer to the remembered list and connects.
@@ -766,7 +766,7 @@ Key| Action
 ---|---
 Alt+C| Focus the Connected peers list
 Alt+E| Focus the Peer details box (for the highlighted connected peer)
-Alt+M| Rename the highlighted connected peer
+Alt+M or F2| Rename the highlighted connected peer (F2 matches the Windows Explorer rename key)
 Alt+D| Focus the Discovered peers list
 Alt+R| Focus the Remembered peers list
 Alt+A| Add peer by IP
