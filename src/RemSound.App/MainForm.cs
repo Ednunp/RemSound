@@ -3038,12 +3038,12 @@ public sealed class MainForm : Form
         panel.Controls.Add(renamePeerButton, 1, 3);
         connectedPeersList.SelectedIndexChanged += (_, _) => UpdatePeerDetails();
 
-        // Add a peer by address — grouped with the connected-peer actions, before the discovery lists.
-        panel.Controls.Add(new Label { Text = "Manual peer", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 4);
-        panel.Controls.Add(manualAddButton, 1, 4);
+        FormLayoutRows.AddCheckedListRow(panel, 4, "Discovered peers (Alt+&D)", discoveredPeersList, discoveredPeersStatus, FocusListControl);
+        FormLayoutRows.AddCheckedListRow(panel, 5, "Remembered peers (Alt+&R)", rememberedPeersList, rememberedPeersStatus, FocusListControl);
 
-        FormLayoutRows.AddCheckedListRow(panel, 5, "Discovered peers (Alt+&D)", discoveredPeersList, discoveredPeersStatus, FocusListControl);
-        FormLayoutRows.AddCheckedListRow(panel, 6, "Remembered peers (Alt+&R)", rememberedPeersList, rememberedPeersStatus, FocusListControl);
+        // Add a peer by address, then the lock toggle — the manual / advanced options after the lists.
+        panel.Controls.Add(new Label { Text = "Manual peer", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 6);
+        panel.Controls.Add(manualAddButton, 1, 6);
 
         lockPeerAddressesBox.Checked = settings.LoadLockPeerAddresses();
         lockPeerAddressesBox.CheckedChanged += (_, _) =>
@@ -4684,14 +4684,14 @@ public sealed class MainForm : Form
         //
         // Connectivity tab. This is the authoritative tab order (it overrides layout add-order), so it
         // must list EVERY focusable control on the tab or the unlisted ones collapse to TabIndex 0 and
-        // land in the wrong place. Order: connected, details, rename, add-by-IP, discovered, remembered,
+        // land in the wrong place. Order: connected, details, rename, discovered, remembered, add-by-IP,
         // lock, status.
         connectedPeersList.TabIndex = 0;
         peerDetailsBox.TabIndex = 1;
         renamePeerButton.TabIndex = 2;
-        manualAddButton.TabIndex = 3;
-        discoveredPeersList.TabIndex = 4;
-        rememberedPeersList.TabIndex = 5;
+        discoveredPeersList.TabIndex = 3;
+        rememberedPeersList.TabIndex = 4;
+        manualAddButton.TabIndex = 5;
         lockPeerAddressesBox.TabIndex = 6;
         statusReadout.TabIndex = 7;
         // Audio I/O tab. The driver picker is row 0 when present (a real driver chosen here
