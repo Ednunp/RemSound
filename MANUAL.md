@@ -761,7 +761,7 @@ Both Opus choices can automatically repair a single missing packet (see the sect
 
 ## 15. Keyboard shortcuts (within the main window)
 
-Each tab has its own Alt+letter shortcuts. The same letter can do different things on different tabs without clashing — the shortcuts only work on the tab that's showing. Move between tabs with Ctrl+Tab and Ctrl+Shift+Tab.
+Each tab has its own Alt+letter shortcuts. The same letter can do different things on different tabs without clashing — the shortcuts only work on the tab that's showing. Move between tabs with Ctrl+Tab and Ctrl+Shift+Tab, or jump straight to one with Ctrl and its number (Ctrl+1 for the first tab, and so on — the numbers follow whatever order you've set the tabs in).
 
 ### Connectivity tab
 
@@ -854,6 +854,7 @@ Key| Action
 ---|---
 **F1**| **Open this manual** in your default web browser. Works anywhere in RemSound — the main window, every dialog, and the profile picker on first launch.
 Ctrl+Tab / Ctrl+Shift+Tab| Move to the next / previous tab
+Ctrl+1…Ctrl+9| Jump straight to a tab by its position — Ctrl+1 is the first tab, Ctrl+2 the second, and so on. The number follows the current order, so if you reorder the tabs (Preferences → Appearance) the numbers move with them. Works in the main window and in the Preferences dialog.
 Tab / Shift+Tab| Move between controls within the current tab
 Spacebar| Tick or untick an item in any device list, or toggle the focused checkbox
 Up / Down| Move between items in any list
@@ -999,7 +1000,7 @@ All of these cues play through your default Windows sound output, which is separ
 
 ### The Audio cues tab
 
-Open **File → Preferences** (or Ctrl+P) and go to the **Audio cues** tab. (Preferences is organised into five tabs — General, Audio cues, Startup behaviour, Update settings and Logging — which you move between with Ctrl+Tab, or with the arrow keys when the row of tab names has focus.)
+Open **File → Preferences** (or Ctrl+P) and go to the **Audio cues** tab. (Preferences is organised into six tabs — General, Appearance, Audio cues, Startup behaviour, Update settings and Logging — which you move between with Ctrl+Tab, Ctrl and a number, or the arrow keys when the row of tab names has focus.)
 
 The **Audio cue sounds (Alt+N)** list shows every cue by name. Use the up and down arrow keys to move between them — as you land on each cue, RemSound plays its current sound, so you can hear what's set just by arrowing through.
 

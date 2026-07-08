@@ -7221,6 +7221,25 @@ public sealed class MainForm : Form
     /// </summary>
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        // Ctrl+1..9 — switch to the main tab at that position. Positions are LIVE: they shift as the
+        // user reorders tabs (Preferences → Appearance) and the pan/EQ tab may be hidden, so the number
+        // always means "the Nth tab as it currently appears". Same idea as Andre's readout app.
+        if ((keyData & Keys.Modifiers) == Keys.Control)
+        {
+            int tabNum = (keyData & Keys.KeyCode) switch
+            {
+                >= Keys.D1 and <= Keys.D9 => (keyData & Keys.KeyCode) - Keys.D1 + 1,
+                >= Keys.NumPad1 and <= Keys.NumPad9 => (keyData & Keys.KeyCode) - Keys.NumPad1 + 1,
+                _ => 0,
+            };
+            if (tabNum >= 1 && tabNum <= mainTabControl.TabPages.Count)
+            {
+                mainTabControl.SelectedIndex = tabNum - 1;
+                mainTabControl.Focus();   // focus the tab strip so NVDA reads the new tab, like Ctrl+Tab
+                return true;
+            }
+        }
+
         // Defensive gate for the global menu shortcuts that change state (Ctrl+R = toggle
         // recording, Ctrl+S = save profile). The default WinForms behaviour fires these
         // shortcuts any time the form has keyboard focus — which technically includes the

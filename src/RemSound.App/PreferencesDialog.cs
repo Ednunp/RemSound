@@ -1013,6 +1013,27 @@ internal sealed class PreferencesDialog : Form
     ///     focus event (without the transition WinForms can treat focus as unchanged and stay silent).
     ///   * NotifyFocus re-fires the MSAA focus event as belt-and-braces.
     /// Ctrl+Tab still switches tabs from inside the page.</summary>
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        // Ctrl+1..N switch to that tab by its current position — matches the main window.
+        if ((keyData & Keys.Modifiers) == Keys.Control)
+        {
+            int n = (keyData & Keys.KeyCode) switch
+            {
+                >= Keys.D1 and <= Keys.D9 => (keyData & Keys.KeyCode) - Keys.D1 + 1,
+                >= Keys.NumPad1 and <= Keys.NumPad9 => (keyData & Keys.KeyCode) - Keys.NumPad1 + 1,
+                _ => 0,
+            };
+            if (n >= 1 && n <= tabs.TabPages.Count)
+            {
+                tabs.SelectedIndex = n - 1;
+                tabs.Focus();
+                return true;
+            }
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
