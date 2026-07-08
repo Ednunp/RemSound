@@ -287,6 +287,45 @@ internal sealed class PreferencesDialog : Form
         AccessibleName = "Colour theme (Alt+T)",
     };
 
+    // Appearance tab — reorder the main-window tabs, and toggle the Connectivity-tab peer lists.
+    private readonly ListBox tabOrderList = new()
+    {
+        Width = 320,
+        Height = 96,
+        IntegralHeight = false,
+        AccessibleName = "Main tab order (Alt+O), then Move up / Move down to reorder",
+    };
+    private readonly Button moveTabUpButton = new() { Text = "Move &up (Alt+U)", AutoSize = true, AccessibleName = "Move tab up" };
+    private readonly Button moveTabDownButton = new() { Text = "Move dow&n (Alt+N)", AutoSize = true, AccessibleName = "Move tab down" };
+    private readonly AccessibleCheckBox enableDiscoveredPeersBox = new()
+    {
+        Text = "Enable the &discovered peers list on the Connectivity tab (Alt+D)",
+        AccessibleName = "Enable the discovered peers list on the Connectivity tab",
+        AutoSize = true,
+    };
+    private readonly AccessibleCheckBox enableRememberedPeersBox = new()
+    {
+        Text = "Enable the &remembered peers list on the Connectivity tab (Alt+R)",
+        AccessibleName = "Enable the remembered peers list on the Connectivity tab",
+        AutoSize = true,
+    };
+
+    // The main-window tabs shown in the reorder list (always all four, even if the pan/EQ tab is
+    // currently hidden). Key matches AppConfig.MainTabOrder / MainForm.TabPageForKey.
+    private static readonly (string Key, string Display)[] KnownTabs =
+    [
+        ("connectivity", "Connectivity"),
+        ("audioio", "Audio inputs and outputs"),
+        ("paneq", "Volume, pan and EQ for peers"),
+        ("audioprofile", "Audio profile"),
+    ];
+
+    private sealed class TabOrderItem(string key, string display)
+    {
+        public string Key { get; } = key;
+        public override string ToString() => display;
+    }
+
     private readonly Label upnpStatusLabel = new()
     {
         Text = "",
@@ -649,6 +688,59 @@ internal sealed class PreferencesDialog : Form
         themeRow.Controls.Add(themeBox);
         themeRow.Controls.Add(themeHint);
 
+        // --- Appearance tab: reorder the main tabs, and toggle the Connectivity peer lists ---
+        // Populate the reorder list from the saved order, normalised so all four tabs always appear.
+        var orderedKeys = new List<string>();
+        if (cfgForLoad.MainTabOrder is { } savedOrder)
+            foreach (var k in savedOrder)
+                if (Array.Exists(KnownTabs, t => t.Key == k) && !orderedKeys.Contains(k)) orderedKeys.Add(k);
+        foreach (var (key, _) in KnownTabs)
+            if (!orderedKeys.Contains(key)) orderedKeys.Add(key);
+        foreach (var key in orderedKeys)
+            tabOrderList.Items.Add(new TabOrderItem(key, Array.Find(KnownTabs, t => t.Key == key).Display));
+        if (tabOrderList.Items.Count > 0) tabOrderList.SelectedIndex = 0;
+
+        void SaveTabOrder()
+        {
+            var cfg = AppConfig.Load();
+            cfg.MainTabOrder = tabOrderList.Items.Cast<TabOrderItem>().Select(t => t.Key).ToList();
+            try { cfg.Save(); } catch { /* harmless — order just won't survive a restart */ }
+        }
+        void MoveTab(int delta)
+        {
+            int i = tabOrderList.SelectedIndex;
+            if (i < 0) return;
+            int j = i + delta;
+            if (j < 0 || j >= tabOrderList.Items.Count) return;
+            var item = tabOrderList.Items[i];
+            tabOrderList.Items.RemoveAt(i);
+            tabOrderList.Items.Insert(j, item);
+            tabOrderList.SelectedIndex = j;
+            SaveTabOrder();
+        }
+        moveTabUpButton.Click += (_, _) => MoveTab(-1);
+        moveTabDownButton.Click += (_, _) => MoveTab(1);
+
+        var tabOrderLabel = new MnemonicLabel { Text = "Main tab &order (Alt+O)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = tabOrderList };
+        var tabOrderButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 2, 0, 0) };
+        tabOrderButtons.Controls.Add(moveTabUpButton);
+        tabOrderButtons.Controls.Add(moveTabDownButton);
+
+        enableDiscoveredPeersBox.Checked = cfgForLoad.ShowDiscoveredPeers;
+        enableDiscoveredPeersBox.CheckedChanged += (_, _) =>
+        {
+            var cfg = AppConfig.Load();
+            cfg.ShowDiscoveredPeers = enableDiscoveredPeersBox.Checked;
+            try { cfg.Save(); } catch { /* harmless */ }
+        };
+        enableRememberedPeersBox.Checked = cfgForLoad.ShowRememberedPeers;
+        enableRememberedPeersBox.CheckedChanged += (_, _) =>
+        {
+            var cfg = AppConfig.Load();
+            cfg.ShowRememberedPeers = enableRememberedPeersBox.Checked;
+            try { cfg.Save(); } catch { /* harmless */ }
+        };
+
         // Live UPnP status — the RouterPortMapper raises StatusChanged from a thread-pool
         // thread, so marshal back onto the UI thread before touching the label. Subscribe
         // on show and unsubscribe on close to avoid leaking the handler past the dialog.
@@ -837,12 +929,16 @@ internal sealed class PreferencesDialog : Form
         pruneDaysRow.Controls.Add(pruneDaysBox);
         pruneDaysRow.Controls.Add(pruneDaysUnitLabel);
 
-        // Five tabs, accessible (QuietTabControl) like the main window. Ctrl+Tab / arrows on the
+        // Six tabs (General, Appearance, Audio cues, Startup behaviour, Update settings, Logging),
+        // accessible (QuietTabControl) like the main window. Ctrl+Tab / arrows on the
         // strip switch tabs; the active page's controls are the next tab stops. The control itself
         // is a field (declared above) so OnShown can focus it when the dialog opens. Logging is its
         // own tab (2026-06-19); the two logging controls moved off the General tab to lead it.
         tabs.TabPages.Add(MakeTab("General",
-            themeRow, browseProfilesFolderButton, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel, showPanEqTabBox));
+            browseProfilesFolderButton, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel));
+        tabs.TabPages.Add(MakeTab("Appearance",
+            themeRow, showPanEqTabBox, tabOrderLabel, tabOrderList, tabOrderButtons,
+            enableDiscoveredPeersBox, enableRememberedPeersBox));
         tabs.TabPages.Add(MakeTab("Audio cues", cueGroup));
         tabs.TabPages.Add(MakeTab("Startup behaviour",
             startMinimisedBox, startWithUserBox, startWithProfileBox, startupListPanel));

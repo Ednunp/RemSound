@@ -274,6 +274,10 @@ public sealed class MainForm : Form
     // Read-only details for the peer highlighted in the connected list, and a button to give it a name.
     private readonly TextBox peerDetailsBox = new() { Multiline = true, ReadOnly = true, Width = 430, Height = 132, ScrollBars = ScrollBars.Vertical, AccessibleName = "Peer details (Alt+E)" };
     private readonly Button renamePeerButton = new() { Text = "Rena&me peer (Alt+M)", AutoSize = true, AccessibleName = "Rename peer" };
+    // The Discovered / Remembered row labels, captured so those rows can be hidden when the user turns
+    // the lists off on the Preferences Appearance tab.
+    private MnemonicLabel? discoveredPeersLabel;
+    private MnemonicLabel? rememberedPeersLabel;
     // Per-profile "pin to exact addresses" toggle (#17). When ticked, RefreshKnownPeers skips the
     // discovered-peer merge and the address-follow, so the profile's peers stay exactly as the user set.
     private readonly AccessibleCheckBox lockPeerAddressesBox = new()
@@ -1749,11 +1753,8 @@ public sealed class MainForm : Form
         BuildAudioProfileTab();
         BuildPanEqTab();
 
-        mainTabControl.TabPages.Add(connectivityTabPage);
-        mainTabControl.TabPages.Add(audioIOTabPage);
-        mainTabControl.TabPages.Add(audioProfileTabPage);
-        // Insert the optional Pan-and-EQ tab (just before Audio profile) if the preference is on.
-        RefreshPanEqTabVisibility();
+        // Add the tabs in the user's saved order (and honour the "show pan/EQ tab" toggle).
+        ApplyMainTabLayout();
         // No SelectedIndexChanged handler. No focus management on tab change. Andre's
         // accessible app does ZERO event hooking on TabControl — relies entirely on
         // default WinForms + NVDA behaviour. Per Ed's repeated request: arrow keys cycle
@@ -2595,8 +2596,9 @@ public sealed class MainForm : Form
             unsubscribeUpnpStatusChanged: handler => routerPortMapper.StatusChanged -= handler);
         dialog.ShowDialog(this);
         if (dialog.ChangedAnyProfileSetting) MarkProfileDirty();
-        // The "Show pan and EQ tab" preference may have been toggled — add/remove the tab to match.
-        RefreshPanEqTabVisibility();
+        // Appearance-tab changes (tab order, show pan/EQ tab, show discovered/remembered lists) apply now.
+        ApplyMainTabLayout();
+        RefreshConnectivityListVisibility();
         // The Preferences dialog includes per-cue Browse buttons that can change custom
         // WAV paths in AppConfig.CustomCuePaths. Reload the cached SoundPlayer instances
         // here unconditionally — cheap, only six small files, and guarantees the next
@@ -3038,8 +3040,8 @@ public sealed class MainForm : Form
         panel.Controls.Add(renamePeerButton, 1, 3);
         connectedPeersList.SelectedIndexChanged += (_, _) => UpdatePeerDetails();
 
-        FormLayoutRows.AddCheckedListRow(panel, 4, "Discovered peers (Alt+&D)", discoveredPeersList, discoveredPeersStatus, FocusListControl);
-        FormLayoutRows.AddCheckedListRow(panel, 5, "Remembered peers (Alt+&R)", rememberedPeersList, rememberedPeersStatus, FocusListControl);
+        discoveredPeersLabel = FormLayoutRows.AddCheckedListRow(panel, 4, "Discovered peers (Alt+&D)", discoveredPeersList, discoveredPeersStatus, FocusListControl);
+        rememberedPeersLabel = FormLayoutRows.AddCheckedListRow(panel, 5, "Remembered peers (Alt+&R)", rememberedPeersList, rememberedPeersStatus, FocusListControl);
 
         // Add a peer by address, then the lock toggle — the manual / advanced options after the lists.
         panel.Controls.Add(new Label { Text = "Manual peer", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 6);
@@ -3083,6 +3085,23 @@ public sealed class MainForm : Form
         connectivityTabPage.Controls.Add(panel);
         // Initial population so screen readers see something on first open.
         SyncAllPeerLists();
+        RefreshConnectivityListVisibility();
+    }
+
+    /// <summary>Shows or hides the Discovered / Remembered peer rows to match the Appearance-tab
+    /// preferences. Hiding both a row's label and its list wrapper collapses the row. Called at build
+    /// and after Preferences close.</summary>
+    private void RefreshConnectivityListVisibility()
+    {
+        var cfg = AppConfig.Load();
+        SetConnectivityRowVisible(discoveredPeersLabel, discoveredPeersList, cfg.ShowDiscoveredPeers);
+        SetConnectivityRowVisible(rememberedPeersLabel, rememberedPeersList, cfg.ShowRememberedPeers);
+    }
+
+    private static void SetConnectivityRowVisible(Control? label, Control list, bool visible)
+    {
+        if (label is not null) label.Visible = visible;
+        if (list.Parent is not null) list.Parent.Visible = visible;   // the FlowLayoutPanel wrapper
     }
 
     /// <summary>Audio I/O tab — full content. All the existing main-form audio controls
@@ -3288,22 +3307,53 @@ public sealed class MainForm : Form
         OnPanEqPeerSelected();
     }
 
-    /// <summary>Adds (or removes) the Pan-and-EQ tab to match the machine-wide "Show pan and EQ tab"
-    /// preference. Placed just before the Audio profile tab. Called at build and after Preferences close.</summary>
-    private void RefreshPanEqTabVisibility()
+    // The main-window tabs' stable keys, in the default order. The user can reorder them on the
+    // Preferences Appearance tab; "paneq" is only shown when the "show pan/EQ tab" preference is on.
+    private static readonly string[] DefaultTabOrder = ["connectivity", "audioio", "paneq", "audioprofile"];
+
+    private TabPage? TabPageForKey(string key) => key switch
     {
-        bool show = AppConfig.Load().ShowPanEqTab;
-        bool present = mainTabControl.TabPages.Contains(panEqTabPage);
-        if (show && !present)
+        "connectivity" => connectivityTabPage,
+        "audioio" => audioIOTabPage,
+        "paneq" => panEqTabPage,
+        "audioprofile" => audioProfileTabPage,
+        _ => null,
+    };
+
+    /// <summary>Rebuilds the main tab strip in the user's saved order, dropping the pan/EQ tab if that
+    /// preference is off. Preserves the current selection. Called at build and after Preferences close.</summary>
+    private void ApplyMainTabLayout()
+    {
+        var cfg = AppConfig.Load();
+        var order = NormalizeTabOrder(cfg.MainTabOrder);
+        bool showEq = cfg.ShowPanEqTab;
+        var selected = mainTabControl.SelectedTab;
+        mainTabControl.SuspendLayout();
+        try
         {
-            int idx = mainTabControl.TabPages.IndexOf(audioProfileTabPage);
-            if (idx < 0) idx = mainTabControl.TabPages.Count;
-            mainTabControl.TabPages.Insert(idx, panEqTabPage);
+            mainTabControl.TabPages.Clear();
+            foreach (var key in order)
+            {
+                if (key == "paneq" && !showEq) continue;
+                if (TabPageForKey(key) is { } page) mainTabControl.TabPages.Add(page);
+            }
+            if (selected is not null && mainTabControl.TabPages.Contains(selected))
+                mainTabControl.SelectedTab = selected;
         }
-        else if (!show && present)
-        {
-            mainTabControl.TabPages.Remove(panEqTabPage);
-        }
+        finally { mainTabControl.ResumeLayout(); }
+    }
+
+    /// <summary>Cleans a saved tab order: keep only known keys (in saved order, de-duplicated), then
+    /// append any known keys the saved list was missing, so the result always has all four.</summary>
+    private static List<string> NormalizeTabOrder(List<string>? saved)
+    {
+        var result = new List<string>();
+        if (saved is not null)
+            foreach (var k in saved)
+                if (Array.IndexOf(DefaultTabOrder, k) >= 0 && !result.Contains(k)) result.Add(k);
+        foreach (var k in DefaultTabOrder)
+            if (!result.Contains(k)) result.Add(k);
+        return result;
     }
 
     /// <summary>Rebuilds the peer picker from the currently-connected peers, one row per address. Runs

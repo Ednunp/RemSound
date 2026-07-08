@@ -80,6 +80,16 @@ public sealed class AppConfig
     /// changing it takes effect on the next launch. Machine-wide, purely visual.</summary>
     public string ThemeMode { get; set; } = "system";
 
+    /// <summary>The order of the main-window tabs, as tab keys ("connectivity", "audioio", "paneq",
+    /// "audioprofile"). Null / incomplete falls back to the default order. Set from the Preferences
+    /// Appearance tab. Machine-wide.</summary>
+    public List<string>? MainTabOrder { get; set; }
+
+    /// <summary>Whether the Discovered / Remembered peer lists appear on the Connectivity tab. Both on
+    /// by default; toggled on the Preferences Appearance tab.</summary>
+    public bool ShowDiscoveredPeers { get; set; } = true;
+    public bool ShowRememberedPeers { get; set; } = true;
+
     /// <summary>The machine-wide "named peers" book — peers the user has deliberately renamed, keyed by
     /// the peer's stable identity (machine name, or address for a nameless manual peer). A name applies in
     /// every profile and shows wherever that peer appears. Managed via the Connectivity tab's Rename peer
