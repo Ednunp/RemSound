@@ -59,6 +59,12 @@ There's a companion **Android receiver**, so a phone or tablet can pick up RemSo
 
 **Get it:** [RemSound Android — Releases](https://github.com/aryanchoudharypro/RemSoundAndroid/releases) — download the latest `app-release.apk`.
 
+## RemSound on iOS
+
+There's also a companion app for **iPhone and iPad**, currently in beta on Apple's **TestFlight**. Like the Android app it's a separate community project — built and maintained by **[Jonathan Schuster](https://github.com/jonathans859)** — and isn't part of RemSound or maintained by us, but it speaks the same protocol.
+
+**Join the beta:** [RemSound for iOS on TestFlight](https://testflight.apple.com/join/pNCnj3z2)
+
 ## Learn how to use it
 
 The full user manual is right here on GitHub: **[Read the user manual](MANUAL.md)**. It covers getting connected for the first time, every setting and what it does, troubleshooting tips, and a glossary at the end. It's the same manual you can press F1 to read from inside RemSound, so you can read it before installing if you want to see what you're getting.
