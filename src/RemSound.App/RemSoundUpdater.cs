@@ -30,7 +30,7 @@ namespace RemSound.App;
 /// single canonical release stream, not to be re-pointed at a fork. If you need to publish
 /// from a different repo, change <see cref="RepoOwner"/> / <see cref="RepoName"/>.
 /// </summary>
-internal sealed class RemSoundUpdater : IDisposable
+internal sealed class RemSoundUpdater
 {
     public const string RepoOwner = "Ednunp";
     public const string RepoName = "RemSound";
@@ -50,11 +50,6 @@ internal sealed class RemSoundUpdater : IDisposable
     public Action<string>? Log { get; set; }
 
     public string CurrentVersion => Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.0.0";
-
-    public void Dispose()
-    {
-        // HttpClient is static and shared across the process; nothing to dispose here.
-    }
 
     /// <summary>Hit the GitHub Releases API, parse the latest release, return a struct
     /// describing what was found. Returns null if the request fails (network down, rate
@@ -259,7 +254,7 @@ internal sealed class RemSoundUpdater : IDisposable
             }
 
             Log?.Invoke($"updater: launching in-app installer from {appRoot}, parent PID {pid}");
-            System.Diagnostics.Process.Start(psi);
+            using (System.Diagnostics.Process.Start(psi)) { }
             return true;
         }
         catch (Exception ex)

@@ -110,20 +110,41 @@ public sealed class PeerDspChain
         int n = left.Length;
         if (n > 0)
         {
-            for (int f = 0; f < frames; f++)
+            // Fold the post-EQ gain into the EQ loop's final store, so a peer with both EQ and non-unity
+            // gain walks the block ONCE on the render thread instead of twice (branch hoisted out of the
+            // per-frame loop). n==0 + gain-only keeps its own single pass below.
+            if (hasGain)
             {
-                float sl = output[2 * f];
-                float sr = output[2 * f + 1];
-                for (int b = 0; b < n; b++)
+                for (int f = 0; f < frames; f++)
                 {
-                    sl = left[b].Transform(sl);
-                    sr = right[b].Transform(sr);
+                    float sl = output[2 * f];
+                    float sr = output[2 * f + 1];
+                    for (int b = 0; b < n; b++)
+                    {
+                        sl = left[b].Transform(sl);
+                        sr = right[b].Transform(sr);
+                    }
+                    output[2 * f] = sl * gainL;
+                    output[2 * f + 1] = sr * gainR;
                 }
-                output[2 * f] = sl;
-                output[2 * f + 1] = sr;
+            }
+            else
+            {
+                for (int f = 0; f < frames; f++)
+                {
+                    float sl = output[2 * f];
+                    float sr = output[2 * f + 1];
+                    for (int b = 0; b < n; b++)
+                    {
+                        sl = left[b].Transform(sl);
+                        sr = right[b].Transform(sr);
+                    }
+                    output[2 * f] = sl;
+                    output[2 * f + 1] = sr;
+                }
             }
         }
-        if (hasGain)
+        else if (hasGain)
         {
             for (int f = 0; f < frames; f++)
             {

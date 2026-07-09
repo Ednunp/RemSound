@@ -372,6 +372,24 @@ internal sealed class AudioRecorder : IDisposable
         return 0;
     }
 
+    /// <summary>How many frames <see cref="DrainOneDirection"/> would produce for one direction right
+    /// now, WITHOUT consuming anything — the lane-merge min (or the single active lane), capped at
+    /// <paramref name="maxFrames"/>. Used by the Both path to drain the sent and received directions by
+    /// the SAME amount so neither ring is over-consumed and the two stay sample-aligned. Read heads are
+    /// owned by this (writer) thread so a plain read is fine; the caller passes Volatile.Read snapshots
+    /// of the write heads, which the audio threads advance.</summary>
+    private static int DirectionAvailFrames(long wasapiWrite, long wasapiRead, long asioWrite, long asioRead, int maxFrames)
+    {
+        var w = (int)((wasapiWrite - wasapiRead) / MixChannels);
+        var a = (int)((asioWrite - asioRead) / MixChannels);
+        int avail;
+        if (w > 0 && a > 0) avail = Math.Min(w, a);
+        else if (w > 0) avail = w;
+        else if (a > 0) avail = a;
+        else avail = 0;
+        return Math.Min(avail, maxFrames);
+    }
+
     private void Process()
     {
         int framesThisCall;
@@ -410,18 +428,37 @@ internal sealed class AudioRecorder : IDisposable
                 // received scratch we'll grow as needed.
                 EnsureScratchSize(DrainChunkMaxFrames * MixChannels);
                 EnsureSecondaryScratchSize(DrainChunkMaxFrames * MixChannels);
-                var sentFrames = DrainOneDirection(
-                    sentWasapiRing, ref sentWasapiWriteHead, ref sentWasapiReadHead,
-                    sentAsioRing, ref sentAsioWriteHead, ref sentAsioReadHead,
-                    mixScratch, mixScratchAux, DrainChunkMaxFrames);
                 EnsureRecvDirectionScratchSize(DrainChunkMaxFrames * MixChannels);
-                var recvFrames = DrainOneDirection(
-                    receivedWasapiRing, ref receivedWasapiWriteHead, ref receivedWasapiReadHead,
-                    receivedAsioRing, ref receivedAsioWriteHead, ref receivedAsioReadHead,
-                    recvDirectionScratch, mixScratchAux, DrainChunkMaxFrames);
-                if (sentFrames > 0 && recvFrames > 0)
+
+                // Peek how much each direction can supply WITHOUT consuming, so when both carry audio we
+                // drain them by the SAME amount and keep them sample-aligned. Draining each independently
+                // (the old code) advanced the faster direction's ring head past frames we then never
+                // wrote — a silent, continuous loss + progressive drift on any real two-way session,
+                // which is exactly what Both mode exists to capture. Now the surplus genuinely stays in
+                // its ring for the next pass.
+                var sentAvail = DirectionAvailFrames(
+                    Volatile.Read(ref sentWasapiWriteHead), sentWasapiReadHead,
+                    Volatile.Read(ref sentAsioWriteHead), sentAsioReadHead, DrainChunkMaxFrames);
+                var recvAvail = DirectionAvailFrames(
+                    Volatile.Read(ref receivedWasapiWriteHead), receivedWasapiReadHead,
+                    Volatile.Read(ref receivedAsioWriteHead), receivedAsioReadHead, DrainChunkMaxFrames);
+
+                if (sentAvail > 0 && recvAvail > 0)
                 {
-                    framesThisCall = Math.Min(sentFrames, recvFrames);
+                    // Both directions have data — take the same count from each. Because write heads only
+                    // advance (producers add) and this is the sole consumer, each drain returns exactly
+                    // `take`, so the two stay aligned and nothing is over-consumed.
+                    var take = Math.Min(sentAvail, recvAvail);
+                    var got1 = DrainOneDirection(
+                        sentWasapiRing, ref sentWasapiWriteHead, ref sentWasapiReadHead,
+                        sentAsioRing, ref sentAsioWriteHead, ref sentAsioReadHead,
+                        mixScratch, mixScratchAux, take);
+                    var got2 = DrainOneDirection(
+                        receivedWasapiRing, ref receivedWasapiWriteHead, ref receivedWasapiReadHead,
+                        receivedAsioRing, ref receivedAsioWriteHead, ref receivedAsioReadHead,
+                        recvDirectionScratch, mixScratchAux, take);
+                    framesThisCall = Math.Min(got1, got2); // defensive; both equal `take` in practice
+                    if (framesThisCall <= 0) return;
                     var dst = mixScratch.AsSpan(0, framesThisCall * MixChannels);
                     var aux = recvDirectionScratch.AsSpan(0, framesThisCall * MixChannels);
                     for (var i = 0; i < dst.Length; i++)
@@ -431,20 +468,26 @@ internal sealed class AudioRecorder : IDisposable
                         else if (s < -1f) s = -1f + MathF.Tanh(-1f - s);
                         dst[i] = s;
                     }
-                    // Any leftover frames in the direction that produced MORE this tick stay
-                    // in their rings for the next iteration — they're not lost, just deferred.
-                    // We can't write them now without un-syncing the two directions.
                 }
-                else if (sentFrames > 0)
+                else if (sentAvail > 0)
                 {
-                    framesThisCall = sentFrames;
-                    // mixScratch already contains the sent direction's audio — emit as-is.
+                    // Only the sent direction has audio right now — record it solo (no over-consume,
+                    // nothing to align against). mixScratch already holds it.
+                    framesThisCall = DrainOneDirection(
+                        sentWasapiRing, ref sentWasapiWriteHead, ref sentWasapiReadHead,
+                        sentAsioRing, ref sentAsioWriteHead, ref sentAsioReadHead,
+                        mixScratch, mixScratchAux, DrainChunkMaxFrames);
+                    if (framesThisCall <= 0) return;
                 }
-                else if (recvFrames > 0)
+                else if (recvAvail > 0)
                 {
-                    framesThisCall = recvFrames;
-                    // The recv-direction audio lives in recvDirectionScratch; copy into
-                    // mixScratch so EmitMixBuffer (which reads from mixScratch) sees it.
+                    framesThisCall = DrainOneDirection(
+                        receivedWasapiRing, ref receivedWasapiWriteHead, ref receivedWasapiReadHead,
+                        receivedAsioRing, ref receivedAsioWriteHead, ref receivedAsioReadHead,
+                        recvDirectionScratch, mixScratchAux, DrainChunkMaxFrames);
+                    if (framesThisCall <= 0) return;
+                    // The recv-direction audio lives in recvDirectionScratch; copy into mixScratch so
+                    // EmitMixBuffer (which reads from mixScratch) sees it.
                     var len = framesThisCall * MixChannels;
                     recvDirectionScratch.AsSpan(0, len).CopyTo(mixScratch.AsSpan(0, len));
                 }

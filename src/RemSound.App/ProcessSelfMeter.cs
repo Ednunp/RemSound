@@ -18,7 +18,7 @@ namespace RemSound.App;
 /// Threading: <see cref="Take"/> is called from the App's status-tick handler on the UI
 /// thread. Snapshot fields are mutated by that same single thread; no locks needed.
 /// </summary>
-internal sealed class ProcessSelfMeter
+internal sealed class ProcessSelfMeter : IDisposable
 {
     private TimeSpan prevTotalCpu;
     private long prevAllocBytes;
@@ -140,4 +140,8 @@ internal sealed class ProcessSelfMeter
             HandleCount: handleCount,
             ThreadCount: threadCount);
     }
+
+    /// <summary>Release the cached Process handle deterministically rather than at GC finalization —
+    /// small, but consistent with the app's resource-lifecycle discipline. Called when MainForm closes.</summary>
+    public void Dispose() => selfProcess.Dispose();
 }

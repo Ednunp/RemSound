@@ -114,8 +114,6 @@ internal sealed class StreamSession : IDisposable
         && Format.Channels == format.Channels
         && Format.FrameSamplesPerChannel == format.FrameSamplesPerChannel;
 
-    public bool IsSameEndpoint(IPEndPoint endpoint) => Endpoint.Equals(endpoint);
-
     public bool HandleAudioPayload(uint sequence, ReadOnlySpan<byte> payload)
     {
         diagnostics.RecordPacketArrived();

@@ -204,11 +204,23 @@ internal static class UpdateApplier
         {
             var exe = Path.Combine(target, "RemSound.exe");
             if (!File.Exists(exe)) { log($"cannot restart — {exe} missing"); return; }
-            Process.Start(new ProcessStartInfo { FileName = exe, WorkingDirectory = target, UseShellExecute = true });
+            // Give the restarted copy the same foreground treatment as the post-install relaunch, so it
+            // doesn't reopen BEHIND other windows where a blind user wouldn't notice it came back (the
+            // old copy has already exited, so a fresh process has no foreground credit of its own).
+            // --foreground makes it pull itself forward; the AllowSetForegroundWindow grant is
+            // best-effort (this staged updater may not hold foreground rights to give away).
+            var psi = new ProcessStartInfo { FileName = exe, WorkingDirectory = target, UseShellExecute = true };
+            psi.ArgumentList.Add("--foreground");
+            using var child = Process.Start(psi);
+            if (child is not null) { try { AllowSetForegroundWindow(child.Id); } catch { } }
             log("RemSound restarted");
         }
         catch (Exception ex) { log($"could not restart RemSound: {ex.Message}"); }
     }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool AllowSetForegroundWindow(int dwProcessId);
 
     /// <summary>Best-effort temp cleanup. We're running FROM the stage, so we can't delete our own
     /// exe's folder here — the restarted app finishes that on startup (see Program.CleanUpUpdateStages).</summary>

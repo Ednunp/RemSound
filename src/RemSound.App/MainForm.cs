@@ -1331,11 +1331,16 @@ public sealed class MainForm : Form
 
         FormClosing += (_, _) =>
         {
-            statusTimer.Stop();
-            deviceRefreshTimer.Stop();
-            continuousTuneTimer.Stop();
-            updateCheckTimer.Stop();
-            asioDriverChangeDebounce.Stop();
+            // Stop AND dispose each timer. A WinForms Timer is a Component, not a Control, so base
+            // Form.Dispose never reaches it; Stop() only kills the WM_TIMER, leaving the timer's
+            // message-only window handle to be freed at GC finalization. MainForm is rebuilt on every
+            // profile switch, so disposing here releases those handles deterministically each time.
+            statusTimer.Stop(); statusTimer.Dispose();
+            deviceRefreshTimer.Stop(); deviceRefreshTimer.Dispose();
+            continuousTuneTimer.Stop(); continuousTuneTimer.Dispose();
+            updateCheckTimer.Stop(); updateCheckTimer.Dispose();
+            asioDriverChangeDebounce.Stop(); asioDriverChangeDebounce.Dispose();
+            try { processSelfMeter.Dispose(); } catch { }
             try { deviceChangeNotifier?.Dispose(); } catch { }
             try { powerResumeHandler?.Dispose(); } catch { }
             try { routerPortMapper?.Dispose(); } catch { }
@@ -1409,20 +1414,22 @@ public sealed class MainForm : Form
             // wired up before we hide the window.
             var coldStart = isFirstLaunch;
             isFirstLaunch = false;
-            // A post-install relaunch (--foreground) overrides any start-minimised preference — the
-            // user just ran an interactive install and expects to see the installed copy come up.
-            var minimizeThisInstance = !forceForegroundOnStart
-                                       && (startNextInstanceMinimized || (coldStart && AppConfig.Load().StartMinimised));
+            var minimizeThisInstance = startNextInstanceMinimized || (coldStart && AppConfig.Load().StartMinimised);
             startNextInstanceMinimized = false;
+            // Consume the one-shot post-install foreground flag now, whichever branch we take below, so
+            // it can't leak into a later profile-switch relaunch. "Start minimised" WINS over it: a user
+            // who chose to boot into the tray wants the just-installed copy in the tray too — we only
+            // pull the window to the front when we're NOT minimising (else it can open behind others).
+            var forcePostInstallForeground = forceForegroundOnStart;
+            forceForegroundOnStart = false;
             if (minimizeThisInstance)
             {
                 // playCue:false — starting up in the tray (StartMinimised / --minimized) isn't the
                 // user choosing to minimise, so it must not sound the "minimise" cue.
                 BeginInvoke(() => trayController.Minimize(playCue: false));
             }
-            else if (forceForegroundOnStart)
+            else if (forcePostInstallForeground)
             {
-                forceForegroundOnStart = false;
                 logFile.Event("installer: post-install relaunch — bringing the window to the foreground");
                 // Deferred so it runs after Shown settles, then yanks the window to the front so the
                 // just-installed copy isn't left hiding behind other windows. Try again a moment later:
@@ -3470,7 +3477,11 @@ public sealed class MainForm : Form
         loadingPanEqControls = true;
         try
         {
-            var s = GetOrCreateShaping(selectedShapingKey);
+            // Read-only for display: use the existing shaping if any, else a throwaway default. Do NOT
+            // GetOrCreateShaping here — merely selecting/scrolling a peer would then insert a no-op entry
+            // into the saved profile for every peer the user only glanced at. The actual edit handlers
+            // (pan/volume/mode/band) call GetOrCreateShaping, so an entry is created only on a real change.
+            var s = GetShaping(selectedShapingKey) ?? new PeerShaping();
             volumeSlider.Value = Math.Clamp((int)Math.Round(s.Volume * 100f), 0, 100);
             UpdateVolumeAccessibleName();
             panSlider.Value = Math.Clamp((int)Math.Round(s.Pan * 50f) + 50, 0, 100);
@@ -8246,15 +8257,18 @@ public sealed class MainForm : Form
     /// Custom paths are per-profile (changed from machine-wide in v3.0.3 development) so
     /// each profile can carry its own cue palette. The settings cache mirrors the active
     /// profile's CustomCuePaths dictionary and is the runtime source of truth.</summary>
-    private void TryLoadCueSound(string cueId, string defaultFileName, out CuePlayer? player)
+    private void TryLoadCueSound(string cueId, string defaultFileName, out CuePlayer? player, AppConfig? cfg = null)
     {
         player = null;
         try
         {
+            // Load the config once per call (or reuse the caller's — ReloadAllCueSounds passes one shared
+            // instance for all 14 cues instead of each cue re-reading + re-parsing the file from disk).
+            cfg ??= AppConfig.Load();
             string? path = null;
             var customPath = settings.LoadCustomCuePath(cueId);
             if (string.IsNullOrWhiteSpace(customPath)
-                && AppConfig.Load().MachineCueCustomPaths.TryGetValue(cueId, out var machinePath))
+                && cfg.MachineCueCustomPaths.TryGetValue(cueId, out var machinePath))
             {
                 // Machine-wide cues (send/receive/hide/show) keep their custom override in AppConfig.
                 customPath = machinePath;
@@ -8268,7 +8282,7 @@ public sealed class MainForm : Form
             {
                 // The cue ships as numbered variants ("connect 1.wav", "connect 2.wav", ...);
                 // resolve the machine-wide chosen default (or the first variant) for this cue.
-                var defaultPath = CueSounds.ResolveDefaultPath(cueId, defaultFileName, AppConfig.Load());
+                var defaultPath = CueSounds.ResolveDefaultPath(cueId, defaultFileName, cfg);
                 if (defaultPath is not null && File.Exists(defaultPath))
                 {
                     path = defaultPath;
@@ -8295,20 +8309,23 @@ public sealed class MainForm : Form
     /// </summary>
     public void ReloadAllCueSounds()
     {
-        TryLoadCueSound(CueId.Connect, "connect.wav", out connectSound);
-        TryLoadCueSound(CueId.Disconnect, "disconnect.wav", out disconnectSound);
-        TryLoadCueSound(CueId.RecordStart, "record start.wav", out recordStartSound);
-        TryLoadCueSound(CueId.RecordStop, "record stop.wav", out recordStopSound);
-        TryLoadCueSound(CueId.Save, "save.wav", out saveSound);
-        TryLoadCueSound(CueId.ProfileSwitch, "profile.wav", out profileSwitchSound);
-        TryLoadCueSound(CueId.ProfileMenuOpen, "profile menu open.wav", out profileMenuOpenSound);
-        TryLoadCueSound(CueId.Update, "update.wav", out updateSound);
-        TryLoadCueSound(CueId.SendOn, "send on.wav", out sendOnSound);
-        TryLoadCueSound(CueId.SendOff, "send off.wav", out sendOffSound);
-        TryLoadCueSound(CueId.ReceiveOn, "recieve on.wav", out receiveOnSound);
-        TryLoadCueSound(CueId.ReceiveOff, "recieve off.wav", out receiveOffSound);
-        TryLoadCueSound(CueId.Hide, "minimise.wav", out hideSound);
-        TryLoadCueSound(CueId.Show, "maximise.wav", out showSound);
+        // Load the machine config ONCE and pass it to all 14 cues, instead of each cue (twice) re-reading
+        // and re-deserializing the config file — this runs on the UI thread on every Preferences close.
+        var cfg = AppConfig.Load();
+        TryLoadCueSound(CueId.Connect, "connect.wav", out connectSound, cfg);
+        TryLoadCueSound(CueId.Disconnect, "disconnect.wav", out disconnectSound, cfg);
+        TryLoadCueSound(CueId.RecordStart, "record start.wav", out recordStartSound, cfg);
+        TryLoadCueSound(CueId.RecordStop, "record stop.wav", out recordStopSound, cfg);
+        TryLoadCueSound(CueId.Save, "save.wav", out saveSound, cfg);
+        TryLoadCueSound(CueId.ProfileSwitch, "profile.wav", out profileSwitchSound, cfg);
+        TryLoadCueSound(CueId.ProfileMenuOpen, "profile menu open.wav", out profileMenuOpenSound, cfg);
+        TryLoadCueSound(CueId.Update, "update.wav", out updateSound, cfg);
+        TryLoadCueSound(CueId.SendOn, "send on.wav", out sendOnSound, cfg);
+        TryLoadCueSound(CueId.SendOff, "send off.wav", out sendOffSound, cfg);
+        TryLoadCueSound(CueId.ReceiveOn, "recieve on.wav", out receiveOnSound, cfg);
+        TryLoadCueSound(CueId.ReceiveOff, "recieve off.wav", out receiveOffSound, cfg);
+        TryLoadCueSound(CueId.Hide, "minimise.wav", out hideSound, cfg);
+        TryLoadCueSound(CueId.Show, "maximise.wav", out showSound, cfg);
         // The app-wide checkbox tick/untick and tab-switch sounds live in their own services; keep
         // them in step.
         CheckSoundService.Reload();
@@ -8553,26 +8570,30 @@ public sealed class MainForm : Form
     /// </summary>
     private void HandleRemoteControlPacket(RemoteControlKind kind, sbyte delta, IPEndPoint remote)
     {
-        // Allow-list match by IP only — the sender's source port is their ephemeral outbound,
-        // not their announced audio port.
-        var allowed = false;
-        foreach (var ep in selectedPeerEndpoints.Values)
-        {
-            if (ep.Address.Equals(remote.Address)) { allowed = true; break; }
-        }
-        if (!allowed)
-        {
-            logFile.Event($"remote-control IGNORED (not in allow-list) kind={kind} delta={delta} from={remote}");
-            return;
-        }
-        if (!settings.LoadAcceptRemoteVolumeCommands())
-        {
-            logFile.Event($"remote-control IGNORED (Accept remote volume commands is off) kind={kind} delta={delta} from={remote}");
-            return;
-        }
-
+        // Marshal to the UI thread FIRST. The allow-list scan reads selectedPeerEndpoints — a plain
+        // Dictionary owned and mutated by the UI thread — so enumerating it here on the receiver's
+        // network thread races a concurrent peer tick/untick (a caught "collection was modified" that
+        // silently drops the remote command). Running the whole check on the UI thread removes the race.
         BeginInvoke(() =>
         {
+            // Allow-list match by IP only — the sender's source port is their ephemeral outbound,
+            // not their announced audio port.
+            var allowed = false;
+            foreach (var ep in selectedPeerEndpoints.Values)
+            {
+                if (ep.Address.Equals(remote.Address)) { allowed = true; break; }
+            }
+            if (!allowed)
+            {
+                logFile.Event($"remote-control IGNORED (not in allow-list) kind={kind} delta={delta} from={remote}");
+                return;
+            }
+            if (!settings.LoadAcceptRemoteVolumeCommands())
+            {
+                logFile.Event($"remote-control IGNORED (Accept remote volume commands is off) kind={kind} delta={delta} from={remote}");
+                return;
+            }
+
             switch (kind)
             {
                 case RemoteControlKind.VolumeUp:

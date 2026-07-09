@@ -226,9 +226,12 @@ internal sealed class RouterPortMapper : IDisposable
 
     public void Dispose()
     {
-        if (disposed) return;
-        disposed = true;
+        // Run the full Stop() teardown FIRST (remove the router mapping, stop discovery, unsubscribe the
+        // static NatUtility.DeviceFound handler) while disposed is still false — otherwise Stop()'s own
+        // `if (disposed) return;` guard would skip all of it, leaving the forwarded port open until its
+        // lease expires and the object subscribed to the process-wide event. THEN mark disposed.
         try { Stop(); } catch { /* shutting down */ }
+        lock (gate) { disposed = true; }
     }
 
     private void OnDeviceFound(object? sender, DeviceEventArgs args)

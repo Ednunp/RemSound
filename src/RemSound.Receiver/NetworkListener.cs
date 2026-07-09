@@ -10,9 +10,12 @@ namespace RemSound.Receiver;
 /// Hands raw packets (byte buffer + length + remote endpoint) up to a callback supplied by the
 /// owner — has no idea what's inside the packets.
 ///
-/// Allocation-free in steady state: one fixed receive buffer reused across calls,
-/// <see cref="Socket.ReceiveFrom"/> with <see cref="SocketAddress"/> avoids the per-call
-/// IPEndPoint boxing that <see cref="UdpClient.ReceiveAsync"/> incurred.
+/// The receive buffer is a single fixed array reused across calls. NOTE: the current
+/// <see cref="Socket.ReceiveFrom(byte[], int, int, SocketFlags, ref EndPoint)"/> overload still
+/// allocates a SocketAddress + a fresh IPEndPoint per datagram — tiny (tens of bytes) and dwarfed
+/// by decode/mix work, but not literally allocation-free. A future optimisation could switch to the
+/// Span/SocketAddress overload with a cached SocketAddress and only materialise an IPEndPoint when a
+/// new session actually opens.
 /// </summary>
 internal sealed class NetworkListener : IDisposable
 {

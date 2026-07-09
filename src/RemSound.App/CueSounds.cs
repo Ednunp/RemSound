@@ -51,7 +51,13 @@ internal static class CueSounds
             }
         }
         catch { return Array.Empty<string>(); }
-        return matches.OrderBy(m => m.Order).Select(m => m.Name).ToList();
+        var ordered = matches.OrderBy(m => m.Order).ToList();
+        // If numbered variants exist, drop the bare unnumbered file: it labels as "Sound 1" (below), the
+        // same as "<cue> 1.wav", so the two would show as indistinguishable "Sound 1" rows a screen-reader
+        // user can't tell apart. The bare name is a legacy single-file fallback; numbered is what ships.
+        if (ordered.Exists(m => m.Order >= 1) && ordered.Exists(m => m.Order == 0))
+            ordered.RemoveAll(m => m.Order == 0);
+        return ordered.Select(m => m.Name).ToList();
     }
 
     /// <summary>The "Sound N" label for a variant filename, for the Preferences listbox.

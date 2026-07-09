@@ -149,6 +149,17 @@ internal sealed class RecordingController
 
     private void StartMultiTrack(RecordingSettings s, DateTime now)
     {
+        // Refuse a split received-only recording with no peers connected: it would make an empty dated
+        // folder and capture nothing while still announcing "recording started". Fail clearly instead
+        // (Start()'s catch surfaces this message). Both / sent-only still record your own send, so they
+        // never hit this. Checked BEFORE creating the folder so no orphan folder is left behind.
+        if (s.Source == RecordingSource.ReceivedOnly && (ConnectedPeersProvider?.Invoke() ?? []).Count == 0)
+        {
+            throw new InvalidOperationException(
+                "No peers are connected, so a split received-only recording would capture nothing. " +
+                "Connect to a peer first, or set the recording source to include your own sent audio.");
+        }
+
         var folder = MultiTrackFolder(s, now);
         Directory.CreateDirectory(folder);
         var ext = AudioRecorder.ExtensionFor(s.FileFormat);

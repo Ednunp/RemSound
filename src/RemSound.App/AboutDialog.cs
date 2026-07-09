@@ -20,6 +20,14 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v5.2
+
+        A stability and polish release — bug fixes and tidy-ups from a deep code review. No new features; it should just feel a bit more solid.
+
+        Fixed: changing the codec or send rate while streaming could, in rare cases, crash RemSound. Fixed: recording both your sent and received audio into a single file could lose a little audio and drift out of sync over a long recording — it now stays accurate the whole way through. Fixed: after installing, RemSound now stays minimised if that's your setting (and still comes to the front otherwise), and uninstalling one copy no longer switches off another copy's run-at-startup.
+
+        Also: the clipping indicator works again, the router port opened for incoming connections is tidied up when you close, and the app is a little lighter on memory and disk. Nothing about how you connect changed, so it still talks to older versions.
+
         RemSound v5.1
 
         Install RemSound as a proper Windows app.

@@ -435,36 +435,6 @@ internal sealed class SessionPlayout : IDisposable
         drainRequested = true;
     }
 
-    /// <summary>Reset the buffer and per-session state. Used at start/stop. Arming will rebuild
-    /// from the next packets that arrive.</summary>
-    public void Reset()
-    {
-        playout.Reset();
-        playbackArmed = false;
-        largestWriteMs = 0;
-        inUnderrunConcealment = false;
-        consecutiveEmptyReads = 0;
-        lastConcealSampleL = 0f;
-        lastConcealSampleR = 0f;
-        filteredErrorFrames = 0;
-        prevDriftSampleTicks = 0;
-        trimGlideTargetMs = 0;
-        prevTrimGlideTicks = 0;
-        // Phase-4 drift resampler state. Reset counters and window state. Reset() on the
-        // resampler clears its internal filter delay line so a fresh session doesn't
-        // inherit phase from a prior one. SetRates back to 1:1 — we'll re-measure drift
-        // from scratch.
-        bytesWrittenForDriftEst = 0;
-        bytesReadOutputForDriftEst = 0;
-        resamplerWindowStartTicks = 0;
-        resamplerWindowStartBytesWritten = 0;
-        resamplerWindowStartBytesOutput = 0;
-        smoothedRateRatio = 1.0;
-        resamplerActivelyTracking = false;
-        driftResampler.Reset();
-        driftResampler.SetRates(MixSampleRate, MixSampleRate);
-    }
-
     public void Dispose()
     {
         // AudioRingBuffer is managed; nothing to free explicitly. Method present for symmetry

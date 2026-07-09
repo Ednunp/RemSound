@@ -16,6 +16,11 @@ internal static class CheckSoundService
 {
     private static CuePlayer? checkSound;
     private static CuePlayer? uncheckSound;
+    // Cached at Reload() so Play() (which fires on the UI thread for every genuine checkbox toggle)
+    // doesn't re-read + re-deserialize the whole config file from disk just to fetch one bool. Reload()
+    // is already the hook that runs whenever cue settings change, so these stay current.
+    private static bool enableCheckboxOn;
+    private static bool enableCheckboxOff;
 
     /// <summary>When true, <see cref="Play"/> is a no-op. MainForm sets this around bulk programmatic
     /// control updates (profile load, "uncheck all", device-list refresh). The per-call Focused gate
@@ -29,6 +34,8 @@ internal static class CheckSoundService
     public static void Reload()
     {
         var cfg = AppConfig.Load();
+        enableCheckboxOn = cfg.EnableCheckboxOnCue;
+        enableCheckboxOff = cfg.EnableCheckboxOffCue;
         checkSound = LoadCue(MainForm.CueId.CheckboxOn, "check.wav", cfg);
         uncheckSound = LoadCue(MainForm.CueId.CheckboxOff, "uncheck.wav", cfg);
     }
@@ -36,9 +43,8 @@ internal static class CheckSoundService
     public static void Play(bool isChecked)
     {
         if (Suppressed) return;
-        var cfg = AppConfig.Load();
-        if (isChecked) { if (cfg.EnableCheckboxOnCue) checkSound?.Play(); }
-        else { if (cfg.EnableCheckboxOffCue) uncheckSound?.Play(); }
+        if (isChecked) { if (enableCheckboxOn) checkSound?.Play(); }
+        else { if (enableCheckboxOff) uncheckSound?.Play(); }
     }
 
     private static CuePlayer? LoadCue(string cueId, string defaultFile, AppConfig cfg)

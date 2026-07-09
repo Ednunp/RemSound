@@ -50,6 +50,10 @@ internal sealed class MainFormTrayController : IDisposable
     private readonly ToolStripMenuItem sendingItem;
     private readonly ToolStripMenuItem receivingItem;
     private readonly ToolStripMenuItem profilesItem;
+    // Retained so Dispose can free it — NotifyIcon.Dispose does NOT dispose an externally-assigned
+    // ContextMenuStrip, and this menu (a native-window-handle-owning Control once shown) would otherwise
+    // leak per profile-switch rebuild. Disposing it cascades to its ToolStripItems.
+    private readonly ContextMenuStrip menu;
 
     public MainFormTrayController(
         Form owner,
@@ -87,7 +91,7 @@ internal sealed class MainFormTrayController : IDisposable
         trayIcon.Visible = false;
         trayIcon.DoubleClick += (_, _) => Restore();
 
-        var menu = new ContextMenuStrip();
+        menu = new ContextMenuStrip();
 
         var showItem = new ToolStripMenuItem("Sho&w RemSound")
         {
@@ -248,7 +252,11 @@ internal sealed class MainFormTrayController : IDisposable
         trayIcon.Visible = true;
     }
 
-    public void Dispose() => trayIcon.Dispose();
+    public void Dispose()
+    {
+        trayIcon.Dispose();
+        menu.Dispose(); // NotifyIcon.Dispose doesn't free the assigned ContextMenuStrip; do it ourselves.
+    }
 
     private void RefreshMenuState()
     {

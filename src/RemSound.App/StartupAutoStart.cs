@@ -97,4 +97,33 @@ internal static class StartupAutoStart
             return false;
         }
     }
+
+    /// <summary>Remove the Run-key entry ONLY if it currently points at an exe inside
+    /// <paramref name="folder"/>. Used by the uninstaller so removing an INSTALLED copy never wipes a
+    /// DIFFERENT copy's autostart entry (e.g. a portable copy the user still wants launching at login)
+    /// that happens to share the single "RemSound" value name. Returns true if the entry is gone
+    /// afterwards or was left alone because it points elsewhere; false only on registry error.</summary>
+    public static bool TryDisableIfPointsInto(string folder)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(folder)) return false;
+            using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true);
+            if (key is null) return true; // No Run subkey → nothing to disable.
+            var value = (key.GetValue(ValueName) as string)?.Trim().Trim('"');
+            if (string.IsNullOrWhiteSpace(value)) return true; // nothing set for us.
+            var target = System.IO.Path.GetFullPath(folder)
+                .TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
+            // Only our own installed copy's entry (its exe lives inside the folder being removed).
+            if (value.StartsWith(target, StringComparison.OrdinalIgnoreCase))
+            {
+                key.DeleteValue(ValueName, throwOnMissingValue: false);
+            }
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 }

@@ -102,7 +102,7 @@ public sealed class RemSoundSettingsStore
     public void SaveMaxLatencyMs(int value)
     {
         var s = Load() ?? new Settings();
-        s.MaxLatencyMs = Math.Clamp(value, 1, 500);
+        s.MaxLatencyMs = Math.Clamp(value, 5, 500); // match LoadMaxLatencyMs's [5,500] so stored == effective
         Save(s);
     }
 
@@ -121,7 +121,7 @@ public sealed class RemSoundSettingsStore
     public void SaveMaxLatencyMsAsio(int value)
     {
         var s = Load() ?? new Settings();
-        s.MaxLatencyMsAsio = Math.Clamp(value, 1, 500);
+        s.MaxLatencyMsAsio = Math.Clamp(value, 5, 500); // match LoadMaxLatencyMsAsio's [5,500]
         Save(s);
     }
 

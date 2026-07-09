@@ -612,5 +612,9 @@ internal sealed class RecordingSettingsDialog : Form
         && a.OggOpusBitrateKbps == b.OggOpusBitrateKbps
         && a.FlacBitsPerSample == b.FlacBitsPerSample
         && a.FlacCompressionLevel == b.FlacCompressionLevel
+        // Include the two v5 toggles the dialog can change, so toggling only these still marks the
+        // profile dirty (before, changing just split-tracks / bypass-shaping reported "no change").
+        && a.SplitTracks == b.SplitTracks
+        && a.BypassShaping == b.BypassShaping
         && string.Equals(a.Folder ?? string.Empty, b.Folder ?? string.Empty, StringComparison.OrdinalIgnoreCase);
 }

@@ -102,10 +102,11 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
     public long TotalCaptureBytes => (wasapi?.TotalCaptureBytes ?? 0) + (asio?.TotalCaptureBytes ?? 0);
     public string? FirstCaptureFormatDescription => asio?.FirstCaptureFormatDescription ?? wasapi?.FirstCaptureFormatDescription;
     public string? FirstCaptureLastError => asio?.FirstCaptureLastError ?? wasapi?.FirstCaptureLastError;
-    // ClippedSampleCount lived on the (now-removed) classic-Both mix loop; the per-lane
-    // BothIndependent pipeline has no shared mix bus to clip. Kept as 0 so any UI binding
-    // that still reads it doesn't NRE.
-    public long ClippedSampleCount => 0;
+    // Sum both inner backends' clip counters. Each per-lane backend (MixingEngine / PushModeWasapi /
+    // Asio) still clamps and counts clipped samples; the earlier "no shared mix bus, so always 0" was
+    // stale and silently zeroed the clip diagnostic that the SNAP log reports (clipΔ), leaving real
+    // clipping invisible — which matters given RemSound's click-vs-clip debugging history.
+    public long ClippedSampleCount => (wasapi?.ClippedSampleCount ?? 0) + (asio?.ClippedSampleCount ?? 0);
 
     /// <summary>Worst callback-gap across both inner backends. We have to take from BOTH (so
     /// each inner's counter resets), then return the larger — otherwise the unread inner

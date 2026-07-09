@@ -49,6 +49,17 @@ public sealed class AudioRingBuffer
     /// <summary>Producer side. Writes the entire span; if the buffer is full, drops the oldest bytes to make room.</summary>
     public void Write(ReadOnlySpan<byte> source)
     {
+        if (source.Length > storage.Length)
+        {
+            // A single write bigger than the whole ring can't fit. Keep only the NEWEST storage.Length
+            // bytes and count the older excess as dropped, so an oversized write degrades to dropped
+            // audio instead of throwing (a CopyTo overflow) on this lock-free real-time producer path.
+            // Unreachable in normal use — writes are MTU-bounded and the ring is far larger — but this
+            // turns an undocumented precondition into a safe, real invariant.
+            Interlocked.Add(ref drops, source.Length - storage.Length);
+            source = source[^storage.Length..];
+        }
+
         var currentTail = tail;
         var currentHead = Volatile.Read(ref head);
         var available = storage.Length - ((currentTail - currentHead) & 0x7FFFFFFF);

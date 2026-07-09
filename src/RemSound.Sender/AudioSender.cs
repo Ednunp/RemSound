@@ -421,8 +421,6 @@ public sealed class AudioSender : IDisposable
         }
     }
 
-    public bool IsAsioBackend => engine is CompositeCaptureBackend;
-
     /// <summary>Updates the PCM frame size based on the user's "Send rate" choice. For Opus,
     /// frame size is set via <see cref="ConfigureCodec"/>'s opusFrameSamplesPerChannel
     /// parameter (the App halves it when SendRate is Tight). On a frame-size change, resets

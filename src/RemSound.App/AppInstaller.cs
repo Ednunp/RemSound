@@ -103,6 +103,11 @@ internal static class AppInstaller
             return;
         }
 
+        // Degenerate case: the portable copy was extracted straight into the install location (no marker
+        // yet, so IsInstalledCopy is false). Copying the folder onto itself would throw an IOException
+        // (self-copy) and abort with a scary message. Detect it and skip the copy — we're already in
+        // place, so registration (marker + shortcuts) is all that's needed.
+        var sameLocation = string.Equals(source, target, StringComparison.OrdinalIgnoreCase);
         var updating = InstallExistsAtTarget;
         var options = ShowInstallOptionsDialog(owner, target, updating);
         if (options is null) return; // cancelled
@@ -116,10 +121,14 @@ internal static class AppInstaller
                         $"recordings={options.CopyRecordings}, logs={options.CopyLogs})");
 
             // The file copy is the part that must succeed — a failure here (disk full, permissions)
-            // aborts with the copy untouched. Directory.CreateDirectory + copy.
+            // aborts with the copy untouched. Skipped entirely when we're already running from the
+            // target (self-copy would throw); registration below still runs.
             Directory.CreateDirectory(target);
-            CopyProgramFiles(source, target);
-            CopyUserData(source, target, options);
+            if (!sameLocation)
+            {
+                CopyProgramFiles(source, target);
+                CopyUserData(source, target, options);
+            }
 
             // Drop the marker that tells the installed copy it IS installed (so the Options menu shows
             // Uninstall). Part of the must-succeed path: without it the install wouldn't recognise
@@ -258,7 +267,9 @@ internal static class AppInstaller
     {
         try { SetDesktopShortcut(false, "", ""); } catch { }
         try { SetStartMenuFolder(false, "", ""); } catch { }
-        try { StartupAutoStart.TryDisable(); } catch { }
+        // Only clear login-autostart if it points at THIS installed copy — never wipe a different
+        // copy's (e.g. a portable copy's) autostart entry that shares the "RemSound" value name.
+        try { StartupAutoStart.TryDisableIfPointsInto(AppContext.BaseDirectory); } catch { }
         try { UnregisterInstalledApp(); } catch { }
     }
 
@@ -383,10 +394,12 @@ internal static class AppInstaller
         var shellType = Type.GetTypeFromProgID("WScript.Shell");
         if (shellType is null) return;
         dynamic? shell = null;
+        object? linkObj = null;
         try
         {
             shell = Activator.CreateInstance(shellType);
             dynamic link = shell!.CreateShortcut(linkPath);
+            linkObj = link; // keep a handle so we can release this SECOND COM object too, not just shell
             link.TargetPath = targetPath;
             link.Arguments = arguments;
             link.WorkingDirectory = workingDir;
@@ -396,6 +409,12 @@ internal static class AppInstaller
         }
         finally
         {
+            // Release both COM objects deterministically (the IWshShortcut from CreateShortcut AND the
+            // WScript.Shell), rather than leaving the shortcut object to the GC finalizer.
+            if (linkObj is not null)
+            {
+                try { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(linkObj); } catch { }
+            }
             if (shell is not null)
             {
                 try { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(shell); } catch { }
@@ -459,7 +478,7 @@ internal static class AppInstaller
         psi.ArgumentList.Add("--await-pid");
         psi.ArgumentList.Add(Environment.ProcessId.ToString());
 
-        var child = Process.Start(psi);
+        using var child = Process.Start(psi);
         // Grant the just-launched child the right to take the foreground. Given now, while we still
         // hold it, it survives our imminent exit and lets the child's SetForegroundWindow succeed.
         if (child is not null)
@@ -524,7 +543,7 @@ internal static class AppInstaller
     {
         var path = Path.Combine(Path.GetTempPath(), namePrefix + Guid.NewGuid().ToString("N") + ".cmd");
         File.WriteAllText(path, script, new UTF8Encoding(false));
-        Process.Start(new ProcessStartInfo
+        using var proc = Process.Start(new ProcessStartInfo
         {
             FileName = "cmd.exe",
             Arguments = $"/c \"{path}\"",

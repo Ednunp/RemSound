@@ -15,6 +15,9 @@ namespace RemSound.App;
 internal static class TabSwitchSoundService
 {
     private static CuePlayer? switchSound;
+    // Cached at Reload() so Play() (fires on every focused tab change) doesn't re-read + re-deserialize
+    // the whole config file just to fetch one bool. Reload() runs whenever cue settings change.
+    private static bool enableTabSwitch;
 
     /// <summary>When true, <see cref="Play"/> is a no-op. Reserved for bulk programmatic tab changes
     /// the focus gate doesn't already cover; mirrors <see cref="CheckSoundService.Suppressed"/>.</summary>
@@ -24,13 +27,15 @@ internal static class TabSwitchSoundService
     /// settings change, alongside <see cref="CheckSoundService.Reload"/>.</summary>
     public static void Reload()
     {
-        switchSound = LoadCue(MainForm.CueId.TabSwitch, "tab switch.wav", AppConfig.Load());
+        var cfg = AppConfig.Load();
+        enableTabSwitch = cfg.EnableTabSwitchCue;
+        switchSound = LoadCue(MainForm.CueId.TabSwitch, "tab switch.wav", cfg);
     }
 
     public static void Play()
     {
         if (Suppressed) return;
-        if (AppConfig.Load().EnableTabSwitchCue) switchSound?.Play();
+        if (enableTabSwitch) switchSound?.Play();
     }
 
     private static CuePlayer? LoadCue(string cueId, string defaultFile, AppConfig cfg)

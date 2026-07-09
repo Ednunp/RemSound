@@ -657,15 +657,15 @@ internal sealed class PlayoutEngine : IWaveProvider
 
     /// <summary>
     /// Render-side audio pull. Iterates every session regardless of lane tag and sums them
-    /// into one mixed bus. This is what every render backend (WasapiOnly, AsioOnly, classic
-    /// Both via the tee, and BothIndependent via the tee) reads from, so a user can pick any
-    /// output device for any received audio — independently of which capture technology the
-    /// sender used. Per-lane latency targets are still honoured: each session reads its own
-    /// route's TargetMs / MaxMs via <see cref="LatencyFor"/>, so the WASAPI-captured stream
-    /// can buffer at one latency and the ASIO-captured stream at another within the same
-    /// output mix. The lane-specific <see cref="WasapiLaneOutput"/> / <see cref="AsioLaneOutput"/>
-    /// surfaces are kept around for future per-route routing options but are not used by the
-    /// default render path (see <c>CompositeRenderBackend</c>). 2026-05-11 revision: previous
+    /// into one mixed bus. This is what the WasapiOnly / AsioOnly render path reads from, so a
+    /// user can pick any output device for any received audio — independently of which capture
+    /// technology the sender used. Per-lane latency targets are still honoured: each session
+    /// reads its own route's TargetMs / MaxMs via <see cref="LatencyFor"/>, so the WASAPI-captured
+    /// stream can buffer at one latency and the ASIO-captured stream at another within the same
+    /// output mix. In BothIndependent mode this all-sessions pull is NOT used: each lane reads its
+    /// own filtered surface (<see cref="WasapiLaneOutput"/> / <see cref="AsioLaneOutput"/>) directly
+    /// — see <c>CompositeRenderBackend</c> — so those surfaces are ACTIVE render sources, not
+    /// future-only. 2026-05-11 revision: previous
     /// implementation filtered by route, which made it impossible to route a WASAPI-captured
     /// stream onto an ASIO output (and vice versa) in BothIndependent mode — that broke a
     /// long-standing cross-backend send/receive flow.

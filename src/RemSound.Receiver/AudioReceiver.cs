@@ -176,8 +176,6 @@ public sealed class AudioReceiver : IDisposable
         if (wasRunning) multiOutput.Start();
     }
 
-    public bool IsAsioBackend => multiOutput is CompositeRenderBackend;
-
     /// <summary>Sets the Buffer-smoothness knob (1 = aggressive — clicks the buffer back
     /// to target on any drift, holds the user's latency tightly; 10 = smooth — no clicks
     /// but the queue can creep up under jitter or sustained clock drift). Knob drives a
@@ -691,8 +689,14 @@ public sealed class AudioReceiver : IDisposable
         Interlocked.Exchange(ref bytesReceived, 0);
         Interlocked.Exchange(ref packetsDropped, 0);
 
-        // Tear down any sessions left over from a previous Start (in case Stop wasn't called).
-        DisposeAllSessionsLocked();
+        // Tear down any sessions left over from a previous Start (in case Stop wasn't called). Under
+        // sessionsLock to match the method's "Locked" contract and its other two callers — the counter
+        // getters / prune run on the App's snapshot-tick thread and touch `sessions` under this lock, so
+        // clearing it bare would be an unsynchronised mutation of the non-thread-safe dictionary.
+        lock (sessionsLock)
+        {
+            DisposeAllSessionsLocked();
+        }
         playoutEngine.ResetAll();
 
         listener.Start(udpPort);
@@ -1073,7 +1077,21 @@ public sealed class AudioReceiver : IDisposable
                 isFormatChange = true;
             }
 
-            newSession = new StreamSession(remote, streamId, format, sp, diagnostics, _ => sp.NoteFramesQueued(playoutEngine.TargetLatencyMs), decryptor);
+            try
+            {
+                newSession = new StreamSession(remote, streamId, format, sp, diagnostics, _ => sp.NoteFramesQueued(playoutEngine.TargetLatencyMs), decryptor);
+            }
+            catch
+            {
+                // The StreamSession ctor failed — most realistically because a corrupt/hostile Format
+                // announced an Opus sample rate/channel count the decoder rejects. We already registered
+                // the SessionPlayout in PlayoutEngine via GetOrCreateSession above; nothing was added to
+                // `sessions`, so PruneIdleSessions would never reap it and it would linger forever, summed
+                // on every render callback and poisoning the auto-tune's underrun stats. Reap it here,
+                // then let the exception propagate so the packet handler still logs it.
+                playoutEngine.RemoveSession(remote, streamId);
+                throw;
+            }
             sessions[key] = newSession;
 
             // Same-lane streamId rotation: drop other sessions from this peer that share the

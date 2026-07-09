@@ -62,6 +62,15 @@ internal sealed class SenderLane
 
     private OpusEncoderState opusEncoder;
     private int opusFrameStereoSamples;
+    // Serialises the Opus encoder SWAP (OnCodecChanged, UI thread) against its USE (EmitOpusFrame,
+    // capture thread). Without it, changing codec or send-rate while streaming could Dispose the native
+    // libopus encoder mid-Encode on the capture thread — a native use-after-free / hard crash with no
+    // managed stack. Held only for the encode + copy-out (microseconds) and the rare swap, so hot-path
+    // contention is negligible.
+    private readonly object encoderGate = new();
+    // Copy of the just-encoded Opus bytes, taken under encoderGate so encryption + send can run OUTSIDE
+    // the lock — LastEncoded returns a span into the encoder's own buffer, which the swap frees.
+    private readonly byte[] opusPlainScratch = new byte[4096];
 
     // Per-lane pre-encode discontinuity probe. Moved here from AudioSender (2026-05-15) so
     // each lane has its OWN probe state and the cross-buffer step measurement (which carries
@@ -154,13 +163,17 @@ internal sealed class SenderLane
     {
         if (newCodec == AudioTransportCodec.Opus)
         {
-            // Dispose the outgoing encoder before replacing it — its underlying
-            // NativeOpusEncoder owns native libopus state that doesn't get released until
-            // explicit Dispose under our SustainedLowLatency GC mode. Pre-2026-05-27 this
-            // overwrite leaked the old encoder's native state on every codec change.
-            opusEncoder.Dispose();
-            opusEncoder = new OpusEncoderState(opusFrameSamplesPerChannel, opusBitrate);
-            opusFrameStereoSamples = opusEncoder.FrameSizePerChannel * MixChannels;
+            // Dispose the outgoing encoder before replacing it — its underlying NativeOpusEncoder owns
+            // native libopus state that doesn't get released until explicit Dispose under our
+            // SustainedLowLatency GC mode. Under encoderGate so the capture thread can't be mid-Encode on
+            // the old native encoder when we free it (that was a native use-after-free on a codec/rate
+            // change while streaming).
+            lock (encoderGate)
+            {
+                opusEncoder.Dispose();
+                opusEncoder = new OpusEncoderState(opusFrameSamplesPerChannel, opusBitrate);
+                opusFrameStereoSamples = opusEncoder.FrameSizePerChannel * MixChannels;
+            }
         }
         streamId = NewStreamId();
         lastFormatPacketUtc = DateTime.MinValue;
@@ -319,23 +332,28 @@ internal sealed class SenderLane
 
     private void EmitOpusFrame(ReadOnlySpan<float> stereoFloats)
     {
-        ReadOnlySpan<byte> opusBytes;
-        if (owner.IsMuted)
+        int encLen;
+        // Encode and copy the bytes out UNDER encoderGate, so a concurrent OnCodecChanged can't Dispose
+        // the encoder mid-Encode (native use-after-free) or free the LastEncoded buffer before we copy
+        // it. Crypto + send run outside the lock, off the copied bytes.
+        lock (encoderGate)
         {
-            Span<float> silence = stackalloc float[opusFrameStereoSamples];
-            silence.Clear();
-            var muteLen = opusEncoder.Encode(silence);
-            opusBytes = opusEncoder.LastEncoded(muteLen);
-        }
-        else
-        {
-            var len = opusEncoder.Encode(stereoFloats);
-            if (len <= 0) return;
-            opusBytes = opusEncoder.LastEncoded(len);
+            if (owner.IsMuted)
+            {
+                Span<float> silence = stackalloc float[opusFrameStereoSamples];
+                silence.Clear();
+                encLen = opusEncoder.Encode(silence);
+            }
+            else
+            {
+                encLen = opusEncoder.Encode(stereoFloats);
+            }
+            if (encLen <= 0) return;
+            opusEncoder.LastEncoded(encLen).CopyTo(opusPlainScratch);
         }
         EnsureCrypto();
         if (cryptoGcm is null) return; // no password yet → never send audio in the clear
-        var ctLen = RemSoundCrypto.EncryptInto(cryptoGcm, opusBytes, cipherScratch);
+        var ctLen = RemSoundCrypto.EncryptInto(cryptoGcm, opusPlainScratch.AsSpan(0, encLen), cipherScratch);
         Interlocked.Increment(ref audioFramesSent);
         SendAudio(cipherScratch.AsSpan(0, ctLen));
     }
