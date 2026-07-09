@@ -46,19 +46,29 @@ internal static class StartupAutoStart
     /// Quotes the path so spaces work. Returns true on success.</summary>
     public static bool TryEnable()
     {
+        var exePath = Environment.ProcessPath;
+        if (string.IsNullOrEmpty(exePath))
+        {
+            // Fallback: use AppContext.BaseDirectory. .NET hosting produces a
+            // different process path for self-contained vs framework-dependent
+            // publish, but BaseDirectory is reliable.
+            exePath = System.IO.Path.Combine(AppContext.BaseDirectory, "RemSound.exe");
+        }
+        return TryEnable(exePath);
+    }
+
+    /// <summary>Add or update the Run-key entry to point at a specific exe path. Used by the
+    /// self-installer to re-point login-launch at the freshly INSTALLED copy while it's still
+    /// running from the portable one, so auto-start doesn't keep launching the old folder.
+    /// Quotes the path so spaces work. Returns true on success.</summary>
+    public static bool TryEnable(string exePath)
+    {
         try
         {
+            if (string.IsNullOrWhiteSpace(exePath)) return false;
             using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true)
                 ?? Registry.CurrentUser.CreateSubKey(RunKeyPath, writable: true);
             if (key is null) return false;
-            var exePath = Environment.ProcessPath;
-            if (string.IsNullOrEmpty(exePath))
-            {
-                // Fallback: use AppContext.BaseDirectory. .NET hosting produces a
-                // different process path for self-contained vs framework-dependent
-                // publish, but BaseDirectory is reliable.
-                exePath = System.IO.Path.Combine(AppContext.BaseDirectory, "RemSound.exe");
-            }
             // Wrap in double-quotes so a path containing spaces (e.g. C:\Program Files\)
             // parses correctly when Windows launches it.
             key.SetValue(ValueName, $"\"{exePath}\"");

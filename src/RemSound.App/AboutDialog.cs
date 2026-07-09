@@ -20,6 +20,14 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v5.1
+
+        Install RemSound as a proper Windows app.
+
+        A new "Install RemSound on this PC" in the Options menu turns the copy you're running into a properly installed app — on the Start menu, with a desktop shortcut, and listed in Windows' Installed apps. It installs just for you, so it never needs administrator rights, and you can bring your profiles, settings, recordings and logs across as you go. Once it's installed, that same menu item becomes Uninstall, which removes it again and asks first whether to keep or delete your own files. You never have to install — running RemSound straight from the unzipped folder works exactly as before.
+
+        Smaller download too, now the built-in sounds have been slimmed down.
+
         RemSound v5.0
 
         A big one. Shape each person, record everyone separately, name your peers, and make the window your own.

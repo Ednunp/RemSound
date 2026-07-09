@@ -1409,13 +1409,46 @@ public sealed class MainForm : Form
             // wired up before we hide the window.
             var coldStart = isFirstLaunch;
             isFirstLaunch = false;
-            var minimizeThisInstance = startNextInstanceMinimized || (coldStart && AppConfig.Load().StartMinimised);
+            // A post-install relaunch (--foreground) overrides any start-minimised preference — the
+            // user just ran an interactive install and expects to see the installed copy come up.
+            var minimizeThisInstance = !forceForegroundOnStart
+                                       && (startNextInstanceMinimized || (coldStart && AppConfig.Load().StartMinimised));
             startNextInstanceMinimized = false;
             if (minimizeThisInstance)
             {
                 // playCue:false — starting up in the tray (StartMinimised / --minimized) isn't the
                 // user choosing to minimise, so it must not sound the "minimise" cue.
                 BeginInvoke(() => trayController.Minimize(playCue: false));
+            }
+            else if (forceForegroundOnStart)
+            {
+                forceForegroundOnStart = false;
+                logFile.Event("installer: post-install relaunch — bringing the window to the foreground");
+                // Deferred so it runs after Shown settles, then yanks the window to the front so the
+                // just-installed copy isn't left hiding behind other windows. Try again a moment later:
+                // a freshly-launched process routinely loses the very first foreground race (the OS is
+                // still settling which window owns the foreground just after the old copy exited).
+                BeginInvoke(() =>
+                {
+                    ForceWindowToForeground();
+                    var attempts = 0;
+                    var retry = new System.Windows.Forms.Timer { Interval = 250 };
+                    retry.Tick += (_, _) =>
+                    {
+                        attempts++;
+                        // Stop once we genuinely own the foreground, or after a few tries.
+                        var won = !IsDisposed && GetForegroundWindow() == Handle;
+                        if (IsDisposed || attempts >= 5 || won)
+                        {
+                            retry.Stop();
+                            retry.Dispose();
+                            logFile.Event($"installer: foreground grab done after {attempts} retries, gotForeground={won}");
+                            return;
+                        }
+                        ForceWindowToForeground();
+                    };
+                    retry.Start();
+                });
             }
 
             // Kick off UPnP discovery if the user has the box ticked. Off by default; the
@@ -1987,6 +2020,27 @@ public sealed class MainForm : Form
             UpdateRealtekAsioMenuItemText();
         }
 
+        // Install / uninstall RemSound as a proper per-user Windows app. The single item flips to
+        // "Uninstall…" when this copy IS the installed one. Copies files to %LOCALAPPDATA%\Programs
+        // (no admin), with optional shortcuts and login auto-start. Modelled on Andre's Sensor Readout.
+        ToolStripMenuItem installItem;
+        if (AppInstaller.IsInstalledCopy)
+        {
+            installItem = new ToolStripMenuItem("&Uninstall RemSound from this PC...")
+            {
+                AccessibleName = "Uninstall RemSound from this PC",
+            };
+            installItem.Click += (_, _) => AppInstaller.RunUninstallInProcess(this, msg => logFile.Event($"installer: {msg}"));
+        }
+        else
+        {
+            installItem = new ToolStripMenuItem("&Install RemSound on this PC...")
+            {
+                AccessibleName = "Install RemSound on this PC",
+            };
+            installItem.Click += (_, _) => AppInstaller.RunInstall(this, msg => logFile.Event($"installer: {msg}"));
+        }
+
         var optionItems = new List<ToolStripItem>
         {
             recordingSettingsItem,
@@ -1997,6 +2051,7 @@ public sealed class MainForm : Form
         };
         if (realtekToggle is not null) optionItems.Add(realtekToggle);
         optionItems.Add(new ToolStripSeparator());
+        optionItems.Add(installItem);
         optionItems.Add(prefsItem);
         optionsMenu.DropDownItems.AddRange(optionItems.ToArray());
 
@@ -2103,6 +2158,12 @@ public sealed class MainForm : Form
     // in the tray should land back in the tray; internal so Program.Main can also skip the
     // "loading audio driver" splash in that case.
     internal static bool startNextInstanceMinimized;
+
+    // Set from the --foreground switch, which the post-install relaunch passes. Makes the next
+    // MainForm pull itself to the front and take focus even past Windows' foreground lock, so the
+    // freshly-installed copy doesn't open behind other windows and leave the user hunting for it.
+    // One-shot: consumed (cleared) the first time a window honours it.
+    internal static bool forceForegroundOnStart;
 
     // True until the first MainForm of the process has shown its window. Distinguishes a genuine
     // cold launch (where the "Start minimised" preference applies) from an in-session new-profile or
@@ -7303,6 +7364,57 @@ public sealed class MainForm : Form
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
+
+    /// <summary>Bring this window to the very front and give it focus, robust against Windows'
+    /// foreground lock. A freshly-launched process (the post-install relaunch) has no recent user
+    /// input to its name, so a bare <c>SetForegroundWindow</c> is refused and the window opens behind
+    /// whatever's on top. Briefly attaching our input queue to the current foreground thread lets the
+    /// call through; the TopMost blip nudges the Z-order too. Best-effort — never throws.</summary>
+    private void ForceWindowToForeground()
+    {
+        try
+        {
+            if (IsDisposed) return;
+            // Capture who's in front FIRST. If we called Show()/Activate() before reading this,
+            // GetForegroundWindow could already return our own handle — and then we'd skip the
+            // thread-attach below, which is the part that actually lets SetForegroundWindow win.
+            var fgWnd = GetForegroundWindow();
+            var myThread = GetCurrentThreadId();
+            var fgThread = fgWnd == IntPtr.Zero ? myThread : GetWindowThreadProcessId(fgWnd, out _);
+
+            // Share input state with whatever currently owns the foreground, so Windows treats our
+            // SetForegroundWindow as coming from the active thread and allows it past the lock.
+            var attached = fgThread != myThread && AttachThreadInput(fgThread, myThread, true);
+            try
+            {
+                if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+                Show();
+                BringToFront();
+                SetForegroundWindow(Handle);
+                Activate();
+                Focus();
+            }
+            finally
+            {
+                if (attached) AttachThreadInput(fgThread, myThread, false);
+            }
+        }
+        catch { /* best-effort — worst case the window is visible but not focused */ }
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
 
 
     // ===================== Profile system =====================

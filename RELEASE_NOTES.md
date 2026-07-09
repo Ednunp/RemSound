@@ -1,49 +1,38 @@
-# RemSound v5.0
+# RemSound v5.1
 
-A big release. Shape each person you're connected to, record everyone onto separate tracks, give your peers names that stick, and make the window your own with themes and reorderable tabs.
+Install RemSound as a proper Windows app — or keep running it portable, whichever you prefer.
 
-## Shape each peer — volume, pan and EQ
+## Install RemSound on this PC
 
-A new **Volume, pan and EQ for peers** tab lets you treat every connected person as their own channel:
+A new **Options → Install RemSound on this PC** turns the copy you're running into a properly installed Windows app:
 
-- **Volume** — an individual level for each person, so you can balance everyone against each other.
-- **Pan** — lean someone to the left or right. It keeps their stereo image; it never folds them down to mono.
-- **EQ** — change each person's tone with one of three equalisers: a simple **3-band** tone control, a **12-band graphic** EQ (31 Hz up to 16 kHz), or a **16-band parametric** EQ where you place each band yourself by typing a start frequency, an end frequency and a gain. On the parametric bands list, left and right arrow nudge the selected band by half a dB, live.
+- It sets RemSound up on the **Start menu** (with the program, the manual and an uninstall shortcut), adds a **desktop shortcut**, and lists it in Windows' **Installed apps**.
+- It installs into your own user area, so it **never asks for administrator rights** and only affects your account.
+- A tick-box dialog lets you choose what to set up — desktop and Start-menu shortcuts, run at startup — and bring your **profiles and settings, recordings and logs** across from the copy you're running.
+- When it's done it reopens from the installed location; everything carries on exactly as before, and RemSound still updates itself in place as usual.
 
-Everything is live — you hear it as you move a control — and it adds no delay. One master switch turns it all on or off (there's a global shortcut for that too), and each person has a tick so you can bypass one without losing their settings. Crucially, **what you dial in is captured in your recordings**, so a shaped mix records the way it sounds (with a "record the raw audio" option if you'd rather keep it clean).
+Once it's installed, that same menu item becomes **Uninstall RemSound from this PC** (with matching entries in the Start menu and Windows' Installed apps). Uninstalling asks first, with two tick-boxes — **remove profiles, config and logs**, and **remove recordings** — both off by default, so your own files are kept unless you say otherwise.
 
-## Record everyone on their own track
+You never *have* to install: running RemSound straight from the unzipped folder works exactly as it always has.
 
-Recording can now **split into a separate file per peer** — each connected person on their own track — so you can take a jam or a conversation away and mix the parts afterwards. The default recording source is now "both sent and received".
+## Smaller download
 
-## Name your peers, and see who's who
-
-- **Rename peer (Alt+M or F2)** on the Connectivity tab gives someone a friendly name that sticks to their machine for good — across restarts, address changes and networks — and shows everywhere that peer appears.
-- **Peer details (Alt+E)** shows the highlighted peer's name, address, how long you've been connected, the link health and ping, what they're sending (how many devices, WASAPI or ASIO, sample rate and codec), and whether they're receiving your audio.
-- **Options → Manage named peers** lists everyone you've named, with where and when you last connected, so you can rename or delete them in one place.
-
-## Make it yours — Appearance
-
-Preferences has a new **Appearance** tab:
-
-- **Colour theme** — Match Windows (the default), Light, or Dark. RemSound now follows your Windows light/dark setting, has a modern font and its own app icon.
-- **Tab order** — reorder the main window's tabs with Move up / Move down, and hide the ones you don't use (including the volume/pan/EQ tab and the Discovered / Remembered peer lists on the Connectivity tab).
-- **Ctrl and a number** jumps straight to a tab by its position, following whatever order you've set.
+The built-in cue sounds have been slimmed down, so RemSound is a smaller download and takes up less space.
 
 ## Compatibility
 
-**v5.0 talks to v3.3 through v4.9 with no trouble** — the over-the-network format is unchanged, so you don't have to update both ends at once. (Everyone still needs **v3.3 or newer**, where end-to-end encryption came in.)
+The over-the-network format is unchanged, so **v5.1 talks to v3.3 through v5.0** with no trouble — you don't have to update both ends at once. (Everyone still needs **v3.3 or newer**, where end-to-end encryption came in.)
 
 ## Install
 
-1. Download `RemSound-v5.0.zip` from this release.
+1. Download `RemSound-v5.1.zip` from this release.
 2. Close RemSound.
 3. Extract the zip **over your existing RemSound folder**, overwriting program files when prompted. The zip is program files only — it won't touch your settings, profiles, logs or recordings.
-4. Run `RemSound.exe`.
+4. Run `RemSound.exe`. (If you'd like it set up as a proper Windows app, use **Options → Install RemSound on this PC**.)
 
 ## Upgrading
 
-**From v3.6 or newer:** Help → Check for updates installs v5.0 with the in-app updater — and if it can't finish, it puts your old version back exactly as it was.
+**From v3.6 or newer:** Help → Check for updates installs v5.1 with the in-app updater — and if it can't finish, it puts your old version back exactly as it was.
 
 **From v1.9–v3.5:** Check for updates works, but uses your current version's older updater for this one hop. If auto-update has been failing on your machine, install by hand using the steps above.
 

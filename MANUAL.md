@@ -278,7 +278,27 @@ Item| Shortcut| What it does
 **Manage named peers …**| Alt+O, N| Opens a list of every peer you've given a friendly name to, showing each one's machine name and where and when you last connected to it. Pick one and **Rename (Alt+R** , or F2) to change its name, or **Delete (Alt+D** , or the Del key) to forget it — deleting only drops the name, the peer still connects as normal under its machine name. See the peer-naming notes on the Connectivity tab.
 **Reset the default audio device prompt**|  Alt+O, R| Brings back the “use only the default audio device?” question if you previously ticked “Don't ask me this again” on it. See Following the Windows default audio device.
 **Enable / Disable Realtek ASIO**|  —| Only shown if a Realtek ASIO driver is installed. Lets you reverse the choice RemSound offered about disabling that driver (Realtek's generic ASIO driver tends to grab the wrong device and clash with your screen reader).
+**Install RemSound on this PC …** (or **Uninstall …**)| Alt+O, I (Alt+O, U once installed)| Turns the copy you're running into a properly installed Windows app — on the Start menu, with a desktop shortcut, and listed in Windows’ Installed apps — or removes it again. Once it's installed, this item changes to **Uninstall RemSound from this PC**. See Installing RemSound on your PC.
 **Preferences …**| Ctrl+P, or Alt+O, P| Opens the Preferences dialog, organised into six tabs (move between them with Ctrl+Tab, or the arrow keys when the tab names have focus): **General** — the profiles folder, accept remote volume commands, and UPnP router opening; **Appearance** — **Colour theme (Alt+T)** (Match Windows / Light / Dark; changes only how the window looks, takes effect next launch, no effect on the screen reader), “Show the volume, pan and EQ for peers tab” (on by default; hides the Volume, pan and EQ for peers tab if you untick it), **Tab order (Alt+O)** — a list of the window's tabs with **Move up (Alt+U)** and **Move down (Alt+N)** buttons to reorder them, and two toggles to **enable the Discovered (Alt+D)** and **Remembered (Alt+R)** peer lists on the Connectivity tab (both on by default — untick one to hide that list); **Audio cues** — the cue list and its sounds (see Audio cue sounds); **Startup behaviour** — start minimised / with Windows / with a specific profile; **Update settings** — the update checks and install options; and **Logging** — enable logs, write logs now, and the log-folder housekeeping (see Logs and diagnostics). Esc or the Close button dismisses it.
+
+### Installing RemSound on your PC
+
+RemSound normally runs “portable” — you unzip it and run it straight from whatever folder you unzipped it to, and it keeps its settings, profiles and recordings inside that same folder. That works perfectly well and you never have to install anything. But if you'd rather have RemSound set up as a proper Windows app — on the Start menu, with a desktop shortcut, and listed in Windows’ _Installed apps_ — open **Options → Install RemSound on this PC** (Alt+O, I).
+
+It installs into your own user area (`…\AppData\Local\Programs\RemSound`), so it **never asks for administrator rights** and only affects your account. A dialog lets you choose what to set up. Tab through the tick-boxes, then select **Install** (pressing Enter on a tick-box won't skip ahead — you reach the Install button by tabbing to it):
+
+  * **Create a desktop shortcut** — on by default.
+  * **Add to the Start menu** — makes a “RemSound” folder on the Start menu holding three shortcuts: the program, this manual, and an uninstall shortcut. On by default.
+  * **Run RemSound when I sign in to Windows** — the same login auto-start as the Startup behaviour tab. Off unless you already had it turned on.
+  * **Copy my profiles and settings across** — brings your profiles and every setting (keyboard shortcuts, named peers, colour theme, and the rest) from the copy you're running into the install folder. On by default.
+  * **Copy my recordings across** — on by default.
+  * **Copy my logs across** — off by default; you rarely need old logs in the installed copy.
+
+
+
+When you select Install, RemSound copies itself into place and then **closes and reopens from the installed location**. A confirmation dialog tells you this is about to happen before it does. From then on your settings, profiles and recordings live inside the installed folder, exactly as they did in the portable copy, and RemSound still updates itself in place as usual.
+
+**Uninstalling.** Once RemSound is installed, that same menu item becomes **Uninstall RemSound from this PC** (Alt+O, U). You can also uninstall from the “Uninstall RemSound” shortcut in its Start-menu folder, or from Windows’ _Installed apps_ list — all three do exactly the same thing. RemSound asks you to confirm first, with two tick-boxes — **Remove profiles, config and logs** and **Remove recordings** — both **off by default** , so unless you tick them your own files are kept even after the program itself is removed. A short message confirms once it's done.
 
 ### Help menu
 

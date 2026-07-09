@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime;
 using System.Windows.Forms;
 using RemSound.Core;
@@ -102,6 +103,17 @@ internal static class Program
         }
         catch { /* older runtime or API change — stay on the classic light theme */ }
 
+        // --uninstall: launched from the Start-menu "Uninstall RemSound" shortcut or Windows
+        // "Installed apps". Runs its own confirmation dialog and the wait-then-delete remover, then
+        // exits. Handled here — after visual styles/theme are set so the dialog renders correctly, but
+        // BEFORE the single-instance guard, because the installed copy it's removing may itself be
+        // running (the remover force-closes it and retries the delete).
+        if (Array.Exists(args, a => string.Equals(a, "--uninstall", StringComparison.OrdinalIgnoreCase)))
+        {
+            AppInstaller.RunUninstallStandalone();
+            return;
+        }
+
         // Consolidate every older layout (loose files, or the interim config\ folder) into the single
         // "user settings and logs" folder before anything reads config/profiles/logs. Idempotent +
         // best-effort; upgrades users from any older build. Shown to the user once if files moved.
@@ -127,6 +139,18 @@ internal static class Program
         var cliExit = CommandLine.Process(args, out var cli);
         if (cliExit is { } cliCode) Environment.Exit(cliCode);
         if (cli.StartMinimized) MainForm.startNextInstanceMinimized = true;
+
+        // --foreground: the post-install relaunch passes this so the freshly-installed copy pulls
+        // itself to the front and takes focus, instead of opening behind whatever's on top (a new
+        // process has no "recent user input" credit, so Windows' foreground lock blocks it otherwise).
+        if (Array.Exists(args, a => string.Equals(a, "--foreground", StringComparison.OrdinalIgnoreCase)))
+            MainForm.forceForegroundOnStart = true;
+
+        // --await-pid <pid>: the post-install relaunch passes the OLD (portable) copy's process id.
+        // Wait for it to exit — releasing the single-instance lock — BEFORE we try to take that lock
+        // just below, so the hand-over doesn't trip the "already running" guard. Bounded so a stale or
+        // wrong pid can never hang startup.
+        WaitForAwaitedProcess(args);
 
         // Single-instance guard. RemSound must never run as two copies at once: with the
         // auto-updater relaunching the app, a copy that didn't exit cleanly used to leave two
@@ -406,6 +430,22 @@ internal static class Program
 
             if (!reloadFromScratch) return;
         }
+    }
+
+    /// <summary>If <c>--await-pid &lt;pid&gt;</c> is present (the post-install relaunch passes the old
+    /// copy's id), block until that process exits so its single-instance lock is released before this
+    /// copy tries to take it. Bounded to a few seconds so a stale/wrong pid can never hang startup.</summary>
+    private static void WaitForAwaitedProcess(string[] args)
+    {
+        var idx = Array.FindIndex(args, a => string.Equals(a, "--await-pid", StringComparison.OrdinalIgnoreCase));
+        if (idx < 0 || idx + 1 >= args.Length) return;
+        if (!int.TryParse(args[idx + 1], out var pid)) return;
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            p.WaitForExit(10000);
+        }
+        catch { /* already gone / invalid pid — nothing to wait for */ }
     }
 
     /// <summary>One-time, Windows-native notice telling the user their config/profiles were moved

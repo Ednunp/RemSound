@@ -200,6 +200,7 @@ internal static class CommandLine
         Console.WriteLine("Settings and control (these act, then exit):");
         Console.WriteLine("  --log on|off          Turn the diagnostic log on or off.");
         Console.WriteLine("  --close               Close a running copy of RemSound.");
+        Console.WriteLine("  --uninstall           Uninstall an installed copy of RemSound (asks first).");
         Console.WriteLine();
         Console.WriteLine("Start-up options (these change how RemSound launches):");
         Console.WriteLine("  --profile \"<name>\"    Start straight into the named profile (skip the picker).");
