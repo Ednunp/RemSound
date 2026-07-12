@@ -5,38 +5,40 @@ namespace RemSound.App;
 
 /// <summary>
 /// The "Configure RemSound service profile" dialog: a self-contained, modal editor for the send-only
-/// service profile. Three tabs — Audio send, Audio profile, Connectivity — plus a button row of
-/// Save and Close / Cancel / Additional options. Being modal, there are no menus and no profile
-/// switching to worry about. It edits a <see cref="Profile"/> clone; nothing is persisted until the
-/// caller acts on an OK result. Send-only and WASAPI-only: no receive controls, no ASIO, and no
-/// "Send my audio" toggle (it always sends).
+/// service profile, built to match the main window — same house controls, same layout rows, and the
+/// same screen-reader wiring on the lists (via <see cref="CheckedListAccessibility"/>), so it reads and
+/// behaves exactly like the real tabs. Tab order mirrors the main window: Connectivity, then Audio send,
+/// then Audio profile. Send-only and WASAPI-only: no receive controls, no ASIO, no "Send my audio"
+/// toggle. Edits a <see cref="Profile"/> clone; nothing is persisted until the caller acts on OK.
 /// </summary>
 internal sealed class ServiceProfileDialog : Form
 {
     private readonly Profile working;
-
     private readonly QuietTabControl tabs = new() { Dock = DockStyle.Fill };
 
-    // --- Audio send tab ---
-    private readonly ListBox sendModeList = new() { Width = 460, Height = 38, IntegralHeight = false, AccessibleName = "How to send WASAPI audio (Alt+6)" };
-    private readonly CheckedListBox outputsList = new() { CheckOnClick = true, Width = 460, Height = 110, AccessibleName = "WASAPI audio outputs to send (Alt+4)" };
-    private readonly AccessibleCheckBox sendAllAppsBox = new() { Text = "Send all applications (Alt+&7)", AccessibleName = "Send all applications", AutoSize = true, Checked = true };
-    private readonly CheckedListBox appsList = new() { CheckOnClick = true, Width = 460, Height = 110, AccessibleName = "Applications to send (Alt+8)" };
-    private readonly CheckedListBox inputsList = new() { CheckOnClick = true, Width = 460, Height = 90, AccessibleName = "WASAPI audio inputs to send (Alt+5)" };
-    private MnemonicLabel? sendModeLabel, outputsLabel, appsLabel, inputsLabel;
-
-    // --- Audio profile tab ---
-    private readonly ComboBox codecBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 360, AccessibleName = "Audio codec (Alt+C)" };
-    private readonly ComboBox sendRateBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 360, AccessibleName = "Send rate (Alt+E)" };
-    private readonly AccessibleCheckBox tightLatencyBox = new() { Text = "&Lock to audio clock — steadier timing, slightly higher latency (Alt+L)", AccessibleName = "Lock to audio clock", AutoSize = true };
-
     // --- Connectivity tab ---
-    private readonly ListBox peersList = new() { Width = 360, Height = 120, AccessibleName = "Peers to send to (Alt+P)" };
-    private readonly TextBox addPeerBox = new() { Width = 260, AccessibleName = "Add a peer address or hostname (Alt+A)" };
+    private readonly ListBox peersList = new() { Width = 460, Height = 120, AccessibleName = "Peers to send to (Alt+1)" };
+    private readonly TextBox addPeerBox = new() { Width = 300, AccessibleName = "Add a peer — IP address or hostname (Alt+2)" };
     private readonly Button addPeerButton = new() { Text = "A&dd", AutoSize = true, AccessibleName = "Add peer" };
     private readonly Button removePeerButton = new() { Text = "&Remove", AutoSize = true, AccessibleName = "Remove selected peer" };
     private readonly Button passwordButton = new() { Text = "Set pass&word...", AutoSize = true, AccessibleName = "Set the service profile password" };
     private readonly Label passwordStatus = new() { AutoSize = true };
+
+    // --- Audio send tab ---
+    private readonly ListBox sendModeList = new() { Width = 460, Height = 40, IntegralHeight = false, AccessibleName = "How to send WASAPI audio (Alt+1)" };
+    private readonly CheckedListBox outputsList = new() { CheckOnClick = true, Width = 460, Height = 110, AccessibleName = "WASAPI audio outputs to send (Alt+2)" };
+    private readonly Label outputsStatus = new() { AutoSize = true, Text = "No output device selected." };
+    private readonly AccessibleCheckBox sendAllAppsBox = new() { Text = "Send all applications (Alt+&3)", AccessibleName = "Send all applications", AutoSize = true, Checked = true };
+    private readonly CheckedListBox appsList = new() { CheckOnClick = true, Width = 460, Height = 110, AccessibleName = "Applications to send (Alt+4)" };
+    private readonly Label appsStatus = new() { AutoSize = true, Text = "No application selected." };
+    private readonly CheckedListBox inputsList = new() { CheckOnClick = true, Width = 460, Height = 90, AccessibleName = "WASAPI audio inputs to send (Alt+5)" };
+    private readonly Label inputsStatus = new() { AutoSize = true, Text = "No input device selected." };
+    private MnemonicLabel? sendModeLabel, outputsLabel, appsLabel, inputsLabel;
+
+    // --- Audio profile tab ---
+    private readonly ComboBox codecBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 360, AccessibleName = "Audio codec (Alt+C)" };
+    private readonly ListBox sendRateBox = new() { Width = 360, Height = 40, IntegralHeight = false, AccessibleName = "Packet size (Alt+P)" };
+    private readonly AccessibleCheckBox tightLatencyBox = new() { AutoSize = true };
 
     // --- Button row ---
     private readonly Button saveButton = new() { Text = "&Save and Close", AutoSize = true, DialogResult = DialogResult.OK };
@@ -45,11 +47,7 @@ internal sealed class ServiceProfileDialog : Form
 
     private bool suppressAppEvents;
 
-    /// <summary>The edited profile (valid after an OK result).</summary>
     public Profile Result => working;
-
-    /// <summary>Whether the service should write its own log — machine-wide, so it's returned separately
-    /// from the profile. Seeded from AppConfig; the caller writes it back to AppConfig on OK.</summary>
     public bool ServiceLoggingEnabled { get; private set; }
 
     public ServiceProfileDialog(Profile current, bool serviceLoggingEnabled)
@@ -65,12 +63,14 @@ internal sealed class ServiceProfileDialog : Form
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterParent;
         KeyPreview = true;
-        ClientSize = new Size(540, 560);
+        ClientSize = new Size(560, 580);
         AccessibleName = "Configure RemSound service profile";
+        if (Theme.AppIcon is { } icon) Icon = icon;
 
+        // Tabs in the main window's order: Connectivity, Audio send, Audio profile.
+        BuildConnectivityTab();
         BuildAudioSendTab();
         BuildAudioProfileTab();
-        BuildConnectivityTab();
         BuildButtonRow();
 
         LoadFromProfile();
@@ -85,20 +85,47 @@ internal sealed class ServiceProfileDialog : Form
 
     // ---------------- layout ----------------
 
-    private TableLayoutPanel NewColumn() => new()
+    private static TableLayoutPanel NewPanel()
     {
-        Dock = DockStyle.Fill,
-        ColumnCount = 2,
-        AutoScroll = true,
-        Padding = new Padding(10),
-    };
+        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoScroll = true, Padding = new Padding(12) };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        return panel;
+    }
+
+    private void BuildConnectivityTab()
+    {
+        var page = new TabPage("Connectivity");
+        var panel = NewPanel();
+
+        AddListRow(panel, 0, "Peers to send to (Alt+&1)", peersList);
+
+        var addLabel = new MnemonicLabel { Text = "Add a peer — IP address or hostname (Alt+&2)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = addPeerBox };
+        panel.Controls.Add(addLabel, 0, 1);
+        var addRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        addRow.Controls.Add(addPeerBox);
+        addRow.Controls.Add(addPeerButton);
+        addRow.Controls.Add(removePeerButton);
+        panel.Controls.Add(addRow, 1, 1);
+
+        addPeerButton.Click += (_, _) => AddPeerFromBox();
+        removePeerButton.Click += (_, _) => { if (peersList.SelectedItem is string s) peersList.Items.Remove(s); };
+        addPeerBox.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { AddPeerFromBox(); e.SuppressKeyPress = true; } };
+
+        var pwWrap = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        pwWrap.Controls.Add(passwordButton);
+        pwWrap.Controls.Add(passwordStatus);
+        panel.Controls.Add(pwWrap, 1, 2);
+        passwordButton.Click += (_, _) => SetPassword();
+
+        page.Controls.Add(panel);
+        tabs.TabPages.Add(page);
+    }
 
     private void BuildAudioSendTab()
     {
         var page = new TabPage("Audio send");
-        var panel = NewColumn();
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        var panel = NewPanel();
 
         sendModeList.Items.Add("Send whole audio devices");
         sendModeList.Items.Add("Send specific applications");
@@ -106,13 +133,17 @@ internal sealed class ServiceProfileDialog : Form
         sendModeList.SelectedIndexChanged += (_, _) => { if (!suppressAppEvents) ApplySendModeVisibility(); };
         sendAllAppsBox.CheckedChanged += (_, _) => { if (!suppressAppEvents) ApplySendModeVisibility(); };
 
-        sendModeLabel = AddListRow(panel, 0, "How to send WASAPI audio (Alt+&6)", sendModeList);
-        outputsLabel = AddListRow(panel, 1, "WASAPI audio outputs to send (Alt+&4)", outputsList);
+        sendModeLabel = AddListRow(panel, 0, "How to send WASAPI audio (Alt+&1)", sendModeList);
+        outputsLabel = FormLayoutRows.AddCheckedListRow(panel, 1, "WASAPI audio outputs to send (Alt+&2)", outputsList, outputsStatus, l => l.Focus());
         var allAppsWrap = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         allAppsWrap.Controls.Add(sendAllAppsBox);
         panel.Controls.Add(allAppsWrap, 1, 2);
-        appsLabel = AddListRow(panel, 3, "Applications to send (Alt+&8)", appsList);
-        inputsLabel = AddListRow(panel, 4, "WASAPI audio inputs to send (Alt+&5)", inputsList);
+        appsLabel = FormLayoutRows.AddCheckedListRow(panel, 3, "Applications to send (Alt+&4)", appsList, appsStatus, l => l.Focus());
+        inputsLabel = FormLayoutRows.AddCheckedListRow(panel, 4, "WASAPI audio inputs to send (Alt+&5)", inputsList, inputsStatus, l => l.Focus());
+
+        CheckedListAccessibility.Wire(outputsList, outputsStatus, "output device");
+        CheckedListAccessibility.Wire(appsList, appsStatus, "application");
+        CheckedListAccessibility.Wire(inputsList, inputsStatus, "input device");
 
         page.Controls.Add(panel);
         tabs.TabPages.Add(page);
@@ -121,54 +152,25 @@ internal sealed class ServiceProfileDialog : Form
     private void BuildAudioProfileTab()
     {
         var page = new TabPage("Audio profile");
-        var panel = NewColumn();
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        var panel = NewPanel();
 
+        // Exact same codec choices, packet-size items and lock-to-clock label as the main window.
         codecBox.Items.AddRange(new object[]
         {
-            new CodecChoice("Uncompressed PCM (best quality, most bandwidth)", AudioTransportCodec.Pcm, 480),
-            new CodecChoice("Opus broadcast quality (20 ms, loss tolerant)", AudioTransportCodec.Opus, 960),
-            new CodecChoice("Opus live latency (2.5 ms, for jamming)", AudioTransportCodec.Opus, 120),
+            new CodecChoice("PCM 48K 24 bit — uncompressed", AudioTransportCodec.Pcm, 0),
+            new CodecChoice("Opus, broadcast quality — loss tolerant", AudioTransportCodec.Opus, 960),
+            new CodecChoice("Opus, live latency — for jamming and monitoring", AudioTransportCodec.Opus, 120),
         });
-        sendRateBox.Items.AddRange(new object[] { SendRate.Standard, SendRate.Tight });
+        sendRateBox.Items.Add("Standard (5 ms PCM, 10/20 ms Opus)");
+        sendRateBox.Items.Add("Small (2.5 ms PCM, 5/10 ms Opus, LAN only)");
+        tightLatencyBox.Text = "Lock to au&dio clock, WASAPI sender";
+        tightLatencyBox.AccessibleName = "Lock to audio clock (Alt+D) — sender uses the WASAPI capture event for timing instead of a Stopwatch tick. Tightens delay; brief clicks possible if the link can't keep up.";
 
-        AddControlRow(panel, 0, "Audio &codec (Alt+C)", codecBox);
-        AddControlRow(panel, 1, "Send rat&e (Alt+E)", sendRateBox);
+        FormLayoutRows.AddRow(panel, 0, "Audio &codec (Alt+C)", codecBox, c => c.Focus());
+        FormLayoutRows.AddRow(panel, 1, "&Packet size (Alt+P)", sendRateBox, c => c.Focus());
         var tightWrap = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         tightWrap.Controls.Add(tightLatencyBox);
         panel.Controls.Add(tightWrap, 1, 2);
-
-        page.Controls.Add(panel);
-        tabs.TabPages.Add(page);
-    }
-
-    private void BuildConnectivityTab()
-    {
-        var page = new TabPage("Connectivity");
-        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoScroll = true, Padding = new Padding(10) };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-
-        AddListRow(panel, 0, "Peers to send to (Alt+&P)", peersList);
-
-        var addRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        addRow.Controls.Add(addPeerBox);
-        addRow.Controls.Add(addPeerButton);
-        addRow.Controls.Add(removePeerButton);
-        var addLabel = new MnemonicLabel { Text = "Add peer (Alt+&A)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = addPeerBox };
-        panel.Controls.Add(addLabel, 0, 1);
-        panel.Controls.Add(addRow, 1, 1);
-
-        addPeerButton.Click += (_, _) => AddPeerFromBox();
-        removePeerButton.Click += (_, _) => { if (peersList.SelectedItem is string s) { peersList.Items.Remove(s); } };
-        addPeerBox.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { AddPeerFromBox(); e.SuppressKeyPress = true; } };
-
-        var pwWrap = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        pwWrap.Controls.Add(passwordButton);
-        pwWrap.Controls.Add(passwordStatus);
-        panel.Controls.Add(pwWrap, 1, 2);
-        passwordButton.Click += (_, _) => SetPassword();
 
         page.Controls.Add(panel);
         tabs.TabPages.Add(page);
@@ -200,14 +202,6 @@ internal sealed class ServiceProfileDialog : Form
         return l;
     }
 
-    private void AddControlRow(TableLayoutPanel panel, int row, string label, Control control)
-    {
-        var l = new MnemonicLabel { Text = label, AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = control };
-        l.Click += (_, _) => control.Focus();
-        panel.Controls.Add(l, 0, row);
-        panel.Controls.Add(control, 1, row);
-    }
-
     // ---------------- data in/out ----------------
 
     private void LoadFromProfile()
@@ -225,7 +219,7 @@ internal sealed class ServiceProfileDialog : Form
             PopulateAppsList();
 
             SelectCodec();
-            sendRateBox.SelectedItem = working.SendRate;
+            sendRateBox.SelectedIndex = Math.Clamp((int)working.SendRate, 0, sendRateBox.Items.Count - 1);
             tightLatencyBox.Checked = working.TightLatencyMode;
 
             peersList.Items.Clear();
@@ -244,7 +238,7 @@ internal sealed class ServiceProfileDialog : Form
         working.SelectedSendApplications = appsList.CheckedItems.OfType<AppRow>().Select(a => a.ProcessName).Distinct().ToList();
 
         if (codecBox.SelectedItem is CodecChoice c) { working.Codec = c.Codec; working.OpusFrameSamplesPerChannel = c.OpusFrameSamples; }
-        if (sendRateBox.SelectedItem is SendRate r) working.SendRate = r;
+        working.SendRate = (SendRate)Math.Max(0, sendRateBox.SelectedIndex);
         working.TightLatencyMode = tightLatencyBox.Checked;
 
         var peers = peersList.Items.OfType<string>().Distinct().ToList();
@@ -252,7 +246,7 @@ internal sealed class ServiceProfileDialog : Form
         working.RememberedPeers = peers;
     }
 
-    private void PopulateDeviceList(CheckedListBox list, IReadOnlyList<AudioDeviceChoice> devices, IReadOnlyList<string> checkedIds)
+    private static void PopulateDeviceList(CheckedListBox list, IReadOnlyList<AudioDeviceChoice> devices, IReadOnlyList<string> checkedIds)
     {
         list.Items.Clear();
         var wanted = new HashSet<string>(checkedIds, StringComparer.OrdinalIgnoreCase);
@@ -326,7 +320,7 @@ internal sealed class ServiceProfileDialog : Form
     {
         var current = string.IsNullOrEmpty(working.Password) ? "" : RemSoundCrypto.Deobfuscate(working.Password);
         var result = ProfilePasswordDialog.Show(ServiceControl.ServiceProfileTitle, current);
-        if (result is null) return; // cancelled
+        if (result is null) return;
         working.Password = string.IsNullOrEmpty(result) ? null : RemSoundCrypto.Obfuscate(result);
         UpdatePasswordStatus();
     }
@@ -368,8 +362,6 @@ internal sealed class ServiceProfileDialog : Form
     private static Profile CloneProfile(Profile p) =>
         System.Text.Json.JsonSerializer.Deserialize<Profile>(System.Text.Json.JsonSerializer.Serialize(p)) ?? new Profile();
 
-    /// <summary>One row in the applications list. Identity is the process name; display adds a
-    /// "(not running)" hint for a remembered-but-closed app.</summary>
     private sealed class AppRow
     {
         public string ProcessName { get; }
