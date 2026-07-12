@@ -30,6 +30,15 @@ public sealed class ServiceSendHost : IDisposable
     private bool running;      // the engine is actively sending
     private bool disposed;
 
+    // Event-driven device-set watcher (the same mechanism the main window uses): it fires ONLY when a
+    // device is added/removed/changes state or the default changes — no background polling, nothing that
+    // builds up. While the service should be sending, that's our cue to (re)open capture: it covers the
+    // audio stack finishing coming up at boot, a device being plugged/unplugged, and the audio service
+    // restarting. Debounced because one hot-plug fires several notifications in quick succession.
+    private AudioDeviceChangeNotifier? deviceNotifier;
+    private volatile bool wantSending;     // true while the app is absent and we intend to stream
+    private long lastDeviceChangeTick;
+
     /// <param name="loadProfile">Supplies the current service profile (re-read on each resume so edits
     /// are picked up). Returns null if none is configured.</param>
     /// <param name="log">Optional diagnostic sink.</param>
@@ -112,59 +121,61 @@ public sealed class ServiceSendHost : IDisposable
     internal void RunLoopWithToken(CancellationToken ct, string tokenName, int pollMs, int resumeSettleMs)
         => RunLoopCore(ct, () => InteractivePresence.IsInteractiveAppRunning(tokenName), pollMs, resumeSettleMs);
 
-    private void RunLoopCore(CancellationToken ct, Func<bool> isAppPresent, int pollMs, int resumeSettleMs, int healthMs = 5000)
+    private void RunLoopCore(CancellationToken ct, Func<bool> isAppPresent, int pollMs, int resumeSettleMs)
     {
+        // Register the event-driven device watcher for the life of the loop. Its callback re-opens
+        // capture when the device set changes, so we never poll for device readiness.
+        try { deviceNotifier ??= new AudioDeviceChangeNotifier(OnDeviceSetChanged); }
+        catch (Exception ex) { log?.Invoke($"service: device-change watcher unavailable ({ex.GetType().Name}) — relying on app-transition re-opens"); }
+
         var appWasPresent = true; // force an initial evaluation
         var absentSince = Environment.TickCount64;
-        long healthBaseline = -1;          // packet count at the last health check (-1 = not yet baselined)
-        var lastHealthTick = Environment.TickCount64;
+        var triedThisAbsence = false;
         while (!ct.IsCancellationRequested)
         {
             var appPresent = isAppPresent();
             if (appPresent)
             {
+                wantSending = false;
                 if (IsSending) Suspend();
                 absentSince = long.MaxValue;
-                healthBaseline = -1;
+                triedThisAbsence = false;
             }
             else
             {
-                if (appWasPresent) absentSince = Environment.TickCount64; // app just left — start the settle timer
+                if (appWasPresent) { absentSince = Environment.TickCount64; triedThisAbsence = false; } // app just left
                 if (Environment.TickCount64 - absentSince >= resumeSettleMs)
                 {
-                    if (!IsSending)
-                    {
-                        // Keep trying to (re)start every poll until it succeeds — covers a boot where the
-                        // audio stack / a device isn't ready yet, and a device that returns later.
-                        Resume();
-                        healthBaseline = -1;
-                        lastHealthTick = Environment.TickCount64;
-                    }
-                    else if (Environment.TickCount64 - lastHealthTick >= healthMs)
-                    {
-                        // Self-heal: we THINK we're sending, but if no packets have flowed since the last
-                        // check then no capture is actually running (devices weren't ready when we started,
-                        // a device dropped, or the audio service restarted). Re-open the capture.
-                        lastHealthTick = Environment.TickCount64;
-                        var packets = sender.PacketsSent;
-                        if (healthBaseline >= 0 && packets == healthBaseline)
-                        {
-                            log?.Invoke("service: no audio flowing while sending — re-opening capture");
-                            Suspend();
-                            Resume();
-                            healthBaseline = -1;
-                        }
-                        else
-                        {
-                            healthBaseline = packets;
-                        }
-                    }
+                    wantSending = true;
+                    // One start attempt per absence. If capture isn't ready yet (audio stack still coming
+                    // up at boot, device absent), the device-change watcher re-opens it the moment a device
+                    // appears — no per-tick retry loop that would keep churning in the background.
+                    if (!triedThisAbsence && !IsSending) { Resume(); triedThisAbsence = true; }
                 }
             }
             appWasPresent = appPresent;
             ct.WaitHandle.WaitOne(pollMs);
         }
+        wantSending = false;
         Suspend();
+    }
+
+    /// <summary>Device-set change callback (COM thread). While we intend to send, (re)open capture — this
+    /// is the event that fires when the audio stack finishes coming up at boot, a device is plugged or
+    /// unplugged, or the audio service restarts. Debounced: a single hot-plug fires several notifications.</summary>
+    private void OnDeviceSetChanged()
+    {
+        if (!wantSending || disposed) return;
+        var now = Environment.TickCount64;
+        lock (gate)
+        {
+            if (now - lastDeviceChangeTick < 750) return; // coalesce the burst
+            lastDeviceChangeTick = now;
+        }
+        var profile = loadProfile();
+        if (profile is null) return;
+        Suspend();
+        ApplyProfile(profile);
     }
 
     // WASAPI-only send specs from a profile. Mirrors the app's applications-vs-devices logic but never
@@ -254,6 +265,8 @@ public sealed class ServiceSendHost : IDisposable
             if (disposed) return;
             disposed = true;
         }
+        wantSending = false;
+        try { deviceNotifier?.Dispose(); } catch { } deviceNotifier = null;
         try { sender.Stop(); } catch { }
         try { sender.Dispose(); } catch { }
     }
