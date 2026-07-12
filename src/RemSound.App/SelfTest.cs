@@ -61,6 +61,7 @@ internal static class SelfTest
         RunStep(results, "Multi-output fan-out (both lanes)", FanOutToBothOutputs);
         RunStep(results, "Per-application send enumeration", AppSendEnumeration);
         RunStep(results, "Per-application capture lifecycle", AppSendCaptureLifecycle);
+        RunStep(results, "Lifecycle churn (modes, sources, pan/EQ, send/receive)", LifecycleChurn);
         RunStep(results, "v5 settings and shaping round-trip", V5ConfigRoundTrip);
         RunStep(results, "Profile save and reload", ProfileRoundTrip);
         RunStep(results, "What's-new update marker", WhatsNewMarkerRoundTrip);
@@ -308,6 +309,150 @@ internal static class SelfTest
             cycles++;
         }
         return $"ran {cycles} start/stop/dispose cycles on pid {pid} with no crash";
+    }
+
+    /// <summary>Soak test for runtime lifecycle transitions — the class of bug that hard-crashed when Ed
+    /// toggled the ASIO driver mid-app-send. Drives a REAL sender+receiver pair over loopback through a
+    /// matrix of transitions in every combination: audio mode, send sources (incl. process-loopback torn
+    /// down and rebuilt), receive outputs, per-peer pan/EQ on and off, codec, and tight-latency — then a
+    /// rapid reconfigure loop. Any unsafe teardown crashes the whole test process and fails the gate;
+    /// otherwise it also checks handles don't run away across the churn. These transitions take an age to
+    /// cover by hand and regress easily, so they live here.
+    ///
+    /// Real ASIO hardware cycling is OPT-IN via the REMSOUND_TEST_ASIO env var ("1" = first installed
+    /// driver, or a driver name) so routine builds never open — and possibly hang or lock — a real audio
+    /// interface. Without it the churn still covers the WASAPI + process-loopback teardown paths that
+    /// actually crashed.</summary>
+    private static string? LifecycleChurn()
+    {
+        const int port = 47844;
+        var ownPid = Process.GetCurrentProcess().Id;
+        var procOk = RemSound.Sender.ProcessLoopbackCapture.IsSupported;
+
+        string? deviceId = null;
+        try { deviceId = AudioDeviceCatalog.LoadOutputs().FirstOrDefault(o => o.DeviceId is not null)?.DeviceId; }
+        catch { /* headless / no devices — still churn modes, proc capture and DSP */ }
+
+        string? asioDriver = null;
+        var asioEnv = Environment.GetEnvironmentVariable("REMSOUND_TEST_ASIO");
+        if (!string.IsNullOrWhiteSpace(asioEnv))
+        {
+            try
+            {
+                var drivers = RemSound.Sender.AsioDeviceProbe.EnumerateDriverNames();
+                asioDriver = string.Equals(asioEnv, "1", StringComparison.Ordinal)
+                    ? drivers.FirstOrDefault()
+                    : drivers.FirstOrDefault(d => string.Equals(d, asioEnv, StringComparison.OrdinalIgnoreCase));
+            }
+            catch { /* driver probe failed — fall back to WASAPI-only churn */ }
+        }
+
+        // DSP states: none, a plain volume cut, and a full pan + parametric-EQ chain.
+        var panEq = new PeerShaping { Volume = 0.7f, Pan = -0.3f, EqMode = PeerEqMode.Parametric16Band };
+        panEq.ParametricBands.Add(new ParametricBand { StartHz = 200, EndHz = 800, GainDb = 5 });
+        var dspStates = new PeerDspChain?[]
+        {
+            null,
+            PeerDspChain.Build(new PeerShaping { Volume = 0.5f }, enabled: true),
+            PeerDspChain.Build(panEq, enabled: true),
+        };
+
+        // Send spec sets: empty, device loopback, process-loopback (own pid), and both together — so the
+        // process-loopback capture is repeatedly torn down and rebuilt (the crash path).
+        var loop = deviceId is null ? null : new CaptureSourceSpec(deviceId, CaptureKind.Loopback, "loopback");
+        var proc = procOk ? new CaptureSourceSpec(ProcessLoopbackId.Format(ownPid), CaptureKind.ProcessLoopback, "self") : null;
+        var specSets = new List<List<CaptureSourceSpec>> { new() };
+        if (loop is not null) specSets.Add(new() { loop });
+        if (proc is not null) specSets.Add(new() { proc });
+        if (loop is not null && proc is not null) specSets.Add(new() { loop, proc });
+
+        var recvSets = new List<string[]> { Array.Empty<string>() };
+        if (deviceId is not null) recvSets.Add(new[] { deviceId });
+
+        var handlesBefore = SafeHandleCount();
+        var transitions = 0;
+
+        using (var receiver = new AudioReceiver())
+        using (var sender = new RemSound.Sender.AudioSender())
+        {
+            try { receiver.Start(port); }
+            catch (Exception ex) { return Skip($"could not bind test port {port}: {ex.Message}"); }
+            receiver.SetOutputDevices(Array.Empty<string>());   // decode only — never make a sound
+            sender.SetReceivers(new[] { new IPEndPoint(IPAddress.Loopback, port) });
+            sender.Start();
+
+            var modes = new List<(AudioMode mode, string? driver)> { (AudioMode.WasapiOnly, null) };
+            if (asioDriver is not null) modes.Add((AudioMode.BothIndependent, asioDriver));
+            var codecs = new[] { AudioTransportCodec.Pcm, AudioTransportCodec.Opus };
+
+            var i = 0;
+            foreach (var (mode, driver) in modes)
+            {
+                sender.SetAudioMode(mode, driver);
+                receiver.SetAudioMode(mode, driver);
+                foreach (var specs in specSets)
+                {
+                    sender.Configure(specs);
+                    foreach (var recv in recvSets) receiver.SetOutputDevices(recv);
+                    foreach (var dsp in dspStates)
+                    {
+                        receiver.SetPeerDsp(IPAddress.Loopback, dsp);
+                        sender.ConfigureCodec(codecs[i % codecs.Length]);
+                        sender.SetTightLatency(i % 2 == 0);
+                        Thread.Sleep(15);
+                        transitions++;
+                        i++;
+                    }
+                }
+            }
+
+            // Rapid WASAPI-only reconfigure loop: hammer the process-loopback capture teardown/rebuild —
+            // the mechanism that actually crashed. No mode changes here, so it never abuses real hardware.
+            sender.SetAudioMode(AudioMode.WasapiOnly, null);
+            receiver.SetAudioMode(AudioMode.WasapiOnly, null);
+            for (var k = 0; k < 24; k++)
+            {
+                sender.Configure(specSets[k % specSets.Count]);
+                receiver.SetPeerDsp(IPAddress.Loopback, dspStates[k % dspStates.Length]);
+                Thread.Sleep(10);
+                transitions++;
+            }
+
+            // Gentle ASIO on/off cycling (opt-in only), with a process-loopback source live across the
+            // toggle — the exact Ed repro. Generous settle time between toggles: some ASIO drivers
+            // (e.g. Audient) stall for seconds on a quick close+reopen, so we must NOT hammer them.
+            if (asioDriver is not null)
+            {
+                for (var k = 0; k < 4; k++)
+                {
+                    var toBoth = k % 2 == 0;
+                    var mode = toBoth ? AudioMode.BothIndependent : AudioMode.WasapiOnly;
+                    var driver = toBoth ? asioDriver : null;
+                    sender.SetAudioMode(mode, driver);
+                    receiver.SetAudioMode(mode, driver);
+                    if (proc is not null) sender.Configure(new List<CaptureSourceSpec> { proc });
+                    Thread.Sleep(600);
+                    transitions++;
+                }
+                sender.SetAudioMode(AudioMode.WasapiOnly, null);
+                receiver.SetAudioMode(AudioMode.WasapiOnly, null);
+            }
+
+            sender.Stop();
+            receiver.Stop();
+        }
+
+        var handleGrowth = SafeHandleCount() - handlesBefore;
+        Check(handleGrowth < 400, $"handle growth across the churn is too high ({handleGrowth}) — a transition may be leaking");
+
+        return $"{transitions} transitions; specSets={specSets.Count}, dsp={dspStates.Length}, "
+             + $"asio={(asioDriver ?? "skipped (set REMSOUND_TEST_ASIO)")}, proc={procOk}, handles+{handleGrowth}";
+    }
+
+    private static int SafeHandleCount()
+    {
+        try { using var p = Process.GetCurrentProcess(); p.Refresh(); return p.HandleCount; }
+        catch { return 0; }
     }
 
     /// <summary>The v5 machine-wide settings and per-peer shaping survive a JSON save/reload: new
