@@ -66,6 +66,7 @@ internal static class SelfTest
         RunStep(results, "Service send host (headless stream + yield)", ServiceSendHostStream);
         RunStep(results, "Service registration args", ServiceRegistrationArgs);
         RunStep(results, "Recording engine (all formats + source gate + mono)", RecordingEngine);
+        RunStep(results, "Recording churn / soak", RecordingChurn);
         RunStep(results, "v5 settings and shaping round-trip", V5ConfigRoundTrip);
         RunStep(results, "Profile save and reload", ProfileRoundTrip);
         RunStep(results, "What's-new update marker", WhatsNewMarkerRoundTrip);
@@ -389,26 +390,35 @@ internal static class SelfTest
             if (asioDriver is not null) modes.Add((AudioMode.BothIndependent, asioDriver));
             var codecs = new[] { AudioTransportCodec.Pcm, AudioTransportCodec.Opus };
 
+            // Soak: with REMSOUND_TEST_SOAK=<seconds> set, repeat the whole transition matrix until the
+            // deadline (a real minutes-long soak); unset, it runs the matrix once in the normal gate.
+            int.TryParse(Environment.GetEnvironmentVariable("REMSOUND_TEST_SOAK"), out var soakSeconds);
+            var deadline = Environment.TickCount64 + Math.Max(0, soakSeconds) * 1000L;
+
             var i = 0;
-            foreach (var (mode, driver) in modes)
+            do
             {
-                sender.SetAudioMode(mode, driver);
-                receiver.SetAudioMode(mode, driver);
-                foreach (var specs in specSets)
+                foreach (var (mode, driver) in modes)
                 {
-                    sender.Configure(specs);
-                    foreach (var recv in recvSets) receiver.SetOutputDevices(recv);
-                    foreach (var dsp in dspStates)
+                    sender.SetAudioMode(mode, driver);
+                    receiver.SetAudioMode(mode, driver);
+                    foreach (var specs in specSets)
                     {
-                        receiver.SetPeerDsp(IPAddress.Loopback, dsp);
-                        sender.ConfigureCodec(codecs[i % codecs.Length]);
-                        sender.SetTightLatency(i % 2 == 0);
-                        Thread.Sleep(15);
-                        transitions++;
-                        i++;
+                        sender.Configure(specs);
+                        foreach (var recv in recvSets) receiver.SetOutputDevices(recv);
+                        foreach (var dsp in dspStates)
+                        {
+                            receiver.SetPeerDsp(IPAddress.Loopback, dsp);
+                            sender.ConfigureCodec(codecs[i % codecs.Length]);
+                            sender.SetTightLatency(i % 2 == 0);
+                            Thread.Sleep(15);
+                            transitions++;
+                            i++;
+                        }
                     }
                 }
             }
+            while (Environment.TickCount64 < deadline);
 
             // Rapid WASAPI-only reconfigure loop: hammer the process-loopback capture teardown/rebuild —
             // the mechanism that actually crashed. No mode changes here, so it never abuses real hardware.
@@ -446,6 +456,7 @@ internal static class SelfTest
             receiver.Stop();
         }
 
+        SettleForLeakCheck();
         var handleGrowth = SafeHandleCount() - handlesBefore;
         Check(handleGrowth < 400, $"handle growth across the churn is too high ({handleGrowth}) — a transition may be leaking");
 
@@ -457,6 +468,20 @@ internal static class SelfTest
     {
         try { using var p = Process.GetCurrentProcess(); p.Refresh(); return p.HandleCount; }
         catch { return 0; }
+    }
+
+    /// <summary>Force pending finalizers/GC and give the OS a moment to release handles, so a leak check
+    /// after a churn reflects genuine leaks rather than not-yet-collected disposables (which pile up
+    /// under fast churn and would otherwise false-flag a long soak).</summary>
+    private static void SettleForLeakCheck()
+    {
+        for (var i = 0; i < 3; i++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            Thread.Sleep(60);
+        }
     }
 
     /// <summary>Records a short synthetic tone to disk in every output format and checks each file is
@@ -504,6 +529,40 @@ internal static class SelfTest
             Check(monoLen > 200, $"mono WAV must have real content (got {monoLen} bytes)");
 
             return string.Join(", ", summary) + $"; gate ok; mono={monoLen}B";
+        }
+        finally { try { Directory.Delete(temp, recursive: true); } catch { /* best-effort */ } }
+    }
+
+    /// <summary>Load/soak: rapidly start, feed, stop and dispose recordings across every format, checking
+    /// nothing leaks handles across the churn — catches recorder/encoder lifecycle leaks and races that a
+    /// single recording wouldn't surface. Set the env var REMSOUND_TEST_SOAK=&lt;seconds&gt; to keep
+    /// hammering for that long (a real soak run); unset it does one quick round in the normal gate.</summary>
+    private static string? RecordingChurn()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "remsound-recchurn-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            int.TryParse(Environment.GetEnvironmentVariable("REMSOUND_TEST_SOAK"), out var soakSeconds);
+            var deadline = Environment.TickCount64 + Math.Max(0, soakSeconds) * 1000L;
+            var formats = new[] { RecordingFileFormat.Wav, RecordingFileFormat.Mp3, RecordingFileFormat.Ogg, RecordingFileFormat.Flac };
+            var handlesBefore = SafeHandleCount();
+            var cycles = 0;
+            do
+            {
+                foreach (var fmt in formats)
+                {
+                    var path = Path.Combine(temp, $"c{cycles}.{AudioRecorder.ExtensionFor(fmt)}");
+                    RecordTone(temp, path, new RecordingSettings { FileFormat = fmt, Source = RecordingSource.Both }, feedReceived: true, feedSent: true);
+                    try { File.Delete(path); } catch { /* best-effort */ }
+                    cycles++;
+                }
+            }
+            while (Environment.TickCount64 < deadline);
+            SettleForLeakCheck();
+            var growth = SafeHandleCount() - handlesBefore;
+            Check(growth < 500, $"handle growth across {cycles} record cycles is too high ({growth}) — a recorder may be leaking");
+            return $"{cycles} record start/stop/dispose cycles; handles+{growth}" + (soakSeconds > 0 ? $"; soak={soakSeconds}s" : "");
         }
         finally { try { Directory.Delete(temp, recursive: true); } catch { /* best-effort */ } }
     }
