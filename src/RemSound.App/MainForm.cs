@@ -8172,6 +8172,21 @@ public sealed class MainForm : Form
         return profile;
     }
 
+    /// <summary>Test-only: push a profile INTO the real controls and read it straight back OUT, so a
+    /// self-test can prove every persisted control both loads and saves correctly. Headless forms only
+    /// (a real form would try to reconnect peers etc.); pass a profile with no peers.</summary>
+    internal Profile ApplyThenCaptureForTest(Profile input)
+    {
+        pendingProfile = input;
+        settings.ApplyProfile(input);
+        // Suppress the interactive "set a password to stream" gate that a real user apply would show —
+        // it would pop a modal dialog and hang the headless test. We only care about control round-trip.
+        suppressStreamingPasswordGate = true;
+        try { ApplyPendingProfileToControls(); }
+        finally { suppressStreamingPasswordGate = false; }
+        return BuildCurrentProfile(input.Title);
+    }
+
     /// <summary>Common save body — gathers all current state into a Profile and writes it.
     /// On success, becomes the active profile (sets currentProfileTitle, updates window
     /// title, refreshes button visibility, and shows a confirmation popup).</summary>

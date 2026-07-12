@@ -75,6 +75,7 @@ internal static class SelfTest
         RunStep(results, "Bundled resources present", ResourcesPresent);
         RunStep(results, "Dialog accessibility (names + mnemonics)", AccessibilityAudit);
         RunStep(results, "Main window coverage (all tabs + controls)", MainWindowCoverage);
+        RunStep(results, "Main window profile round-trip (controls load + save)", MainWindowProfileRoundTrip);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");
@@ -1048,6 +1049,53 @@ internal static class SelfTest
             return $"audited the whole main window: {tabs} tabs, {interactive} interactive controls — names, mnemonics and tab order clean";
         }
         finally { try { form.Dispose(); } catch { /* ignore */ } }
+    }
+
+    /// <summary>Functional round-trip through the REAL main-window controls: apply a profile to the
+    /// controls, read it back, and assert every persisted value survived — proving each control's load
+    /// AND save logic, not just that it exists. Uses the headless form with no peers (so nothing tries
+    /// to connect). Device ticks need real hardware ids so they're covered by the profile-store
+    /// round-trip test instead; this covers the hardware-independent controls.</summary>
+    private static string? MainWindowProfileRoundTrip()
+    {
+        MainForm mf;
+        try { mf = new MainForm(null, RemSound.Core.Profile.NewBlank(), null, null, headless: true); }
+        catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+
+        using (mf)
+        {
+            var input = new Profile
+            {
+                Title = "roundtrip",
+                Volume = 42,
+                Muted = true,
+                ReceiveAudioOn = true,
+                SendAudioOn = true,
+                EnableAllPeerShaping = true,
+                WasapiSendMode = "applications",
+                SendAllApplications = false,
+            };
+            input.SelectedSendApplications.Add("vlc");
+            input.SelectedSendApplications.Add("firefox");
+
+            var back = mf.ApplyThenCaptureForTest(input);
+
+            Check(back.Volume == 42, $"volume must round-trip through the controls (got {back.Volume})");
+            Check(back.Muted, "mute must round-trip through the controls");
+            Check(back.ReceiveAudioOn && back.SendAudioOn, "send/receive toggles must round-trip");
+            Check(back.EnableAllPeerShaping, "the peer-shaping master switch must round-trip");
+
+            var covered = "volume, mute, send/receive, shaping";
+            if (RemSound.Sender.ProcessLoopbackCapture.IsSupported)
+            {
+                Check(back.WasapiSendMode == "applications", $"send mode must round-trip (got {back.WasapiSendMode})");
+                Check(!back.SendAllApplications, "the send-all-applications toggle must round-trip");
+                Check(back.SelectedSendApplications.Contains("vlc") && back.SelectedSendApplications.Contains("firefox"),
+                    "the selected applications must round-trip through the app list");
+                covered += ", send-mode, apps";
+            }
+            return $"round-tripped through the real controls: {covered}";
+        }
     }
 
     private static int CountControls(Control root, Func<Control, bool> predicate)
