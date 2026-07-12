@@ -6566,6 +6566,10 @@ public sealed class MainForm : Form
         // to re-tick to get audio back.
         ApplyAudioRuntime();
         ApplyReceiveDevices();
+        // The block above force-set the WASAPI send-list visibility for the new mode. Re-assert the
+        // per-application send view on top so the loopback-outputs list stays hidden (and the app list
+        // shown) when we're in applications mode — ASIO toggling must not resurrect the wrong list.
+        ApplySendModeVisibility();
         if (wipedSomething) logFile.Event($"audio mode change wiped now-hidden device ticks");
     }
 

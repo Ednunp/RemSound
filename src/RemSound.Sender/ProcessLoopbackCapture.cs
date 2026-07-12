@@ -39,9 +39,11 @@ public sealed class ProcessLoopbackCapture : IWaveIn
     private readonly bool includeTree;
     private IAudioClient? audioClient;
     private IAudioCaptureClient? captureClient;
-    private EventWaitHandle? bufferReady;
+    private volatile EventWaitHandle? bufferReady;
     private Thread? captureThread;
     private volatile bool running;
+    private volatile bool stopRequested;
+    private volatile bool threadExited;
 
     public WaveFormat WaveFormat { get; set; } = CaptureFormat;
 
@@ -67,26 +69,38 @@ public sealed class ProcessLoopbackCapture : IWaveIn
         if (!IsSupported)
             throw new PlatformNotSupportedException("Process-loopback capture needs Windows 10 build 19041 or newer.");
 
-        Activate();
         running = true;
-        captureThread = new Thread(CaptureLoop)
+        stopRequested = false;
+        threadExited = false;
+        // The capture thread owns the ENTIRE COM lifecycle — it activates, runs, and releases every COM
+        // object itself before exiting. Nothing else ever touches those objects, so they can never be
+        // released out from under a running native call (the access-violation hard-crash we hit when a
+        // rebuild disposed the capture mid-GetBuffer). Activation is done on this thread too, so blocking
+        // on the async-activation callback can't stall the UI thread.
+        captureThread = new Thread(CaptureThreadMain)
         {
             IsBackground = true,
             Name = $"proc-loopback-{targetPid}",
             Priority = ThreadPriority.AboveNormal,
         };
+        // WASAPI / ActivateAudioInterfaceAsync want an MTA thread: the completion callback arrives on an
+        // MTA pool thread and we block waiting for it, so this must not be the STA UI thread.
+        captureThread.SetApartmentState(ApartmentState.MTA);
         captureThread.Start();
     }
 
     public void StopRecording()
     {
-        if (!running && captureThread == null) return;
-        running = false;
-        bufferReady?.Set(); // wake the loop so it can exit
-        captureThread?.Join(500);
+        var t = captureThread;
         captureThread = null;
-        try { audioClient?.Stop(); } catch { }
-        RecordingStopped?.Invoke(this, new StoppedEventArgs());
+        running = false;
+        stopRequested = true;
+        bufferReady?.Set(); // wake the loop so it exits promptly
+        // Only WAIT for the thread here; never release COM from this side. If the thread is wedged in a
+        // native call and doesn't return, we leak it rather than free objects from another thread and
+        // risk an access violation — a rare leak beats a hard crash. Guard against joining ourselves in
+        // case a RecordingStopped handler re-enters.
+        if (t is not null && t != Thread.CurrentThread) t.Join(2000);
     }
 
     private void Activate()
@@ -160,39 +174,16 @@ public sealed class ProcessLoopbackCapture : IWaveIn
         if (startHr != 0) Marshal.ThrowExceptionForHR(startHr);
     }
 
-    private void CaptureLoop()
+    /// <summary>The whole life of one process-loopback capture, start to finish, on a single MTA thread:
+    /// activate the client, pull audio until asked to stop (or an error), then release every COM object
+    /// here — never from another thread. RecordingStopped fires exactly once when the thread finishes.</summary>
+    private void CaptureThreadMain()
     {
         Exception? failure = null;
-        var frameBytes = CaptureFormat.BlockAlign; // 8 bytes (2ch * float)
         try
         {
-            while (running)
-            {
-                if (bufferReady!.WaitOne(200) == false) continue;
-                if (!running) break;
-
-                while (true)
-                {
-                    var hr = captureClient!.GetBuffer(out var dataPtr, out var frames, out var flags, out _, out _);
-                    if (hr != 0)
-                    {
-                        // AUDCLNT_S_BUFFER_EMPTY (0x08890001) — nothing to read this wake.
-                        if ((uint)hr == 0x08890001) break;
-                        Marshal.ThrowExceptionForHR(hr);
-                    }
-                    if (frames == 0) break;
-
-                    var byteCount = frames * frameBytes;
-                    var buffer = new byte[byteCount];
-                    const int AUDCLNT_BUFFERFLAGS_SILENT = 0x2;
-                    if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0)
-                        Marshal.Copy(dataPtr, buffer, 0, byteCount);
-                    // else leave zeroed — WASAPI signalled a silent packet.
-
-                    captureClient.ReleaseBuffer(frames);
-                    DataAvailable?.Invoke(this, new WaveInEventArgs(buffer, byteCount));
-                }
-            }
+            Activate();      // creates audioClient / captureClient / bufferReady on THIS thread
+            RunCaptureLoop();
         }
         catch (Exception ex)
         {
@@ -200,18 +191,66 @@ public sealed class ProcessLoopbackCapture : IWaveIn
         }
         finally
         {
-            if (failure != null)
-                RecordingStopped?.Invoke(this, new StoppedEventArgs(failure));
+            TeardownComOnThisThread();
+            running = false;
+            threadExited = true;
+            RecordingStopped?.Invoke(this, new StoppedEventArgs(failure));
         }
+    }
+
+    private void RunCaptureLoop()
+    {
+        var frameBytes = CaptureFormat.BlockAlign; // 8 bytes (2ch * float)
+        while (!stopRequested)
+        {
+            if (bufferReady!.WaitOne(200) == false) continue;
+            if (stopRequested) break;
+
+            while (!stopRequested)
+            {
+                var hr = captureClient!.GetBuffer(out var dataPtr, out var frames, out var flags, out _, out _);
+                if (hr != 0)
+                {
+                    // AUDCLNT_S_BUFFER_EMPTY (0x08890001) — nothing to read this wake.
+                    if ((uint)hr == 0x08890001) break;
+                    Marshal.ThrowExceptionForHR(hr);
+                }
+                if (frames == 0) break;
+
+                var byteCount = frames * frameBytes;
+                var buffer = new byte[byteCount];
+                const int AUDCLNT_BUFFERFLAGS_SILENT = 0x2;
+                if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0)
+                    Marshal.Copy(dataPtr, buffer, 0, byteCount);
+                // else leave zeroed — WASAPI signalled a silent packet.
+
+                captureClient.ReleaseBuffer(frames);
+                DataAvailable?.Invoke(this, new WaveInEventArgs(buffer, byteCount));
+            }
+        }
+    }
+
+    /// <summary>Releases the COM objects on the capture thread (the only thread that ever touches them).
+    /// Stop the client before releasing so no callback is in flight.</summary>
+    private void TeardownComOnThisThread()
+    {
+        try { audioClient?.Stop(); } catch { }
+        try { audioClient?.Reset(); } catch { }
+        if (captureClient != null) { try { Marshal.ReleaseComObject(captureClient); } catch { } captureClient = null; }
+        if (audioClient != null) { try { Marshal.ReleaseComObject(audioClient); } catch { } audioClient = null; }
     }
 
     public void Dispose()
     {
         StopRecording();
-        if (captureClient != null) { try { Marshal.ReleaseComObject(captureClient); } catch { } captureClient = null; }
-        if (audioClient != null) { try { Marshal.ReleaseComObject(audioClient); } catch { } audioClient = null; }
-        bufferReady?.Dispose();
-        bufferReady = null;
+        // Dispose the wait handle only once the thread has genuinely exited (it uses the handle). If the
+        // thread wedged and StopRecording's join timed out, leave the handle alone rather than pull it
+        // from under a live WaitOne — the leak is bounded and safe; a use-after-free would not be.
+        if (threadExited)
+        {
+            bufferReady?.Dispose();
+            bufferReady = null;
+        }
     }
 
     // ---- Async activation completion handler -------------------------------------------------

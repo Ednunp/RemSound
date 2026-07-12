@@ -60,6 +60,7 @@ internal static class SelfTest
         RunStep(results, "Per-peer shaping DSP", PeerShapingDsp);
         RunStep(results, "Multi-output fan-out (both lanes)", FanOutToBothOutputs);
         RunStep(results, "Per-application send enumeration", AppSendEnumeration);
+        RunStep(results, "Per-application capture lifecycle", AppSendCaptureLifecycle);
         RunStep(results, "v5 settings and shaping round-trip", V5ConfigRoundTrip);
         RunStep(results, "Profile save and reload", ProfileRoundTrip);
         RunStep(results, "What's-new update marker", WhatsNewMarkerRoundTrip);
@@ -282,6 +283,31 @@ internal static class SelfTest
         Check(supported == OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041),
             "support gate disagrees with the OS build check");
         return $"enumerated {apps.Count} app(s); process-loopback supported={supported}";
+    }
+
+    /// <summary>Exercises the process-loopback capture's real start → run → teardown cycle several times
+    /// against our OWN process, on hardware. This is the regression guard for the ASIO-toggle hard crash:
+    /// a bad COM teardown (releasing objects from the wrong thread / mid-native-call) would take the whole
+    /// test process down with an access violation, failing the gate. SKIP on Windows too old to support
+    /// process loopback.</summary>
+    private static string? AppSendCaptureLifecycle()
+    {
+        if (!RemSound.Sender.ProcessLoopbackCapture.IsSupported)
+            return Skip("process loopback needs Windows 10 build 19041+");
+
+        var pid = Process.GetCurrentProcess().Id;
+        var cycles = 0;
+        for (var i = 0; i < 3; i++)
+        {
+            var capture = new RemSound.Sender.ProcessLoopbackCapture(pid);
+            var frames = 0L;
+            capture.DataAvailable += (_, e) => Interlocked.Add(ref frames, e.BytesRecorded);
+            capture.StartRecording();
+            Thread.Sleep(150);         // let activation + the capture loop run and then be torn down
+            capture.Dispose();          // teardown while the capture thread is live — the crash scenario
+            cycles++;
+        }
+        return $"ran {cycles} start/stop/dispose cycles on pid {pid} with no crash";
     }
 
     /// <summary>The v5 machine-wide settings and per-peer shaping survive a JSON save/reload: new
