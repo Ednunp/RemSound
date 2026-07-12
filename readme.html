@@ -31,7 +31,7 @@ ul, ol { padding-left: 1.4em; }
 <li><a href="#quick-start">Quick start</a></li>
 <li><a href="#profiles">Profiles</a></li>
 <li><a href="#main-window">The main window: menu bar and tabs</a></li>
-<li><a href="#menu-bar">Menus (File, Record, Options, Help)</a></li>
+<li><a href="#menu-bar">Menus (File, Record, Options, Service, Help)</a></li>
 <li><a href="#tab-connectivity">Connectivity tab</a></li>
 <li><a href="#tab-io">Audio inputs and outputs tab</a></li>
 <li><a href="#tab-profile">Audio profile tab</a></li>
@@ -50,6 +50,7 @@ ul, ol { padding-left: 1.4em; }
 <li><a href="#recording">Recording to a file</a></li>
 <li><a href="#logs">Logs and diagnostics</a></li>
 <li><a href="#command-line">Command-line options</a></li>
+<li><a href="#service">The lock-screen service (send only)</a></li>
 <li><a href="#troubleshooting">Troubleshooting</a></li>
 <li><a href="#glossary">Glossary</a></li>
 </ol>
@@ -272,7 +273,7 @@ ul, ol { padding-left: 1.4em; }
 <li><strong>Cancel</strong> &mdash; do nothing.</li>
 </ul>
 
-<h2 id="menu-bar">5. Menus (File, Record, Options, Help)</h2>
+<h2 id="menu-bar">5. Menus (File, Record, Options, Service, Help)</h2>
 
 <p>There are four menus on the main window: <strong>File (Alt+F)</strong>, <strong>Record (Alt+K)</strong>, <strong>Options (Alt+O)</strong> and <strong>Help (Alt+H)</strong>. The Record menu opens with Alt+K rather than Alt+R because Alt+R is already used by the <strong>Receive audio</strong> checkbox on the main window. The menu's title is shown as &ldquo;Record (Alt+K)&rdquo; so you can find the shortcut even though there is no K in the word.</p>
 
@@ -362,6 +363,8 @@ ul, ol { padding-left: 1.4em; }
 <tr><td><strong>Enable the discovered peers list on the Connectivity tab</strong></td><td>Alt+D</td><td>On by default. Untick to hide the Discovered peers list from the Connectivity tab.</td></tr>
 <tr><td><strong>Enable the remembered peers list on the Connectivity tab</strong></td><td>Alt+R</td><td>On by default. Untick to hide the Remembered peers list from the Connectivity tab.</td></tr>
 </table>
+
+<p>The <strong>Service</strong> menu (Alt+S) installs and controls the optional <a href="#service">lock-screen service</a> that keeps sending your audio when you are not at the machine. See that section for the details.</p>
 
 <h2 id="tab-connectivity">6. Connectivity tab</h2>
 
@@ -1381,7 +1384,36 @@ RemSound.exe --connect 192.168.1.42
 
 <p>A common support sequence: ask the person to run <code>--diagnostics</code> and send you the file, then have them run <code>--selftest</code> &mdash; if that says PASS, capture, encoding and the audio path are all sound on their machine and the problem is somewhere in the connection between you.</p>
 
-<h2 id="troubleshooting">24. Troubleshooting</h2>
+<h2 id="service">24. The lock-screen service (send only)</h2>
+
+<p>Normally RemSound runs as an app you open and close. The <strong>lock-screen service</strong> is a second, silent way to run it: a Windows service that keeps <em>sending</em> this machine's audio to your peers even when the screen is locked, when you have signed out, and when nobody is logged in at all (for example after an unattended restart). It is useful when a machine needs to stream its audio continuously without someone sitting at it.</p>
+
+<p>It is deliberately limited:</p>
+<ul>
+<li><strong>Send only.</strong> The service captures and sends; it never plays received audio. (Windows silences audio output when no one is logged in, so receiving on the lock screen is not possible.) Use the normal app for listening.</li>
+<li><strong>WASAPI only.</strong> ASIO devices cannot be used by a Windows service. If you need ASIO, use the normal app.</li>
+<li><strong>It gets out of your way.</strong> Whenever you open the normal RemSound app, the service automatically stops sending and hands over to you &mdash; so you are always in control while you are at the machine. When you close the app (or it crashes, or you sign out), the service takes over again a couple of seconds later, re-reading its profile so any changes you made are picked up. You never need to stop it by hand to make a change.</li>
+</ul>
+
+<h3>Setting it up</h3>
+<p>Everything lives in the <strong>Service</strong> menu on the menu bar:</p>
+<ol>
+<li><strong>Configure service profile&hellip;</strong> &mdash; opens a small window with three tabs (Audio send, Audio profile, Connectivity) where you choose what to send, how to send it, and who to send it to, plus a password. This is a separate profile from your normal ones and does not appear in the usual profile list. There is no &ldquo;send my audio&rdquo; switch because the service always sends. The <strong>Additional options</strong> button lets you turn the connect/disconnect sounds and the service's own log on or off.</li>
+<li><strong>Install service</strong> &mdash; registers it with Windows so it starts automatically at every boot. Windows asks for administrator permission (one prompt). Do this once.</li>
+<li><strong>Start service</strong> / <strong>Stop service</strong> &mdash; run or halt it now without waiting for a reboot. Also administrator actions.</li>
+<li><strong>Uninstall service</strong> &mdash; removes it entirely.</li>
+</ol>
+<p>The top of the Service menu always shows the current state: not installed, installed and running, or installed and stopped.</p>
+
+<h3>Good to know</h3>
+<ul>
+<li>The service sends to the exact peer addresses you list in its profile (a computer on your network, or a reachable address across the internet). Automatic peer discovery and hole-punching are handled by the normal app, not the service.</li>
+<li>Because the service runs even when you are not logged in, it sends from the system account &mdash; the installer arranges the firewall so its audio can get out.</li>
+<li>When RemSound updates itself, the service keeps running the previous version until its next restart (or the next reboot), then picks up the new one. Nothing breaks in the meantime.</li>
+<li>If two computers should each stream to the other unattended, install the service on both.</li>
+</ul>
+
+<h2 id="troubleshooting">25. Troubleshooting</h2>
 
 <h3>I don't hear my friend</h3>
 <ol>
@@ -1456,7 +1488,7 @@ RemSound.exe --connect 192.168.1.42
 </ul>
 <p>If none of those apply, just fall back to Tailscale &mdash; it works without involving the router at all.</p>
 
-<h2 id="glossary">25. Glossary</h2>
+<h2 id="glossary">26. Glossary</h2>
 
 <table>
 <tr><th>Term</th><th>Meaning</th></tr>
