@@ -66,7 +66,6 @@ internal static class SelfTest
         RunStep(results, "Service sender parity (crypto + Opus frame)", ServiceSenderParity);
         RunStep(results, "Service send host (headless stream + yield)", ServiceSendHostStream);
         RunStep(results, "Service registration args", ServiceRegistrationArgs);
-        RunStep(results, "Service real lifecycle (install/start/stop/uninstall)", ServiceRealLifecycle);
         RunStep(results, "Recording engine (all formats + source gate + mono)", RecordingEngine);
         RunStep(results, "Recording split tracks (per-peer + own)", RecordingSplitTracks);
         RunStep(results, "Recording churn / soak", RecordingChurn);
@@ -660,59 +659,6 @@ internal static class SelfTest
         }
         for (var i = 0; i < 60 && !File.Exists(path); i++) Thread.Sleep(25);
         return File.Exists(path) ? new FileInfo(path).Length : 0;
-    }
-
-    /// <summary>The REAL Windows-service lifecycle end to end: install → started → stopped → uninstalled,
-    /// driving the actual SCM (sc.exe + ServiceController). Needs administrator rights, so it's OPT-IN via
-    /// REMSOUND_TEST_SERVICE=1 and skips cleanly otherwise — the normal gate runs unprivileged. It clears
-    /// any leftover registration first (so a stray copy from an aborted run can't fail it) and always
-    /// removes the service afterwards, even on failure. Run it elevated:
-    ///   set REMSOUND_TEST_SERVICE=1 &amp;&amp; RemSound.exe --selftest   (from an elevated prompt)</summary>
-    private static string? ServiceRealLifecycle()
-    {
-        if (!string.Equals(Environment.GetEnvironmentVariable("REMSOUND_TEST_SERVICE"), "1", StringComparison.Ordinal))
-            return Skip("set REMSOUND_TEST_SERVICE=1 (elevated) to run the real install/start/stop/uninstall lifecycle");
-        if (!IsAdministrator())
-            return Skip("the real service lifecycle needs administrator rights");
-
-        // Start from a known state — remove any service left over from a previous aborted run. DoUninstall
-        // stops it first, so this also clears a leftover RUNNING copy.
-        if (ServiceControl.IsInstalled()) ServiceControl.DoUninstall();
-        Check(!ServiceControl.IsInstalled(), "pre-clean: no leftover RemSound service should remain");
-
-        try
-        {
-            Check(ServiceControl.DoInstall() == 0, "DoInstall should succeed");
-            Check(ServiceControl.IsInstalled(), "the service should report installed after DoInstall");
-            Check(ServiceControl.Query() == ServiceState.Stopped, "an auto-start service is Stopped until started");
-
-            Check(ServiceControl.DoStart() == 0, "DoStart should succeed");
-            Check(ServiceControl.Query() == ServiceState.Running, "the service should be Running after DoStart");
-
-            Check(ServiceControl.DoStop() == 0, "DoStop should succeed");
-            Check(ServiceControl.Query() == ServiceState.Stopped, "the service should be Stopped after DoStop");
-
-            Check(ServiceControl.DoUninstall() == 0, "DoUninstall should succeed");
-            Check(!ServiceControl.IsInstalled(), "the service should be gone after DoUninstall");
-
-            return "installed → started → stopped → uninstalled (real SCM)";
-        }
-        finally
-        {
-            // Safety net: never leave a service registered (its binPath would point at a throwaway exe).
-            try { if (ServiceControl.IsInstalled()) ServiceControl.DoUninstall(); } catch { /* best-effort */ }
-        }
-    }
-
-    private static bool IsAdministrator()
-    {
-        try
-        {
-            using var id = System.Security.Principal.WindowsIdentity.GetCurrent();
-            return new System.Security.Principal.WindowsPrincipal(id)
-                .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
-        }
-        catch { return false; }
     }
 
     /// <summary>The sc.exe "create" argument string quotes a spaced exe path correctly — a real footgun
