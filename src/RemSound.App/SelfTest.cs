@@ -65,6 +65,7 @@ internal static class SelfTest
         RunStep(results, "Service app-yield token", ServiceInteractivePresence);
         RunStep(results, "Service send host (headless stream + yield)", ServiceSendHostStream);
         RunStep(results, "Service registration args", ServiceRegistrationArgs);
+        RunStep(results, "Recording engine (all formats + source gate + mono)", RecordingEngine);
         RunStep(results, "v5 settings and shaping round-trip", V5ConfigRoundTrip);
         RunStep(results, "Profile save and reload", ProfileRoundTrip);
         RunStep(results, "What's-new update marker", WhatsNewMarkerRoundTrip);
@@ -456,6 +457,88 @@ internal static class SelfTest
     {
         try { using var p = Process.GetCurrentProcess(); p.Refresh(); return p.HandleCount; }
         catch { return 0; }
+    }
+
+    /// <summary>Records a short synthetic tone to disk in every output format and checks each file is
+    /// written with real content — the thing Ed can't face testing by ear on every change. Drives the
+    /// real <see cref="AudioRecorder"/> writer (WAV / MP3 / OGG-Opus / FLAC encoders and their native
+    /// bits) headlessly by feeding its audio-thread taps directly, then asserting the file exists and is
+    /// non-trivial. Also covers the received/sent source gate and mono downmix.</summary>
+    private static string? RecordingEngine()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "remsound-rec-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            var summary = new List<string>();
+
+            // 1. Every format, Both source, stereo — the file must exist with real content.
+            foreach (var (fmt, ext) in new[]
+            {
+                (RecordingFileFormat.Wav, "wav"), (RecordingFileFormat.Mp3, "mp3"),
+                (RecordingFileFormat.Ogg, "ogg"), (RecordingFileFormat.Flac, "flac"),
+            })
+            {
+                var path = Path.Combine(temp, $"both.{ext}");
+                var len = RecordTone(temp, path,
+                    new RecordingSettings { FileFormat = fmt, Source = RecordingSource.Both, ChannelMode = RecordingChannelMode.Stereo },
+                    feedReceived: true, feedSent: true);
+                Check(len > 200, $"{ext.ToUpperInvariant()} recording must have real content (got {len} bytes)");
+                summary.Add($"{ext}={len}B");
+            }
+
+            // 2. Source gate: a SentOnly recorder fed only RECEIVED audio must stay (near) empty.
+            var sentOnlyPath = Path.Combine(temp, "gate.wav");
+            var gateLen = RecordTone(temp, sentOnlyPath,
+                new RecordingSettings { FileFormat = RecordingFileFormat.Wav, Source = RecordingSource.SentOnly },
+                feedReceived: true, feedSent: false);
+            var fullLen = RecordTone(temp, Path.Combine(temp, "full.wav"),
+                new RecordingSettings { FileFormat = RecordingFileFormat.Wav, Source = RecordingSource.SentOnly },
+                feedReceived: false, feedSent: true);
+            Check(gateLen < fullLen / 2, $"a SentOnly recorder must ignore received audio (gate={gateLen}B vs full={fullLen}B)");
+
+            // 3. Mono downmix produces a valid (smaller) WAV.
+            var monoLen = RecordTone(temp, Path.Combine(temp, "mono.wav"),
+                new RecordingSettings { FileFormat = RecordingFileFormat.Wav, Source = RecordingSource.Both, ChannelMode = RecordingChannelMode.Mono },
+                feedReceived: true, feedSent: false);
+            Check(monoLen > 200, $"mono WAV must have real content (got {monoLen} bytes)");
+
+            return string.Join(", ", summary) + $"; gate ok; mono={monoLen}B";
+        }
+        finally { try { Directory.Delete(temp, recursive: true); } catch { /* best-effort */ } }
+    }
+
+    // Records ~0.4s of a 440 Hz tone with the given settings to an explicit path and returns the file
+    // size. Feeds the recorder's audio-thread taps directly, pacing so the writer thread drains the ring.
+    private static long RecordTone(string temp, string path, RecordingSettings settings, bool feedReceived, bool feedSent)
+    {
+        long finishedBytes = -1;
+        using (var rec = new AudioRecorder(settings, null, (_, b) => finishedBytes = b, path))
+        {
+            const int rate = 48000;
+            var totalFrames = (int)(rate * 0.4);
+            var chunk = new float[480 * 2];
+            var phase = 0.0;
+            var done = 0;
+            while (done < totalFrames)
+            {
+                var frames = Math.Min(chunk.Length / 2, totalFrames - done);
+                for (var i = 0; i < frames; i++)
+                {
+                    var s = (float)(0.2 * Math.Sin(phase));
+                    phase += 2 * Math.PI * 440 / rate;
+                    chunk[i * 2] = s; chunk[i * 2 + 1] = s;
+                }
+                var mem = chunk.AsMemory(0, frames * 2);
+                if (feedReceived) rec.WriteReceived(mem, RenderRoute.Mixed);
+                if (feedSent) rec.WriteSent(mem, RenderRoute.Mixed);
+                done += frames;
+                Thread.Sleep(2);
+            }
+            rec.Stop();
+        }
+        for (var i = 0; i < 60 && !File.Exists(path); i++) Thread.Sleep(25);
+        return File.Exists(path) ? new FileInfo(path).Length : 0;
     }
 
     /// <summary>The sc.exe "create" argument string quotes a spaced exe path correctly — a real footgun
