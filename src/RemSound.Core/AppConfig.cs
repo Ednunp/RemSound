@@ -244,6 +244,19 @@ public sealed class AppConfig
     /// Startup behaviour dialog. Null = always show the picker (legacy behaviour).</summary>
     public string? StartWithProfileTitle { get; set; }
 
+    // === Lock-screen send-only service (the RemSound Windows service) ===
+    /// <summary>The title of the profile the RemSound Windows service loads and streams from. Null =
+    /// no service profile configured yet. Machine-wide, set from the Service menu's config dialog. The
+    /// service is send-only / WASAPI-only; this profile is edited exclusively through that dialog and is
+    /// kept out of the normal profile picker.</summary>
+    public string? ServiceProfileName { get; set; }
+
+    /// <summary>Whether the RemSound Windows service writes its own log file. Separate from the app's
+    /// machine-wide <see cref="LoggingEnabled"/> so you can diagnose the headless service without
+    /// turning on logging for the interactive app. Off by default. Set from the service config dialog's
+    /// "Additional options". Machine-wide.</summary>
+    public bool ServiceLoggingEnabled { get; set; }
+
     /// <summary>How often RemSound polls the GitHub Releases API for a newer build. Default
     /// <see cref="UpdateCheckFrequency.Every24Hours"/>. Set to <see cref="UpdateCheckFrequency.Never"/>
     /// to disable background checks entirely (the user can still trigger a manual check via

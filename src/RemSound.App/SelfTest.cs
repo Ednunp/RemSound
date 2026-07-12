@@ -62,6 +62,8 @@ internal static class SelfTest
         RunStep(results, "Per-application send enumeration", AppSendEnumeration);
         RunStep(results, "Per-application capture lifecycle", AppSendCaptureLifecycle);
         RunStep(results, "Lifecycle churn (modes, sources, pan/EQ, send/receive)", LifecycleChurn);
+        RunStep(results, "Service app-yield token", ServiceInteractivePresence);
+        RunStep(results, "Service send host (headless stream + yield)", ServiceSendHostStream);
         RunStep(results, "v5 settings and shaping round-trip", V5ConfigRoundTrip);
         RunStep(results, "Profile save and reload", ProfileRoundTrip);
         RunStep(results, "What's-new update marker", WhatsNewMarkerRoundTrip);
@@ -453,6 +455,129 @@ internal static class SelfTest
     {
         try { using var p = Process.GetCurrentProcess(); p.Refresh(); return p.HandleCount; }
         catch { return 0; }
+    }
+
+    /// <summary>The lock-screen service's app-yield token: while a hold is active the service must see an
+    /// interactive app present; once released (or on crash — the OS frees the mutex) it must see none.
+    /// Uses a unique token name so the test is immune to a real RemSound running alongside the gate.</summary>
+    private static string? ServiceInteractivePresence()
+    {
+        var name = @"Global\RemSound.Interactive.selftest." + Guid.NewGuid().ToString("N");
+        Check(!InteractivePresence.IsInteractiveAppRunning(name), "no app should be seen before any hold");
+        using (var hold = InteractivePresence.AcquireHold(name))
+        {
+            Check(hold is not null, "AcquireHold should succeed");
+            Check(InteractivePresence.IsInteractiveAppRunning(name), "an app must be seen while the hold is active");
+            // A second, independent check must also see it (the service polls repeatedly).
+            Check(InteractivePresence.IsInteractiveAppRunning(name), "repeated checks must stay consistent while held");
+        }
+        var released = false;
+        for (var i = 0; i < 40 && !released; i++)
+        {
+            if (!InteractivePresence.IsInteractiveAppRunning(name)) released = true; else Thread.Sleep(25);
+        }
+        Check(released, "no app should be seen after the hold is released");
+        return "held → present; released → absent";
+    }
+
+    /// <summary>End-to-end proof of the send-only service host, headless (no window, no message pump):
+    /// a temp send-only profile streams a captured device to a local receiver over loopback. Drives the
+    /// real yield mechanism — ApplyProfile streams, Suspend stops, Resume re-reads and streams again —
+    /// and then the RunLoop against the presence token: holding the token suspends the host, releasing it
+    /// resumes. SKIPs on a box with no capturable output device.</summary>
+    private static string? ServiceSendHostStream()
+    {
+        const int port = 47846;
+        string? deviceId;
+        try { deviceId = AudioDeviceCatalog.LoadOutputs().FirstOrDefault(o => o.DeviceId is not null)?.DeviceId; }
+        catch (Exception ex) { return Skip("could not enumerate outputs: " + ex.Message); }
+        if (deviceId is null) return Skip("no usable output device to capture from");
+
+        // Unit-level checks first (no hardware): spec + endpoint building from a profile.
+        var probe = new Profile { WasapiSendMode = "devices" };
+        probe.SelectedWasapiSendOutputs.Add("dev-a");
+        probe.SelectedConnectedPeers.Add("127.0.0.1:47846");
+        probe.SelectedConnectedPeers.Add("bad::garbage::host");
+        Check(ServiceSendHost.BuildSendSpecs(probe).Any(s => s.DeviceId == "dev-a" && s.Kind == CaptureKind.Loopback),
+            "a WASAPI send output must become a loopback spec");
+        var eps = ServiceSendHost.BuildEndpoints(probe);
+        Check(eps.Any(e => e.Address.ToString() == "127.0.0.1" && e.Port == 47846), "a host:port peer must resolve to an endpoint");
+
+        using var receiver = new AudioReceiver();
+        try { receiver.Start(port); }
+        catch (Exception ex) { return Skip($"could not bind test port {port}: {ex.Message}"); }
+        receiver.SetOutputDevices(Array.Empty<string>()); // decode only — never make a sound
+
+        var profile = new Profile
+        {
+            Title = "selftest-service",
+            WasapiSendMode = "devices",
+            Codec = AudioTransportCodec.Pcm,
+        };
+        profile.SelectedWasapiSendOutputs.Add(deviceId);
+        profile.SelectedConnectedPeers.Add($"127.0.0.1:{port}");
+
+        using var host = new ServiceSendHost(() => profile);
+
+        Check(host.ApplyProfile(profile), "ApplyProfile should start streaming");
+        Check(host.IsSending, "host should report sending after ApplyProfile");
+        Thread.Sleep(500);
+        var afterStart = receiver.PacketsReceived;
+        Check(afterStart > 0, $"packets must flow from the service host (got {afterStart})");
+
+        host.Suspend();
+        Check(!host.IsSending, "host should report not sending after Suspend");
+        Thread.Sleep(200);
+        var atSuspend = receiver.PacketsReceived;
+        Thread.Sleep(400);
+        Check(receiver.PacketsReceived == atSuspend, "no packets must flow while suspended");
+
+        Check(host.Resume(), "Resume should restart streaming");
+        Thread.Sleep(500);
+        Check(receiver.PacketsReceived > atSuspend, "packets must flow again after Resume");
+
+        // Now the full RunLoop + presence token, with a unique token so a real app can't interfere.
+        host.Suspend();
+        var tokenName = @"Global\RemSound.Interactive.selftest." + Guid.NewGuid().ToString("N");
+        var loopResult = RunLoopYieldCheck(host, receiver, tokenName);
+        Check(loopResult is null, loopResult ?? "");
+
+        return $"streamed headless; start/suspend/resume verified; {afterStart} pkts; yield loop ok";
+    }
+
+    // Drives ServiceSendHost.RunLoop against a presence token (unique name via a tiny shim): with the
+    // token held the host must stay suspended; released, it must resume and packets must flow.
+    private static string? RunLoopYieldCheck(ServiceSendHost host, AudioReceiver receiver, string tokenName)
+    {
+        using var cts = new CancellationTokenSource();
+        // Hold the token BEFORE the loop starts so the host yields from the outset.
+        var hold = InteractivePresence.AcquireHold(tokenName);
+        if (hold is null) return "could not acquire the presence token for the yield check";
+        var loop = new Thread(() => host.RunLoopWithToken(cts.Token, tokenName, pollMs: 100, resumeSettleMs: 200)) { IsBackground = true };
+        loop.Start();
+        try
+        {
+            Thread.Sleep(500);
+            if (host.IsSending) return "host must stay suspended while the interactive token is held";
+            var held = receiver.PacketsReceived;
+            Thread.Sleep(300);
+            if (receiver.PacketsReceived != held) return "no packets must flow while the token is held";
+
+            hold.Dispose(); hold = null; // app "closes" — host should resume after the settle
+            var resumed = false;
+            for (var i = 0; i < 40 && !resumed; i++) { Thread.Sleep(50); if (host.IsSending) resumed = true; }
+            if (!resumed) return "host must resume after the token is released";
+            var before = receiver.PacketsReceived;
+            Thread.Sleep(400);
+            if (receiver.PacketsReceived <= before) return "packets must flow after the host resumes";
+            return null;
+        }
+        finally
+        {
+            cts.Cancel();
+            loop.Join(2000);
+            hold?.Dispose();
+        }
     }
 
     /// <summary>The v5 machine-wide settings and per-peer shaping survive a JSON save/reload: new

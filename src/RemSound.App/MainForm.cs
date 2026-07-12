@@ -113,7 +113,7 @@ public sealed class MainForm : Form
     // programmatically repopulate them (mode switch, profile apply, reconcile) so those handlers
     // don't fire MarkProfileDirty or trigger re-entrant rebuilds on our own writes.
     private bool suppressSendAppEvents;
-    // The two sendModeList rows, in order. Index 0 = whole sound devices (classic), 1 = applications.
+    // The two sendModeList rows, in order. Index 0 = whole audio devices (classic), 1 = applications.
     private const int SendModeDevicesIndex = 0;
     private const int SendModeApplicationsIndex = 1;
     // ASIO-side lists. Always present in the form but hidden when ASIO is disabled. The two
@@ -3299,7 +3299,7 @@ public sealed class MainForm : Form
         sendCheckboxPanel.Controls.Add(sendMyAudioCheckbox);
         panel.Controls.Add(sendCheckboxPanel, 1, 6);
 
-        // Row 7: "how to send WASAPI audio" chooser — sound devices (the classic loopback list) or
+        // Row 7: "how to send WASAPI audio" chooser — audio devices (the classic loopback list) or
         // specific applications. Sits right after "Send my audio". Built manually (like the ASIO
         // driver row) so we keep the label reference to collapse the whole row on old Windows.
         BuildSendModeRow(panel, 7);
@@ -3338,7 +3338,7 @@ public sealed class MainForm : Form
         sendModeLabel.Click += (_, _) => FocusControl(sendModeList);
         sendModeList.AccessibleName = "How to send WASAPI audio (Alt+6)";
         sendModeList.Items.Clear();
-        sendModeList.Items.Add("Send whole sound devices");   // SendModeDevicesIndex
+        sendModeList.Items.Add("Send whole audio devices");   // SendModeDevicesIndex
         sendModeList.Items.Add("Send specific applications");  // SendModeApplicationsIndex
         sendModeList.SelectedIndex = SendModeDevicesIndex;
         panel.Controls.Add(sendModeLabel, 0, row);

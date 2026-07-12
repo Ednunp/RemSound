@@ -206,6 +206,13 @@ internal static class Program
         instance.StartActivationListener();
         instance.ActivateRequested += () => activeMainForm?.RestoreFromTray();
 
+        // Hold the interactive-presence token for this copy's whole lifetime, so the send-only
+        // lock-screen service (if installed) yields to us — it suspends its own sending while an
+        // interactive RemSound is open. Windows releases the token automatically when this process
+        // exits or crashes, so the service resumes on its own. Best-effort: null if it couldn't be
+        // taken, in which case we simply run without announcing our presence.
+        using var presenceHold = InteractivePresence.AcquireHold();
+
         // Best-effort: clear leftover update temp stages (and any relics of the old batch updater).
         // We hold the single-instance lock here, so only the live copy does this — no sibling race.
         RemSoundUpdater.CleanUpUpdateStages();
