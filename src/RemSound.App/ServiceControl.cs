@@ -18,6 +18,11 @@ public static class ServiceControl
 {
     public const string ServiceName = "RemSoundService";
     public const string DisplayName = "RemSound send-only service";
+
+    /// <summary>Reserved title of the profile the service streams from. Edited only through the service
+    /// config dialog and filtered out of the normal profile picker so it can't be loaded by accident.
+    /// Single source of truth lives in <see cref="RemSound.Core.ProfileStore.ReservedServiceProfileTitle"/>.</summary>
+    public const string ServiceProfileTitle = RemSound.Core.ProfileStore.ReservedServiceProfileTitle;
     public const string Description =
         "Streams this machine's audio to its RemSound peers without a logged-in user (lock screen). " +
         "Send-only; yields to the interactive RemSound app while it is open.";

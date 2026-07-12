@@ -795,6 +795,7 @@ internal static class SelfTest
                 () => false, _ => { }, () => { }, () => 0, () => { }, () => { }, _ => { },
                 () => (default(RouterMappingStatus), (IPEndPoint?)null, ""),
                 _ => { }, _ => { })),
+            ("Service profile", () => new ServiceProfileDialog(RemSound.Core.Profile.NewBlank(), false)),
         };
 
         var audited = new List<string>();

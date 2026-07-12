@@ -49,9 +49,14 @@ public sealed class ProfileStore
     /// <summary>Folder this store reads from and writes into.</summary>
     public string BaseDirectory => baseDir;
 
+    /// <summary>Reserved title of the send-only Windows service's profile. It lives in the same folder
+    /// as normal profiles (so the service loads it via <see cref="Load"/>), but it's edited only through
+    /// the Service menu's config dialog and hidden from the normal picker by <see cref="ListProfileTitles"/>.</summary>
+    public const string ReservedServiceProfileTitle = "RemSound service";
+
     /// <summary>Returns the user-facing titles of every profile in the folder, sorted
-    /// alphabetically (case-insensitive). Excludes the synthetic blank-template; the
-    /// caller decides whether to surface that.</summary>
+    /// alphabetically (case-insensitive). Excludes the synthetic blank-template and the reserved
+    /// service profile; the caller decides whether to surface the blank template.</summary>
     public IReadOnlyList<string> ListProfileTitles()
     {
         if (!Directory.Exists(baseDir)) return [];
@@ -60,6 +65,7 @@ public sealed class ProfileStore
             return Directory.GetFiles(baseDir, "*.json")
                 .Select(p => TryReadTitle(p) ?? Path.GetFileNameWithoutExtension(p))
                 .Where(static t => !string.IsNullOrWhiteSpace(t))
+                .Where(static t => !string.Equals(t, ReservedServiceProfileTitle, StringComparison.OrdinalIgnoreCase))
                 .OrderBy(t => t, StringComparer.OrdinalIgnoreCase)
                 .ToList();
         }

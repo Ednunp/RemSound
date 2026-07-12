@@ -2159,8 +2159,108 @@ public sealed class MainForm : Form
         menu.Items.Add(fileMenu);
         menu.Items.Add(recordMenu);
         menu.Items.Add(optionsMenu);
+        menu.Items.Add(BuildServiceMenu());
         menu.Items.Add(helpMenu);
         return menu;
+    }
+
+    /// <summary>The Service menu: configure the send-only lock-screen service's profile, and
+    /// install / uninstall / start / stop it. The status line and item enabling refresh each time the
+    /// menu opens. Install/uninstall/start/stop re-launch RemSound elevated (one UAC prompt each);
+    /// querying status needs no elevation.</summary>
+    private ToolStripMenuItem BuildServiceMenu()
+    {
+        var serviceMenu = new ToolStripMenuItem("&Service") { AccessibleName = "Service menu" };
+        var status = new ToolStripMenuItem("Service: …") { Enabled = false, AccessibleName = "Service status" };
+        var configure = new ToolStripMenuItem("&Configure service profile...") { AccessibleName = "Configure service profile" };
+        configure.Click += (_, _) => ConfigureServiceProfile();
+        var install = new ToolStripMenuItem("&Install service") { AccessibleName = "Install service" };
+        install.Click += (_, _) => ServiceAction(ServiceControl.InstallVerb, "install", confirm: true);
+        var uninstall = new ToolStripMenuItem("&Uninstall service") { AccessibleName = "Uninstall service" };
+        uninstall.Click += (_, _) => ServiceAction(ServiceControl.UninstallVerb, "uninstall", confirm: true);
+        var start = new ToolStripMenuItem("S&tart service") { AccessibleName = "Start service" };
+        start.Click += (_, _) => ServiceAction(ServiceControl.StartVerb, "start", confirm: false);
+        var stop = new ToolStripMenuItem("Sto&p service") { AccessibleName = "Stop service" };
+        stop.Click += (_, _) => ServiceAction(ServiceControl.StopVerb, "stop", confirm: false);
+
+        serviceMenu.DropDownItems.AddRange(new ToolStripItem[]
+        {
+            status, new ToolStripSeparator(),
+            configure, new ToolStripSeparator(),
+            install, uninstall, start, stop,
+        });
+        serviceMenu.DropDownOpening += (_, _) =>
+        {
+            var state = ServiceControl.Query();
+            status.Text = "Service: " + DescribeServiceState(state);
+            var installed = state != ServiceState.NotInstalled;
+            install.Enabled = !installed;
+            uninstall.Enabled = installed;
+            start.Enabled = installed && state is ServiceState.Stopped;
+            stop.Enabled = installed && state is ServiceState.Running;
+        };
+        return serviceMenu;
+    }
+
+    private static string DescribeServiceState(ServiceState s) => s switch
+    {
+        ServiceState.NotInstalled => "not installed",
+        ServiceState.Running => "installed, running",
+        ServiceState.Stopped => "installed, stopped",
+        ServiceState.StartPending => "starting…",
+        ServiceState.StopPending => "stopping…",
+        _ => "unknown",
+    };
+
+    /// <summary>Opens the modal service-profile editor, then persists the result: saves the reserved
+    /// service profile, points AppConfig at it, and stores the machine-wide service-logging choice. If
+    /// the service is running, restarts it so the edits take effect.</summary>
+    private void ConfigureServiceProfile()
+    {
+        if (profileStore is null) return;
+        var cfg = AppConfig.Load();
+        Profile current;
+        try { current = profileStore.Load(ServiceControl.ServiceProfileTitle) ?? Profile.NewBlank(); }
+        catch { current = Profile.NewBlank(); }
+
+        using var dlg = new ServiceProfileDialog(current, cfg.ServiceLoggingEnabled);
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            profileStore.Save(dlg.Result);
+            var c = AppConfig.Load();
+            c.ServiceProfileName = ServiceControl.ServiceProfileTitle;
+            c.ServiceLoggingEnabled = dlg.ServiceLoggingEnabled;
+            c.Save();
+            if (ServiceControl.Query() == ServiceState.Running)
+            {
+                ServiceControl.RunElevated(ServiceControl.StopVerb);
+                ServiceControl.RunElevated(ServiceControl.StartVerb);
+            }
+            MessageBox.Show(this, "Service profile saved.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Could not save the service profile: {ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private void ServiceAction(string verb, string label, bool confirm)
+    {
+        if (confirm)
+        {
+            var msg = verb == ServiceControl.InstallVerb
+                ? "Install the RemSound send-only service? It will start automatically at boot and stream your service profile whenever you're not using RemSound normally.\n\nWindows will ask for administrator permission."
+                : "Uninstall the RemSound service?\n\nWindows will ask for administrator permission.";
+            if (MessageBox.Show(this, msg, AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        }
+        var rc = ServiceControl.RunElevated(verb);
+        if (rc == 0)
+            MessageBox.Show(this, $"Service {label} succeeded.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        else if (rc == -1)
+            MessageBox.Show(this, $"Service {label} was cancelled, or administrator rights were declined.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        else
+            MessageBox.Show(this, $"Service {label} failed (code {rc}).", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
     /// <summary>Rebuild the Recent profiles submenu from <see cref="AppConfig.RecentProfiles"/>.
