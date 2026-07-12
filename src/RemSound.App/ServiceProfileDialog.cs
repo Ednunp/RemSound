@@ -16,11 +16,10 @@ internal sealed class ServiceProfileDialog : Form
     private readonly Profile working;
     private readonly QuietTabControl tabs = new() { Dock = DockStyle.Fill };
 
-    // --- Connectivity tab ---
-    private readonly ListBox peersList = new() { Width = 460, Height = 120, AccessibleName = "Peers to send to (Alt+1)" };
-    private readonly TextBox addPeerBox = new() { Width = 300, AccessibleName = "Add a peer — IP address or hostname (Alt+2)" };
-    private readonly Button addPeerButton = new() { Text = "A&dd", AutoSize = true, AccessibleName = "Add peer" };
-    private readonly Button removePeerButton = new() { Text = "&Remove", AutoSize = true, AccessibleName = "Remove selected peer" };
+    // --- Connectivity tab (mirrors the main window: a wired peer list + Add peer by IP) ---
+    private readonly CheckedListBox peersList = new() { CheckOnClick = true, Width = 460, Height = 120, AccessibleName = "Peers to send to (Alt+C)" };
+    private readonly Label peersStatus = new() { AutoSize = true, Text = "No peers." };
+    private readonly Button manualAddButton = new() { Text = "Add peer by IP (Alt+&A)", AutoSize = true, AccessibleName = "Add peer by IP" };
     private readonly Button passwordButton = new() { Text = "Set pass&word...", AutoSize = true, AccessibleName = "Set the service profile password" };
     private readonly Label passwordStatus = new() { AutoSize = true };
 
@@ -98,24 +97,41 @@ internal sealed class ServiceProfileDialog : Form
         var page = new TabPage("Connectivity");
         var panel = NewPanel();
 
-        AddListRow(panel, 0, "Peers to send to (Alt+&1)", peersList);
+        var header = Theme.SectionHeader("Peers");
+        panel.Controls.Add(header, 0, 0);
+        panel.SetColumnSpan(header, 2);
 
-        var addLabel = new MnemonicLabel { Text = "Add a peer — IP address or hostname (Alt+&2)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = addPeerBox };
-        panel.Controls.Add(addLabel, 0, 1);
-        var addRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        addRow.Controls.Add(addPeerBox);
-        addRow.Controls.Add(addPeerButton);
-        addRow.Controls.Add(removePeerButton);
-        panel.Controls.Add(addRow, 1, 1);
+        // The peer list, wired for the screen reader exactly like the main window. A ticked peer is one
+        // the service sends to; untick to keep it in the list but not send. Delete removes it entirely.
+        FormLayoutRows.AddCheckedListRow(panel, 1, "Peers to send to (Alt+&C)", peersList, peersStatus, l => l.Focus());
+        CheckedListAccessibility.Wire(peersList, peersStatus, "peer");
+        peersList.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Delete && peersList.SelectedIndex >= 0)
+            {
+                peersList.Items.RemoveAt(peersList.SelectedIndex);
+                e.Handled = true; e.SuppressKeyPress = true;
+            }
+        };
 
-        addPeerButton.Click += (_, _) => AddPeerFromBox();
-        removePeerButton.Click += (_, _) => { if (peersList.SelectedItem is string s) peersList.Items.Remove(s); };
-        addPeerBox.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { AddPeerFromBox(); e.SuppressKeyPress = true; } };
+        // Add a peer by address — the same "Add peer by IP" prompt the main window uses.
+        panel.Controls.Add(new Label { Text = "Manual peer", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 2);
+        panel.Controls.Add(manualAddButton, 1, 2);
+        manualAddButton.Click += (_, _) =>
+        {
+            var entry = ManualPeerPrompt.Show(this);
+            if (string.IsNullOrWhiteSpace(entry)) return;
+            if (!peersList.Items.OfType<string>().Any(p => string.Equals(p, entry, StringComparison.OrdinalIgnoreCase)))
+            {
+                var idx = peersList.Items.Add(entry.Trim());
+                peersList.SetItemChecked(idx, true);
+            }
+        };
 
         var pwWrap = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         pwWrap.Controls.Add(passwordButton);
         pwWrap.Controls.Add(passwordStatus);
-        panel.Controls.Add(pwWrap, 1, 2);
+        panel.Controls.Add(pwWrap, 1, 3);
         passwordButton.Click += (_, _) => SetPassword();
 
         page.Controls.Add(panel);
@@ -223,8 +239,15 @@ internal sealed class ServiceProfileDialog : Form
             tightLatencyBox.Checked = working.TightLatencyMode;
 
             peersList.Items.Clear();
-            foreach (var p in (working.SelectedConnectedPeers.Count > 0 ? working.SelectedConnectedPeers : working.RememberedPeers).Distinct())
-                peersList.Items.Add(p);
+            var allPeers = working.RememberedPeers.Concat(working.SelectedConnectedPeers)
+                .Where(p => !string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            var selectedPeers = new HashSet<string>(working.SelectedConnectedPeers, StringComparer.OrdinalIgnoreCase);
+            foreach (var p in allPeers)
+            {
+                var idx = peersList.Items.Add(p);
+                // Ticked = the service sends to it. If the profile carried no explicit selection, tick all.
+                if (selectedPeers.Count == 0 || selectedPeers.Contains(p)) peersList.SetItemChecked(idx, true);
+            }
         }
         finally { suppressAppEvents = false; }
     }
@@ -241,9 +264,9 @@ internal sealed class ServiceProfileDialog : Form
         working.SendRate = (SendRate)Math.Max(0, sendRateBox.SelectedIndex);
         working.TightLatencyMode = tightLatencyBox.Checked;
 
-        var peers = peersList.Items.OfType<string>().Distinct().ToList();
-        working.SelectedConnectedPeers = peers;
-        working.RememberedPeers = peers;
+        // Ticked peers are the ones the service sends to; keep every listed peer as remembered.
+        working.SelectedConnectedPeers = peersList.CheckedItems.OfType<string>().Distinct().ToList();
+        working.RememberedPeers = peersList.Items.OfType<string>().Distinct().ToList();
     }
 
     private static void PopulateDeviceList(CheckedListBox list, IReadOnlyList<AudioDeviceChoice> devices, IReadOnlyList<string> checkedIds)
@@ -305,15 +328,6 @@ internal sealed class ServiceProfileDialog : Form
     {
         c.Visible = visible;
         if (c.Parent is not null) c.Parent.Visible = visible;
-    }
-
-    private void AddPeerFromBox()
-    {
-        var text = addPeerBox.Text.Trim();
-        if (text.Length == 0) return;
-        if (!peersList.Items.OfType<string>().Any(p => string.Equals(p, text, StringComparison.OrdinalIgnoreCase)))
-            peersList.Items.Add(text);
-        addPeerBox.Clear();
     }
 
     private void SetPassword()
