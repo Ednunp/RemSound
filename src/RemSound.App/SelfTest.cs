@@ -879,6 +879,12 @@ internal static class SelfTest
                 () => (default(RouterMappingStatus), (IPEndPoint?)null, ""),
                 _ => { }, _ => { })),
             ("Service profile", () => new ServiceProfileDialog(RemSound.Core.Profile.NewBlank(), false)),
+            ("About", () => new AboutDialog()),
+            ("Add EQ band", () => new AddBandDialog()),
+            ("Rename peer", () => new RenamePeerDialog("TestMachine", null)),
+            ("Keyboard shortcut import", () => new KeyboardShortcutImportDialog(Array.Empty<string>())),
+            ("Profile selection", () => new ProfileSelectionDialog(new ProfileStore(
+                Path.Combine(Path.GetTempPath(), "remsound-selftest-picker-" + Guid.NewGuid().ToString("N"))))),
         };
 
         var audited = new List<string>();
@@ -927,6 +933,17 @@ internal static class SelfTest
             if (string.IsNullOrWhiteSpace(name))
                 violations.Add($"{formName}: a {c.GetType().Name} has no accessible name or text");
         }
+
+        // Tab-order sanity: the GetNextControl walk must TERMINATE — a cycle would trap a keyboard /
+        // screen-reader user pressing Tab forever. Guards against a malformed tab order.
+        var guard = 0;
+        var seen = new HashSet<Control>();
+        for (Control? cur = form.GetNextControl(form, true); cur is not null && guard < 10000; cur = form.GetNextControl(cur, true))
+        {
+            guard++;
+            if (!seen.Add(cur)) { violations.Add($"{formName}: tab order forms a cycle at {cur.GetType().Name}"); break; }
+        }
+        if (guard >= 10000) violations.Add($"{formName}: tab-order walk did not terminate");
     }
 
     /// <summary>Extract the Alt mnemonic letter from a WinForms caption ('&amp;X' marks X; '&amp;&amp;'
