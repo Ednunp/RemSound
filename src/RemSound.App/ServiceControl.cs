@@ -94,11 +94,7 @@ public static class ServiceControl
         var exe = Environment.ProcessPath;
         if (string.IsNullOrEmpty(exe)) return 2;
 
-        // sc.exe's key= value syntax needs a space after '='. The binPath value is the quoted exe path
-        // plus the run verb, and that whole value is itself quoted — hence the escaped inner quotes.
-        var createArgs =
-            $"create {ServiceName} binPath= \"\\\"{exe}\\\" {RunVerb}\" start= auto DisplayName= \"{DisplayName}\"";
-        var rc = RunSc(createArgs);
+        var rc = RunSc(BuildCreateArgs(exe));
         if (rc != 0) return rc;
         // Best-effort description; failure here doesn't fail the install.
         RunSc($"description {ServiceName} \"{Description}\"");
@@ -164,7 +160,13 @@ public static class ServiceControl
     }
 
     /// <summary>Builds the exact sc.exe "create" argument string for a given exe path. Pure and
-    /// side-effect-free so a self-test can verify the fiddly quoting without touching the SCM.</summary>
+    /// side-effect-free so a self-test can verify the fiddly quoting without touching the SCM.
+    ///
+    /// <para><c>depend= Audiosrv/AudioEndpointBuilder</c> makes the service start as EARLY as it usefully
+    /// can: the Windows Audio and Audio Endpoint Builder services must be running for WASAPI capture to
+    /// find any audio at all, so Windows launches RemSound the instant they're ready (at boot, before
+    /// login) rather than at some arbitrary later point. Starting it BEFORE the audio services isn't
+    /// possible — there'd be no endpoints to capture — and there's no sound to miss before audio is up.</para></summary>
     internal static string BuildCreateArgs(string exePath) =>
-        $"create {ServiceName} binPath= \"\\\"{exePath}\\\" {RunVerb}\" start= auto DisplayName= \"{DisplayName}\"";
+        $"create {ServiceName} binPath= \"\\\"{exePath}\\\" {RunVerb}\" start= auto depend= Audiosrv/AudioEndpointBuilder DisplayName= \"{DisplayName}\"";
 }

@@ -2170,8 +2170,8 @@ public sealed class MainForm : Form
         // and the arrow keys.
         menu.Items.Add(fileMenu);
         menu.Items.Add(recordMenu);
-        menu.Items.Add(optionsMenu);
         menu.Items.Add(BuildServiceMenu());
+        menu.Items.Add(optionsMenu);
         menu.Items.Add(helpMenu);
         return menu;
     }
