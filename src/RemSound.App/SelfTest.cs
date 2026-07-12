@@ -66,6 +66,7 @@ internal static class SelfTest
         RunStep(results, "Service send host (headless stream + yield)", ServiceSendHostStream);
         RunStep(results, "Service registration args", ServiceRegistrationArgs);
         RunStep(results, "Recording engine (all formats + source gate + mono)", RecordingEngine);
+        RunStep(results, "Recording split tracks (per-peer + own)", RecordingSplitTracks);
         RunStep(results, "Recording churn / soak", RecordingChurn);
         RunStep(results, "v5 settings and shaping round-trip", V5ConfigRoundTrip);
         RunStep(results, "Profile save and reload", ProfileRoundTrip);
@@ -530,6 +531,63 @@ internal static class SelfTest
             Check(monoLen > 200, $"mono WAV must have real content (got {monoLen} bytes)");
 
             return string.Join(", ", summary) + $"; gate ok; mono={monoLen}B";
+        }
+        finally { try { Directory.Delete(temp, recursive: true); } catch { /* best-effort */ } }
+    }
+
+    /// <summary>Split-track (multi-track) recording: with SplitTracks on and one connected peer, the
+    /// recorder must write a FOLDER of tracks — one per peer plus your own send — not a single mixed file.
+    /// Drives the real RecordingController via a settings-injection seam (so it never touches the shared
+    /// settings store), feeds the "your send" track through the tap the controller wires onto the sender,
+    /// and asserts the track files land with content.</summary>
+    private static string? RecordingSplitTracks()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "remsound-split-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        using var receiver = new AudioReceiver();
+        using var sender = new RemSound.Sender.AudioSender();
+        try
+        {
+            var controller = new RecordingController(sender, receiver, new RemSoundSettingsStore("RemSound"), _ => { })
+            {
+                SettingsSourceForTest = () => new RecordingSettings
+                {
+                    SplitTracks = true,
+                    Source = RecordingSource.Both,
+                    FileFormat = RecordingFileFormat.Wav,
+                    Folder = temp,
+                },
+                ConnectedPeersProvider = () => new[] { (IPAddress.Loopback, "TestPeer") },
+            };
+
+            controller.Start();
+            Check(controller.IsRecording, "split recording should be running after Start");
+
+            // Feed the "your send" track through the tap Start wired onto the sender.
+            var tap = sender.OnSentSamples;
+            if (tap is not null)
+            {
+                var chunk = new float[480 * 2];
+                var phase = 0.0;
+                for (var c = 0; c < 60; c++)
+                {
+                    for (var i = 0; i < chunk.Length; i += 2)
+                    {
+                        var s = (float)(0.2 * Math.Sin(phase));
+                        phase += 2 * Math.PI * 440 / 48000;
+                        chunk[i] = s; chunk[i + 1] = s;
+                    }
+                    tap(chunk.AsMemory(), RenderRoute.Mixed);
+                    Thread.Sleep(2);
+                }
+            }
+            controller.Stop();
+            for (var i = 0; i < 40 && Directory.GetFiles(temp, "*.wav", SearchOption.AllDirectories).Length == 0; i++) Thread.Sleep(25);
+
+            var files = Directory.GetFiles(temp, "*.wav", SearchOption.AllDirectories);
+            Check(files.Length >= 2, $"split recording must make one file per peer plus your own (found {files.Length})");
+            Check(files.Any(f => new FileInfo(f).Length > 200), "at least one split track (your own send) must have real content");
+            return $"split recording made {files.Length} track files, one with content";
         }
         finally { try { Directory.Delete(temp, recursive: true); } catch { /* best-effort */ } }
     }

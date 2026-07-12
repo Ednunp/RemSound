@@ -44,6 +44,11 @@ internal sealed class RecordingController
     /// recording starts, so one track file is created per peer. Set by MainForm.</summary>
     public Func<IReadOnlyList<(IPAddress Address, string Name)>>? ConnectedPeersProvider { get; set; }
 
+    /// <summary>Test seam: overrides where <see cref="Start"/> reads the recording settings from, so a
+    /// self-test can drive a split (multi-track) recording without writing to the real shared settings
+    /// store. Null (the default) = read from the store as normal.</summary>
+    internal Func<RecordingSettings>? SettingsSourceForTest { get; set; }
+
     public RecordingController(AudioSender sender, AudioReceiver receiver, RemSoundSettingsStore settings, Action<string> diagnostic)
     {
         this.sender = sender;
@@ -71,7 +76,7 @@ internal sealed class RecordingController
     public void Start()
     {
         if (IsRecording) return;
-        var s = settings.LoadRecordingSettings();
+        var s = (SettingsSourceForTest ?? settings.LoadRecordingSettings)();
         var now = DateTime.Now;
         try
         {
