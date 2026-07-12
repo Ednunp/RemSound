@@ -14,6 +14,10 @@
 # if RemSound is open and has them locked.
 #
 # Run:  powershell -ExecutionPolicy Bypass -File deploy-test.ps1
+# Add -SkipGate to skip the build-and-test gate (e.g. when you just ran it) - by default a binary
+# deploy runs run-tests.ps1 first and refuses to deploy a build that didn't pass.
+
+param([switch]$SkipGate)
 
 $ErrorActionPreference = 'Stop'
 $repo      = $PSScriptRoot
@@ -34,6 +38,19 @@ if ($soundOnly) {
     Write-Host "RemSound is running - refreshing SOUNDS only (binaries are locked; close RemSound to update them)." -ForegroundColor Yellow
 }
 else {
+    # Never deploy a build to test that hasn't passed the tests. The gate publishes + tests its own
+    # throwaway copy, so it doesn't touch the publish\ folder below. -SkipGate overrides (e.g. when the
+    # gate was just run in this session). Sound-only refreshes above skip it - they change no code.
+    if (-not $SkipGate) {
+        $gate = Join-Path $repo 'run-tests.ps1'
+        if (Test-Path -LiteralPath $gate) {
+            Write-Host "Running the build-and-test gate before deploying..." -ForegroundColor Cyan
+            & $gate
+            if ($LASTEXITCODE -ne 0) { throw "build-and-test gate FAILED - not deploying. Fix the failures above, or re-run with -SkipGate to override." }
+        }
+        else { Write-Host "WARNING: run-tests.ps1 not found - deploying WITHOUT the test gate." -ForegroundColor Yellow }
+    }
+
     Write-Host "Publishing (Release) -> $publish ..." -ForegroundColor Cyan
     & dotnet publish $proj -c Release -o $publish --nologo -v q
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed ($LASTEXITCODE)" }

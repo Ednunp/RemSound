@@ -49,6 +49,22 @@ if ($csprojVersion -ne $tagVersion) {
 }
 Write-Host "Version check: tag $Tag matches csproj <Version> $csprojVersion." -ForegroundColor DarkGray
 
+# 0y. RELEASE_NOTES.md must exist AND be written for THIS tag - the final `gh release create` ships it
+#     verbatim, so a copy left over from the previous release would publish the wrong notes. The notes
+#     lead with "# RemSound <tag>", so requiring the tag string to appear catches a forgotten update.
+$notesFile = Join-Path $repo 'RELEASE_NOTES.md'
+if (-not (Test-Path -LiteralPath $notesFile)) {
+    Write-Host "RELEASE ABORTED - RELEASE_NOTES.md not found. Write the notes for $Tag and re-run." -ForegroundColor Red
+    exit 1
+}
+$notesText = Get-Content -LiteralPath $notesFile -Raw
+if ($notesText -notmatch [regex]::Escape($Tag)) {
+    Write-Host "RELEASE ABORTED - RELEASE_NOTES.md does not mention $Tag - it looks stale from a previous release." -ForegroundColor Red
+    Write-Host "Update RELEASE_NOTES.md for $Tag (it should lead with '# RemSound $Tag') and re-run." -ForegroundColor Red
+    exit 1
+}
+Write-Host "Release notes check: RELEASE_NOTES.md is written for $Tag." -ForegroundColor DarkGray
+
 # 0a. SoundForge drops a .sfk peak file next to every .wav it opens. They're byproducts that must
 #     never ship (the build only bundles *.wav, so they wouldn't anyway) - clear them from the
 #     source 'default sounds\' folder so they don't accumulate and clutter the working tree.
