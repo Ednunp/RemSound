@@ -13,6 +13,9 @@ internal static class Program
     // window. volatile for cross-thread visibility; RestoreFromTray marshals to the UI thread.
     private static volatile MainForm? activeMainForm;
 
+    private static bool HasArg(string[] args, string flag) =>
+        Array.Exists(args, a => string.Equals(a, flag, StringComparison.OrdinalIgnoreCase));
+
     // Writes an otherwise-fatal exception to a timestamped crash file in the logs folder, so a
     // "RemSound just disappeared, no dialog" report (#16) leaves a stack behind to diagnose instead
     // of nothing. Best-effort and self-contained — a crash handler must never throw.
@@ -56,6 +59,19 @@ internal static class Program
             WriteCrashReport("TaskScheduler.UnobservedTaskException", e.Exception);
             e.SetObserved();
         };
+
+        // Windows-service verbs, handled before the single-instance lock and the UI migrations below.
+        // The service is a SEPARATE role — it must never take the interactive single-instance lock — and
+        // the elevated one-shot verbs (install/uninstall/start/stop) just do their SCM work and exit with
+        // a status code. --run-service blocks in the SCM dispatcher until Windows stops the service.
+        if (args.Length > 0)
+        {
+            if (HasArg(args, ServiceControl.RunVerb)) { RemSoundService.RunAsService(); return; }
+            if (HasArg(args, ServiceControl.InstallVerb)) { Environment.ExitCode = ServiceControl.DoInstall(); return; }
+            if (HasArg(args, ServiceControl.UninstallVerb)) { Environment.ExitCode = ServiceControl.DoUninstall(); return; }
+            if (HasArg(args, ServiceControl.StartVerb)) { Environment.ExitCode = ServiceControl.DoStart(); return; }
+            if (HasArg(args, ServiceControl.StopVerb)) { Environment.ExitCode = ServiceControl.DoStop(); return; }
+        }
 
         // --config-dir <folder> (test / portable isolation): redirect ALL user state - config,
         // profiles, logs, cue sounds - to an explicit folder for THIS process only. Applied first,

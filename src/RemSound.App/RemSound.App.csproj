@@ -29,6 +29,11 @@
     <ProjectReference Include="..\RemSound.Sender\RemSound.Sender.csproj" />
     <ProjectReference Include="..\RemSound.Receiver\RemSound.Receiver.csproj" />
     <PackageReference Include="NAudio" Version="2.3.0" />
+    <!-- ServiceBase (to run RemSound.exe as a Windows service under the SCM) and ServiceController
+         (to query/start/stop the service from the interactive app). Backs the send-only lock-screen
+         service. Service creation/deletion is done via sc.exe (elevated), which this package doesn't
+         cover. -->
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="9.0.0" />
     <!-- LAME wrapper for MP3 encoding. Pulled in for the recording feature. The native
          libmp3lame.dll ships with the package and is copied to the output folder. -->
     <PackageReference Include="NAudio.Lame" Version="2.1.0" />

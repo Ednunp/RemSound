@@ -64,6 +64,7 @@ internal static class SelfTest
         RunStep(results, "Lifecycle churn (modes, sources, pan/EQ, send/receive)", LifecycleChurn);
         RunStep(results, "Service app-yield token", ServiceInteractivePresence);
         RunStep(results, "Service send host (headless stream + yield)", ServiceSendHostStream);
+        RunStep(results, "Service registration args", ServiceRegistrationArgs);
         RunStep(results, "v5 settings and shaping round-trip", V5ConfigRoundTrip);
         RunStep(results, "Profile save and reload", ProfileRoundTrip);
         RunStep(results, "What's-new update marker", WhatsNewMarkerRoundTrip);
@@ -455,6 +456,23 @@ internal static class SelfTest
     {
         try { using var p = Process.GetCurrentProcess(); p.Refresh(); return p.HandleCount; }
         catch { return 0; }
+    }
+
+    /// <summary>The sc.exe "create" argument string quotes a spaced exe path correctly — a real footgun
+    /// (a broken binPath silently installs a service that can't start). Pure/side-effect-free, so it
+    /// never touches the SCM or needs admin.</summary>
+    private static string? ServiceRegistrationArgs()
+    {
+        const string exe = @"C:\Program Files\RemSound\RemSound.exe";
+        var args = ServiceControl.BuildCreateArgs(exe);
+        Check(args.StartsWith($"create {ServiceControl.ServiceName} "), "must be a create for the named service");
+        Check(args.Contains("start= auto"), "service must be auto-start");
+        // The exe path must be wrapped in ESCAPED quotes inside the binPath value, followed by the run
+        // verb, so a path with spaces survives sc.exe's parsing.
+        Check(args.Contains("\\\"" + exe + "\\\" " + ServiceControl.RunVerb),
+            $"exe path must be escaped-quoted with the run verb (got: {args})");
+        Check(args.Contains($"DisplayName= \"{ServiceControl.DisplayName}\""), "must set the display name");
+        return "sc create args quoted correctly for a spaced path";
     }
 
     /// <summary>The lock-screen service's app-yield token: while a hold is active the service must see an
