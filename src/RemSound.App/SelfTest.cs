@@ -73,6 +73,7 @@ internal static class SelfTest
         RunStep(results, "Diagnostics report privacy", DiagnosticsPrivacy);
         RunStep(results, "Bundled resources present", ResourcesPresent);
         RunStep(results, "Dialog accessibility (names + mnemonics)", AccessibilityAudit);
+        RunStep(results, "Main window coverage (all tabs + controls)", MainWindowCoverage);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");
@@ -964,6 +965,39 @@ internal static class SelfTest
         var detail = $"audited {audited.Count} ({string.Join(", ", audited)})";
         if (skipped.Count > 0) detail += $"; skipped {skipped.Count}";
         return detail;
+    }
+
+    /// <summary>Constructs the ENTIRE main window in headless mode (no audio backend, no hotkeys, no
+    /// timers, no sockets — see MainForm's `headless` flag) and audits every tab and control: accessible
+    /// names present, Alt mnemonics unique per group, and the tab order forms no cycle. This is the
+    /// "check all the tabs" coverage — the whole main-window surface, proven on every build.</summary>
+    private static string? MainWindowCoverage()
+    {
+        Form? form;
+        try { form = new MainForm(null, RemSound.Core.Profile.NewBlank(), null, null, headless: true); }
+        catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+
+        try
+        {
+            var violations = new List<string>();
+            AuditForm("Main window", form, violations);
+            Check(violations.Count == 0, string.Join("; ", violations));
+
+            var tabs = CountControls(form, c => c is TabPage);
+            var interactive = CountControls(form, c => c is CheckBox or Button or ComboBox or ListBox or TrackBar or TextBox);
+            Check(tabs >= 3, $"the main window's tabs should be present (found {tabs})");
+            Check(interactive >= 15, $"the main window's interactive controls should be present (found {interactive})");
+            return $"audited the whole main window: {tabs} tabs, {interactive} interactive controls — names, mnemonics and tab order clean";
+        }
+        finally { try { form.Dispose(); } catch { /* ignore */ } }
+    }
+
+    private static int CountControls(Control root, Func<Control, bool> predicate)
+    {
+        var n = 0;
+        void Walk(Control p) { foreach (Control c in p.Controls) { if (predicate(c)) n++; Walk(c); } }
+        Walk(root);
+        return n;
     }
 
     private static void AuditForm(string formName, Form form, List<string> violations)

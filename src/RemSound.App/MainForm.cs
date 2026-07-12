@@ -273,7 +273,7 @@ public sealed class MainForm : Form
     // become the WASAPI-lane controls (Alt+W / Alt+Y) and these new ASIO controls take over
     // the simpler Alt+L / Alt+T mnemonics — ASIO is the "headline" lane in the new mode
     // (the reason a user picked it) so it gets the more memorable shortcuts.
-    private readonly NumericUpDown maxLatencyAsioBox = new() { Minimum = 1, Maximum = 500, Increment = 1, Value = 10, Width = 90, AccessibleName = "ASIO latency in milliseconds (Alt+L)" };
+    private readonly NumericUpDown maxLatencyAsioBox = new() { Minimum = 1, Maximum = 500, Increment = 1, Value = 10, Width = 90, AccessibleName = "ASIO latency in milliseconds (Alt+I)" };
     private readonly AccessibleCheckBox continuousTuneAsioBox = new() { Text = "Continuous auto-tune ASIO latency", AutoSize = true };
     private readonly ListBox smoothnessBox = new() { Width = 420, Height = 200, IntegralHeight = false, AccessibleName = "Buffer smoothness (Alt+B)" };
     private readonly ListBox artefactBox = new() { Width = 420, Height = 60, IntegralHeight = false, AccessibleName = "Artefact sound type (Alt+A) — controls how audio gaps sound" };
@@ -624,6 +624,13 @@ public sealed class MainForm : Form
     // Program.cs after the form closes; non-null means "user clicked Switch in Manage profiles —
     // re-launch the form under that profile."
     private ProfileStore? profileStore;
+    // Headless/test construction: when true the constructor builds the full window (every tab, control
+    // and menu) but SKIPS the calls that touch the OS — registering global hotkeys, starting the status /
+    // device-refresh timers, the device-change notifier, and the audio-backend mode switch. The
+    // disruptive startup work (Connect + sockets, UPnP, update check) already lives in the Shown handler,
+    // which never fires when a test constructs the form without showing it. Defaults false, so the real
+    // app's startup path is byte-for-byte unchanged. Lets the self-test audit the whole main window.
+    private readonly bool headless;
     private string? currentProfileTitle;
     // True when the active profile has its ReadOnly flag set. Drives three behaviours:
     //   * The window title gets a " (read-only)" suffix so NVDA / sighted users see
@@ -741,9 +748,10 @@ public sealed class MainForm : Form
 
     public MainForm() : this(null, null, null, null) { }
 
-    public MainForm(ProfileStore? profileStore, Profile? profile, string? loadedTitle, string? loadedPath = null)
+    public MainForm(ProfileStore? profileStore, Profile? profile, string? loadedTitle, string? loadedPath = null, bool headless = false)
     {
         this.profileStore = profileStore;
+        this.headless = headless;
         currentProfileTitle = loadedTitle;
         // Resolve the active profile's full path from whichever bit of info Program.cs
         // passed in. If a path was explicitly given (Open-from-arbitrary-folder flow),
@@ -1367,7 +1375,7 @@ public sealed class MainForm : Form
         // the moment we start announcing, those addresses get directly contacted (bridges
         // Tailscale/VPN where broadcast doesn't traverse).
         PushDiscoveryUnicastHints();
-        hotkeyController.Initialize(this);
+        if (!headless) hotkeyController.Initialize(this);
         // Announce each configurable global hotkey on the control / menu item it drives, so NVDA
         // reads "… press Control+Shift+Alt+R anywhere" when you land on it.
         UpdateHotkeyAnnouncements();
@@ -1569,6 +1577,10 @@ public sealed class MainForm : Form
             // next — every one modal to the main window, never nested.
             BeginInvoke(new Action(RunStartupNotices));
         };
+
+        // Headless test build stops here: no timers, no OS device-change registration. Everything above
+        // has built the full window (tabs, controls, menus) for the self-test to walk.
+        if (headless) return;
 
         statusTimer.Start();
 
@@ -4395,7 +4407,7 @@ public sealed class MainForm : Form
         // (Alt+W)" / "Continuous auto-tune WASAPI (Alt+Y)", surrendering L/T to ASIO. In every
         // classic mode this row is hidden via UpdateBothIndependentVisibility and the WASAPI
         // row keeps the original "Audio latency (Alt+L)" labels.
-        asioLatencyLabel = new Label { Text = "ASIO latency in milliseconds (Alt+&L)", AutoSize = true, Anchor = AnchorStyles.Left };
+        asioLatencyLabel = new Label { Text = "AS&IO latency in milliseconds (Alt+I)", AutoSize = true, Anchor = AnchorStyles.Left };
         asioLatencyLabel.Click += (_, _) => FocusControl(maxLatencyAsioBox);
         SelectAllOnFocus(maxLatencyAsioBox);
         maxLatencyAsioBox.Value = Math.Clamp(settings.LoadMaxLatencyMsAsio(), (int)maxLatencyAsioBox.Minimum, (int)maxLatencyAsioBox.Maximum);
@@ -6590,8 +6602,13 @@ public sealed class MainForm : Form
         var asioDriverArg = ModeUsesAsio(resolvedMode) ? driver : null;
         try
         {
-            sender.SetAudioMode(resolvedMode, asioDriverArg);
-            receiver.SetAudioMode(resolvedMode, asioDriverArg);
+            // In a headless test build, don't switch the real audio backends (which can open an ASIO
+            // driver); the list visibility below is UI-only and still runs so the mode toggle is testable.
+            if (!headless)
+            {
+                sender.SetAudioMode(resolvedMode, asioDriverArg);
+                receiver.SetAudioMode(resolvedMode, asioDriverArg);
+            }
             logFile.Event(resolvedMode == AudioMode.WasapiOnly
                 ? "audio backend: WASAPI only (fast path)"
                 : $"audio backend: WASAPI + ASIO driver \"{asioDriverArg}\" (independent lanes, no mix)");
