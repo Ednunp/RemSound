@@ -43,7 +43,13 @@ foreach ($loc in $runLocations) {
     # Binaries: publish\ already has them from the publish above; copy them to the other location(s).
     if (-not $soundOnly -and $loc -ne $publish) {
         Write-Host "Deploying program + binaries -> $loc (preserving user settings/logs) ..." -ForegroundColor Cyan
-        Invoke-Robocopy @($publish, $loc, '/E')   # no /MIR: never delete the user's settings/logs/profiles
+        # /E copies the program + binaries; NO /MIR so we never DELETE the user's data. The /XD
+        # excludes make the copy incapable of OVERWRITING it either: if publish\ ever accumulated a
+        # user-data folder (a stray run from there), it must never land on Ed's real Dropbox profiles/
+        # config/logs. The binary sync only ever carries program files, never user state, both ways.
+        Invoke-Robocopy @($publish, $loc, '/E',
+            '/XD', 'user settings and logs', 'recordings', 'logs', 'profiles', 'config',
+            '/XF', 'global config.json', 'remsound.config.json')
     }
     # THE point of this script: the whole source 'default sounds' folder, force-copied over THIS
     # location's copy, every time. /IS = copy even files robocopy thinks are identical; /IT = copy

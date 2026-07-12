@@ -35,6 +35,20 @@ $distDir = Join-Path $repo 'dist'
 $zipPath = Join-Path $distDir "RemSound-$Tag.zip"
 $staging = Join-Path ([System.IO.Path]::GetTempPath()) ("remsound-release-" + [guid]::NewGuid().ToString('N'))
 
+# 0z. The -Tag MUST match the csproj <Version>. The in-app updater downloads exactly
+#     "RemSound-<tag>.zip" and compares the running version to the tag; a mismatch (e.g. tag v5.3 but
+#     the binary is still 5.2 because the version bump was forgotten) ships a zip whose contents don't
+#     match its name, which the updater sees as a perpetual "update available". Catch it before any work.
+$csprojText    = Get-Content -LiteralPath $proj -Raw
+$csprojVersion = if ($csprojText -match '<Version>([^<]+)</Version>') { $Matches[1].Trim() } else { '' }
+$tagVersion    = $Tag.TrimStart('v')
+if ($csprojVersion -ne $tagVersion) {
+    Write-Host "RELEASE ABORTED - tag $Tag ($tagVersion) does not match the csproj <Version> ($csprojVersion)." -ForegroundColor Red
+    Write-Host "Bump <Version> in RemSound.App.csproj to $tagVersion (and add the About-box changelog entry), or fix the tag, then re-run." -ForegroundColor Red
+    exit 1
+}
+Write-Host "Version check: tag $Tag matches csproj <Version> $csprojVersion." -ForegroundColor DarkGray
+
 # 0a. SoundForge drops a .sfk peak file next to every .wav it opens. They're byproducts that must
 #     never ship (the build only bundles *.wav, so they wouldn't anyway) - clear them from the
 #     source 'default sounds\' folder so they don't accumulate and clutter the working tree.
