@@ -9211,7 +9211,8 @@ public sealed class MainForm : Form
     /// Standard returns the codec's natural frame; Tight halves it (Opus 960 → 480 → 240 → 120
     /// floored). Floor is 120 samples = 2.5 ms = standard libopus's RESTRICTED_LOWDELAY minimum.
     /// </summary>
-    private static int EffectiveOpusFrameSamples(AudioTransportCodec codec, int opusFrameSamples, SendRate rate)
+    // internal so the send-only service host reuses the exact same frame-size rule as the main app.
+    internal static int EffectiveOpusFrameSamples(AudioTransportCodec codec, int opusFrameSamples, SendRate rate)
     {
         if (codec != AudioTransportCodec.Opus) return opusFrameSamples;
         return rate == SendRate.Tight ? Math.Max(120, opusFrameSamples / 2) : opusFrameSamples;

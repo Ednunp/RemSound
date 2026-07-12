@@ -60,6 +60,11 @@ public sealed class ServiceSendHost : IDisposable
 
     public bool IsSending { get { lock (gate) return running; } }
 
+    /// <summary>Test seam: the crypto material the host pushed to the sender + the codec/frame it set, so
+    /// a self-test can prove the service configures the sender exactly like the main app.</summary>
+    internal (byte[]? Key, byte[]? Fingerprint, AudioTransportCodec Codec, int Frame) SenderConfigForTest =>
+        (sender.AudioKey, sender.AudioFingerprint, sender.Codec, sender.OpusFrameSamplesPerChannel);
+
     /// <summary>Builds the send sources, peer endpoints and encryption key from a profile and starts the
     /// sender. Idempotent-ish: call <see cref="Suspend"/> before re-applying a different profile. Returns
     /// false (and stays stopped) if the profile has nothing to send or no reachable peers.</summary>
@@ -73,10 +78,16 @@ public sealed class ServiceSendHost : IDisposable
             if (specs.Count == 0) { log?.Invoke("service: profile has no WASAPI send sources — nothing to stream"); return false; }
             if (endpoints.Count == 0) { log?.Invoke("service: profile has no reachable peers — nothing to stream to"); return false; }
 
-            sender.AudioKey = string.IsNullOrEmpty(profile.Password)
-                ? null
-                : RemSoundCrypto.DeriveKey(RemSoundCrypto.Deobfuscate(profile.Password));
-            sender.ConfigureCodec(profile.Codec, profile.OpusFrameSamplesPerChannel);
+            // Encryption: derive BOTH the key AND the fingerprint from the plain password, exactly like
+            // MainForm.RecomputeAudioCrypto. The peer verifies the fingerprint before accepting a stream —
+            // sending the key without it would get the service's audio rejected at the far end.
+            var plainPassword = string.IsNullOrEmpty(profile.Password) ? "" : RemSoundCrypto.Deobfuscate(profile.Password);
+            sender.AudioKey = string.IsNullOrEmpty(plainPassword) ? null : RemSoundCrypto.DeriveKey(plainPassword);
+            sender.AudioFingerprint = string.IsNullOrEmpty(plainPassword) ? null : RemSoundCrypto.Fingerprint(plainPassword);
+            // Opus frame size follows the send rate the same way the main app does (the "Small" rate
+            // halves the Opus frame) — otherwise the service would encode at a different frame than the
+            // main app would for the identical profile.
+            sender.ConfigureCodec(profile.Codec, MainForm.EffectiveOpusFrameSamples(profile.Codec, profile.OpusFrameSamplesPerChannel, profile.SendRate));
             sender.SetSendRate(profile.SendRate);
             sender.SetTightLatency(profile.TightLatencyMode);
             sender.SetReceivers(endpoints);
@@ -229,7 +240,9 @@ public sealed class ServiceSendHost : IDisposable
                 catch { addr = null; }
             }
             if (addr is null) continue;
-            var ep = new IPEndPoint(addr, port ?? p.AudioPort);
+            // Send to the peer's audio port: an explicit "host:port" wins, else the standard peer port —
+            // the same default the main app's manual-peer path uses (NOT the local listen port).
+            var ep = new IPEndPoint(addr, port ?? RemPacket.DefaultPeerDialPort);
             if (seen.Add($"{ep.Address}:{ep.Port}")) result.Add(ep);
         }
         return result;

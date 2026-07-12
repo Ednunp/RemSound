@@ -63,6 +63,7 @@ internal static class SelfTest
         RunStep(results, "Per-application capture lifecycle", AppSendCaptureLifecycle);
         RunStep(results, "Lifecycle churn (modes, sources, pan/EQ, send/receive)", LifecycleChurn);
         RunStep(results, "Service app-yield token", ServiceInteractivePresence);
+        RunStep(results, "Service sender parity (crypto + Opus frame)", ServiceSenderParity);
         RunStep(results, "Service send host (headless stream + yield)", ServiceSendHostStream);
         RunStep(results, "Service registration args", ServiceRegistrationArgs);
         RunStep(results, "Recording engine (all formats + source gate + mono)", RecordingEngine);
@@ -675,6 +676,39 @@ internal static class SelfTest
             $"exe path must be escaped-quoted with the run verb (got: {args})");
         Check(args.Contains($"DisplayName= \"{ServiceControl.DisplayName}\""), "must set the display name");
         return "sc create args quoted correctly for a spaced path";
+    }
+
+    /// <summary>The service must configure the sender EXACTLY like the main app: derive both the audio key
+    /// AND the fingerprint from the password (a missing fingerprint gets the encrypted stream rejected at
+    /// the peer), and apply the send-rate-adjusted Opus frame (the "Small" rate halves it). Guards the
+    /// divergences found auditing the service against the main app.</summary>
+    private static string? ServiceSenderParity()
+    {
+        var profile = new Profile
+        {
+            Title = "parity",
+            Codec = AudioTransportCodec.Opus,
+            OpusFrameSamplesPerChannel = 960,   // broadcast
+            SendRate = SendRate.Tight,          // "Small" — should halve the Opus frame to 480
+            WasapiSendMode = "devices",
+        };
+        profile.SelectedWasapiSendOutputs.Add("fake-device-id");     // a source so ApplyProfile proceeds
+        profile.SelectedConnectedPeers.Add("127.0.0.1:47999");
+        const string pw = "hunter2";
+        profile.Password = RemSoundCrypto.Obfuscate(pw);
+
+        using var host = new ServiceSendHost(() => profile);
+        Check(host.ApplyProfile(profile), "ApplyProfile should proceed with a source + peer + password");
+        var cfg = host.SenderConfigForTest;
+
+        Check(cfg.Key is { Length: > 0 } && cfg.Key.SequenceEqual(RemSoundCrypto.DeriveKey(pw)),
+            "the service must set the audio key = DeriveKey(password)");
+        Check(cfg.Fingerprint is { Length: > 0 } && cfg.Fingerprint.SequenceEqual(RemSoundCrypto.Fingerprint(pw)),
+            "the service must set the audio FINGERPRINT = Fingerprint(password), or the peer rejects the stream");
+        Check(cfg.Codec == AudioTransportCodec.Opus, "codec must round-trip to the sender");
+        Check(cfg.Frame == MainForm.EffectiveOpusFrameSamples(AudioTransportCodec.Opus, 960, SendRate.Tight) && cfg.Frame == 480,
+            $"the Small send rate must halve the Opus frame like the main app (got {cfg.Frame})");
+        return "key + fingerprint + effective Opus frame match the main app";
     }
 
     /// <summary>The lock-screen service's app-yield token: while a hold is active the service must see an
