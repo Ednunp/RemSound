@@ -478,11 +478,17 @@ public sealed class MainForm : Form
         new("Use Windows default audio device, follows Windows changes", "__use-default-output__", CaptureKind.Loopback) { IsDefaultFollower = true };
     private static readonly AudioDeviceChoice DefaultInputFollower =
         new("Use Windows default audio device, follows Windows changes", "__use-default-input__", CaptureKind.Input) { IsDefaultFollower = true };
+    // "Use Windows default" for the SEND side's "WASAPI audio outputs to send" (system-audio/loopback)
+    // list: loopback-capture whatever Windows currently uses as the default OUTPUT and follow it. Its own
+    // sentinel + persisted flag, distinct from the receive-output follower (which plays TO the default).
+    private static readonly AudioDeviceChoice DefaultLoopbackSendFollower =
+        new("Use Windows default audio device, follows Windows changes", "__use-default-loopback-send__", CaptureKind.Loopback) { IsDefaultFollower = true };
     // The Windows-default device id we last routed to while following, per direction. A default-device
     // change doesn't change the device SET, so the list-sync wouldn't catch it — we compare against
     // these to spot it and re-route (see ReapplyIfFollowedDefaultChanged).
     private string? lastFollowedDefaultOutputId;
     private string? lastFollowedDefaultInputId;
+    private string? lastFollowedDefaultLoopbackId;
 
     // Receive-output device IDs the user/profile selected — kept even while a device is unplugged,
     // so a card that returns is silently re-ticked and re-opened (issue #5: recover after USB
@@ -1172,7 +1178,21 @@ public sealed class MainForm : Form
         };
         WireCheckedListAccessibility(sendOutputDevicesList, sendOutputDevicesStatusLabel, "output device");
         WireCheckedListAccessibility(sendInputDevicesList, sendInputDevicesStatusLabel, "input device");
-        sendOutputDevicesList.ItemCheck += (_, _) => { if (!suppressDeviceCheckChange) { BeginInvoke(ApplyAudioRuntime); MarkProfileDirty(); } };
+        sendOutputDevicesList.ItemCheck += (_, args) =>
+        {
+            if (suppressDeviceCheckChange) return;
+            BeginInvoke(ApplyAudioRuntime);
+            if (sendOutputDevicesList.Items[args.Index] is AudioDeviceChoice { IsDefaultFollower: true })
+            {
+                // "Use Windows default output for loopback" is a machine-wide preference (AppConfig),
+                // not part of the profile — a follower can never go stale. No untick-others prompt: the
+                // capture-spec builder de-dupes ids, so following the default never double-captures a
+                // device already ticked explicitly.
+                PersistUseDefaultLoopbackSend(args.NewValue == CheckState.Checked);
+                return;
+            }
+            MarkProfileDirty();
+        };
         sendInputDevicesList.ItemCheck += (_, args) =>
         {
             if (suppressDeviceCheckChange) return;
@@ -4362,7 +4382,7 @@ public sealed class MainForm : Form
                 // by every measure. 2026-06-02 (Ed's "offline but still sending audio" report).
                 var stillThere = receiver.IsAudioFlowingFrom(ep.Address, TimeSpan.FromSeconds(3))
                     || IsEndpointHeartbeatHealthy(ep);
-                var suffix = stillThere ? "" : " (offline)";
+                var suffix = stillThere ? "" : OfflineMarker;
                 var ghost = new PeerAnnouncement(id, $"{label}{suffix}", ep.Port, true, true, DateTime.UtcNow, ep.Address);
                 desired.Add((new PeerListItem(ghost), id));
             }
@@ -4466,9 +4486,22 @@ public sealed class MainForm : Form
     /// (which for a manual-by-IP peer is the address). Used by every peer list via
     /// <see cref="PeerListItem.DisplayNameProvider"/>.</summary>
     private string ResolvePeerDisplayName(PeerAnnouncement peer)
-        => namedPeers.TryGetValue(PeerIdentityKey(peer), out var np) && !string.IsNullOrWhiteSpace(np.FriendlyName)
+    {
+        var name = namedPeers.TryGetValue(PeerIdentityKey(peer), out var np) && !string.IsNullOrWhiteSpace(np.FriendlyName)
             ? np.FriendlyName
             : peer.Name;
+        // SyncConnectedList decorates a discovery-lost "ghost" peer's Name with a transient " (offline)"
+        // for the connected list. That decoration must NEVER be persisted as the peer's label — this
+        // method feeds selectedPeerLabels (the status readout, pan/EQ list, recordings), which is
+        // re-stored every status tick, so a baked-in " (offline)" compounds into
+        // "NAME (offline)(offline)(offline)…". Strip it here, the single point where a display name is
+        // resolved for storage, so the marker stays a once-only, live decoration.
+        return StripOfflineMarker(name);
+    }
+
+    private const string OfflineMarker = " (offline)";
+    private static string StripOfflineMarker(string name) =>
+        name.Contains(OfflineMarker, StringComparison.Ordinal) ? name.Replace(OfflineMarker, "") : name;
 
     private PeerListItem? SelectedConnectedPeer() => SafeSelectedItem(connectedPeersList) as PeerListItem;
 
@@ -5130,10 +5163,25 @@ public sealed class MainForm : Form
         // splits this set internally into WASAPI specs (sent to MixingEngine) and ASIO specs
         // (sent to AsioCaptureBackend). Both run in parallel and their outputs are summed.
         var specs = new List<CaptureSourceSpec>();
+        var addedLoopbackIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string? followedDefaultLoopback = null;
         foreach (var item in sendOutputDevicesList.CheckedItems.OfType<AudioDeviceChoice>())
         {
-            if (item.DeviceId is { } id) specs.Add(new CaptureSourceSpec(id, CaptureKind.Loopback, item.Name));
+            if (item.IsDefaultFollower)
+            {
+                // Loopback-capture whatever Windows currently uses as the default OUTPUT, and follow it.
+                followedDefaultLoopback = ResolveDefaultDeviceId(NAudio.CoreAudioApi.DataFlow.Render);
+                if (!string.IsNullOrEmpty(followedDefaultLoopback) && addedLoopbackIds.Add(followedDefaultLoopback))
+                {
+                    specs.Add(new CaptureSourceSpec(followedDefaultLoopback, CaptureKind.Loopback, "Windows default audio device"));
+                }
+            }
+            else if (item.DeviceId is { } id && addedLoopbackIds.Add(id))
+            {
+                specs.Add(new CaptureSourceSpec(id, CaptureKind.Loopback, item.Name));
+            }
         }
+        lastFollowedDefaultLoopbackId = followedDefaultLoopback;
         var addedInputIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         string? followedDefaultInput = null;
         foreach (var item in sendInputDevicesList.CheckedItems.OfType<AudioDeviceChoice>())
@@ -5179,7 +5227,7 @@ public sealed class MainForm : Form
             // All three lists start UNCHECKED every session. No persisted selection — by design.
             // The user re-ticks once per session, avoiding the "wrong-device-still-selected"
             // failure mode after a card unplug or ID change.
-            sendOutputDevicesSignature = SyncDeviceCheckedListBox(sendOutputDevicesList, outputs);
+            sendOutputDevicesSignature = SyncDeviceCheckedListBox(sendOutputDevicesList, WithDefaultFollower(outputs, DefaultLoopbackSendFollower));
             sendInputDevicesSignature = SyncDeviceCheckedListBox(sendInputDevicesList, WithDefaultFollower(inputs, DefaultInputFollower));
             receiveOutputDevicesSignature = SyncDeviceCheckedListBox(receiveOutputDevicesList, WithDefaultFollower(outputs, DefaultOutputFollower));
             // Re-tick the "Use Windows default" followers from the saved preference. They don't ride the
@@ -5286,7 +5334,7 @@ public sealed class MainForm : Form
             return;
         }
 
-        var sendOutputChanged = MaybeSyncList(sendOutputDevicesList, wasapiOutputs, ref sendOutputDevicesSignature);
+        var sendOutputChanged = MaybeSyncList(sendOutputDevicesList, WithDefaultFollower(wasapiOutputs, DefaultLoopbackSendFollower), ref sendOutputDevicesSignature);
         var sendInputChanged = MaybeSyncList(sendInputDevicesList, WithDefaultFollower(wasapiInputs, DefaultInputFollower), ref sendInputDevicesSignature);
         var receiveOutputChanged = MaybeSyncList(receiveOutputDevicesList, WithDefaultFollower(wasapiOutputs, DefaultOutputFollower), ref receiveOutputDevicesSignature);
         bool asioSendChanged;
@@ -5785,6 +5833,12 @@ public sealed class MainForm : Form
         {
             ApplySendSources();
         }
+        // Send-side loopback follower tracks the default OUTPUT (Render) — re-route when it moves.
+        if (IsFollowerChecked(sendOutputDevicesList)
+            && ResolveDefaultDeviceId(NAudio.CoreAudioApi.DataFlow.Render) != lastFollowedDefaultLoopbackId)
+        {
+            ApplySendSources();
+        }
     }
 
     private static void PersistUseDefaultDevice(bool output, bool on)
@@ -5798,6 +5852,12 @@ public sealed class MainForm : Form
         catch { /* harmless — choice just won't survive a restart */ }
     }
 
+    private static void PersistUseDefaultLoopbackSend(bool on)
+    {
+        try { var c = AppConfig.Load(); c.UseDefaultLoopbackSend = on; c.Save(); }
+        catch { /* harmless — choice just won't survive a restart */ }
+    }
+
     private void RestoreDefaultFollowerChecks()
     {
         AppConfig cfg;
@@ -5805,6 +5865,7 @@ public sealed class MainForm : Form
         catch { return; }
         SetFollowerChecked(receiveOutputDevicesList, cfg.UseDefaultOutputDevice);
         SetFollowerChecked(sendInputDevicesList, cfg.UseDefaultInputDevice);
+        SetFollowerChecked(sendOutputDevicesList, cfg.UseDefaultLoopbackSend);
     }
 
     private void SetFollowerChecked(CheckedListBox list, bool on)

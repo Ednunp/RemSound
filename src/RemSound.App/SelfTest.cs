@@ -58,6 +58,8 @@ internal static class SelfTest
         RunStep(results, "Server wire-format compatibility", ServerWireCompat);
         RunStep(results, "App settings save and reload", SettingsRoundTrip);
         RunStep(results, "Per-peer shaping DSP", PeerShapingDsp);
+        RunStep(results, "Multi-output fan-out (both lanes)", FanOutToBothOutputs);
+        RunStep(results, "Per-application send enumeration", AppSendEnumeration);
         RunStep(results, "v5 settings and shaping round-trip", V5ConfigRoundTrip);
         RunStep(results, "Profile save and reload", ProfileRoundTrip);
         RunStep(results, "What's-new update marker", WhatsNewMarkerRoundTrip);
@@ -246,6 +248,40 @@ internal static class SelfTest
         Check(centre > 200 && centre < 800 && q is > 0.1f and < 12f,
             $"parametric range→peaking must give a sane centre ({centre:0} Hz) and Q ({q:0.00})");
         return "unity→null, master-off→null, volume, parametric";
+    }
+
+    /// <summary>Proves the "every received stream plays to EVERY active output" fan-out: with both output
+    /// lanes active (BothIndependent), one incoming stream must produce audio on BOTH the WASAPI and the
+    /// ASIO lane surface — the WASAPI lane from the primary session, the ASIO lane from its mirror
+    /// replica. Before the fan-out, only the lane matching the sender's capture tag played and the other
+    /// output was silent (the bug Ed hit: ASIO-sent audio never reached the WASAPI output).</summary>
+    private static string? FanOutToBothOutputs()
+    {
+        // Driven inside RemSound.Receiver (PlayoutEngine/SessionPlayout are internal there).
+        var err = ReceiverSelfChecks.FanOutToBothOutputs();
+        Check(err is null, err ?? "");
+        return "one stream played to both output lanes (WASAPI + ASIO fan-out)";
+    }
+
+    /// <summary>Per-application send plumbing: the enumerator returns a well-formed snapshot without
+    /// throwing (it may be empty on a silent/headless box — that's fine), the "proc:PID" id round-trips,
+    /// and the Windows-version support gate answers consistently. Does NOT open a real process-loopback
+    /// capture — that needs a live playing app + hardware, validated separately.</summary>
+    private static string? AppSendEnumeration()
+    {
+        var apps = RemSound.Sender.AudioAppEnumerator.Snapshot();
+        Check(apps is not null, "enumerator returned null");
+        foreach (var a in apps!)
+            Check(!string.IsNullOrWhiteSpace(a.ProcessName), "an app had an empty process name");
+
+        Check(ProcessLoopbackId.TryParse(ProcessLoopbackId.Format(1234), out var pid) && pid == 1234,
+            "proc:PID id did not round-trip");
+        Check(!ProcessLoopbackId.TryParse("asio:0", out _), "ASIO id wrongly parsed as a process id");
+
+        var supported = RemSound.Sender.ProcessLoopbackCapture.IsSupported;
+        Check(supported == OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041),
+            "support gate disagrees with the OS build check");
+        return $"enumerated {apps.Count} app(s); process-loopback supported={supported}";
     }
 
     /// <summary>The v5 machine-wide settings and per-peer shaping survive a JSON save/reload: new

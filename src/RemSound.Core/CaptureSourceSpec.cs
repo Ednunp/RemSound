@@ -9,6 +9,11 @@ public enum CaptureKind
 {
     Loopback,
     Input,
+    /// <summary>Per-application capture: loopback of ONE process (and its child process tree) via the
+    /// Windows process-loopback API (Windows 10 build 19041+). The <see cref="CaptureSourceSpec.DeviceId"/>
+    /// carries the target PID as <c>"proc:&lt;pid&gt;"</c> (see <see cref="ProcessLoopbackId"/>). WASAPI-only
+    /// — ASIO has no per-app concept.</summary>
+    ProcessLoopback,
 }
 
 /// <summary>
@@ -34,5 +39,21 @@ public static class AsioDeviceId
         if (string.IsNullOrEmpty(deviceId)) return false;
         if (!deviceId.StartsWith("asio:", StringComparison.OrdinalIgnoreCase)) return false;
         return int.TryParse(deviceId.AsSpan("asio:".Length), out channelPair) && channelPair >= 0;
+    }
+}
+
+/// <summary>Synthetic device-id for a per-application (process-loopback) capture: <c>"proc:&lt;pid&gt;"</c>.
+/// The PID is resolved fresh each time the app list reconciles, so the id is transient (an app that
+/// restarts gets a new PID and a new spec) — selection is tracked by process NAME elsewhere.</summary>
+public static class ProcessLoopbackId
+{
+    public static string Format(int processId) => $"proc:{processId}";
+
+    public static bool TryParse(string deviceId, out int processId)
+    {
+        processId = -1;
+        if (string.IsNullOrEmpty(deviceId)) return false;
+        if (!deviceId.StartsWith("proc:", StringComparison.OrdinalIgnoreCase)) return false;
+        return int.TryParse(deviceId.AsSpan("proc:".Length), out processId) && processId > 0;
     }
 }

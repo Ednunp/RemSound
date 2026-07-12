@@ -1054,14 +1054,12 @@ public sealed class AudioReceiver : IDisposable
             }
 
             sp = playoutEngine.GetOrCreateSession(remote, streamId, MaxBufferCapacityBytes(MaxLatencyForSizingMs));
-            // Tag the session with the wire-announced render route. For classic-mode senders
-            // (or pre-2026-05-11 builds) this is always Mixed and PlayoutEngine treats the
-            // session exactly as it always did. BothIndependent senders will tag their two
-            // lanes with WasapiLane / AsioLane so the per-route surfaces direct each lane to
-            // the matching render backend without mixing. Updated unconditionally so an
-            // in-place format change can re-route a session (e.g. a sender that mistakenly
-            // started in classic mode and re-announces with the right lane mid-stream).
-            sp.Route = format.Lane;
+            // Output routing is now owned by PlayoutEngine: every received stream is fanned out to EVERY
+            // active output lane (a primary plus a mirror replica per extra lane), so the sender's
+            // captured-lane tag (format.Lane) no longer decides where the audio plays — it plays on all
+            // the receiver's outputs. GetOrCreateSession assigns each replica its output lane. (The
+            // sender still announces format.Lane on the wire for back-compat; the receiver ignores it
+            // for routing.)
 
             if (existing is null)
             {

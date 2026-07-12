@@ -22,15 +22,27 @@ public sealed class PeerDspChain
     // carries per-channel state. left.Length == right.Length always.
     private readonly BiQuadFilter[] left;
     private readonly BiQuadFilter[] right;
+    // The inputs this chain was built from, kept so a mirror output lane can get its OWN chain with
+    // fresh (independent) biquad state via Clone() — two output lanes reading the same peer must NOT
+    // share biquad delay lines, or their interleaved reads corrupt each other's filter state.
+    private readonly PeerShaping? sourceShaping;
+    private readonly bool sourceEnabled;
 
-    private PeerDspChain(float gainL, float gainR, bool hasGain, BiQuadFilter[] left, BiQuadFilter[] right)
+    private PeerDspChain(float gainL, float gainR, bool hasGain, BiQuadFilter[] left, BiQuadFilter[] right, PeerShaping? sourceShaping, bool sourceEnabled)
     {
         this.gainL = gainL;
         this.gainR = gainR;
         this.hasGain = hasGain;
         this.left = left;
         this.right = right;
+        this.sourceShaping = sourceShaping;
+        this.sourceEnabled = sourceEnabled;
     }
+
+    /// <summary>A fresh chain identical in coefficients/gain but with its OWN zeroed biquad state, for a
+    /// second output lane playing the same peer. Cheap (rebuilds a handful of biquads); the brief
+    /// zero-state settle is sub-millisecond, same as any DSP change.</summary>
+    public PeerDspChain Clone() => Build(sourceShaping, sourceEnabled) ?? this;
 
     /// <summary>True when this chain would do nothing (unity gain — pan off/centre, volume 100% — and
     /// EQ off/flat). Build returns null in that case so an unshaped peer's <c>dsp</c> reference is null
@@ -86,7 +98,7 @@ public sealed class PeerDspChain
             }
         }
 
-        var chain = new PeerDspChain(gainL, gainR, hasGain, [.. l], [.. r]);
+        var chain = new PeerDspChain(gainL, gainR, hasGain, [.. l], [.. r], shaping, enabled);
         return chain.IsNoOp ? null : chain;
     }
 

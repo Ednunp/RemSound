@@ -321,6 +321,9 @@ internal sealed class SessionPlayout : IDisposable
     /// contributes to. Defaults to <see cref="RenderRoute.Mixed"/> — the value an old
     /// sender or a classic-mode (WasapiOnly / AsioOnly / Both) sender writes.</summary>
     public RenderRoute Route { get; set; } = RenderRoute.Mixed;
+    /// <summary>Ring capacity this session was sized to (bytes) — so a mirror replica for another
+    /// output lane can be created with the same capacity.</summary>
+    public int Capacity { get; }
     public int BufferedBytes => playout.BufferedBytes;
     public int BufferedMs => playout.BufferedBytes / MixBytesPerFrame * 1000 / MixSampleRate;
     public long UnderrunCount => playout.UnderrunCount;
@@ -369,6 +372,7 @@ internal sealed class SessionPlayout : IDisposable
     {
         Endpoint = endpoint;
         StreamId = streamId;
+        Capacity = capacityBytes;
         playout = new AudioRingBuffer(capacityBytes);
 
         // Resampler init. interp=true, filtercnt=0 picks WdlResampler's linear-interpolation
@@ -384,7 +388,26 @@ internal sealed class SessionPlayout : IDisposable
         driftResampler.SetRates(MixSampleRate, MixSampleRate);
     }
 
+    // Mirror replicas. In BothIndependent mode the SAME decoded audio is fanned out to one extra
+    // SessionPlayout per additional output lane, so every output device plays every stream. Each
+    // mirror is a FULL, independent SessionPlayout — its own ring, drift resampler, arming and
+    // concealment — so each output keeps its own clock and latency with no shared cache and no extra
+    // latency (identical to a single-output setup, by construction). Only the decode-side fan-out lives
+    // here; ReadFloats (the tuned drift/trim/conceal math) is untouched and each replica runs it alone.
+    // Replaced wholesale (reference swap) by the UI thread; the network/audio threads only read it.
+    private volatile SessionPlayout[] mirrors = [];
+    public void SetMirrors(SessionPlayout[] value) => mirrors = value;
+
     public void Write(ReadOnlySpan<byte> source)
+    {
+        WriteLocal(source);
+        var mir = mirrors;
+        for (var i = 0; i < mir.Length; i++) mir[i].WriteLocal(source);
+    }
+
+    /// <summary>The single-instance write body — used directly for a mirror replica (so a mirror never
+    /// re-fans-out) and by <see cref="Write"/> for the primary before it forwards to its mirrors.</summary>
+    private void WriteLocal(ReadOnlySpan<byte> source)
     {
         var ms = source.Length * 1000 / MixBytesPerSecond;
         if (ms > largestWriteMs) largestWriteMs = ms;
@@ -412,6 +435,16 @@ internal sealed class SessionPlayout : IDisposable
     /// by the buffer + drift corrector + click-trim combo.
     /// </summary>
     public void NoteFramesQueued(int targetLatencyMs)
+    {
+        NoteFramesQueuedLocal(targetLatencyMs);
+        // Each mirror arms independently on its own ring (same bytes arrive at the same rate, so they
+        // arm at ~the same moment). Forwarded here rather than called separately so the decode side
+        // only ever touches the primary.
+        var mir = mirrors;
+        for (var i = 0; i < mir.Length; i++) mir[i].NoteFramesQueuedLocal(targetLatencyMs);
+    }
+
+    private void NoteFramesQueuedLocal(int targetLatencyMs)
     {
         const int CatastrophicCapMs = 1000;
         const int CatastrophicTrimToMs = 250;

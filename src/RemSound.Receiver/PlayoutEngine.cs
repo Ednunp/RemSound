@@ -54,6 +54,18 @@ internal sealed class PlayoutEngine : IWaveProvider
     private Action<IPEndPoint, ReadOnlyMemory<float>>? recordTap;
     private bool recordTapRaw;
     private SessionPlayout[] sessionsSnapshot = [];
+    // Mirror replicas for the "every stream plays to every output" fan-out (BothIndependent). The
+    // PRIMARY per stream lives in `sessions` (the decoder writes to it, tagged with the first active
+    // output lane); these are the EXTRA replicas, one per additional active output lane, each fed the
+    // same decoded audio via the primary's mirror list and tagged with its own output lane. Reconciled
+    // whenever the active output lanes change (SetLaneActive) or a stream is created. Guarded by
+    // sessionsLock. `sessionsSnapshot` above includes both primaries and mirrors, so the existing
+    // per-Route reads and per-Route auto-tune aggregators route each replica to exactly its own output.
+    private readonly Dictionary<(IPEndPoint Endpoint, ushort StreamId), List<SessionPlayout>> mirrorsByKey = new();
+    // The lane that drives RECORDING (the primary lane / first active output). The received-mix record
+    // dispatch and the per-block record hook fire only on this route, so a fanned-out stream is recorded
+    // once, not once per output. The per-peer record tap lives only on the primaries (in `sessions`).
+    private volatile RenderRoute recordingRoute = RenderRoute.Mixed;
     // Per-route scratch. Each IWaveProvider surface (Mixed / WasapiLane / AsioLane) runs on
     // its own consumer thread in BothIndependent mode (WASAPI master producer + ASIO render
     // thread, independent). They must not share scratch arrays — concurrent writes would
@@ -124,12 +136,19 @@ internal sealed class PlayoutEngine : IWaveProvider
     /// first place; the orphan-fall-through logic is benign in that case.</summary>
     public void SetLaneActive(RenderRoute lane, bool active)
     {
-        switch (lane)
+        lock (sessionsLock)
         {
-            case RenderRoute.WasapiLane: wasapiLaneActive = active; break;
-            case RenderRoute.AsioLane: asioLaneActive = active; break;
-            // RenderRoute.Mixed is handled by ReadAllSessions which doesn't filter by lane;
-            // no flag needed.
+            switch (lane)
+            {
+                case RenderRoute.WasapiLane: wasapiLaneActive = active; break;
+                case RenderRoute.AsioLane: asioLaneActive = active; break;
+                // RenderRoute.Mixed is handled by ReadAllSessions which doesn't filter by lane;
+                // no flag needed.
+            }
+            // Re-fan-out every stream to the now-active set of output lanes: a newly-ticked device gets a
+            // mirror replica per existing stream; an un-ticked one has its replicas dropped. Idempotent,
+            // so the paired Wasapi+Asio calls CompositeRenderBackend makes don't double up.
+            ReconcileReplicasLocked();
         }
     }
 
@@ -154,6 +173,11 @@ internal sealed class PlayoutEngine : IWaveProvider
             else peerDspByAddress[address] = chain;
             foreach (var s in sessions.Values)
                 if (s.Endpoint.Address.Equals(address)) s.SetDsp(chain);
+            // Mirror replicas each need their OWN chain instance (independent biquad state) — a fresh
+            // clone per mirror, or null to clear. Never share one chain across two output lanes.
+            foreach (var (key, mirs) in mirrorsByKey)
+                if (key.Endpoint.Address.Equals(address))
+                    foreach (var mir in mirs) mir.SetDsp(chain?.Clone());
         }
     }
 
@@ -350,7 +374,10 @@ internal sealed class PlayoutEngine : IWaveProvider
                 if (peerDspByAddress.TryGetValue(endpoint.Address, out var chain)) sp.SetDsp(chain);
                 if (recordTap is not null) sp.SetRecordTap(recordTap, recordTapRaw);
                 sessions[key] = sp;
-                sessionsSnapshot = sessions.Values.ToArray();
+                // Assigns the primary's output lane and creates a mirror replica per additional active
+                // output lane (fan-out), then rebuilds the snapshot. In WasapiOnly this is a no-op beyond
+                // setting the route (one active lane), so classic behaviour is unchanged.
+                ReconcileReplicasLocked();
             }
             return sp;
         }
@@ -364,11 +391,88 @@ internal sealed class PlayoutEngine : IWaveProvider
             if (sessions.Remove(key, out var sp))
             {
                 sp.Dispose();
-                sessionsSnapshot = sessions.Values.ToArray();
+                if (mirrorsByKey.Remove(key, out var mirs))
+                    foreach (var m in mirs) m.Dispose();
+                RebuildSnapshotLocked();
                 return true;
             }
             return false;
         }
+    }
+
+    /// <summary>The active output lanes, in priority order (WASAPI first). Drives which lane a stream's
+    /// primary uses and how many mirror replicas it needs. Caller holds sessionsLock.</summary>
+    private List<RenderRoute> ActiveOutputLanesLocked()
+    {
+        var lanes = new List<RenderRoute>(2);
+        if (wasapiLaneActive) lanes.Add(RenderRoute.WasapiLane);
+        if (asioLaneActive) lanes.Add(RenderRoute.AsioLane);
+        return lanes;
+    }
+
+    /// <summary>Reconcile every stream's replicas to the current active output lanes: put the primary on
+    /// the first active lane and keep exactly one mirror per additional active lane (each a full,
+    /// independent SessionPlayout fed the same decoded audio). Idempotent, so it's cheap to call on
+    /// every lane change. In WasapiOnly there is one active lane, so no mirrors are made and behaviour is
+    /// unchanged. Caller holds sessionsLock.</summary>
+    private void ReconcileReplicasLocked()
+    {
+        var lanes = ActiveOutputLanesLocked();
+        if (lanes.Count > 0) recordingRoute = lanes[0];
+
+        foreach (var (key, primary) in sessions)
+        {
+            if (lanes.Count == 0)
+            {
+                DropMirrorsLocked(key, primary);
+                continue;
+            }
+            primary.Route = lanes[0];
+            // Wanted mirror lanes = every active lane except the primary's.
+            var wanted = lanes.Count > 1 ? lanes.GetRange(1, lanes.Count - 1) : null;
+            if (wanted is null || wanted.Count == 0)
+            {
+                DropMirrorsLocked(key, primary);
+                continue;
+            }
+            var existing = mirrorsByKey.TryGetValue(key, out var m) ? m : new List<SessionPlayout>();
+            // Drop mirrors whose lane is no longer active.
+            for (var i = existing.Count - 1; i >= 0; i--)
+                if (!wanted.Contains(existing[i].Route)) { existing[i].Dispose(); existing.RemoveAt(i); }
+            // Add a mirror for each wanted lane not already present.
+            foreach (var lane in wanted)
+            {
+                if (existing.Exists(x => x.Route == lane)) continue;
+                var mir = new SessionPlayout(primary.Endpoint, primary.StreamId, primary.Capacity) { Route = lane };
+                mir.SetConcealmentArtifact((ConcealmentArtifact)concealmentArtifactRaw);
+                if (peerDspByAddress.TryGetValue(primary.Endpoint.Address, out var chain) && chain is not null)
+                    mir.SetDsp(chain.Clone()); // its own filter state — must NOT share with the primary
+                // Deliberately NO record tap on mirrors: recording follows the primary/recordingRoute only.
+                existing.Add(mir);
+            }
+            mirrorsByKey[key] = existing;
+            primary.SetMirrors(existing.ToArray());
+        }
+        RebuildSnapshotLocked();
+    }
+
+    private void DropMirrorsLocked((IPEndPoint Endpoint, ushort StreamId) key, SessionPlayout primary)
+    {
+        if (mirrorsByKey.Remove(key, out var mirs))
+        {
+            foreach (var m in mirs) m.Dispose();
+            primary.SetMirrors([]);
+        }
+    }
+
+    /// <summary>Rebuild the lock-free snapshot the render/tune threads read: primaries plus all mirrors.
+    /// The per-Route reads and per-Route tune aggregators filter by Route, so each replica is routed to
+    /// exactly its own output lane. Caller holds sessionsLock.</summary>
+    private void RebuildSnapshotLocked()
+    {
+        var all = new List<SessionPlayout>(sessions.Values);
+        foreach (var list in mirrorsByKey.Values) all.AddRange(list);
+        sessionsSnapshot = all.ToArray();
     }
 
     public IReadOnlyList<SessionPlayout> ActiveSessions
@@ -381,7 +485,10 @@ internal sealed class PlayoutEngine : IWaveProvider
         lock (sessionsLock)
         {
             foreach (var s in sessions.Values) s.Dispose();
+            foreach (var list in mirrorsByKey.Values)
+                foreach (var m in list) m.Dispose();
             sessions.Clear();
+            mirrorsByKey.Clear();
             sessionsSnapshot = [];
         }
     }
@@ -817,14 +924,17 @@ internal sealed class PlayoutEngine : IWaveProvider
 
         if (recordDiagnostics) diagnostics.RecordOutputSampleSteps(mixBuf.AsSpan(0, outFloats));
 
-        // Recording tap (per-lane). Mix is fully processed at this point — volume, mute and
-        // limiter have all been applied — so the recorder sees exactly what the user is
-        // about to hear from this lane. Tagged with `route` so the recorder can keep WASAPI-
-        // lane and ASIO-lane streams separate (each lane fires this method independently in
-        // BothIndependent; without the tag both ended up in one recorder ring, doubling the
-        // file's effective sample rate).
-        DispatchReceivedSamples(mixBuf.AsMemory(0, outFloats), route);
-        OnRecordBlockComplete?.Invoke(outFloats);
+        // Recording is driven by ONE lane only (recordingRoute = the primary/first-active lane). With
+        // the every-stream-to-every-output fan-out, both lanes now render the same streams, so firing
+        // the record hooks on both would record every stream twice. The primary lane already carries a
+        // replica of every stream (and holds the per-peer record taps), so recording from it alone
+        // captures everything once. Mix is fully processed here (volume, mute, limiter applied), so the
+        // recorder still sees exactly what the user hears.
+        if (route == recordingRoute)
+        {
+            DispatchReceivedSamples(mixBuf.AsMemory(0, outFloats), route);
+            OnRecordBlockComplete?.Invoke(outFloats);
+        }
 
         Buffer.BlockCopy(mixBuf, 0, buffer, offset, outFloats * sizeof(float));
         return count;

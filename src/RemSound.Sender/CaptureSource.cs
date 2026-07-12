@@ -36,7 +36,7 @@ internal sealed class CaptureSource : IDisposable
     private const int CaptureBufferMs = 10;
     private const int RingBufferMs = 250;
 
-    private readonly WasapiCapture capture;
+    private readonly IWaveIn capture;
     private readonly BufferedWaveProvider buffer;
     private readonly Action<string>? onDiagnostic;
     private long callbackCount;
@@ -56,15 +56,25 @@ internal sealed class CaptureSource : IDisposable
         (int)(buffer.BufferedDuration.TotalMilliseconds);
 
     public CaptureSource(MMDevice device, CaptureKind kind, string displayName, Action<string>? onDiagnostic = null)
+        : this(
+            kind == CaptureKind.Loopback
+                ? new LowLatencyWasapiLoopbackCapture(device, audioBufferMilliseconds: CaptureBufferMs)
+                : new WasapiCapture(device, useEventSync: true, audioBufferMillisecondsLength: CaptureBufferMs),
+            kind, device.ID, displayName, onDiagnostic)
+    {
+    }
+
+    /// <summary>Wraps an arbitrary <see cref="IWaveIn"/> capture — used for per-application
+    /// process-loopback (<see cref="ProcessLoopbackCapture"/>), where the source isn't an
+    /// <see cref="MMDevice"/> and <paramref name="deviceId"/> is the synthetic <c>"proc:&lt;pid&gt;"</c> id.</summary>
+    public CaptureSource(IWaveIn waveIn, CaptureKind kind, string deviceId, string displayName, Action<string>? onDiagnostic = null)
     {
         Name = displayName;
         Kind = kind;
-        DeviceId = device.ID;
+        DeviceId = deviceId;
         this.onDiagnostic = onDiagnostic;
 
-        capture = kind == CaptureKind.Loopback
-            ? new LowLatencyWasapiLoopbackCapture(device, audioBufferMilliseconds: CaptureBufferMs)
-            : new WasapiCapture(device, useEventSync: true, audioBufferMillisecondsLength: CaptureBufferMs);
+        capture = waveIn;
 
         var captureFormat = capture.WaveFormat;
         CaptureFormatDescription =

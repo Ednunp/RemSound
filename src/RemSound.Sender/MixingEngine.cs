@@ -265,6 +265,26 @@ internal sealed class MixingEngine : ICaptureBackend
     /// </summary>
     private ActiveSource? OpenSource(CaptureSourceSpec spec)
     {
+        // Per-application source: no MMDevice, no render keepalive — the process-loopback client
+        // captures the app's render stream directly. If the app has exited, the PID is stale and
+        // activation fails; the caller simply drops it and the next reconcile re-resolves the name.
+        if (spec.Kind == CaptureKind.ProcessLoopback)
+        {
+            try
+            {
+                if (!ProcessLoopbackId.TryParse(spec.DeviceId, out var pid))
+                    throw new ArgumentException($"bad process-loopback id \"{spec.DeviceId}\"");
+                var proc = new ProcessLoopbackCapture(pid);
+                var src = new CaptureSource(proc, spec.Kind, spec.DeviceId, spec.Name, onDiagnostic);
+                return new ActiveSource { Source = src, KeepAlive = null, Device = null };
+            }
+            catch (Exception ex)
+            {
+                onDiagnostic?.Invoke($"mixer: failed to open app source \"{spec.Name}\": {ex.GetType().Name}: {ex.Message}");
+                return null;
+            }
+        }
+
         MMDevice? device = null;
         try
         {
@@ -302,7 +322,7 @@ internal sealed class MixingEngine : ICaptureBackend
     {
         try { a.KeepAlive?.Dispose(); } catch { /* ignore */ }
         try { a.Source.Dispose(); } catch { /* ignore */ }
-        try { a.Device.Dispose(); } catch { /* ignore */ }
+        try { a.Device?.Dispose(); } catch { /* ignore */ }
     }
 
     private static string SourceKey(string deviceId, CaptureKind kind) => $"{deviceId}|{kind}";
@@ -391,7 +411,8 @@ internal sealed class MixingEngine : ICaptureBackend
     private sealed class ActiveSource
     {
         public required CaptureSource Source { get; init; }
-        public required MMDevice Device { get; init; }
+        // Null for per-application (process-loopback) sources, which have no MMDevice.
+        public required MMDevice? Device { get; init; }
         public SilentRenderKeepAlive? KeepAlive { get; init; }
     }
 }
