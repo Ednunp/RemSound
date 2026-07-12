@@ -751,11 +751,14 @@ internal static class SelfTest
         var probe = new Profile { WasapiSendMode = "devices" };
         probe.SelectedWasapiSendOutputs.Add("dev-a");
         probe.SelectedConnectedPeers.Add("127.0.0.1:47846");
+        probe.SelectedConnectedPeers.Add("10.0.0.9");          // no explicit port → the standard peer port
         probe.SelectedConnectedPeers.Add("bad::garbage::host");
         Check(ServiceSendHost.BuildSendSpecs(probe).Any(s => s.DeviceId == "dev-a" && s.Kind == CaptureKind.Loopback),
             "a WASAPI send output must become a loopback spec");
         var eps = ServiceSendHost.BuildEndpoints(probe);
         Check(eps.Any(e => e.Address.ToString() == "127.0.0.1" && e.Port == 47846), "a host:port peer must resolve to an endpoint");
+        Check(eps.Any(e => e.Address.ToString() == "10.0.0.9" && e.Port == RemPacket.DefaultPeerDialPort),
+            "a peer with no port must use the standard peer port (not the local audio port) — same as the main app");
 
         using var receiver = new AudioReceiver();
         try { receiver.Start(port); }
