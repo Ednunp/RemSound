@@ -179,7 +179,11 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
             // (multi-source needs the rendezvous logic in MixingEngine). Applies equally in
             // WasapiOnly and BothIndependent — in either, the WASAPI lane is single-source
             // when the user has ticked one input.
-            var wantPushMode = useTightLatencyWasapi && wasapiSpecs.Count == 1;
+            // Process-loopback (per-application) sources are never eligible for push mode — that fast
+            // path opens an MMDevice by id, which a synthetic "proc:<pid>" id has no counterpart for.
+            // They always go through MixingEngine, which knows how to open a process-loopback capture.
+            var wantPushMode = useTightLatencyWasapi && wasapiSpecs.Count == 1
+                && wasapiSpecs[0].Kind != CaptureKind.ProcessLoopback;
             var currentIsPush = wasapi is PushModeWasapiBackend;
             if (wantPushMode != currentIsPush)
             {

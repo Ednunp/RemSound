@@ -370,6 +370,11 @@ internal static class SelfTest
             p.AudioPort = 47830;
             p.AsioDriverName = "Some ASIO Driver";
             p.SelectedWasapiSendInputs.Add("device-id-abc");
+            // Per-application send mode (issue #20) is per-profile — round-trip it too.
+            p.WasapiSendMode = "applications";
+            p.SendAllApplications = false;
+            p.SelectedSendApplications.Add("vlc");
+            p.SelectedSendApplications.Add("firefox");
             store.Save(p);
 
             var back = store.Load("selftest roundtrip");
@@ -381,6 +386,11 @@ internal static class SelfTest
                   && back.AsioDriverName == "Some ASIO Driver"
                   && back.SelectedWasapiSendInputs.Contains("device-id-abc"),
                 "profile fields must survive a save/reload");
+            Check(back.WasapiSendMode == "applications"
+                  && !back.SendAllApplications
+                  && back.SelectedSendApplications.Contains("vlc")
+                  && back.SelectedSendApplications.Contains("firefox"),
+                "per-application send settings must survive a save/reload");
             return null;
         }
         finally

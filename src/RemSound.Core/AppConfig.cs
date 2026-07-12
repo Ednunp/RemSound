@@ -230,20 +230,6 @@ public sealed class AppConfig
     /// device, following it if the default changes. Machine-wide, opt-in, default false.</summary>
     public bool UseDefaultLoopbackSend { get; set; }
 
-    /// <summary>How the WASAPI send side captures system audio: "devices" (the WASAPI outputs-to-send
-    /// loopback list — the classic behaviour, default) or "applications" (per-application process
-    /// loopback — Windows 10 2004+ only). Chosen in Preferences; the send tab shows the matching list.
-    /// ASIO capture runs alongside either way.</summary>
-    public string WasapiSendMode { get; set; } = "devices";
-    /// <summary>In "applications" send mode: when true (the default) every app's audio is sent (i.e. the
-    /// whole system audio); when false only the apps in <see cref="SelectedSendApplications"/> are sent.
-    /// Mirrors the "Send all applications" master checkbox.</summary>
-    public bool SendAllApplications { get; set; } = true;
-    /// <summary>In "applications" send mode with <see cref="SendAllApplications"/> off: the process names
-    /// (lower-case, no path/extension, e.g. "vlc", "firefox") whose audio to send. Tracked by NAME not
-    /// PID so the selection survives an app restart.</summary>
-    public List<string> SelectedSendApplications { get; set; } = new();
-
     /// <summary>Remembered answer to the "untick the other outputs/inputs when you turn on Use Windows
     /// default?" prompt. Null = ask each time; true = always untick; false = never untick. Set when the
     /// user ticks "Don't ask again" on that prompt. Machine-wide.</summary>

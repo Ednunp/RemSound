@@ -87,6 +87,35 @@ public sealed class MainForm : Form
     private readonly Label sendOutputDevicesStatusLabel = new() { AutoSize = true, Text = "No output device selected." };
     private readonly CheckedListBox sendInputDevicesList = new() { CheckOnClick = true, Width = 430, Height = 90 };
     private readonly Label sendInputDevicesStatusLabel = new() { AutoSize = true, Text = "No input device selected." };
+    // Per-application WASAPI send (issue #20). The WASAPI send side captures EITHER whole output
+    // devices (sendOutputDevicesList above — the classic behaviour) OR the audio of specific running
+    // applications, chosen by sendModeList on the Input/Output tab right after the "Send my audio"
+    // checkbox. Windows 10 build 19041+ only: on older Windows the chooser row is hidden and the mode
+    // is forced to "devices". The app list is tracked by process NAME (so a selection survives an app
+    // restart) and reconciled on sendAppsReconcileTimer so apps dropping in and out don't pile up.
+    // Unlike the device lists this selection IS persisted — per profile (WasapiSendMode /
+    // SendAllApplications / SelectedSendApplications) — matching how Ed wants a profile to remember its
+    // whole send setup.
+    private readonly ListBox sendModeList = new() { Width = 430, Height = 38, IntegralHeight = false };
+    private MnemonicLabel? sendModeLabel;
+    private readonly AccessibleCheckBox sendAllApplicationsCheckbox = new()
+    {
+        Text = "Send all applications (Alt+&7)",
+        AccessibleName = "Send all applications",
+        AutoSize = true,
+        Checked = true,
+    };
+    private readonly CheckedListBox sendAppsList = new() { CheckOnClick = true, Width = 430, Height = 90 };
+    private readonly Label sendAppsStatusLabel = new() { AutoSize = true, Text = "No application selected." };
+    private MnemonicLabel? sendAppsLabel;
+    private System.Windows.Forms.Timer? sendAppsReconcileTimer;
+    // Guards the sendModeList / sendAllApplicationsCheckbox / sendAppsList handlers while we
+    // programmatically repopulate them (mode switch, profile apply, reconcile) so those handlers
+    // don't fire MarkProfileDirty or trigger re-entrant rebuilds on our own writes.
+    private bool suppressSendAppEvents;
+    // The two sendModeList rows, in order. Index 0 = whole sound devices (classic), 1 = applications.
+    private const int SendModeDevicesIndex = 0;
+    private const int SendModeApplicationsIndex = 1;
     // ASIO-side lists. Always present in the form but hidden when ASIO is disabled. The two
     // lists are independent of the WASAPI ones — the user can tick any combination across all
     // five lists. Sender mixes WASAPI capture + ASIO capture into one outgoing stream;
@@ -906,6 +935,11 @@ public sealed class MainForm : Form
         asioReceiveOutputDevicesStatusLabel.AccessibleName = "Selected ASIO receive channel status";
         asioSendDevicesList.AccessibleName = "ASIO audio inputs to send (Alt+2)";
         asioSendDevicesStatusLabel.AccessibleName = "Selected ASIO send channel status";
+        // Per-application send controls (issue #20). Listbox + list carry the "(Alt+N)" suffix like the
+        // other non-CheckBox controls; the master checkbox owns its own &-mnemonic via its Text.
+        sendModeList.AccessibleName = "How to send WASAPI audio (Alt+6)";
+        sendAppsList.AccessibleName = "Applications to send (Alt+8)";
+        sendAppsStatusLabel.AccessibleName = "Selected application status";
         // Keyboard shortcuts / Minimise to tray / Save / Save as buttons retired 2026-05-08
         // (now File menu items in BuildFileMenu).
         asioDriverBox.AccessibleName = "ASIO driver (Alt+D)";
@@ -1360,6 +1394,7 @@ public sealed class MainForm : Form
             continuousTuneTimer.Stop(); continuousTuneTimer.Dispose();
             updateCheckTimer.Stop(); updateCheckTimer.Dispose();
             asioDriverChangeDebounce.Stop(); asioDriverChangeDebounce.Dispose();
+            try { sendAppsReconcileTimer?.Stop(); sendAppsReconcileTimer?.Dispose(); } catch { }
             try { processSelfMeter.Dispose(); } catch { }
             try { deviceChangeNotifier?.Dispose(); } catch { }
             try { powerResumeHandler?.Dispose(); } catch { }
@@ -3194,6 +3229,14 @@ public sealed class MainForm : Form
         if (list.Parent is not null) list.Parent.Visible = visible;   // the FlowLayoutPanel wrapper
     }
 
+    /// <summary>Shows/hides a control together with its FlowLayoutPanel row wrapper so the whole
+    /// table row collapses (rather than leaving an empty gap). Used by the send-mode switch.</summary>
+    private static void SetRowControlVisible(Control control, bool visible)
+    {
+        control.Visible = visible;
+        if (control.Parent is not null) control.Parent.Visible = visible;
+    }
+
     /// <summary>Audio I/O tab — full content. All the existing main-form audio controls
     /// (mode, ASIO driver, send/receive checkboxes, device lists, volume) live here.</summary>
     private void BuildAudioIOTab()
@@ -3203,7 +3246,7 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
             ColumnCount = 2,
-            RowCount = 11,
+            RowCount = 13,
             AutoScroll = true,
         };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -3255,11 +3298,245 @@ public sealed class MainForm : Form
         var sendCheckboxPanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         sendCheckboxPanel.Controls.Add(sendMyAudioCheckbox);
         panel.Controls.Add(sendCheckboxPanel, 1, 6);
-        sendOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 7, "WASAPI audio outputs to send (Alt+&4)", sendOutputDevicesList, sendOutputDevicesStatusLabel, FocusListControl);
-        sendInputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 8, "WASAPI audio inputs to send (Alt+&5)", sendInputDevicesList, sendInputDevicesStatusLabel, FocusListControl);
-        asioSendDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 9, "ASIO audio inputs to send (Alt+&2)", asioSendDevicesList, asioSendDevicesStatusLabel, FocusListControl);
+
+        // Row 7: "how to send WASAPI audio" chooser — sound devices (the classic loopback list) or
+        // specific applications. Sits right after "Send my audio". Built manually (like the ASIO
+        // driver row) so we keep the label reference to collapse the whole row on old Windows.
+        BuildSendModeRow(panel, 7);
+
+        // Row 8 (devices mode): the classic WASAPI outputs-to-send loopback list.
+        sendOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 8, "WASAPI audio outputs to send (Alt+&4)", sendOutputDevicesList, sendOutputDevicesStatusLabel, FocusListControl);
+
+        // Rows 9-10 (applications mode): the "Send all applications" master checkbox and the app list.
+        var sendAllAppsPanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        sendAllAppsPanel.Controls.Add(sendAllApplicationsCheckbox);
+        panel.Controls.Add(sendAllAppsPanel, 1, 9);
+        sendAppsLabel = FormLayoutRows.AddCheckedListRow(panel, 10, "Applications to send (Alt+&8)", sendAppsList, sendAppsStatusLabel, FocusListControl);
+
+        // Rows 11-12: the remaining send lists (unchanged, just shifted down two rows).
+        sendInputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 11, "WASAPI audio inputs to send (Alt+&5)", sendInputDevicesList, sendInputDevicesStatusLabel, FocusListControl);
+        asioSendDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 12, "ASIO audio inputs to send (Alt+&2)", asioSendDevicesList, asioSendDevicesStatusLabel, FocusListControl);
+
+        WireSendModeControls();
 
         audioIOTabPage.Controls.Add(panel);
+    }
+
+    /// <summary>Builds the "how to send WASAPI audio" chooser row: a two-item listbox (whole sound
+    /// devices vs specific applications) preceded by its mnemonic label. Built by hand rather than via
+    /// FormLayoutRows so we retain <see cref="sendModeLabel"/> to collapse the whole row on Windows too
+    /// old for per-application capture.</summary>
+    private void BuildSendModeRow(TableLayoutPanel panel, int row)
+    {
+        sendModeLabel = new MnemonicLabel
+        {
+            Text = "How to send WASAPI audio (Alt+&6)",
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            MnemonicTarget = sendModeList,
+        };
+        sendModeLabel.Click += (_, _) => FocusControl(sendModeList);
+        sendModeList.AccessibleName = "How to send WASAPI audio (Alt+6)";
+        sendModeList.Items.Clear();
+        sendModeList.Items.Add("Send whole sound devices");   // SendModeDevicesIndex
+        sendModeList.Items.Add("Send specific applications");  // SendModeApplicationsIndex
+        sendModeList.SelectedIndex = SendModeDevicesIndex;
+        panel.Controls.Add(sendModeLabel, 0, row);
+        var wrapper = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            TabStop = false,
+        };
+        wrapper.Controls.Add(sendModeList);
+        panel.Controls.Add(wrapper, 1, row);
+    }
+
+    /// <summary>Wires the send-mode chooser, the "Send all applications" master checkbox and the app
+    /// list, sets up the reconcile timer, and applies the initial visibility. On Windows older than the
+    /// process-loopback API the whole applications path is hidden and the mode is pinned to devices.</summary>
+    private void WireSendModeControls()
+    {
+        WireCheckedListAccessibility(sendAppsList, sendAppsStatusLabel, "application");
+
+        sendModeList.SelectedIndexChanged += (_, _) =>
+        {
+            if (suppressSendAppEvents) return;
+            ApplySendModeVisibility();
+            if (sendModeList.SelectedIndex == SendModeApplicationsIndex) ReconcileSendAppsList();
+            MarkProfileDirty();
+            ApplySendSources();
+        };
+
+        sendAllApplicationsCheckbox.CheckedChanged += (_, _) =>
+        {
+            if (suppressSendAppEvents) return;
+            ApplySendModeVisibility();
+            MarkProfileDirty();
+            ApplySendSources();
+        };
+
+        sendAppsList.ItemCheck += (_, args) =>
+        {
+            if (suppressSendAppEvents) return;
+            // Defer to after the check state settles, then persist-dirty and re-apply the sources.
+            BeginInvoke(() =>
+            {
+                if (suppressSendAppEvents) return;
+                MarkProfileDirty();
+                ApplySendSources();
+            });
+        };
+
+        // Reconcile the app list on a slow timer so entries appear/disappear as apps open and close,
+        // without ever piling up (each pass releases every session object — see AudioAppEnumerator).
+        // Only ticks while the applications list is actually visible.
+        sendAppsReconcileTimer = new System.Windows.Forms.Timer { Interval = 3000 };
+        sendAppsReconcileTimer.Tick += (_, _) =>
+        {
+            if (sendModeList.SelectedIndex == SendModeApplicationsIndex && sendAppsList.Visible)
+                ReconcileSendAppsList();
+        };
+
+        ApplySendModeVisibility();
+    }
+
+    /// <summary>Shows the device list in devices mode and the app checkbox + list in applications mode,
+    /// collapsing the other. On unsupported Windows the chooser itself is hidden and devices mode is
+    /// forced. Also starts/stops the reconcile timer with the applications view.</summary>
+    private void ApplySendModeVisibility()
+    {
+        var supported = ProcessLoopbackCapture.IsSupported;
+
+        // The chooser row only makes sense where applications mode is possible.
+        if (sendModeLabel is not null) sendModeLabel.Visible = supported;
+        SetRowControlVisible(sendModeList, supported);
+        if (!supported && sendModeList.SelectedIndex != SendModeDevicesIndex)
+        {
+            suppressSendAppEvents = true;
+            sendModeList.SelectedIndex = SendModeDevicesIndex;
+            suppressSendAppEvents = false;
+        }
+
+        var appsMode = supported && sendModeList.SelectedIndex == SendModeApplicationsIndex;
+
+        // Devices mode → show the loopback outputs list; applications mode → hide it.
+        if (sendOutputDevicesLabel is not null) sendOutputDevicesLabel.Visible = !appsMode;
+        SetRowControlVisible(sendOutputDevicesList, !appsMode);
+
+        // Applications mode → show the master checkbox; the app list (and its label) show only when
+        // "Send all applications" is unticked (with it ticked there's nothing to pick).
+        SetRowControlVisible(sendAllApplicationsCheckbox, appsMode);
+        var showAppList = appsMode && !sendAllApplicationsCheckbox.Checked;
+        if (sendAppsLabel is not null) sendAppsLabel.Visible = showAppList;
+        SetRowControlVisible(sendAppsList, showAppList);
+
+        if (appsMode)
+        {
+            if (sendAppsList.Items.Count == 0) ReconcileSendAppsList();
+            sendAppsReconcileTimer?.Start();
+        }
+        else
+        {
+            sendAppsReconcileTimer?.Stop();
+        }
+    }
+
+    /// <summary>Refreshes <see cref="sendAppsList"/> from the current audio apps, preserving the user's
+    /// ticks by process NAME and keeping any ticked-but-not-currently-running apps in the list (so a
+    /// selection survives an app closing and reopening). Tagged items carry the process name; the
+    /// display shows the friendly name and a "(not running)" hint when the app isn't live.</summary>
+    private void ReconcileSendAppsList()
+    {
+        if (!ProcessLoopbackCapture.IsSupported) return;
+
+        // Names the user currently has ticked (keep them even if the app has since closed).
+        var tickedNames = new HashSet<string>(
+            sendAppsList.CheckedItems.OfType<AudioAppChoice>().Select(c => c.ProcessName),
+            StringComparer.OrdinalIgnoreCase);
+
+        var running = AudioAppEnumerator.Snapshot();
+        var runningNames = new HashSet<string>(running.Select(a => a.ProcessName), StringComparer.OrdinalIgnoreCase);
+
+        // Build the merged set: every running app, plus any ticked app that isn't running right now.
+        var choices = new List<AudioAppChoice>();
+        foreach (var a in running)
+            choices.Add(new AudioAppChoice(a.ProcessName, a.DisplayName, running: true));
+        foreach (var name in tickedNames)
+            if (!runningNames.Contains(name))
+                choices.Add(new AudioAppChoice(name, name, running: false));
+        choices.Sort((x, y) => string.Compare(x.ToString(), y.ToString(), StringComparison.CurrentCultureIgnoreCase));
+
+        suppressSendAppEvents = true;
+        try
+        {
+            sendAppsList.BeginUpdate();
+            sendAppsList.Items.Clear();
+            foreach (var c in choices)
+            {
+                var index = sendAppsList.Items.Add(c);
+                if (tickedNames.Contains(c.ProcessName)) sendAppsList.SetItemChecked(index, true);
+            }
+            sendAppsList.EndUpdate();
+        }
+        finally
+        {
+            suppressSendAppEvents = false;
+        }
+        UpdateCheckedListStatus(sendAppsList, sendAppsStatusLabel, "application");
+    }
+
+    /// <summary>Restores the WASAPI send mode, the "Send all applications" master toggle and the ticked
+    /// app names from a loaded profile. Remembered apps that aren't running right now are seeded into the
+    /// list (ticked, marked "not running") so they resume capture the moment they reappear. On Windows
+    /// too old for process loopback the mode is forced back to devices.</summary>
+    private void RestoreSendModeFromProfile(Profile p)
+    {
+        suppressSendAppEvents = true;
+        try
+        {
+            var wantApps = ProcessLoopbackCapture.IsSupported
+                && string.Equals(p.WasapiSendMode, "applications", StringComparison.OrdinalIgnoreCase);
+            sendModeList.SelectedIndex = wantApps ? SendModeApplicationsIndex : SendModeDevicesIndex;
+            sendAllApplicationsCheckbox.Checked = p.SendAllApplications;
+
+            sendAppsList.Items.Clear();
+            foreach (var name in (p.SelectedSendApplications ?? new()).Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(name)) continue;
+                var idx = sendAppsList.Items.Add(new AudioAppChoice(name, name, running: false));
+                sendAppsList.SetItemChecked(idx, true);
+            }
+        }
+        finally
+        {
+            suppressSendAppEvents = false;
+        }
+
+        ApplySendModeVisibility();
+        if (sendModeList.SelectedIndex == SendModeApplicationsIndex) ReconcileSendAppsList();
+    }
+
+    /// <summary>The process names the user has ticked in the app list (lower-case, no extension).</summary>
+    private List<string> CheckedSendApplicationNames() =>
+        sendAppsList.CheckedItems.OfType<AudioAppChoice>().Select(c => c.ProcessName).Distinct().ToList();
+
+    /// <summary>One row in the "Applications to send" list. Identity is the process NAME; the display
+    /// adds a "(not running)" hint for a remembered-but-closed app.</summary>
+    private sealed class AudioAppChoice
+    {
+        public string ProcessName { get; }
+        private readonly string display;
+        private readonly bool running;
+        public AudioAppChoice(string processName, string displayName, bool running)
+        {
+            ProcessName = processName;
+            display = displayName;
+            this.running = running;
+        }
+        public override string ToString() => running ? display : $"{display} (not running)";
     }
 
     /// <summary>Audio profile tab — split into two GroupBox sections so NVDA announces the
@@ -4873,9 +5150,12 @@ public sealed class MainForm : Form
         asioReceiveOutputDevicesList.TabIndex = 3;
         volumeBar.TabIndex = 4;
         sendMyAudioCheckbox.TabIndex = 5;
-        sendOutputDevicesList.TabIndex = 6;
-        sendInputDevicesList.TabIndex = 7;
-        asioSendDevicesList.TabIndex = 8;
+        sendModeList.TabIndex = 6;               // how-to-send chooser, right after "Send my audio"
+        sendOutputDevicesList.TabIndex = 7;      // devices mode
+        sendAllApplicationsCheckbox.TabIndex = 8;  // applications mode
+        sendAppsList.TabIndex = 9;                 // applications mode
+        sendInputDevicesList.TabIndex = 10;
+        asioSendDevicesList.TabIndex = 11;
         // Profiles & preferences tab retired 2026-05-08 — the controls that used to live
         // there have moved to the File menu (Open/Save/Save as/Rename/etc.) and the
         // Preferences dialog (Mute cues / Accept remote vol / Startup behaviour).
@@ -5152,10 +5432,21 @@ public sealed class MainForm : Form
         }
     }
 
+    /// <summary>True when the WASAPI send side is in "specific applications" mode (and the OS supports
+    /// it). In that mode the loopback-outputs list is ignored in favour of the app selection.</summary>
+    private bool AppsModeActive() =>
+        ProcessLoopbackCapture.IsSupported && sendModeList.SelectedIndex == SendModeApplicationsIndex;
+
+    /// <summary>True when applications mode will actually send something: "send all applications" is on,
+    /// or at least one specific app is ticked.</summary>
+    private bool HasAppModeSend() =>
+        AppsModeActive() && (sendAllApplicationsCheckbox.Checked || sendAppsList.CheckedItems.Count > 0);
+
     private bool HasCheckedSendDevice() =>
-        sendOutputDevicesList.CheckedItems.OfType<AudioDeviceChoice>().Any(c => c.DeviceId is not null)
+        (!AppsModeActive() && sendOutputDevicesList.CheckedItems.OfType<AudioDeviceChoice>().Any(c => c.DeviceId is not null))
         || sendInputDevicesList.CheckedItems.OfType<AudioDeviceChoice>().Any(c => c.DeviceId is not null)
-        || asioSendDevicesList.CheckedItems.OfType<AudioDeviceChoice>().Any(c => c.DeviceId is not null);
+        || asioSendDevicesList.CheckedItems.OfType<AudioDeviceChoice>().Any(c => c.DeviceId is not null)
+        || HasAppModeSend();
 
     private void ApplySendSources()
     {
@@ -5165,20 +5456,49 @@ public sealed class MainForm : Form
         var specs = new List<CaptureSourceSpec>();
         var addedLoopbackIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         string? followedDefaultLoopback = null;
-        foreach (var item in sendOutputDevicesList.CheckedItems.OfType<AudioDeviceChoice>())
+        var appsMode = ProcessLoopbackCapture.IsSupported && sendModeList.SelectedIndex == SendModeApplicationsIndex;
+        if (!appsMode)
         {
-            if (item.IsDefaultFollower)
+            // Devices mode (classic): loopback-capture whole output devices from the ticked list.
+            foreach (var item in sendOutputDevicesList.CheckedItems.OfType<AudioDeviceChoice>())
             {
-                // Loopback-capture whatever Windows currently uses as the default OUTPUT, and follow it.
-                followedDefaultLoopback = ResolveDefaultDeviceId(NAudio.CoreAudioApi.DataFlow.Render);
-                if (!string.IsNullOrEmpty(followedDefaultLoopback) && addedLoopbackIds.Add(followedDefaultLoopback))
+                if (item.IsDefaultFollower)
                 {
-                    specs.Add(new CaptureSourceSpec(followedDefaultLoopback, CaptureKind.Loopback, "Windows default audio device"));
+                    // Loopback-capture whatever Windows currently uses as the default OUTPUT, and follow it.
+                    followedDefaultLoopback = ResolveDefaultDeviceId(NAudio.CoreAudioApi.DataFlow.Render);
+                    if (!string.IsNullOrEmpty(followedDefaultLoopback) && addedLoopbackIds.Add(followedDefaultLoopback))
+                    {
+                        specs.Add(new CaptureSourceSpec(followedDefaultLoopback, CaptureKind.Loopback, "Windows default audio device"));
+                    }
+                }
+                else if (item.DeviceId is { } id && addedLoopbackIds.Add(id))
+                {
+                    specs.Add(new CaptureSourceSpec(id, CaptureKind.Loopback, item.Name));
                 }
             }
-            else if (item.DeviceId is { } id && addedLoopbackIds.Add(id))
+        }
+        else if (sendAllApplicationsCheckbox.Checked)
+        {
+            // Applications mode, "send all applications" = the same result as sending the whole
+            // system output: loopback the current default render device (and follow it if it changes).
+            followedDefaultLoopback = ResolveDefaultDeviceId(NAudio.CoreAudioApi.DataFlow.Render);
+            if (!string.IsNullOrEmpty(followedDefaultLoopback) && addedLoopbackIds.Add(followedDefaultLoopback))
             {
-                specs.Add(new CaptureSourceSpec(id, CaptureKind.Loopback, item.Name));
+                specs.Add(new CaptureSourceSpec(followedDefaultLoopback, CaptureKind.Loopback, "All applications (system audio)"));
+            }
+        }
+        else
+        {
+            // Applications mode, specific apps: one process-loopback spec per running process of each
+            // ticked app name. Apps not currently running contribute nothing until they reappear (the
+            // reconcile timer keeps the list fresh and re-applies). Child processes are captured too
+            // (the process-loopback include-tree mode), so a browser's audio renderers are covered.
+            foreach (var name in CheckedSendApplicationNames())
+            {
+                foreach (var pid in AudioAppEnumerator.PidsForProcessName(name))
+                {
+                    specs.Add(new CaptureSourceSpec(ProcessLoopbackId.Format(pid), CaptureKind.ProcessLoopback, name));
+                }
             }
         }
         lastFollowedDefaultLoopbackId = followedDefaultLoopback;
@@ -7528,6 +7848,7 @@ public sealed class MainForm : Form
             ApplyTicksToList(sendOutputDevicesList, p.SelectedWasapiSendOutputs);
             ApplyTicksToList(sendInputDevicesList, p.SelectedWasapiSendInputs);
             ApplyTicksToList(asioSendDevicesList, p.SelectedAsioSendInputs);
+            RestoreSendModeFromProfile(p);
 
             receiveAudioCheckbox.Checked = p.ReceiveAudioOn;
             sendMyAudioCheckbox.Checked = p.SendAudioOn;
@@ -7720,6 +8041,10 @@ public sealed class MainForm : Form
         profile.SelectedWasapiSendOutputs = ExtractCheckedDeviceIds(sendOutputDevicesList);
         profile.SelectedWasapiSendInputs = ExtractCheckedDeviceIds(sendInputDevicesList);
         profile.SelectedAsioSendInputs = ExtractCheckedDeviceIds(asioSendDevicesList);
+        // WASAPI send mode (whole devices vs specific applications) — persisted per profile.
+        profile.WasapiSendMode = sendModeList.SelectedIndex == SendModeApplicationsIndex ? "applications" : "devices";
+        profile.SendAllApplications = sendAllApplicationsCheckbox.Checked;
+        profile.SelectedSendApplications = CheckedSendApplicationNames();
         profile.SelectedConnectedPeers = GatherSelectedPeerEntries();
         profile.EnableAllPeerShaping = enableAllPeerShapingBox.Checked;
         profile.PeerShaping = peerShaping;
@@ -8236,7 +8561,9 @@ public sealed class MainForm : Form
         // "WASAPI" rather than "WASAPI + ASIO".
         if (sendMyAudioCheckbox.Checked)
         {
-            var hasWasapiSend = AnyChecked(sendInputDevicesList) || AnyChecked(sendOutputDevicesList);
+            var hasWasapiSend = AnyChecked(sendInputDevicesList)
+                || (!AppsModeActive() && AnyChecked(sendOutputDevicesList))
+                || HasAppModeSend();
             var hasAsioSend = AnyChecked(asioSendDevicesList);
             parts.Add($"sending ({DescribeLanes(hasWasapiSend, hasAsioSend)})");
         }

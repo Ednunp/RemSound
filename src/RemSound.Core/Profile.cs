@@ -67,6 +67,26 @@ public sealed class Profile
     public List<string> SelectedWasapiSendInputs { get; set; } = [];    // microphones / line-ins
     public List<string> SelectedAsioSendInputs { get; set; } = [];
 
+    // === WASAPI send mode: whole devices vs specific applications (issue #20) ===
+    /// <summary>How the WASAPI send side captures system audio: <c>"devices"</c> (the classic
+    /// "WASAPI audio outputs to send" loopback list — default) or <c>"applications"</c>
+    /// (per-application process loopback — Windows 10 build 19041+ only). Chosen by the listbox on
+    /// the Input/Output tab, right after the send section; the tab shows the matching list. Saved per
+    /// profile so one setup can send whole devices and another send just a couple of apps. ASIO capture
+    /// runs alongside either way. On a machine too old for process loopback this is forced back to
+    /// "devices" on load.</summary>
+    public string WasapiSendMode { get; set; } = "devices";
+    /// <summary>In "applications" send mode: when true (the default) every app's audio is sent — i.e.
+    /// exactly the same result as sending the whole system's default output. When false, only the apps
+    /// named in <see cref="SelectedSendApplications"/> are sent. Mirrors the "Send all applications"
+    /// master checkbox.</summary>
+    public bool SendAllApplications { get; set; } = true;
+    /// <summary>In "applications" send mode with <see cref="SendAllApplications"/> off: the process
+    /// names (lower-case, no path/extension, e.g. "vlc", "firefox") whose audio to send. Tracked by
+    /// NAME not PID so the selection survives an app restarting. Apps not currently running stay in the
+    /// list (remembered) and start being captured again the moment they reappear.</summary>
+    public List<string> SelectedSendApplications { get; set; } = [];
+
     // === Connectivity & transport ===
     public int AudioPort { get; set; } = 47830;
     public int CodecRaw { get; set; } = (int)AudioTransportCodec.Pcm;
