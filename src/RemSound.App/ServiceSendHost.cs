@@ -112,10 +112,12 @@ public sealed class ServiceSendHost : IDisposable
     internal void RunLoopWithToken(CancellationToken ct, string tokenName, int pollMs, int resumeSettleMs)
         => RunLoopCore(ct, () => InteractivePresence.IsInteractiveAppRunning(tokenName), pollMs, resumeSettleMs);
 
-    private void RunLoopCore(CancellationToken ct, Func<bool> isAppPresent, int pollMs, int resumeSettleMs)
+    private void RunLoopCore(CancellationToken ct, Func<bool> isAppPresent, int pollMs, int resumeSettleMs, int healthMs = 5000)
     {
         var appWasPresent = true; // force an initial evaluation
         var absentSince = Environment.TickCount64;
+        long healthBaseline = -1;          // packet count at the last health check (-1 = not yet baselined)
+        var lastHealthTick = Environment.TickCount64;
         while (!ct.IsCancellationRequested)
         {
             var appPresent = isAppPresent();
@@ -123,12 +125,41 @@ public sealed class ServiceSendHost : IDisposable
             {
                 if (IsSending) Suspend();
                 absentSince = long.MaxValue;
+                healthBaseline = -1;
             }
             else
             {
                 if (appWasPresent) absentSince = Environment.TickCount64; // app just left — start the settle timer
-                if (!IsSending && Environment.TickCount64 - absentSince >= resumeSettleMs)
-                    Resume();
+                if (Environment.TickCount64 - absentSince >= resumeSettleMs)
+                {
+                    if (!IsSending)
+                    {
+                        // Keep trying to (re)start every poll until it succeeds — covers a boot where the
+                        // audio stack / a device isn't ready yet, and a device that returns later.
+                        Resume();
+                        healthBaseline = -1;
+                        lastHealthTick = Environment.TickCount64;
+                    }
+                    else if (Environment.TickCount64 - lastHealthTick >= healthMs)
+                    {
+                        // Self-heal: we THINK we're sending, but if no packets have flowed since the last
+                        // check then no capture is actually running (devices weren't ready when we started,
+                        // a device dropped, or the audio service restarted). Re-open the capture.
+                        lastHealthTick = Environment.TickCount64;
+                        var packets = sender.PacketsSent;
+                        if (healthBaseline >= 0 && packets == healthBaseline)
+                        {
+                            log?.Invoke("service: no audio flowing while sending — re-opening capture");
+                            Suspend();
+                            Resume();
+                            healthBaseline = -1;
+                        }
+                        else
+                        {
+                            healthBaseline = packets;
+                        }
+                    }
+                }
             }
             appWasPresent = appPresent;
             ct.WaitHandle.WaitOne(pollMs);
