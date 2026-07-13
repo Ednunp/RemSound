@@ -78,6 +78,7 @@ internal static class SelfTest
         RunStep(results, "Dialog accessibility (names + mnemonics)", AccessibilityAudit);
         RunStep(results, "Main window coverage (all tabs + controls)", MainWindowCoverage);
         RunStep(results, "Main window profile round-trip (controls load + save)", MainWindowProfileRoundTrip);
+        RunStep(results, "Auto-save non-read-only profiles (options + guard + silent timer)", AutoSaveNonReadOnlyProfiles);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");
@@ -1105,7 +1106,7 @@ internal static class SelfTest
             ("Recording settings", () => new RecordingSettingsDialog(new RecordingSettings())),
             ("Preferences", () => new PreferencesDialog(
                 new RemSoundSettingsStore("RemSound"), null,
-                () => false, _ => { }, () => { }, () => 0, () => { }, () => { }, _ => { },
+                () => false, _ => { }, () => { }, () => 0, () => { }, () => { }, () => { }, _ => { },
                 () => (default(RouterMappingStatus), (IPEndPoint?)null, ""),
                 _ => { }, _ => { })),
             ("Service profile", () => new ServiceProfileDialog(RemSound.Core.Profile.NewBlank(), false)),
@@ -1207,6 +1208,58 @@ internal static class SelfTest
             }
             return $"round-tripped through the real controls: {covered}";
         }
+    }
+
+    /// <summary>The "auto save non-read only profiles" preference (2026-07-13): the exact option list Ed
+    /// asked for, the guard that only auto-saves a real non-read-only dirty profile, the AppConfig
+    /// persistence, and that the timer turns on/off from the interval. The silence guarantee (no save cue)
+    /// is structural — the sole auto-save caller passes playCue: false — so we assert the guard, not audio.</summary>
+    private static string? AutoSaveNonReadOnlyProfiles()
+    {
+        // 1. The option rows are exactly Never / 2 / 5 / 10 / 15 / 20 / 30 minutes, in order.
+        var opts = PreferencesDialog.AutoSaveMinuteOptionsForTest;
+        var expected = new[] { 0, 2, 5, 10, 15, 20, 30 };
+        Check(opts.Count == expected.Length, $"auto-save must offer {expected.Length} options (got {opts.Count})");
+        for (var i = 0; i < expected.Length; i++)
+            Check(opts[i] == expected[i], $"auto-save option {i} must be {expected[i]} minutes (got {opts[i]})");
+
+        // 2. AppConfig persists the chosen interval across a save/load. Done in place (the gate runs
+        //    against a throwaway --config-dir) and restored in a finally so we leave no trace.
+        var original = AppConfig.Load().AutoSaveNonReadOnlyMinutes;
+        try
+        {
+            var cfg = AppConfig.Load();
+            cfg.AutoSaveNonReadOnlyMinutes = 15;
+            cfg.Save();
+            Check(AppConfig.Load().AutoSaveNonReadOnlyMinutes == 15, "the auto-save interval must persist through AppConfig");
+        }
+        finally
+        {
+            var restore = AppConfig.Load();
+            restore.AutoSaveNonReadOnlyMinutes = original;
+            try { restore.Save(); } catch { /* best effort */ }
+        }
+
+        // 3. The guard: only a real, saved, non-read-only, dirty profile may be auto-saved.
+        Check(MainForm.ShouldAutoSave(true, "mine", readOnly: false, dirty: true), "a dirty non-read-only profile must auto-save");
+        Check(!MainForm.ShouldAutoSave(true, "mine", readOnly: true, dirty: true), "a read-only profile must never auto-save");
+        Check(!MainForm.ShouldAutoSave(true, "mine", readOnly: false, dirty: false), "an unchanged profile must not auto-save");
+        Check(!MainForm.ShouldAutoSave(true, "", readOnly: false, dirty: true), "a blank template (no title) must not auto-save");
+        Check(!MainForm.ShouldAutoSave(false, "mine", readOnly: false, dirty: true), "with no store there is nothing to auto-save");
+
+        // 4. The timer turns on with the right interval, and off when set to Never.
+        MainForm mf;
+        try { mf = new MainForm(null, RemSound.Core.Profile.NewBlank(), null, null, headless: true); }
+        catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+        using (mf)
+        {
+            mf.ApplyAutoSaveTimer(5);
+            Check(mf.AutoSaveTimerEnabledForTest, "a 5-minute setting must start the auto-save timer");
+            Check(mf.AutoSaveTimerIntervalForTest == 5 * 60 * 1000, $"5 minutes must be 300000 ms (got {mf.AutoSaveTimerIntervalForTest})");
+            mf.ApplyAutoSaveTimer(0);
+            Check(!mf.AutoSaveTimerEnabledForTest, "Never (0) must stop the auto-save timer");
+        }
+        return "options, persistence, guard (read-only/blank/unchanged skipped), and silent timer all verified";
     }
 
     private static int CountControls(Control root, Func<Control, bool> predicate)

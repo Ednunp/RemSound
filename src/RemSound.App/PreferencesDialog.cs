@@ -30,6 +30,30 @@ internal sealed class PreferencesDialog : Form
         AutoSize = true,
     };
 
+    // "Auto save non-read only profiles" (2026-07-13). How often RemSound silently saves the current
+    // profile if it's not read-only and has unsaved changes. A plain list (Ed asked for "a list") whose
+    // rows map to minute intervals; row 0 = Never = off (the default). The save is silent — no cue.
+    private readonly Label autoSaveLabel = new()
+    {
+        Text = "&Auto-save non-read-only profiles (Alt+A):",
+        AccessibleName = "Auto-save non-read-only profiles",
+        AutoSize = true,
+        Padding = new Padding(0, 6, 0, 4),
+    };
+    private readonly ListBox autoSaveList = new()
+    {
+        IntegralHeight = false,
+        Width = 360,
+        Height = 132,
+        AccessibleName = "Auto-save non-read-only profiles",
+    };
+    // Parallel to autoSaveList.Items: the minute interval each row means (0 = Never).
+    private static readonly int[] AutoSaveMinuteOptions = { 0, 2, 5, 10, 15, 20, 30 };
+
+    /// <summary>Test seam: the auto-save interval rows (minutes; 0 = Never), so a self-test can assert the
+    /// list Ed asked for stays intact.</summary>
+    internal static IReadOnlyList<int> AutoSaveMinuteOptionsForTest => AutoSaveMinuteOptions;
+
     // Audio cue UI (2026-05-28 revised after Ed's feedback that one-control-per-cue blew
     // out the tab order). Back to a single CheckedListBox — up/down arrows move between
     // cues, Space toggles enable, exactly as it always was. Two buttons sit BELOW the list:
@@ -465,6 +489,7 @@ internal sealed class PreferencesDialog : Form
         Func<int> deleteAllLogs,
         Action checkForUpdatesNow,
         Action onUpdateFrequencyChanged,
+        Action onAutoSaveIntervalChanged,
         Action<bool> applyUpnpEnabled,
         Func<(RouterMappingStatus Status, IPEndPoint? External, string LastError)> getUpnpSnapshot,
         Action<EventHandler> subscribeUpnpStatusChanged,
@@ -610,6 +635,27 @@ internal sealed class PreferencesDialog : Form
             settings.SaveAcceptRemoteVolumeCommands(acceptRemoteVolumeBox.Checked);
             ChangedAnyProfileSetting = true;
         };
+
+        // Auto-save interval — machine-local, saved on change. Rows map 1:1 to AutoSaveMinuteOptions;
+        // we select the row whose minutes match the saved value (falling back to Never). The owner's
+        // onAutoSaveIntervalChanged re-applies the live timer so a change takes effect immediately.
+        autoSaveList.Items.AddRange(new object[]
+        {
+            "Never", "Every 2 minutes", "Every 5 minutes", "Every 10 minutes",
+            "Every 15 minutes", "Every 20 minutes", "Every 30 minutes",
+        });
+        var savedAutoSave = AppConfig.Load().AutoSaveNonReadOnlyMinutes;
+        var autoSaveRow = Array.IndexOf(AutoSaveMinuteOptions, savedAutoSave);
+        autoSaveList.SelectedIndex = autoSaveRow >= 0 ? autoSaveRow : 0;
+        autoSaveList.SelectedIndexChanged += (_, _) =>
+        {
+            if (autoSaveList.SelectedIndex < 0) return;
+            var cfg = AppConfig.Load();
+            cfg.AutoSaveNonReadOnlyMinutes = AutoSaveMinuteOptions[autoSaveList.SelectedIndex];
+            try { cfg.Save(); } catch { /* harmless — choice just won't survive a restart */ }
+            onAutoSaveIntervalChanged();
+        };
+        autoSaveLabel.Click += (_, _) => autoSaveList.Focus();
 
         // Update settings — wired against AppConfig directly since they're machine-local.
         // The frequency combo's index maps 1:1 to the UpdateCheckFrequency enum so reordering
@@ -934,8 +980,18 @@ internal sealed class PreferencesDialog : Form
         // strip switch tabs; the active page's controls are the next tab stops. The control itself
         // is a field (declared above) so OnShown can focus it when the dialog opens. Logging is its
         // own tab (2026-06-19); the two logging controls moved off the General tab to lead it.
+        // Auto-save label + list stacked into one panel, so they read as a unit and sit as a single
+        // row of the General tab directly after the "Browse for profiles folder" button, as Ed asked.
+        var autoSavePanel = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.TopDown,
+            AutoSize = true,
+            WrapContents = false,
+        };
+        autoSavePanel.Controls.Add(autoSaveLabel);
+        autoSavePanel.Controls.Add(autoSaveList);
         tabs.TabPages.Add(MakeTab("General",
-            browseProfilesFolderButton, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel));
+            browseProfilesFolderButton, autoSavePanel, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel));
         tabs.TabPages.Add(MakeTab("Appearance",
             themeRow, showPanEqTabBox, tabOrderLabel, tabOrderList, tabOrderButtons,
             enableDiscoveredPeersBox, enableRememberedPeersBox));

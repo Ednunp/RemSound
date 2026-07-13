@@ -244,6 +244,11 @@ public sealed class AppConfig
     /// Startup behaviour dialog. Null = always show the picker (legacy behaviour).</summary>
     public string? StartWithProfileTitle { get; set; }
 
+    /// <summary>How often (in minutes) RemSound auto-saves the current profile if it's NOT read-only and
+    /// has unsaved changes. 0 = never (the default). Set in Preferences → General. The auto-save is
+    /// SILENT — it never plays the save cue or shows the confirmation. Machine-wide.</summary>
+    public int AutoSaveNonReadOnlyMinutes { get; set; }
+
     // The send-only service's profile + settings live in the machine-wide RemSound.Core.ServiceStore
     // (ProgramData), NOT here — AppConfig is per-user, but the service runs as SYSTEM and needs the same
     // file the user wrote. (ServiceProfileName / ServiceLoggingEnabled were moved there 2026-07-12.)

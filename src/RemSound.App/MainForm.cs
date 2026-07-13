@@ -481,6 +481,11 @@ public sealed class MainForm : Form
     private readonly Dictionary<CheckedListBox, int> lastFocusedListIndices = [];
 
     private readonly System.Windows.Forms.Timer statusTimer = new() { Interval = 1000 };
+    // Periodic silent auto-save of the current profile (Preferences → General → "auto save non-read only
+    // profiles"). Off by default; when enabled it fires every N minutes and saves the active profile only
+    // if it's a real saved profile, NOT read-only, and has unsaved changes — WITHOUT the save cue. Interval
+    // and enable/disable come from AppConfig.AutoSaveNonReadOnlyMinutes via ApplyAutoSaveTimer().
+    private readonly System.Windows.Forms.Timer autoSaveTimer = new();
     // Device-list refresh. As of v3.4 this is EVENT-DRIVEN, not polled: an
     // AudioDeviceChangeNotifier registers for Windows audio endpoint-change notifications and
     // pokes this timer when the device set actually changes (USB hot-plug / unplug, default-device
@@ -1398,6 +1403,7 @@ public sealed class MainForm : Form
             // message-only window handle to be freed at GC finalization. MainForm is rebuilt on every
             // profile switch, so disposing here releases those handles deterministically each time.
             statusTimer.Stop(); statusTimer.Dispose();
+            autoSaveTimer.Stop(); autoSaveTimer.Dispose();
             deviceRefreshTimer.Stop(); deviceRefreshTimer.Dispose();
             continuousTuneTimer.Stop(); continuousTuneTimer.Dispose();
             updateCheckTimer.Stop(); updateCheckTimer.Dispose();
@@ -1583,6 +1589,12 @@ public sealed class MainForm : Form
         if (headless) return;
 
         statusTimer.Start();
+
+        // Silent periodic auto-save (opt-in, off by default). Event wiring here; the interval and whether
+        // it runs at all are set by ApplyAutoSaveTimer() from the saved preference, and re-applied live
+        // when the user changes it in Preferences.
+        autoSaveTimer.Tick += (_, _) => AutoSaveCurrentProfileIfDue();
+        ApplyAutoSaveTimer();
 
         // Hot-plug detection is event-driven (see the deviceRefreshTimer comment): register for
         // Windows audio endpoint-change notifications and refresh the device lists only when the
@@ -2835,6 +2847,7 @@ public sealed class MainForm : Form
             },
             checkForUpdatesNow: () => CheckForUpdatesManually(),
             onUpdateFrequencyChanged: ApplyUpdateCheckTimer,
+            onAutoSaveIntervalChanged: ApplyAutoSaveTimer,
             applyUpnpEnabled: enabled =>
             {
                 // The persist already happened in the dialog; this callback only flips the
@@ -8228,7 +8241,9 @@ public sealed class MainForm : Form
     /// title, refreshes button visibility, and shows a confirmation popup).</summary>
     private void SaveProfileTo(string title) => SaveProfileTo(title, showConfirmation: true);
 
-    private void SaveProfileTo(string title, bool showConfirmation)
+    private void SaveProfileTo(string title, bool showConfirmation) => SaveProfileTo(title, showConfirmation, playCue: true);
+
+    private void SaveProfileTo(string title, bool showConfirmation, bool playCue)
     {
         if (profileStore is null) return;
         try
@@ -8238,8 +8253,9 @@ public sealed class MainForm : Form
             // Save cue (2026-05-28): fires after any successful save — Save AND Save As, since
             // both routes funnel through this single method. Honours the EnableSaveCue per-
             // profile flag; the cue is silent if the user has unticked it in Preferences or if
-            // sounds\save.wav doesn't exist and no custom override has been set.
-            if (settings.LoadEnableSaveCue()) saveSound?.Play();
+            // sounds\save.wav doesn't exist and no custom override has been set. Auto-save passes
+            // playCue: false so it never interrupts the user with a save sound.
+            if (playCue && settings.LoadEnableSaveCue()) saveSound?.Play();
             unsavedChanges = false;
             if (showConfirmation && !AppConfig.Load().SaveProfileConfirmationSuppressed)
             {
@@ -8259,6 +8275,41 @@ public sealed class MainForm : Form
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
+
+    /// <summary>Applies the "auto save non-read only profiles" preference to the timer: stops it when the
+    /// setting is Never (0 minutes), otherwise sets the interval and starts it. Called at launch and again
+    /// whenever the user changes the setting in Preferences, so the change takes effect immediately.</summary>
+    internal void ApplyAutoSaveTimer() => ApplyAutoSaveTimer(AppConfig.Load().AutoSaveNonReadOnlyMinutes);
+
+    /// <summary>Overload taking the interval directly, so a self-test can drive it without touching the
+    /// real config.</summary>
+    internal void ApplyAutoSaveTimer(int minutes)
+    {
+        autoSaveTimer.Stop();
+        if (minutes <= 0) return; // Never
+        autoSaveTimer.Interval = minutes * 60 * 1000;
+        autoSaveTimer.Start();
+    }
+
+    /// <summary>Timer tick: silently save the active profile, but ONLY if it's a real saved profile, is NOT
+    /// read-only, and actually has unsaved changes. Uses the shared save path with the cue and the
+    /// confirmation dialog suppressed, so it's completely unobtrusive — no sound, no popup.</summary>
+    private void AutoSaveCurrentProfileIfDue()
+    {
+        if (!ShouldAutoSave(profileStore is not null, currentProfileTitle, currentProfileReadOnly, unsavedChanges)) return;
+        SaveProfileTo(currentProfileTitle!, showConfirmation: false, playCue: false);
+    }
+
+    /// <summary>Pure guard for the periodic auto-save (unit-testable). Only a real, saved profile that is
+    /// NOT read-only and has unsaved changes may be auto-saved — a blank template, a read-only profile, or
+    /// an unchanged one is left alone.</summary>
+    internal static bool ShouldAutoSave(bool hasStore, string? currentTitle, bool readOnly, bool dirty)
+        => hasStore && !string.IsNullOrEmpty(currentTitle) && !readOnly && dirty;
+
+    // Test seams for the auto-save timer (headless): confirm ApplyAutoSaveTimer turns it on/off and sets
+    // the interval from AppConfig.AutoSaveNonReadOnlyMinutes.
+    internal bool AutoSaveTimerEnabledForTest => autoSaveTimer.Enabled;
+    internal int AutoSaveTimerIntervalForTest => autoSaveTimer.Interval;
 
     /// <summary>Builds a Profile from the current control state and writes it via the store.
     /// Doesn't touch UI feedback — that's the caller's job. Throws on store failure.</summary>
