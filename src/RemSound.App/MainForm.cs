@@ -2229,21 +2229,23 @@ public sealed class MainForm : Form
     /// the service is running, restarts it so the edits take effect.</summary>
     private void ConfigureServiceProfile()
     {
-        if (profileStore is null) return;
-        var cfg = AppConfig.Load();
-        Profile current;
-        try { current = profileStore.Load(ServiceControl.ServiceProfileTitle) ?? Profile.NewBlank(); }
-        catch { current = Profile.NewBlank(); }
+        // The service profile lives in the machine-wide ServiceStore (ProgramData), NOT the user's
+        // profiles folder — so it's readable by the SYSTEM service and fully isolated from the picker,
+        // recents and password manager. Migrate a profile left in the old (user-folder) location by the
+        // earlier design so a user who configured it before doesn't lose their settings.
+        var current = ServiceStore.LoadProfile();
+        if (current is null && profileStore is not null)
+            try { current = profileStore.Load(ServiceControl.ServiceProfileTitle); } catch { /* none */ }
+        current ??= Profile.NewBlank();
 
-        using var dlg = new ServiceProfileDialog(current, cfg.ServiceLoggingEnabled);
+        using var dlg = new ServiceProfileDialog(current, ServiceStore.LoadLoggingEnabled());
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
         try
         {
-            profileStore.Save(dlg.Result);
-            var c = AppConfig.Load();
-            c.ServiceProfileName = ServiceControl.ServiceProfileTitle;
-            c.ServiceLoggingEnabled = dlg.ServiceLoggingEnabled;
-            c.Save();
+            ServiceStore.SaveProfile(dlg.Result);
+            ServiceStore.SaveLoggingEnabled(dlg.ServiceLoggingEnabled);
+            // Remove any stray copy the old design left in the user's profiles folder.
+            try { profileStore?.Delete(ServiceControl.ServiceProfileTitle); } catch { /* best-effort */ }
             if (ServiceControl.Query() == ServiceState.Running)
             {
                 ServiceControl.RunElevated(ServiceControl.StopVerb);

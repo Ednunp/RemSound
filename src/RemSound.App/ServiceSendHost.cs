@@ -48,15 +48,10 @@ public sealed class ServiceSendHost : IDisposable
         this.log = log;
     }
 
-    /// <summary>Convenience factory for the real service: loads the profile named by
-    /// <see cref="AppConfig.ServiceProfileName"/> from the given profiles folder each time it's asked.</summary>
-    public static ServiceSendHost FromConfig(Action<string>? log = null) => new(() =>
-    {
-        var cfg = AppConfig.Load();
-        if (string.IsNullOrWhiteSpace(cfg.ServiceProfileName) || string.IsNullOrWhiteSpace(cfg.ProfilesDirectory)) return null;
-        try { return new ProfileStore(cfg.ProfilesDirectory).Load(cfg.ServiceProfileName!); }
-        catch { return null; }
-    }, log);
+    /// <summary>Convenience factory for the real service: loads the profile from the machine-wide
+    /// <see cref="ServiceStore"/> (ProgramData) each time it's asked — the same file the config dialog
+    /// writes, readable by the SYSTEM service account. Re-read on each resume so edits are picked up.</summary>
+    public static ServiceSendHost FromConfig(Action<string>? log = null) => new(ServiceStore.LoadProfile, log);
 
     public bool IsSending { get { lock (gate) return running; } }
 

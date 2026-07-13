@@ -64,6 +64,7 @@ internal static class SelfTest
         RunStep(results, "Lifecycle churn (modes, sources, pan/EQ, send/receive)", LifecycleChurn);
         RunStep(results, "Service app-yield token", ServiceInteractivePresence);
         RunStep(results, "Service sender parity (crypto + Opus frame)", ServiceSenderParity);
+        RunStep(results, "Service profile isolation (location + hidden from pickers)", ServiceProfileIsolation);
         RunStep(results, "Service send host (headless stream + yield)", ServiceSendHostStream);
         RunStep(results, "Service registration args", ServiceRegistrationArgs);
         RunStep(results, "Recording engine (all formats + source gate + mono)", RecordingEngine);
@@ -676,6 +677,52 @@ internal static class SelfTest
             $"exe path must be escaped-quoted with the run verb (got: {args})");
         Check(args.Contains($"DisplayName= \"{ServiceControl.DisplayName}\""), "must set the display name");
         return "sc create args quoted correctly for a spaced path";
+    }
+
+    /// <summary>The service profile is fully isolated from the normal profile machinery: it lives in a
+    /// MACHINE-WIDE ProgramData location (readable by the SYSTEM service, outside the user's profiles
+    /// folder), and the reserved title never shows up in the profile listing that backs the startup
+    /// picker, File→Open, Recent profiles and the password manager. Also round-trips through the store.</summary>
+    private static string? ServiceProfileIsolation()
+    {
+        // 1. The store lives under ProgramData, NOT the user's profiles folder.
+        var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        Check(ServiceStore.Directory.StartsWith(programData, StringComparison.OrdinalIgnoreCase),
+            $"the service profile must live under ProgramData (got {ServiceStore.Directory})");
+
+        // 2. The reserved title is filtered out of ListProfileTitles (the picker / recents / password
+        //    manager all read that), even if a stray file were present in the profiles folder.
+        var temp = Path.Combine(Path.GetTempPath(), "remsound-svciso-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var store = new ProfileStore(temp);
+            store.Save(new Profile { Title = "My normal profile" });
+            store.Save(new Profile { Title = ProfileStore.ReservedServiceProfileTitle });
+            var titles = store.ListProfileTitles();
+            Check(titles.Contains("My normal profile"), "a normal profile must be listed");
+            Check(!titles.Any(t => string.Equals(t, ProfileStore.ReservedServiceProfileTitle, StringComparison.OrdinalIgnoreCase)),
+                "the service profile must NOT appear in the profile listing (picker / recents / password manager)");
+
+            // 3. Round-trip through the machine-wide store (redirected to a temp folder for the test).
+            var saved = ServiceStore.TestDirectoryOverride;
+            ServiceStore.TestDirectoryOverride = Path.Combine(temp, "service");
+            try
+            {
+                Check(ServiceStore.LoadProfile() is null, "no service profile before one is saved");
+                var p = new Profile { Title = ProfileStore.ReservedServiceProfileTitle, WasapiSendMode = "applications" };
+                p.SelectedConnectedPeers.Add("10.0.0.5");
+                ServiceStore.SaveProfile(p);
+                ServiceStore.SaveLoggingEnabled(true);
+                var back = ServiceStore.LoadProfile();
+                Check(back is not null && back.WasapiSendMode == "applications" && back.SelectedConnectedPeers.Contains("10.0.0.5"),
+                    "the service profile must round-trip through the machine-wide store");
+                Check(ServiceStore.LoadLoggingEnabled(), "service logging flag must round-trip");
+            }
+            finally { ServiceStore.TestDirectoryOverride = saved; }
+
+            return "under ProgramData; hidden from the picker/recents/password-manager; round-trips";
+        }
+        finally { try { Directory.Delete(temp, recursive: true); } catch { /* best-effort */ } }
     }
 
     /// <summary>The service must configure the sender EXACTLY like the main app: derive both the audio key

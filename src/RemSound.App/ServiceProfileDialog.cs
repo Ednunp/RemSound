@@ -20,7 +20,7 @@ internal sealed class ServiceProfileDialog : Form
     private readonly CheckedListBox peersList = new() { CheckOnClick = true, Width = 460, Height = 120, AccessibleName = "Peers to send to (Alt+C)" };
     private readonly Label peersStatus = new() { AutoSize = true, Text = "No peers." };
     private readonly Button manualAddButton = new() { Text = "Add peer by IP (Alt+&A)", AutoSize = true, AccessibleName = "Add peer by IP" };
-    private readonly Button passwordButton = new() { Text = "Set pass&word...", AutoSize = true, AccessibleName = "Set the service profile password" };
+    private readonly Button passwordButton = new() { Text = "Set service profile pass&word...", AutoSize = true, AccessibleName = "Set service profile password" };
     private readonly Label passwordStatus = new() { AutoSize = true };
 
     // --- Audio send tab ---

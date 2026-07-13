@@ -50,7 +50,7 @@ public sealed class RemSoundService : ServiceBase
 
     private static bool SafeServiceLogging()
     {
-        try { return AppConfig.Load().ServiceLoggingEnabled; }
+        try { return ServiceStore.LoadLoggingEnabled(); }
         catch { return false; }
     }
 
