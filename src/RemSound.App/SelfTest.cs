@@ -732,6 +732,10 @@ internal static class SelfTest
                 Check(back is not null && back.WasapiSendMode == "applications" && back.SelectedConnectedPeers.Contains("10.0.0.5"),
                     "the service profile must round-trip through the machine-wide store");
                 Check(ServiceStore.LoadLoggingEnabled(), "service logging flag must round-trip");
+
+                // Running status (version + start time) round-trips — this is what the Service menu shows.
+                ServiceStore.SaveStatus(new ServiceStore.ServiceStatus { Version = "5.3", StartedUtc = DateTime.UtcNow });
+                Check(ServiceStore.LoadStatus()?.Version == "5.3", "the service running-status version must round-trip");
             }
             finally { ServiceStore.TestDirectoryOverride = saved; }
 

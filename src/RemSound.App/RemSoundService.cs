@@ -40,7 +40,12 @@ public sealed class RemSoundService : ServiceBase
     protected override void OnStart(string[] args)
     {
         log = new RemSoundLog { Enabled = SafeServiceLogging() };
-        log.Event("service: OnStart");
+        var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+        var versionText = version is null ? "?" : $"{version.Major}.{version.Minor}";
+        log.Event($"service: OnStart, version {versionText}");
+        // Record the running version + start time so the app's Service menu can show them — this is how a
+        // self-update is visible (the version bumps and the start time is recent).
+        try { ServiceStore.SaveStatus(new ServiceStore.ServiceStatus { Version = versionText, StartedUtc = DateTime.UtcNow }); } catch { }
         host = ServiceSendHost.FromConfig(msg => log?.Event(msg));
         worker = new Thread(() =>
         {

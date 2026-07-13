@@ -66,5 +66,28 @@ public static class ServiceStore
     /// <summary>True once a service profile has been configured.</summary>
     public static bool IsConfigured() => File.Exists(ProfilePath);
 
+    // === Running status (written by the service on start, read by the app's Service menu) ===
+    private static string StatusPath => Path.Combine(Directory, "status.json");
+
+    /// <summary>The version + start time the service last recorded — so the interactive app can show
+    /// which version is running and when it (re)started, which is how you SEE a self-update land.</summary>
+    public sealed class ServiceStatus
+    {
+        public string? Version { get; set; }
+        public DateTime StartedUtc { get; set; }
+    }
+
+    public static void SaveStatus(ServiceStatus status)
+    {
+        try { System.IO.Directory.CreateDirectory(Directory); File.WriteAllText(StatusPath, JsonSerializer.Serialize(status)); }
+        catch { /* best-effort */ }
+    }
+
+    public static ServiceStatus? LoadStatus()
+    {
+        try { return File.Exists(StatusPath) ? JsonSerializer.Deserialize<ServiceStatus>(File.ReadAllText(StatusPath)) : null; }
+        catch { return null; }
+    }
+
     private sealed class ServiceSettings { public bool LoggingEnabled { get; set; } }
 }

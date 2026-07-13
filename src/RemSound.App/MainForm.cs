@@ -2205,6 +2205,12 @@ public sealed class MainForm : Form
         {
             var state = ServiceControl.Query();
             status.Text = "Service: " + DescribeServiceState(state);
+            // Surface the running version + when it (re)started, so a self-update is visible at a glance.
+            if (state is ServiceState.Running or ServiceState.Stopped && ServiceStore.LoadStatus() is { Version: { } ver } st)
+            {
+                status.Text += $" — version {ver}";
+                if (state == ServiceState.Running && st.StartedUtc != default) status.Text += $", running since {DescribeAgo(st.StartedUtc)}";
+            }
             var installed = state != ServiceState.NotInstalled;
             install.Enabled = !installed;
             uninstall.Enabled = installed;
@@ -2212,6 +2218,16 @@ public sealed class MainForm : Form
             stop.Enabled = installed && state is ServiceState.Running;
         };
         return serviceMenu;
+    }
+
+    private static string DescribeAgo(DateTime utc)
+    {
+        var span = DateTime.UtcNow - utc;
+        if (span < TimeSpan.Zero) span = TimeSpan.Zero;
+        if (span.TotalMinutes < 1) return "just now";
+        if (span.TotalHours < 1) return $"{(int)span.TotalMinutes} min ago";
+        if (span.TotalDays < 1) return $"{(int)span.TotalHours} h ago";
+        return $"{(int)span.TotalDays} d ago";
     }
 
     private static string DescribeServiceState(ServiceState s) => s switch
