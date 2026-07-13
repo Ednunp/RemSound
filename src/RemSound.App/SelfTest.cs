@@ -682,7 +682,16 @@ internal static class SelfTest
         var fail = ServiceControl.BuildFailureArgs();
         Check(fail.StartsWith($"failure {ServiceControl.ServiceName} ") && fail.Contains("actions= restart/"),
             $"failure args must configure auto-restart (got: {fail})");
-        return "sc create + failure args are well-formed";
+
+        // Self-update version comparison — the service restarts itself ONLY on a strictly-newer on-disk
+        // version; any other case must be false so it can never loop.
+        var v = new Version(5, 2, 0, 0);
+        Check(ServiceUpdate.IsNewer(v, "5.3.0.0"), "a strictly-newer on-disk version must trigger a self-update");
+        Check(!ServiceUpdate.IsNewer(v, "5.2.0.0"), "the same version must NOT trigger a restart (loop-safe)");
+        Check(!ServiceUpdate.IsNewer(v, "5.1.0.0"), "an older on-disk version must NOT trigger a restart");
+        Check(!ServiceUpdate.IsNewer(v, null) && !ServiceUpdate.IsNewer(v, "garbage") && !ServiceUpdate.IsNewer(null, "5.3"),
+            "missing/unparseable versions must NOT trigger a restart");
+        return "sc create + failure args well-formed; self-update comparison loop-safe";
     }
 
     /// <summary>The service profile is fully isolated from the normal profile machinery: it lives in a

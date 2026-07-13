@@ -15,6 +15,8 @@ public sealed class RemSoundService : ServiceBase
     private Thread? worker;
     private ServiceSendHost? host;
     private RemSoundLog? log;
+    private System.Threading.Timer? updateWatch;
+    private volatile bool restartScheduled;
 
     public RemSoundService()
     {
@@ -47,11 +49,26 @@ public sealed class RemSoundService : ServiceBase
         })
         { IsBackground = true, Name = "remsound-service" };
         worker.Start();
+
+        // Self-update: the auto-updater swaps the files in place but can't restart us (no admin). We run
+        // as SYSTEM, so when a newer RemSound.exe lands next to us we restart onto it ourselves. Checked
+        // on a slow timer (an update is rare); loop-safe (only fires on a strictly-newer on-disk version).
+        updateWatch = new System.Threading.Timer(_ => CheckForUpdate(), null, TimeSpan.FromSeconds(45), TimeSpan.FromSeconds(45));
+    }
+
+    private void CheckForUpdate()
+    {
+        if (restartScheduled) return;
+        if (!ServiceUpdate.UpdateLanded()) return;
+        restartScheduled = true;
+        log?.Event("service: a newer RemSound version was installed — restarting to update");
+        ServiceUpdate.RestartSelf();
     }
 
     protected override void OnStop()
     {
         log?.Event("service: OnStop");
+        try { updateWatch?.Dispose(); } catch { }
         try { cts.Cancel(); } catch { }
         try { worker?.Join(5000); } catch { }
         try { host?.Dispose(); } catch { }
