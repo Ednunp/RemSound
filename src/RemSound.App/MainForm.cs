@@ -2244,6 +2244,7 @@ public sealed class MainForm : Form
         {
             ServiceStore.SaveProfile(dlg.Result);
             ServiceStore.SaveLoggingEnabled(dlg.ServiceLoggingEnabled);
+            logFile.Event($"service: profile saved (service logging {(dlg.ServiceLoggingEnabled ? "on" : "off")})");
             // Remove any stray copy the old design left in the user's profiles folder.
             try { profileStore?.Delete(ServiceControl.ServiceProfileTitle); } catch { /* best-effort */ }
             if (ServiceControl.Query() == ServiceState.Running)
@@ -2268,7 +2269,9 @@ public sealed class MainForm : Form
                 : "Uninstall the RemSound service?\n\nWindows will ask for administrator permission.";
             if (MessageBox.Show(this, msg, AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         }
+        logFile.Event($"service: {label} requested (elevated)");
         var rc = ServiceControl.RunElevated(verb);
+        logFile.Event($"service: {label} finished with code {rc} ({(rc == 0 ? "success" : rc == -1 ? "cancelled/declined" : "failed")})");
         if (rc == 0)
             MessageBox.Show(this, $"Service {label} succeeded.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
         else if (rc == -1)
