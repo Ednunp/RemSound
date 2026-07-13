@@ -166,6 +166,20 @@ public sealed class ServiceSendHost : IDisposable
         Suspend();
     }
 
+    /// <summary>Force a re-open of capture if we intend to send — called after a power resume, when the
+    /// audio devices have re-initialised and the current capture may be dead. The device-change watcher
+    /// usually catches this too, but a resume doesn't always fire an endpoint change, so we re-open
+    /// explicitly to be safe.</summary>
+    public void ReopenAfterResume()
+    {
+        if (!wantSending || disposed) return;
+        var profile = loadProfile();
+        if (profile is null) return;
+        log?.Invoke("service: re-opening capture after power resume");
+        Suspend();
+        ApplyProfile(profile);
+    }
+
     /// <summary>Device-set change callback (COM thread). While we intend to send, (re)open capture — this
     /// is the event that fires when the audio stack finishes coming up at boot, a device is plugged or
     /// unplugged, or the audio service restarts. Debounced: a single hot-plug fires several notifications.</summary>

@@ -676,7 +676,13 @@ internal static class SelfTest
         Check(args.Contains("\\\"" + exe + "\\\" " + ServiceControl.RunVerb),
             $"exe path must be escaped-quoted with the run verb (got: {args})");
         Check(args.Contains($"DisplayName= \"{ServiceControl.DisplayName}\""), "must set the display name");
-        return "sc create args quoted correctly for a spaced path";
+        Check(args.Contains("depend= Audiosrv"), "must depend on the audio service so it starts after audio is up");
+
+        // Auto-restart-on-crash failure actions.
+        var fail = ServiceControl.BuildFailureArgs();
+        Check(fail.StartsWith($"failure {ServiceControl.ServiceName} ") && fail.Contains("actions= restart/"),
+            $"failure args must configure auto-restart (got: {fail})");
+        return "sc create + failure args are well-formed";
     }
 
     /// <summary>The service profile is fully isolated from the normal profile machinery: it lives in a

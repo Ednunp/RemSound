@@ -98,8 +98,16 @@ public static class ServiceControl
         if (rc != 0) return rc;
         // Best-effort description; failure here doesn't fail the install.
         RunSc($"description {ServiceName} \"{Description}\"");
+        // Auto-restart on crash: without this a crashed service stays dead until reboot, which defeats
+        // an always-on streamer. Restart 5s / 10s / then every 60s; reset the failure counter daily.
+        RunSc(BuildFailureArgs());
         return 0;
     }
+
+    /// <summary>The sc.exe "failure" args that make the service auto-restart on a crash. Pure, so a
+    /// self-test can verify the format.</summary>
+    internal static string BuildFailureArgs() =>
+        $"failure {ServiceName} reset= 86400 actions= restart/5000/restart/10000/restart/60000";
 
     /// <summary>Stops (if running) and deletes the service. Must be run elevated. Returns 0 on success or
     /// if it wasn't installed.</summary>

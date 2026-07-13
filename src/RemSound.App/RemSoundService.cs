@@ -22,6 +22,17 @@ public sealed class RemSoundService : ServiceBase
         CanStop = true;
         CanShutdown = true;
         CanPauseAndContinue = false;
+        CanHandlePowerEvent = true;   // so we can re-open capture after the machine wakes from sleep
+    }
+
+    protected override bool OnPowerEvent(PowerBroadcastStatus powerStatus)
+    {
+        if (powerStatus is PowerBroadcastStatus.ResumeSuspend or PowerBroadcastStatus.ResumeAutomatic or PowerBroadcastStatus.ResumeCritical)
+        {
+            log?.Event("service: power resume — re-opening capture");
+            try { host?.ReopenAfterResume(); } catch (Exception ex) { log?.Event($"service: resume re-open failed {ex.GetType().Name}: {ex.Message}"); }
+        }
+        return true;
     }
 
     protected override void OnStart(string[] args)

@@ -66,7 +66,15 @@ internal static class Program
         // a status code. --run-service blocks in the SCM dispatcher until Windows stops the service.
         if (args.Length > 0)
         {
-            if (HasArg(args, ServiceControl.RunVerb)) { RemSoundService.RunAsService(); return; }
+            if (HasArg(args, ServiceControl.RunVerb))
+            {
+                // Point the service's data (its log) at the machine-wide ProgramData location, next to its
+                // profile — otherwise a headless SYSTEM service logs into the SYSTEM account's AppData,
+                // which is near-impossible to find. (The profile itself always comes from ServiceStore.)
+                AppConfig.SetUserDataDirectoryOverride(ServiceStore.Directory);
+                RemSoundService.RunAsService();
+                return;
+            }
             if (HasArg(args, ServiceControl.InstallVerb)) { Environment.ExitCode = ServiceControl.DoInstall(); return; }
             if (HasArg(args, ServiceControl.UninstallVerb)) { Environment.ExitCode = ServiceControl.DoUninstall(); return; }
             if (HasArg(args, ServiceControl.StartVerb)) { Environment.ExitCode = ServiceControl.DoStart(); return; }
