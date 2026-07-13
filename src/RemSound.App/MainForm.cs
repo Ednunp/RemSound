@@ -2194,12 +2194,15 @@ public sealed class MainForm : Form
         start.Click += (_, _) => ServiceAction(ServiceControl.StartVerb, "start", confirm: false);
         var stop = new ToolStripMenuItem("Sto&p service") { AccessibleName = "Stop service" };
         stop.Click += (_, _) => ServiceAction(ServiceControl.StopVerb, "stop", confirm: false);
+        var updateLog = new ToolStripMenuItem("View service update &log") { AccessibleName = "View service update log" };
+        updateLog.Click += (_, _) => OpenServiceUpdateLog();
 
         serviceMenu.DropDownItems.AddRange(new ToolStripItem[]
         {
             status, new ToolStripSeparator(),
             configure, new ToolStripSeparator(),
-            install, uninstall, start, stop,
+            install, uninstall, start, stop, new ToolStripSeparator(),
+            updateLog,
         });
         serviceMenu.DropDownOpening += (_, _) =>
         {
@@ -2218,6 +2221,18 @@ public sealed class MainForm : Form
             stop.Enabled = installed && state is ServiceState.Running;
         };
         return serviceMenu;
+    }
+
+    private void OpenServiceUpdateLog()
+    {
+        var path = ServiceStore.UpdateLogPath;
+        if (!File.Exists(path))
+        {
+            MessageBox.Show(this, "No service update log yet — it's written the first time the service updates itself.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true }); }
+        catch (Exception ex) { MessageBox.Show(this, $"Could not open the update log ({path}): {ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning); }
     }
 
     private static string DescribeAgo(DateTime utc)

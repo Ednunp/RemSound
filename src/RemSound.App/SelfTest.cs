@@ -736,6 +736,14 @@ internal static class SelfTest
                 // Running status (version + start time) round-trips — this is what the Service menu shows.
                 ServiceStore.SaveStatus(new ServiceStore.ServiceStatus { Version = "5.3", StartedUtc = DateTime.UtcNow });
                 Check(ServiceStore.LoadStatus()?.Version == "5.3", "the service running-status version must round-trip");
+
+                // Update log + pending marker: the always-on trail of a self-update.
+                ServiceStore.AppendUpdateLog("update detected: test");
+                Check(File.Exists(ServiceStore.UpdateLogPath) && File.ReadAllText(ServiceStore.UpdateLogPath).Contains("update detected: test"),
+                    "the update log must be written");
+                ServiceStore.SetUpdatePending();
+                Check(ServiceStore.ConsumeUpdatePending(), "a set update-pending marker must be consumed once");
+                Check(!ServiceStore.ConsumeUpdatePending(), "the update-pending marker must not be consumed twice");
             }
             finally { ServiceStore.TestDirectoryOverride = saved; }
 

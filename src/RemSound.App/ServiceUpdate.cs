@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Reflection;
+using RemSound.Core;
 
 namespace RemSound.App;
 
@@ -25,32 +26,46 @@ internal static class ServiceUpdate
 
     /// <summary>True when a strictly-newer RemSound.exe sits next to the running service binary (i.e. an
     /// update landed). Reads the on-disk exe's file version; never throws.</summary>
-    public static bool UpdateLanded()
+    public static bool UpdateLanded() => IsNewer(RunningVersion(), OnDiskVersion());
+
+    /// <summary>The version string of the RemSound.exe sitting next to the service, or null if unreadable.</summary>
+    public static string? OnDiskVersion()
     {
         try
         {
             var onDiskExe = Path.Combine(AppContext.BaseDirectory, "RemSound.exe");
-            if (!File.Exists(onDiskExe)) return false;
-            var running = Assembly.GetExecutingAssembly().GetName().Version;
-            var onDisk = FileVersionInfo.GetVersionInfo(onDiskExe).FileVersion;
-            return IsNewer(running, onDisk);
+            return File.Exists(onDiskExe) ? FileVersionInfo.GetVersionInfo(onDiskExe).FileVersion : null;
         }
-        catch { return false; }
+        catch { return null; }
     }
+
+    public static Version? RunningVersion() => Assembly.GetExecutingAssembly().GetName().Version;
 
     /// <summary>Restart the service onto the new binary. Spawns a DETACHED PowerShell (as SYSTEM, inherited
     /// from the service) that stops this service — which exits this process — then starts it again, so the
-    /// SCM launches the freshly-installed exe. Never throws.</summary>
+    /// SCM launches the freshly-installed exe. The script LOGS its own stop/start outcome to the update log,
+    /// so even the part that runs after this process is gone (and any failed start) is recorded. Never
+    /// throws; worst case the service picks up the update on the next reboot.</summary>
     public static void RestartSelf()
     {
         try
         {
+            var dir = ServiceStore.Directory;
+            System.IO.Directory.CreateDirectory(dir);
+            var script = Path.Combine(dir, "restart.ps1");
+            var log = ServiceStore.UpdateLogPath;
+            var svc = ServiceControl.ServiceName;
+            var content =
+                "$ts = { (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') }\r\n" +
+                $"Add-Content -LiteralPath '{log}' -Value \"$(& $ts)  restarter: stopping {svc}\"\r\n" +
+                $"Stop-Service -Name {svc} -Force -ErrorAction SilentlyContinue\r\n" +
+                $"try {{ Start-Service -Name {svc} -ErrorAction Stop; $r = 'restart: service started' }} catch {{ $r = 'restart: START FAILED - ' + $_.Exception.Message }}\r\n" +
+                $"Add-Content -LiteralPath '{log}' -Value \"$(& $ts)  $r\"\r\n";
+            File.WriteAllText(script, content);
             var psi = new ProcessStartInfo
             {
                 FileName = "powershell.exe",
-                Arguments = "-NonInteractive -WindowStyle Hidden -Command " +
-                            $"\"Stop-Service -Name {ServiceControl.ServiceName} -Force -ErrorAction SilentlyContinue; " +
-                            $"Start-Service -Name {ServiceControl.ServiceName} -ErrorAction SilentlyContinue\"",
+                Arguments = $"-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{script}\"",
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };

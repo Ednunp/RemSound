@@ -89,5 +89,36 @@ public static class ServiceStore
         catch { return null; }
     }
 
+    // === Update log (ALWAYS written, not gated on the service-logging toggle) ===
+    // Updates are rare but important, so we always keep a small trail of them where the user can find it.
+    public static string UpdateLogPath => Path.Combine(Directory, "update.log");
+    private static string UpdatePendingPath => Path.Combine(Directory, "update-pending");
+
+    /// <summary>Append a timestamped line to the service update log. Never throws. Truncates if it ever
+    /// grows large (update events are infrequent, so it normally stays tiny).</summary>
+    public static void AppendUpdateLog(string line)
+    {
+        try
+        {
+            System.IO.Directory.CreateDirectory(Directory);
+            try { if (File.Exists(UpdateLogPath) && new FileInfo(UpdateLogPath).Length > 200_000) File.Delete(UpdateLogPath); } catch { }
+            File.AppendAllText(UpdateLogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {line}{Environment.NewLine}");
+        }
+        catch { /* best-effort */ }
+    }
+
+    /// <summary>Marker dropped when a self-update restart is triggered; the next start consumes it and logs
+    /// completion — so the update log shows the update actually finished (and its absence flags a stuck one).</summary>
+    public static void SetUpdatePending()
+    {
+        try { System.IO.Directory.CreateDirectory(Directory); File.WriteAllText(UpdatePendingPath, ""); } catch { }
+    }
+
+    public static bool ConsumeUpdatePending()
+    {
+        try { if (File.Exists(UpdatePendingPath)) { File.Delete(UpdatePendingPath); return true; } } catch { }
+        return false;
+    }
+
     private sealed class ServiceSettings { public bool LoggingEnabled { get; set; } }
 }

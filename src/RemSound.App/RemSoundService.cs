@@ -46,6 +46,8 @@ public sealed class RemSoundService : ServiceBase
         // Record the running version + start time so the app's Service menu can show them — this is how a
         // self-update is visible (the version bumps and the start time is recent).
         try { ServiceStore.SaveStatus(new ServiceStore.ServiceStatus { Version = versionText, StartedUtc = DateTime.UtcNow }); } catch { }
+        // If this start is the completion of a self-update restart, close the loop in the update log.
+        try { if (ServiceStore.ConsumeUpdatePending()) ServiceStore.AppendUpdateLog($"update complete: now running version {versionText}"); } catch { }
         host = ServiceSendHost.FromConfig(msg => log?.Event(msg));
         worker = new Thread(() =>
         {
@@ -66,6 +68,11 @@ public sealed class RemSoundService : ServiceBase
         if (restartScheduled) return;
         if (!ServiceUpdate.UpdateLanded()) return;
         restartScheduled = true;
+        var running = ServiceUpdate.RunningVersion();
+        var runningText = running is null ? "?" : $"{running.Major}.{running.Minor}";
+        // Always-on update log (not gated on the service-logging toggle) — updates are rare + important.
+        ServiceStore.AppendUpdateLog($"update detected: newer RemSound.exe ({ServiceUpdate.OnDiskVersion()}) found, running {runningText} — restarting to update");
+        ServiceStore.SetUpdatePending();
         log?.Event("service: a newer RemSound version was installed — restarting to update");
         ServiceUpdate.RestartSelf();
     }
