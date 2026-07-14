@@ -16,6 +16,15 @@ internal static class Program
     private static bool HasArg(string[] args, string flag) =>
         Array.Exists(args, a => string.Equals(a, flag, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>True when any Windows-service verb is present. Uses only the inlined const verb strings, so
+    /// it references no service type and loads no service assembly — see the dispatch call in <see cref="Main"/>
+    /// for why that matters on older Windows. When this is false (every normal launch) the service code is
+    /// never reached.</summary>
+    internal static bool IsServiceInvocation(string[] args) =>
+        HasArg(args, ServiceControl.RunVerb) || HasArg(args, ServiceControl.InstallVerb)
+        || HasArg(args, ServiceControl.UninstallVerb) || HasArg(args, ServiceControl.StartVerb)
+        || HasArg(args, ServiceControl.StopVerb);
+
     // Writes an otherwise-fatal exception to a timestamped crash file in the logs folder, so a
     // "RemSound just disappeared, no dialog" report (#16) leaves a stack behind to diagnose instead
     // of nothing. Best-effort and self-contained — a crash handler must never throw.
@@ -64,21 +73,18 @@ internal static class Program
         // The service is a SEPARATE role — it must never take the interactive single-instance lock — and
         // the elevated one-shot verbs (install/uninstall/start/stop) just do their SCM work and exit with
         // a status code. --run-service blocks in the SCM dispatcher until Windows stops the service.
-        if (args.Length > 0)
+        //
+        // CRITICAL (2026-07-14): the dispatch lives in ServiceEntry, NOT inline here. RemSoundService
+        // derives from ServiceBase, so naming it in THIS method's body would make the JIT load the
+        // System.ServiceProcess assembly the instant Main is compiled — at the very start of every launch,
+        // before any argument is read. On older Windows (Win7) that assembly won't load under .NET 10, so
+        // the app crashed before it could open a window. The check below uses only inlined const verb
+        // strings, and ServiceEntry.Dispatch is only reached when a service verb is genuinely present, so a
+        // normal launch never touches that assembly.
+        if (args.Length > 0 && IsServiceInvocation(args))
         {
-            if (HasArg(args, ServiceControl.RunVerb))
-            {
-                // Point the service's data (its log) at the machine-wide ProgramData location, next to its
-                // profile — otherwise a headless SYSTEM service logs into the SYSTEM account's AppData,
-                // which is near-impossible to find. (The profile itself always comes from ServiceStore.)
-                AppConfig.SetUserDataDirectoryOverride(ServiceStore.Directory);
-                RemSoundService.RunAsService();
-                return;
-            }
-            if (HasArg(args, ServiceControl.InstallVerb)) { Environment.ExitCode = ServiceControl.DoInstall(); return; }
-            if (HasArg(args, ServiceControl.UninstallVerb)) { Environment.ExitCode = ServiceControl.DoUninstall(); return; }
-            if (HasArg(args, ServiceControl.StartVerb)) { Environment.ExitCode = ServiceControl.DoStart(); return; }
-            if (HasArg(args, ServiceControl.StopVerb)) { Environment.ExitCode = ServiceControl.DoStop(); return; }
+            Environment.ExitCode = ServiceEntry.Dispatch(args);
+            return;
         }
 
         // --config-dir <folder> (test / portable isolation): redirect ALL user state - config,

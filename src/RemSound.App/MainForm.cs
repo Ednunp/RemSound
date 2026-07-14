@@ -2182,7 +2182,13 @@ public sealed class MainForm : Form
         // and the arrow keys.
         menu.Items.Add(fileMenu);
         menu.Items.Add(recordMenu);
-        menu.Items.Add(BuildServiceMenu());
+        // The send-only Windows service is a Windows 10+ feature: it was built and tested there, and on
+        // older Windows the System.ServiceProcess assembly it relies on won't even load under .NET 10. Only
+        // offer the Service menu where it can actually work — on Win7/8 it simply isn't shown and no service
+        // code is ever reached. (Mirrors how "capture individual apps" is gated to the versions that support
+        // it.) The startup path is already load-safe via ServiceEntry; this keeps the menu load-safe too.
+        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0))
+            menu.Items.Add(BuildServiceMenu());
         menu.Items.Add(optionsMenu);
         menu.Items.Add(helpMenu);
         return menu;
@@ -2218,19 +2224,29 @@ public sealed class MainForm : Form
         });
         serviceMenu.DropDownOpening += (_, _) =>
         {
-            var state = ServiceControl.Query();
-            status.Text = "Service: " + DescribeServiceState(state);
-            // Surface the running version + when it (re)started, so a self-update is visible at a glance.
-            if (state is ServiceState.Running or ServiceState.Stopped && ServiceStore.LoadStatus() is { Version: { } ver } st)
+            // Never let a status-query failure crash the menu (and with it the app). The menu only appears
+            // on Win10+ where the service assembly loads fine, but a defensive net here is cheap insurance.
+            try
             {
-                status.Text += $" — version {ver}";
-                if (state == ServiceState.Running && st.StartedUtc != default) status.Text += $", running since {DescribeAgo(st.StartedUtc)}";
+                var state = ServiceControl.Query();
+                status.Text = "Service: " + DescribeServiceState(state);
+                // Surface the running version + when it (re)started, so a self-update is visible at a glance.
+                if (state is ServiceState.Running or ServiceState.Stopped && ServiceStore.LoadStatus() is { Version: { } ver } st)
+                {
+                    status.Text += $" — version {ver}";
+                    if (state == ServiceState.Running && st.StartedUtc != default) status.Text += $", running since {DescribeAgo(st.StartedUtc)}";
+                }
+                var installed = state != ServiceState.NotInstalled;
+                install.Enabled = !installed;
+                uninstall.Enabled = installed;
+                start.Enabled = installed && state is ServiceState.Stopped;
+                stop.Enabled = installed && state is ServiceState.Running;
             }
-            var installed = state != ServiceState.NotInstalled;
-            install.Enabled = !installed;
-            uninstall.Enabled = installed;
-            start.Enabled = installed && state is ServiceState.Stopped;
-            stop.Enabled = installed && state is ServiceState.Running;
+            catch (Exception ex)
+            {
+                status.Text = "Service: status unavailable";
+                logFile.Event($"service menu: status query failed {ex.GetType().Name}: {ex.Message}");
+            }
         };
         return serviceMenu;
     }

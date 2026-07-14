@@ -79,6 +79,7 @@ internal static class SelfTest
         RunStep(results, "Main window coverage (all tabs + controls)", MainWindowCoverage);
         RunStep(results, "Main window profile round-trip (controls load + save)", MainWindowProfileRoundTrip);
         RunStep(results, "Auto-save non-read-only profiles (options + guard + silent timer)", AutoSaveNonReadOnlyProfiles);
+        RunStep(results, "Service verb gate (normal launch stays load-safe)", ServiceVerbGate);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");
@@ -1261,6 +1262,56 @@ internal static class SelfTest
         }
         return "options, persistence, guard (read-only/blank/unchanged skipped), and silent timer all verified";
     }
+
+    /// <summary>Guards the fix for the 2026-07-14 Win7 launch crash: RemSoundService derives from ServiceBase,
+    /// so if Program.Main reached the service dispatch on a normal launch, the JIT would load the
+    /// System.ServiceProcess assembly at startup — which won't load on Win7 under .NET 10 and crashed the app
+    /// before it could open. A normal launch must therefore NOT be treated as a service invocation (so the
+    /// dispatch — the only place that names the service types — is never JIT-compiled), while every real
+    /// service verb must be recognised.</summary>
+    private static string? ServiceVerbGate()
+    {
+        // Real launches that must NOT route to the service dispatch.
+        string[][] normal =
+        {
+            Array.Empty<string>(),
+            new[] { "--silent" },
+            new[] { "--profile", "My Profile" },
+            new[] { "--connect", "10.0.0.5" },
+            new[] { "--minimized" },
+            new[] { "--config-dir", @"C:\temp\x" },
+        };
+        foreach (var args in normal)
+            Check(!Program.IsServiceInvocation(args),
+                $"a normal launch ({(args.Length == 0 ? "no args" : string.Join(' ', args))}) must not be treated as a service invocation");
+
+        // Every service verb must be recognised, case-insensitively (so it DOES route to the dispatch).
+        foreach (var verb in new[]
+                 {
+                     ServiceControl.RunVerb, ServiceControl.InstallVerb, ServiceControl.UninstallVerb,
+                     ServiceControl.StartVerb, ServiceControl.StopVerb,
+                 })
+        {
+            Check(Program.IsServiceInvocation(new[] { verb }), $"'{verb}' must be recognised as a service invocation");
+            Check(Program.IsServiceInvocation(new[] { verb.ToUpperInvariant() }), $"'{verb}' must be recognised case-insensitively");
+            // A service verb mixed in with other args still counts.
+            Check(Program.IsServiceInvocation(new[] { "--silent", verb }), $"'{verb}' must be recognised even alongside other args");
+        }
+
+        // Belt-and-braces: evaluating the gate on a normal launch must not itself drag in the service
+        // assembly. (If nothing loaded it yet — most likely — this proves the gate references no service
+        // type; if an earlier step already loaded it, we can't re-check and just pass.)
+        const string svcAsm = "System.ServiceProcess.ServiceController";
+        bool loadedBefore = IsAssemblyLoaded(svcAsm);
+        _ = Program.IsServiceInvocation(new[] { "--silent" });
+        if (!loadedBefore)
+            Check(!IsAssemblyLoaded(svcAsm), "deciding a normal launch must not load the Windows-service assembly");
+
+        return "normal launches stay load-safe; all five service verbs recognised (case-insensitive)";
+    }
+
+    private static bool IsAssemblyLoaded(string simpleName) =>
+        AppDomain.CurrentDomain.GetAssemblies().Any(a => string.Equals(a.GetName().Name, simpleName, StringComparison.OrdinalIgnoreCase));
 
     private static int CountControls(Control root, Func<Control, bool> predicate)
     {
