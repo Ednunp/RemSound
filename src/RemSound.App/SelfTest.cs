@@ -82,6 +82,7 @@ internal static class SelfTest
         RunStep(results, "Service verb gate (normal launch stays load-safe)", ServiceVerbGate);
         RunStep(results, "Service capability probe (feature-detect, cached, safe)", ServiceCapabilityProbe);
         RunStep(results, "Menu shortcuts don't clash with controls", MenuShortcutsDontClashWithControls);
+        RunStep(results, "Service log discovery (newest activity log)", ServiceLogDiscovery);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");
@@ -1310,6 +1311,37 @@ internal static class SelfTest
             Check(!IsAssemblyLoaded(svcAsm), "deciding a normal launch must not load the Windows-service assembly");
 
         return "normal launches stay load-safe; all five service verbs recognised (case-insensitive)";
+    }
+
+    /// <summary>The Service menu's "View service log" opens the newest diagnostic log — the log that says
+    /// why the service is or isn't sending (what the tester actually needed; the update log only records
+    /// self-updates). Verifies the log folder resolves under the service data dir and that the newest .log
+    /// is picked, with a clean "nothing yet" answer when logging never ran.</summary>
+    private static string? ServiceLogDiscovery()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "remsound-svclog-" + Guid.NewGuid().ToString("N"));
+        var prev = ServiceStore.TestDirectoryOverride;
+        try
+        {
+            ServiceStore.TestDirectoryOverride = dir;
+            Check(ServiceStore.LogsDirectory == Path.Combine(dir, "logs"), "the service log folder must sit under the service data dir");
+            Check(ServiceStore.NewestLogFile() is null, "with no logs folder there must be no newest log file");
+
+            Directory.CreateDirectory(ServiceStore.LogsDirectory);
+            var older = Path.Combine(ServiceStore.LogsDirectory, "RemSound-old.log");
+            var newer = Path.Combine(ServiceStore.LogsDirectory, "RemSound-new.log");
+            File.WriteAllText(older, "old");
+            File.WriteAllText(newer, "new");
+            File.SetLastWriteTimeUtc(older, new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+            File.SetLastWriteTimeUtc(newer, new DateTime(2020, 1, 2, 0, 0, 0, DateTimeKind.Utc));
+            Check(ServiceStore.NewestLogFile() == newer, "NewestLogFile must return the most recently written .log");
+            return "log folder resolves under the service data dir; newest .log is found; empty case handled";
+        }
+        finally
+        {
+            ServiceStore.TestDirectoryOverride = prev;
+            try { Directory.Delete(dir, true); } catch { /* best effort */ }
+        }
     }
 
     private static bool IsAssemblyLoaded(string simpleName) =>

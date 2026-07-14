@@ -2219,6 +2219,8 @@ public sealed class MainForm : Form
         start.Click += (_, _) => ServiceAction(ServiceControl.StartVerb, "start", confirm: false);
         var stop = new ToolStripMenuItem("Sto&p service") { AccessibleName = "Stop service" };
         stop.Click += (_, _) => ServiceAction(ServiceControl.StopVerb, "stop", confirm: false);
+        var activityLog = new ToolStripMenuItem("&View service log") { AccessibleName = "View service log" };
+        activityLog.Click += (_, _) => OpenServiceLog();
         var updateLog = new ToolStripMenuItem("View service update &log") { AccessibleName = "View service update log" };
         updateLog.Click += (_, _) => OpenServiceUpdateLog();
 
@@ -2227,7 +2229,7 @@ public sealed class MainForm : Form
             status, new ToolStripSeparator(),
             configure, new ToolStripSeparator(),
             install, uninstall, start, stop, new ToolStripSeparator(),
-            updateLog,
+            activityLog, updateLog,
         });
         serviceMenu.DropDownOpening += (_, _) =>
         {
@@ -2258,12 +2260,32 @@ public sealed class MainForm : Form
         return serviceMenu;
     }
 
+    /// <summary>Opens the service's DIAGNOSTIC log — the "what is the service doing / why isn't it sending"
+    /// activity log, which records the streaming decision on every resume (e.g. "streaming N sources to M
+    /// peers", or "profile has no WASAPI send sources"). Distinct from the update log (self-updates only).
+    /// The log is written only while service logging is enabled (Configure service profile → Logging), so if
+    /// there's nothing here yet, that's the first thing to turn on.</summary>
+    private void OpenServiceLog()
+    {
+        var path = ServiceStore.NewestLogFile();
+        if (path is null)
+        {
+            var msg = ServiceStore.LoadLoggingEnabled()
+                ? "No service log yet. The service writes one once it starts with logging on — start (or restart) the service, then check back here."
+                : "No service log yet. Turn on logging first: Service menu → Configure service profile → Logging tab → enable service logging, then start (or restart) the service. The log records what the service does and why it is or isn't sending.";
+            MessageBox.Show(this, msg, AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true }); }
+        catch (Exception ex) { MessageBox.Show(this, $"Could not open the service log ({path}): {ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+    }
+
     private void OpenServiceUpdateLog()
     {
         var path = ServiceStore.UpdateLogPath;
         if (!File.Exists(path))
         {
-            MessageBox.Show(this, "No service update log yet — it's written the first time the service updates itself.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, "No service update log yet — it's written the first time the service updates itself. (For what the service is doing day to day, use \"View service log\" instead.)", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
         try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true }); }

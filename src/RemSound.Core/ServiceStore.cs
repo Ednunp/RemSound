@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text.Json;
 
 namespace RemSound.Core;
@@ -65,6 +66,28 @@ public static class ServiceStore
 
     /// <summary>True once a service profile has been configured.</summary>
     public static bool IsConfigured() => File.Exists(ProfilePath);
+
+    // === Diagnostic log (the service's activity log, written ONLY when service logging is enabled) ===
+    // This is the "what is the service actually doing / why isn't it sending" log — distinct from the
+    // update log below (which only records self-updates). The SYSTEM service writes here because Program.cs
+    // points its user-data dir at ServiceStore.Directory, so AppConfig.LogsDirectory lands in this folder.
+
+    /// <summary>Where the service writes its diagnostic log when logging is on — a <c>logs</c> folder next to
+    /// its profile in ProgramData. Same absolute path for the SYSTEM service and the interactive user.</summary>
+    public static string LogsDirectory => Path.Combine(Directory, "logs");
+
+    /// <summary>The most recently written service log file, or null if none exist yet (logging never ran).
+    /// Never throws.</summary>
+    public static string? NewestLogFile()
+    {
+        try
+        {
+            var dir = new DirectoryInfo(LogsDirectory);
+            if (!dir.Exists) return null;
+            return dir.GetFiles("*.log").OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault()?.FullName;
+        }
+        catch { return null; }
+    }
 
     // === Running status (written by the service on start, read by the app's Service menu) ===
     private static string StatusPath => Path.Combine(Directory, "status.json");
