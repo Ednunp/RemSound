@@ -26,6 +26,10 @@ public sealed class ServiceSendHost : IDisposable
     private readonly Func<Profile?> loadProfile;
     private readonly Action<string>? log;
     private readonly AudioSender sender = new();
+    // Network reachability: discovery + listener + heartbeat, so a peer can actually FIND and CONNECT to
+    // the service (the bare sender only ever pushed blindly to fixed addresses). Brought up alongside the
+    // sender while we're streaming, and fully torn down to a shell whenever we yield to the interactive app.
+    private readonly ServiceNetworkPresence presence;
     private readonly object gate = new();
     private bool running;      // the engine is actively sending
     private bool disposed;
@@ -46,6 +50,7 @@ public sealed class ServiceSendHost : IDisposable
     {
         this.loadProfile = loadProfile;
         this.log = log;
+        presence = new ServiceNetworkPresence(sender, log);
     }
 
     /// <summary>Convenience factory for the real service: loads the profile from the machine-wide
@@ -54,6 +59,10 @@ public sealed class ServiceSendHost : IDisposable
     public static ServiceSendHost FromConfig(Action<string>? log = null) => new(ServiceStore.LoadProfile, log);
 
     public bool IsSending { get { lock (gate) return running; } }
+
+    /// <summary>Test seam: is the network presence (discovery + listener + heartbeat) currently up? Tracks
+    /// sending — up while streaming, torn down to a shell while yielded to the interactive app.</summary>
+    internal bool IsNetworkPresenceUpForTest => presence.IsUp;
 
     /// <summary>Test seam: the crypto material the host pushed to the sender + the codec/frame it set, so
     /// a self-test can prove the service configures the sender exactly like the main app.</summary>
@@ -88,6 +97,9 @@ public sealed class ServiceSendHost : IDisposable
             sender.SetReceivers(endpoints);
             sender.Configure(specs);
             sender.Start();
+            // Come up on the network too, so the peers can discover and connect to us — not just receive a
+            // blind push. Same well-known audio port and the same components the interactive app uses.
+            presence.Start(RemPacket.DefaultPort, endpoints);
             running = true;
             log?.Invoke($"service: streaming \"{profile.Title}\" — {specs.Count} source(s) to {endpoints.Count} peer(s)");
             return true;
@@ -100,6 +112,9 @@ public sealed class ServiceSendHost : IDisposable
         lock (gate)
         {
             if (!running) return;
+            // Vacate the network FIRST (stop announcing, unbind the port, stop the heartbeat) so the
+            // interactive app can take it over cleanly, then stop the audio send.
+            try { presence.Stop(); } catch (Exception ex) { log?.Invoke($"service: presence stop error {ex.GetType().Name}: {ex.Message}"); }
             try { sender.Stop(); } catch (Exception ex) { log?.Invoke($"service: stop error {ex.GetType().Name}: {ex.Message}"); }
             running = false;
             log?.Invoke("service: suspended (interactive app present)");
@@ -289,6 +304,7 @@ public sealed class ServiceSendHost : IDisposable
         }
         wantSending = false;
         try { deviceNotifier?.Dispose(); } catch { } deviceNotifier = null;
+        try { presence.Dispose(); } catch { }
         try { sender.Stop(); } catch { }
         try { sender.Dispose(); } catch { }
     }

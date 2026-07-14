@@ -66,6 +66,7 @@ internal static class SelfTest
         RunStep(results, "Service sender parity (crypto + Opus frame)", ServiceSenderParity);
         RunStep(results, "Service profile isolation (location + hidden from pickers)", ServiceProfileIsolation);
         RunStep(results, "Service send host (headless stream + yield)", ServiceSendHostStream);
+        RunStep(results, "Service network presence (reachable + shell teardown)", ServiceNetworkPresenceReachable);
         RunStep(results, "Service registration args", ServiceRegistrationArgs);
         RunStep(results, "Recording engine (all formats + source gate + mono)", RecordingEngine);
         RunStep(results, "Recording split tracks (per-peer + own)", RecordingSplitTracks);
@@ -857,12 +858,14 @@ internal static class SelfTest
 
         Check(host.ApplyProfile(profile), "ApplyProfile should start streaming");
         Check(host.IsSending, "host should report sending after ApplyProfile");
+        Check(host.IsNetworkPresenceUpForTest, "the network presence must come up with streaming (discoverable + reachable)");
         Thread.Sleep(500);
         var afterStart = receiver.PacketsReceived;
         Check(afterStart > 0, $"packets must flow from the service host (got {afterStart})");
 
         host.Suspend();
         Check(!host.IsSending, "host should report not sending after Suspend");
+        Check(!host.IsNetworkPresenceUpForTest, "the network presence must drop to a shell on Suspend (nothing left on the network for the app to fight)");
         Thread.Sleep(200);
         var atSuspend = receiver.PacketsReceived;
         Thread.Sleep(400);
@@ -1400,6 +1403,45 @@ internal static class SelfTest
 
             return $"{menuMnemonics.Count} top-level menu shortcuts, none stolen by a control";
         }
+    }
+
+    /// <summary>The service's network presence (what makes it discoverable + connectable, not just a blind
+    /// push): Start binds the well-known-port listener and comes up; Stop tears it ALL the way down to a
+    /// shell (listener unbound) so the interactive app can own the network; and it's re-startable (the
+    /// service resuming after the app closes). Uses a free port so it never fights a real RemSound.</summary>
+    private static string? ServiceNetworkPresenceReachable()
+    {
+        var sender = new RemSound.Sender.AudioSender();
+        var presence = new ServiceNetworkPresence(sender, null);
+        try
+        {
+            var peers = new List<IPEndPoint> { new(IPAddress.Loopback, RemPacket.DefaultPeerDialPort) };
+
+            presence.Start(FreeUdpPort(), peers);
+            Check(presence.IsUp, "presence must report up after Start");
+            Check(presence.ListenerBound, "the well-known-port listener must be bound so a peer can reach the service");
+
+            presence.Stop();
+            Check(!presence.IsUp, "presence must report down after Stop");
+            Check(!presence.ListenerBound, "Stop must unbind the listener — no footprint left for the interactive app to fight over");
+
+            presence.Start(FreeUdpPort(), peers);
+            Check(presence.IsUp && presence.ListenerBound, "presence must come back up after a stop/start cycle (resume after the app closes)");
+            return "presence binds the listener on Start, tears fully down (shell) on Stop, and is re-startable";
+        }
+        finally
+        {
+            try { presence.Dispose(); } catch { /* ignore */ }
+            try { sender.Dispose(); } catch { /* ignore */ }
+        }
+    }
+
+    private static int FreeUdpPort()
+    {
+        using var s = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork,
+            System.Net.Sockets.SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp);
+        s.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        return ((IPEndPoint)s.LocalEndPoint!).Port;
     }
 
     private static int CountControls(Control root, Func<Control, bool> predicate)
