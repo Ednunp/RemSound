@@ -81,6 +81,7 @@ internal static class SelfTest
         RunStep(results, "Auto-save non-read-only profiles (options + guard + silent timer)", AutoSaveNonReadOnlyProfiles);
         RunStep(results, "Service verb gate (normal launch stays load-safe)", ServiceVerbGate);
         RunStep(results, "Service capability probe (feature-detect, cached, safe)", ServiceCapabilityProbe);
+        RunStep(results, "Menu shortcuts don't clash with controls", MenuShortcutsDontClashWithControls);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");
@@ -1327,6 +1328,46 @@ internal static class SelfTest
         Check(first == second, "the capability result must be stable across calls (cached)");
         Check(first, "the Windows service machinery must be detected as available on this Windows 10/11 test runner");
         return "service machinery feature-detected as available, and the result is cached";
+    }
+
+    /// <summary>A top-level menu opens on Alt+&lt;its mnemonic&gt; — but a VISIBLE control that owns the same
+    /// Alt key steals it, so the menu never opens (this is exactly why Alt+S didn't open the Service menu:
+    /// the "Send my audio" checkbox owns Alt+S). Since the user could be on any tab when they press Alt, a
+    /// top-level menu's mnemonic must avoid EVERY control mnemonic in the window. This is invisible to the
+    /// main coverage audit because menu items are ToolStripItems, not Controls.</summary>
+    private static string? MenuShortcutsDontClashWithControls()
+    {
+        Form form;
+        try { form = new MainForm(null, RemSound.Core.Profile.NewBlank(), null, null, headless: true); }
+        catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+
+        using (form)
+        {
+            var all = new List<Control>();
+            void Walk(Control p) { foreach (Control c in p.Controls) { all.Add(c); Walk(c); } }
+            Walk(form);
+
+            var menu = form.MainMenuStrip ?? all.OfType<MenuStrip>().FirstOrDefault();
+            Check(menu is not null, "the main window must have a menu strip to audit");
+
+            // Top-level menu mnemonics (the Alt+letter that should open each menu).
+            var menuMnemonics = new Dictionary<char, string>();
+            foreach (ToolStripItem item in menu!.Items)
+                if (TryMnemonic(item.Text, out var m)) menuMnemonics[m] = item.Text ?? "";
+            Check(menuMnemonics.Count >= 3, $"expected several top-level menu shortcuts (found {menuMnemonics.Count})");
+
+            // Every control mnemonic anywhere in the window (any tab could be showing when Alt is pressed).
+            var controlMnemonics = new Dictionary<char, string>();
+            foreach (var c in all)
+                if (TryMnemonic(c.Text, out var m)) controlMnemonics.TryAdd(m, string.IsNullOrWhiteSpace(c.Text) ? c.GetType().Name : c.Text!);
+
+            var clashes = menuMnemonics.Keys.Where(controlMnemonics.ContainsKey)
+                .Select(k => $"Alt+{char.ToUpperInvariant(k)} — menu \"{menuMnemonics[k]}\" vs control \"{controlMnemonics[k]}\"")
+                .ToList();
+            Check(clashes.Count == 0, "top-level menu shortcuts must not collide with control shortcuts (the control steals the key): " + string.Join("; ", clashes));
+
+            return $"{menuMnemonics.Count} top-level menu shortcuts, none stolen by a control";
+        }
     }
 
     private static int CountControls(Control root, Func<Control, bool> predicate)

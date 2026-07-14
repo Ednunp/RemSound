@@ -2202,7 +2202,12 @@ public sealed class MainForm : Form
     /// querying status needs no elevation.</summary>
     private ToolStripMenuItem BuildServiceMenu()
     {
-        var serviceMenu = new ToolStripMenuItem("&Service") { AccessibleName = "Service menu" };
+        // Mnemonic is Alt+J, NOT Alt+S: the always-visible "Send my audio" checkbox already owns Alt+S, and
+        // a visible control beats a top-level menu for the same Alt key (that's why Alt+S didn't open this
+        // menu). J is unused anywhere in the main window, so it opens the menu reliably from every tab —
+        // same reason the Record menu uses "(Alt+&K)". Every letter in "Service" (S/e/r/v/i/c) collides with
+        // a control (Send/Receive/Volume/…). The "Menu shortcuts don't clash with controls" self-test guards this.
+        var serviceMenu = new ToolStripMenuItem("Service (Alt+&J)") { AccessibleName = "Service menu" };
         var status = new ToolStripMenuItem("Service: …") { Enabled = false, AccessibleName = "Service status" };
         var configure = new ToolStripMenuItem("&Configure service profile...") { AccessibleName = "Configure service profile" };
         configure.Click += (_, _) => ConfigureServiceProfile();
