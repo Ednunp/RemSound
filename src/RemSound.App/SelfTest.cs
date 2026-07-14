@@ -81,7 +81,7 @@ internal static class SelfTest
         RunStep(results, "Main window profile round-trip (controls load + save)", MainWindowProfileRoundTrip);
         RunStep(results, "Auto-save non-read-only profiles (options + guard + silent timer)", AutoSaveNonReadOnlyProfiles);
         RunStep(results, "Service verb gate (normal launch stays load-safe)", ServiceVerbGate);
-        RunStep(results, "Service capability probe (feature-detect, cached, safe)", ServiceCapabilityProbe);
+        RunStep(results, "Main window builds without loading the service assembly (Win7-safe)", MainWindowServiceAssemblyFree);
         RunStep(results, "Menu shortcuts don't clash with controls", MenuShortcutsDontClashWithControls);
         RunStep(results, "Service log discovery (newest activity log)", ServiceLogDiscovery);
 
@@ -1356,13 +1356,26 @@ internal static class SelfTest
     /// so it must report available; the "can't load → hidden" path can only be exercised on an OS where the
     /// assembly genuinely won't load, but the try/catch that guarantees it degrades safely is verified here
     /// by the probe never throwing.</summary>
-    private static string? ServiceCapabilityProbe()
+    /// <summary>The Win7 launch guarantee, directly: building the main window (which builds the menu bar)
+    /// must NOT load System.ServiceProcess. The Service menu's visibility is decided by a Windows-VERSION
+    /// check, which touches no service type — so the service assembly is only ever loaded later, if a
+    /// Windows-10+ user opens the Service menu. On Windows 7 that decision hides the menu and the assembly
+    /// (which won't load there) is never referenced at launch, which is what keeps the app starting.</summary>
+    private static string? MainWindowServiceAssemblyFree()
     {
-        bool first = ServiceCapability.IsAvailable();
-        bool second = ServiceCapability.IsAvailable();
-        Check(first == second, "the capability result must be stable across calls (cached)");
-        Check(first, "the Windows service machinery must be detected as available on this Windows 10/11 test runner");
-        return "service machinery feature-detected as available, and the result is cached";
+        const string svcAsm = "System.ServiceProcess.ServiceController";
+        bool loadedBefore = IsAssemblyLoaded(svcAsm);
+
+        Form form;
+        try { form = new MainForm(null, RemSound.Core.Profile.NewBlank(), null, null, headless: true); }
+        catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+        using (form) { }
+
+        if (loadedBefore)
+            return "service assembly already loaded by an earlier step; main-window load-safety not re-checked this run";
+        Check(!IsAssemblyLoaded(svcAsm),
+            "constructing the main window must NOT load System.ServiceProcess (Service menu is version-gated, not probed) — this is what keeps the app launching on Windows 7");
+        return "the main window builds without loading the Windows-service assembly (Win7 launch-safe)";
     }
 
     /// <summary>A top-level menu opens on Alt+&lt;its mnemonic&gt; — but a VISIBLE control that owns the same

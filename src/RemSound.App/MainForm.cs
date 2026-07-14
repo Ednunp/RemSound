@@ -2182,14 +2182,16 @@ public sealed class MainForm : Form
         // and the arrow keys.
         menu.Items.Add(fileMenu);
         menu.Items.Add(recordMenu);
-        // Offer the Service menu wherever the send-only service can actually run — feature-detected, not
-        // gated on a Windows version, so it appears on Windows 7 too if the .NET service layer loads there
-        // (Ed's ask: install on "Win7 or above" wherever it's supported). ServiceCapability probes safely:
-        // if System.ServiceProcess can't load on this OS, it catches that and the menu is simply hidden, so
-        // an older Windows can never be crashed by it. The startup path is already service-type-free via
-        // ServiceEntry, so this probe (at window construction, never at launch) is the only place that
-        // decides visibility.
-        if (ServiceCapability.IsAvailable())
+        // Offer the Service menu on Windows 10+ only. This is a VERSION check on purpose, not a runtime
+        // probe: a probe would have to construct a ServiceController to test it, which loads
+        // System.ServiceProcess — the exact assembly that won't load on Windows 7 — during window
+        // construction on EVERY launch. Deciding by version is free (it touches no service type), so on
+        // Windows 7/8 the menu is simply hidden and that assembly is never referenced at launch at all,
+        // which is what keeps the app launching there. On Windows 10+ the assembly loads only later, if the
+        // user actually opens the Service menu (the DropDownOpening handler, wrapped in try/catch). Feature-
+        // detecting on Win7 and keeping Win7 launch-safe are mutually exclusive — you can't test whether the
+        // assembly loads without loading it — so we choose guaranteed launch safety.
+        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0))
             menu.Items.Add(BuildServiceMenu());
         menu.Items.Add(optionsMenu);
         menu.Items.Add(helpMenu);
