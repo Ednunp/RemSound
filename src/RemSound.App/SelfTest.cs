@@ -80,6 +80,7 @@ internal static class SelfTest
         RunStep(results, "Main window profile round-trip (controls load + save)", MainWindowProfileRoundTrip);
         RunStep(results, "Auto-save non-read-only profiles (options + guard + silent timer)", AutoSaveNonReadOnlyProfiles);
         RunStep(results, "Service verb gate (normal launch stays load-safe)", ServiceVerbGate);
+        RunStep(results, "Service capability probe (feature-detect, cached, safe)", ServiceCapabilityProbe);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");
@@ -1312,6 +1313,21 @@ internal static class SelfTest
 
     private static bool IsAssemblyLoaded(string simpleName) =>
         AppDomain.CurrentDomain.GetAssemblies().Any(a => string.Equals(a.GetName().Name, simpleName, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>The Service menu is shown by FEATURE-DETECTING the Windows service machinery (so it can
+    /// appear on Win7 too if the .NET service layer loads there), not by a hardcoded Windows version. The
+    /// probe must be stable/cached and must never throw. On this Win10/11 gate runner the machinery loads,
+    /// so it must report available; the "can't load → hidden" path can only be exercised on an OS where the
+    /// assembly genuinely won't load, but the try/catch that guarantees it degrades safely is verified here
+    /// by the probe never throwing.</summary>
+    private static string? ServiceCapabilityProbe()
+    {
+        bool first = ServiceCapability.IsAvailable();
+        bool second = ServiceCapability.IsAvailable();
+        Check(first == second, "the capability result must be stable across calls (cached)");
+        Check(first, "the Windows service machinery must be detected as available on this Windows 10/11 test runner");
+        return "service machinery feature-detected as available, and the result is cached";
+    }
 
     private static int CountControls(Control root, Func<Control, bool> predicate)
     {

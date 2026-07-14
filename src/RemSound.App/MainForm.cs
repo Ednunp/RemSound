@@ -2182,12 +2182,14 @@ public sealed class MainForm : Form
         // and the arrow keys.
         menu.Items.Add(fileMenu);
         menu.Items.Add(recordMenu);
-        // The send-only Windows service is a Windows 10+ feature: it was built and tested there, and on
-        // older Windows the System.ServiceProcess assembly it relies on won't even load under .NET 10. Only
-        // offer the Service menu where it can actually work — on Win7/8 it simply isn't shown and no service
-        // code is ever reached. (Mirrors how "capture individual apps" is gated to the versions that support
-        // it.) The startup path is already load-safe via ServiceEntry; this keeps the menu load-safe too.
-        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0))
+        // Offer the Service menu wherever the send-only service can actually run — feature-detected, not
+        // gated on a Windows version, so it appears on Windows 7 too if the .NET service layer loads there
+        // (Ed's ask: install on "Win7 or above" wherever it's supported). ServiceCapability probes safely:
+        // if System.ServiceProcess can't load on this OS, it catches that and the menu is simply hidden, so
+        // an older Windows can never be crashed by it. The startup path is already service-type-free via
+        // ServiceEntry, so this probe (at window construction, never at launch) is the only place that
+        // decides visibility.
+        if (ServiceCapability.IsAvailable())
             menu.Items.Add(BuildServiceMenu());
         menu.Items.Add(optionsMenu);
         menu.Items.Add(helpMenu);
