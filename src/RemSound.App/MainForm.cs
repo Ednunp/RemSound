@@ -3621,7 +3621,13 @@ public sealed class MainForm : Form
         // The chooser row only makes sense where applications mode is possible.
         if (sendModeLabel is not null) sendModeLabel.Visible = supported;
         SetRowControlVisible(sendModeList, supported);
-        if (!supported && sendModeList.SelectedIndex != SendModeDevicesIndex)
+        // Items.Count > 0 guard: this method is called once EARLY in the constructor (via ApplyAsioMode)
+        // before the Input/Output tab has populated sendModeList, so the list can still be empty here.
+        // Setting SelectedIndex on an empty ListBox throws ArgumentOutOfRangeException. On Windows 10+ the
+        // branch is skipped anyway (process-loopback IS supported), which hid the bug — but on Windows 7
+        // (unsupported) it crashed the app at launch (issue #22). When the list is empty there's nothing to
+        // reset; it's created selecting Devices, and this runs again (line ~3611) once the list is built.
+        if (!supported && sendModeList.Items.Count > 0 && sendModeList.SelectedIndex != SendModeDevicesIndex)
         {
             suppressSendAppEvents = true;
             sendModeList.SelectedIndex = SendModeDevicesIndex;

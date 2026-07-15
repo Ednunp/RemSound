@@ -3,6 +3,9 @@ using System.Threading;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 
+// Lets the in-app self-tests (assembly "RemSound") flip ForceSupportedForTest to exercise the Win7 paths.
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("RemSound")]
+
 namespace RemSound.Sender;
 
 /// <summary>
@@ -59,9 +62,14 @@ public sealed class ProcessLoopbackCapture : IWaveIn
         includeTree = includeProcessTree;
     }
 
+    /// <summary>Test-only override: when set, <see cref="IsSupported"/> returns this instead of the real OS
+    /// check, so a self-test running on Windows 10/11 can exercise the Windows-7 (unsupported) code paths —
+    /// e.g. the send-mode UI that crashed at launch on Win7 (issue #22). Null = use the real OS check.</summary>
+    internal static bool? ForceSupportedForTest;
+
     /// <summary>True on Windows builds new enough for the process-loopback API (10.0.19041+).</summary>
     public static bool IsSupported =>
-        OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041);
+        ForceSupportedForTest ?? OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041);
 
     public void StartRecording()
     {

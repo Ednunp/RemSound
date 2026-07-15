@@ -82,6 +82,7 @@ internal static class SelfTest
         RunStep(results, "Auto-save non-read-only profiles (options + guard + silent timer)", AutoSaveNonReadOnlyProfiles);
         RunStep(results, "Service verb gate (normal launch stays load-safe)", ServiceVerbGate);
         RunStep(results, "Main window builds without loading the service assembly (Win7-safe)", MainWindowServiceAssemblyFree);
+        RunStep(results, "Main window builds where process-loopback is unsupported (Win7 launch, issue #22)", Win7SendModeConstruction);
         RunStep(results, "Menu shortcuts don't clash with controls", MenuShortcutsDontClashWithControls);
         RunStep(results, "Service log discovery (newest activity log)", ServiceLogDiscovery);
 
@@ -1447,6 +1448,31 @@ internal static class SelfTest
             try { presence.Dispose(); } catch { /* ignore */ }
             try { sender.Dispose(); } catch { /* ignore */ }
         }
+    }
+
+    /// <summary>Issue #22: on Windows 7 process-loopback is unsupported, so ApplySendModeVisibility — called
+    /// early in the constructor (via ApplyAsioMode), BEFORE the Input/Output tab populates the send-mode
+    /// list — set SelectedIndex on an EMPTY ListBox and threw ArgumentOutOfRangeException, crashing the app
+    /// at launch. On Windows 10/11 the branch is skipped (process-loopback IS supported), which hid the bug
+    /// from the gate. This forces the unsupported path so the crash is reproduced (and now prevented) on a
+    /// Win10/11 test box.</summary>
+    private static string? Win7SendModeConstruction()
+    {
+        var prev = RemSound.Sender.ProcessLoopbackCapture.ForceSupportedForTest;
+        RemSound.Sender.ProcessLoopbackCapture.ForceSupportedForTest = false; // pretend we're on Windows 7
+        try
+        {
+            MainForm? mf = null;
+            Exception? ctorEx = null;
+            try { mf = new MainForm(null, RemSound.Core.Profile.NewBlank(), null, null, headless: true); }
+            catch (Exception ex) { ctorEx = ex; }
+            finally { mf?.Dispose(); }
+
+            Check(ctorEx is null,
+                $"constructing the main window with process-loopback unsupported (the Win7 path) must not throw — got {ctorEx?.GetType().Name}: {ctorEx?.Message}");
+            return "the main window constructs cleanly with process-loopback unsupported (Win7 send-mode path)";
+        }
+        finally { RemSound.Sender.ProcessLoopbackCapture.ForceSupportedForTest = prev; }
     }
 
     private static int FreeUdpPort()
