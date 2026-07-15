@@ -358,13 +358,16 @@ public sealed class AudioSender : IDisposable
 
         if (!willUseAsio)
         {
-            // Mode no longer uses ASIO. Dispose the persistent instance so the driver
-            // releases (other apps may want it).
+            // Mode no longer uses ASIO. Ed's approach (2026-07-15): do NOT close the driver here — closing
+            // it is the native call that crashes Audient (the "ASIO -> none kills the app" bug). Instead
+            // keep the persistent instance OPEN but PARKED: rewire its callback to a no-op and drop it to
+            // zero active pairs. That stops it feeding any lane WITHOUT a native close, so no crash. It's
+            // reused instantly if the user turns ASIO back on, and only truly closes on a driver CHANGE
+            // (below) or app exit — where the OS reclaims it anyway.
             if (persistentAsio is not null)
             {
-                try { persistentAsio.Dispose(); } catch { /* ignore */ }
-                persistentAsio = null;
-                persistentAsioDriverName = null;
+                try { persistentAsio.SetCallback(static _ => { }); } catch { /* ignore */ }
+                try { persistentAsio.UpdateSources(Array.Empty<CaptureSourceSpec>()); } catch { /* ignore */ }
             }
             return;
         }
