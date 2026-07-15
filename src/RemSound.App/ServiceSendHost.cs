@@ -43,6 +43,14 @@ public sealed class ServiceSendHost : IDisposable
     private volatile bool wantSending;     // true while the app is absent and we intend to stream
     private long lastDeviceChangeTick;
 
+    // Reachability-gated sending (issues #8 / #15): stream ONLY to peers the heartbeat can reach, and drop
+    // any that stay unreachable — never blast audio into a dead address forever. The heartbeat keeps
+    // probing the FULL set, so a peer that comes back is re-armed on the next refresh. Mirrors the app's
+    // RefreshAudioReceivers. Send-only, so there's no "actively receiving" carve-out.
+    private static readonly TimeSpan PruneUnreachableAfter = TimeSpan.FromSeconds(30);
+    private IPEndPoint[] allEndpoints = [];
+    private string? armedSignature;
+
     /// <param name="loadProfile">Supplies the current service profile (re-read on each resume so edits
     /// are picked up). Returns null if none is configured.</param>
     /// <param name="log">Optional diagnostic sink.</param>
@@ -94,6 +102,10 @@ public sealed class ServiceSendHost : IDisposable
             sender.ConfigureCodec(profile.Codec, MainForm.EffectiveOpusFrameSamples(profile.Codec, profile.OpusFrameSamplesPerChannel, profile.SendRate));
             sender.SetSendRate(profile.SendRate);
             sender.SetTightLatency(profile.TightLatencyMode);
+            // Arm the full set to begin with (nothing is known-dead yet); RefreshSendArming then prunes any
+            // peer the heartbeat can't reach and re-arms it when it recovers.
+            allEndpoints = endpoints.ToArray();
+            armedSignature = null;
             sender.SetReceivers(endpoints);
             sender.Configure(specs);
             sender.Start();
@@ -128,6 +140,39 @@ public sealed class ServiceSendHost : IDisposable
         var profile = loadProfile();
         if (profile is null) { log?.Invoke("service: no service profile configured — staying idle"); return false; }
         return ApplyProfile(profile);
+    }
+
+    /// <summary>Pure, testable: which endpoints to actively stream to — the full set minus any peer the
+    /// heartbeat reports as continuously unreachable for longer than <paramref name="pruneAfter"/>. A peer
+    /// that's reachable, or still within the grace window, stays armed. Mirrors the app's RefreshAudioReceivers.</summary>
+    internal static IPEndPoint[] ComputeArmedEndpoints(IReadOnlyList<IPEndPoint> all, IReadOnlyList<PeerHealth> health, TimeSpan pruneAfter)
+    {
+        HashSet<string>? dead = null;
+        foreach (var ph in health)
+        {
+            if (ph.State == PeerHealthState.Unreachable && ph.AgeOfLastPong is { } age && age > pruneAfter)
+                (dead ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase)).Add($"{ph.AudioEndpoint.Address}:{ph.AudioEndpoint.Port}");
+        }
+        return dead is null ? all.ToArray() : all.Where(ep => !dead.Contains($"{ep.Address}:{ep.Port}")).ToArray();
+    }
+
+    /// <summary>Re-arm the sender to only the reachable peers, using the heartbeat health. Cheap and
+    /// idempotent — only touches the sender when the armed set actually changes. Called on the service's
+    /// existing poll tick while streaming, so there's no extra timer.</summary>
+    private void RefreshSendArming()
+    {
+        lock (gate)
+        {
+            if (!running || allEndpoints.Length == 0) return;
+            var armed = ComputeArmedEndpoints(allEndpoints, presence.PeerHealthSnapshot(), PruneUnreachableAfter);
+            var sig = string.Join("|", armed.Select(ep => $"{ep.Address}:{ep.Port}").OrderBy(s => s, StringComparer.OrdinalIgnoreCase));
+            if (sig == armedSignature) return;
+            armedSignature = sig;
+            sender.SetReceivers(armed);
+            log?.Invoke(armed.Length == 0
+                ? $"service: 0 reachable peers — holding audio (heartbeat still probing {allEndpoints.Length})"
+                : $"service: streaming to {armed.Length}/{allEndpoints.Length} reachable peer(s)");
+        }
     }
 
     /// <summary>The service's main loop: watch the interactive-presence token and hand the send back and
@@ -174,6 +219,9 @@ public sealed class ServiceSendHost : IDisposable
                     if (!triedThisAbsence && !IsSending) { Resume(); triedThisAbsence = true; }
                 }
             }
+            // While streaming, re-arm to only the reachable peers (drop dead ones, pick up recovered ones).
+            // Piggybacks this existing tick — no extra timer, no background pile-up.
+            if (IsSending) RefreshSendArming();
             appWasPresent = appPresent;
             ct.WaitHandle.WaitOne(pollMs);
         }

@@ -67,6 +67,7 @@ internal static class SelfTest
         RunStep(results, "Service profile isolation (location + hidden from pickers)", ServiceProfileIsolation);
         RunStep(results, "Service send host (headless stream + yield)", ServiceSendHostStream);
         RunStep(results, "Service network presence (reachable + shell teardown)", ServiceNetworkPresenceReachable);
+        RunStep(results, "Service reachability-gated sending (drop dead peers, re-arm recovered)", ServiceReachabilityGating);
         RunStep(results, "Service registration args", ServiceRegistrationArgs);
         RunStep(results, "Recording engine (all formats + source gate + mono)", RecordingEngine);
         RunStep(results, "Recording split tracks (per-peer + own)", RecordingSplitTracks);
@@ -1473,6 +1474,43 @@ internal static class SelfTest
             return "the main window constructs cleanly with process-loopback unsupported (Win7 send-mode path)";
         }
         finally { RemSound.Sender.ProcessLoopbackCapture.ForceSupportedForTest = prev; }
+    }
+
+    /// <summary>The service must only stream to peers the heartbeat can reach and drop long-unreachable
+    /// ones (never blast audio into a dead address — issue #8), re-arming a peer the moment it recovers
+    /// (issue #15) — the same behaviour as the app's RefreshAudioReceivers. Tests the pure arming logic.</summary>
+    private static string? ServiceReachabilityGating()
+    {
+        var a = new IPEndPoint(IPAddress.Parse("10.0.0.1"), 47830);
+        var b = new IPEndPoint(IPAddress.Parse("10.0.0.2"), 47830);
+        var all = new[] { a, b };
+        var prune = TimeSpan.FromSeconds(30);
+
+        var bothHealthy = new List<PeerHealth>
+        {
+            new(a, PeerHealthState.Healthy, 10, TimeSpan.FromSeconds(1)),
+            new(b, PeerHealthState.Healthy, 12, TimeSpan.FromSeconds(1)),
+        };
+        Check(ServiceSendHost.ComputeArmedEndpoints(all, bothHealthy, prune).Length == 2, "both reachable peers must be armed");
+
+        var bDeadLong = new List<PeerHealth>
+        {
+            new(a, PeerHealthState.Healthy, 10, TimeSpan.FromSeconds(1)),
+            new(b, PeerHealthState.Unreachable, null, TimeSpan.FromSeconds(60)),
+        };
+        var armed = ServiceSendHost.ComputeArmedEndpoints(all, bDeadLong, prune);
+        Check(armed.Length == 1 && armed[0].Equals(a), "a peer unreachable past the grace window must be dropped (never stream into a dead address)");
+
+        var bDeadGrace = new List<PeerHealth>
+        {
+            new(a, PeerHealthState.Healthy, 10, TimeSpan.FromSeconds(1)),
+            new(b, PeerHealthState.Unreachable, null, TimeSpan.FromSeconds(10)),
+        };
+        Check(ServiceSendHost.ComputeArmedEndpoints(all, bDeadGrace, prune).Length == 2, "a briefly-unreachable peer stays armed during the grace window");
+
+        Check(ServiceSendHost.ComputeArmedEndpoints(all, new List<PeerHealth>(), prune).Length == 2, "with no heartbeat data yet, arm the full set");
+
+        return "reachable armed; long-unreachable dropped; grace-window kept; recovery re-arms (issues #8/#15)";
     }
 
     private static int FreeUdpPort()

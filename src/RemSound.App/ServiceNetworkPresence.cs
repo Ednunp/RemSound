@@ -49,6 +49,10 @@ internal sealed class ServiceNetworkPresence : IDisposable
     /// <summary>Test seam: is the well-known-port listener actually bound?</summary>
     internal bool ListenerBound => receiver.IsListenerRunning;
 
+    /// <summary>Current per-peer heartbeat health (reachable / stale / unreachable + age), so the host can
+    /// gate the audio send on reachability — the same signal the interactive app uses. Empty when down.</summary>
+    public IReadOnlyList<PeerHealth> PeerHealthSnapshot() => heartbeat?.GetAllPeerHealth() ?? Array.Empty<PeerHealth>();
+
     /// <summary>Bring the service up as a discoverable, reachable, send-only peer on <paramref name="port"/>,
     /// tracking <paramref name="endpoints"/> (the profile's peers) for heartbeat/pairing and unicast
     /// announcements. Idempotent: re-applies cleanly if already up. Never throws.</summary>
