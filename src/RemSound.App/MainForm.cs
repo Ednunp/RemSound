@@ -105,9 +105,18 @@ public sealed class MainForm : Form
         AutoSize = true,
         Checked = true,
     };
+    // "Currently active applications" — the apps running right now (like Discovered peers).
     private readonly CheckedListBox sendAppsList = new() { CheckOnClick = true, Width = 430, Height = 90 };
     private readonly Label sendAppsStatusLabel = new() { AutoSize = true, Text = "No application selected." };
     private MnemonicLabel? sendAppsLabel;
+    // "Remembered applications" — the GLOBAL remembered-apps address book (like Remembered peers). Tick one
+    // here and it's marked to send; the instant it goes live it also appears (ticked) in the active list.
+    private readonly CheckedListBox rememberedAppsList = new() { CheckOnClick = true, Width = 430, Height = 90 };
+    private readonly Label rememberedAppsStatusLabel = new() { AutoSize = true, Text = "No remembered application." };
+    private MnemonicLabel? rememberedAppsLabel;
+    // The authoritative set of app process-names to send — ticked in EITHER list. Both lists render their
+    // checkboxes from this and toggling either updates it. Saved per-profile as SelectedSendApplications.
+    private readonly HashSet<string> selectedSendApps = new(StringComparer.OrdinalIgnoreCase);
     private System.Windows.Forms.Timer? sendAppsReconcileTimer;
     // Instant capture-on-start: fires the moment a ticked app opens an audio session, so we begin
     // capturing it right at the start (the poll below is only a backstop). Live only while sending
@@ -957,8 +966,10 @@ public sealed class MainForm : Form
         // Per-application send controls (issue #20). Listbox + list carry the "(Alt+N)" suffix like the
         // other non-CheckBox controls; the master checkbox owns its own &-mnemonic via its Text.
         sendModeList.AccessibleName = "How to send WASAPI audio (Alt+6)";
-        sendAppsList.AccessibleName = "Applications to send (Alt+8)";
-        sendAppsStatusLabel.AccessibleName = "Selected application status";
+        sendAppsList.AccessibleName = "Currently active applications (Alt+8)";
+        sendAppsStatusLabel.AccessibleName = "Active application status";
+        rememberedAppsList.AccessibleName = "Remembered applications (Alt+9)";
+        rememberedAppsStatusLabel.AccessibleName = "Remembered application status";
         // Keyboard shortcuts / Minimise to tray / Save / Save as buttons retired 2026-05-08
         // (now File menu items in BuildFileMenu).
         asioDriverBox.AccessibleName = "ASIO driver (Alt+D)";
@@ -3483,7 +3494,7 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
             ColumnCount = 2,
-            RowCount = 13,
+            RowCount = 14,
             AutoScroll = true,
         };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -3544,15 +3555,17 @@ public sealed class MainForm : Form
         // Row 8 (devices mode): the classic WASAPI outputs-to-send loopback list.
         sendOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 8, "WASAPI audio outputs to send (Alt+&4)", sendOutputDevicesList, sendOutputDevicesStatusLabel, FocusListControl);
 
-        // Rows 9-10 (applications mode): the "Send all applications" master checkbox and the app list.
+        // Rows 9-11 (applications mode): the "Send all applications" master checkbox, then TWO app lists —
+        // currently-active (running now) and remembered (the global address book), mirroring the peers lists.
         var sendAllAppsPanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         sendAllAppsPanel.Controls.Add(sendAllApplicationsCheckbox);
         panel.Controls.Add(sendAllAppsPanel, 1, 9);
-        sendAppsLabel = FormLayoutRows.AddCheckedListRow(panel, 10, "Applications to send (Alt+&8)", sendAppsList, sendAppsStatusLabel, FocusListControl);
+        sendAppsLabel = FormLayoutRows.AddCheckedListRow(panel, 10, "Currently active applications (Alt+&8)", sendAppsList, sendAppsStatusLabel, FocusListControl);
+        rememberedAppsLabel = FormLayoutRows.AddCheckedListRow(panel, 11, "Remembered applications (Alt+&9)", rememberedAppsList, rememberedAppsStatusLabel, FocusListControl);
 
-        // Rows 11-12: the remaining send lists (unchanged, just shifted down two rows).
-        sendInputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 11, "WASAPI audio inputs to send (Alt+&5)", sendInputDevicesList, sendInputDevicesStatusLabel, FocusListControl);
-        asioSendDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 12, "ASIO audio inputs to send (Alt+&2)", asioSendDevicesList, asioSendDevicesStatusLabel, FocusListControl);
+        // Rows 12-13: the remaining send lists (shifted down one row for the remembered-apps list above).
+        sendInputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 12, "WASAPI audio inputs to send (Alt+&5)", sendInputDevicesList, sendInputDevicesStatusLabel, FocusListControl);
+        asioSendDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 13, "ASIO audio inputs to send (Alt+&2)", asioSendDevicesList, asioSendDevicesStatusLabel, FocusListControl);
 
         WireSendModeControls();
 
@@ -3597,6 +3610,7 @@ public sealed class MainForm : Form
     private void WireSendModeControls()
     {
         WireCheckedListAccessibility(sendAppsList, sendAppsStatusLabel, "application");
+        WireCheckedListAccessibility(rememberedAppsList, rememberedAppsStatusLabel, "remembered application");
 
         sendModeList.SelectedIndexChanged += (_, _) =>
         {
@@ -3615,18 +3629,21 @@ public sealed class MainForm : Form
             ApplySendSources();
         };
 
-        sendAppsList.ItemCheck += (_, args) =>
+        // Both app lists toggle the SAME send set: ticking an app in either the active or the remembered
+        // list adds it; unticking removes it. The other list re-renders to match, exactly like the peers
+        // lists. Defer to after the check state settles.
+        void WireAppList(CheckedListBox list)
         {
-            if (suppressSendAppEvents) return;
-            // Defer to after the check state settles, then persist-dirty and re-apply the sources.
-            BeginInvoke(() =>
+            list.ItemCheck += (_, args) =>
             {
                 if (suppressSendAppEvents) return;
-                MarkProfileDirty();
-                ApplySendSources();
-                RememberCheckedApps();
-            });
-        };
+                if (list.Items[args.Index] is not AudioAppChoice choice) return;
+                var nowChecked = args.NewValue == CheckState.Checked;
+                BeginInvoke(() => OnSendAppToggled(choice.ProcessName, nowChecked));
+            };
+        }
+        WireAppList(sendAppsList);
+        WireAppList(rememberedAppsList);
 
         // Reconcile the app list on a slow timer so entries appear/disappear as apps open and close,
         // without ever piling up (each pass releases every session object — see AudioAppEnumerator).
@@ -3680,6 +3697,8 @@ public sealed class MainForm : Form
         var showAppList = appsMode && !sendAllApplicationsCheckbox.Checked;
         if (sendAppsLabel is not null) sendAppsLabel.Visible = showAppList;
         SetRowControlVisible(sendAppsList, showAppList);
+        if (rememberedAppsLabel is not null) rememberedAppsLabel.Visible = showAppList;
+        SetRowControlVisible(rememberedAppsList, showAppList);
 
         // Only the specific-apps case needs the reconcile poll + the instant session-start watcher (in
         // "send all applications" mode we just loopback the whole default device, no per-app tracking).
@@ -3696,48 +3715,76 @@ public sealed class MainForm : Form
         }
     }
 
-    /// <summary>Refreshes <see cref="sendAppsList"/> from the current audio apps, preserving the user's
-    /// ticks by process NAME and keeping any ticked-but-not-currently-running apps in the list (so a
-    /// selection survives an app closing and reopening). Tagged items carry the process name; the
-    /// display shows the friendly name and a "(not running)" hint when the app isn't live.</summary>
+    /// <summary>A send-app checkbox was toggled in EITHER list: update the one shared send set, remember the
+    /// app globally when ticked, re-apply the capture, and re-render both lists so they stay in lock-step
+    /// (tick it in Remembered and it shows ticked in Active the instant it's live). Mirrors the peers lists.</summary>
+    private void OnSendAppToggled(string name, bool nowChecked)
+    {
+        if (suppressSendAppEvents || string.IsNullOrWhiteSpace(name)) return;
+        if (nowChecked) selectedSendApps.Add(name); else selectedSendApps.Remove(name);
+        if (nowChecked)
+        {
+            var remembered = settings.LoadRememberedApplications().ToList();
+            if (!remembered.Any(e => string.Equals(e, name, StringComparison.OrdinalIgnoreCase)))
+            {
+                remembered.Add(name);
+                settings.SaveRememberedApplications(remembered);
+            }
+        }
+        MarkProfileDirty();
+        ApplySendSources();
+        ReconcileSendAppsList();   // re-render both lists to reflect the new shared selection
+    }
+
+    /// <summary>Refreshes BOTH send-app lists from the current state: the "currently active" list = apps
+    /// running right now; the "remembered" list = the global remembered-apps address book (plus anything in
+    /// the active selection). Every item is ticked iff it's in <see cref="selectedSendApps"/>, so the two
+    /// lists stay in lock-step. A "(not running)" hint marks a remembered app that isn't live.</summary>
     private void ReconcileSendAppsList()
     {
         if (!ProcessLoopbackCapture.IsSupported) return;
 
-        // Names the user currently has ticked (keep them even if the app has since closed).
-        var tickedNames = new HashSet<string>(
-            sendAppsList.CheckedItems.OfType<AudioAppChoice>().Select(c => c.ProcessName),
-            StringComparer.OrdinalIgnoreCase);
-
         var running = AudioAppEnumerator.Snapshot();
         var runningNames = new HashSet<string>(running.Select(a => a.ProcessName), StringComparer.OrdinalIgnoreCase);
 
-        // Build the merged set: every running app, plus any ticked app that isn't running right now.
-        var choices = new List<AudioAppChoice>();
-        foreach (var a in running)
-            choices.Add(new AudioAppChoice(a.ProcessName, a.DisplayName, running: true));
-        foreach (var name in tickedNames)
-            if (!runningNames.Contains(name))
-                choices.Add(new AudioAppChoice(name, name, running: false));
-        choices.Sort((x, y) => string.Compare(x.ToString(), y.ToString(), StringComparison.CurrentCultureIgnoreCase));
+        // Remembered = the global address book, unioned with the current selection (so a just-ticked app
+        // always appears) — sorted by display name.
+        var remembered = settings.LoadRememberedApplications()
+            .Concat(selectedSendApps)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(n => n, StringComparer.CurrentCultureIgnoreCase)
+            .ToList();
 
         suppressSendAppEvents = true;
         try
         {
-            sendAppsList.BeginUpdate();
-            sendAppsList.Items.Clear();
-            foreach (var c in choices)
+            FillAppList(sendAppsList, running.Select(a => new AudioAppChoice(a.ProcessName, a.DisplayName, running: true)));
+            FillAppList(rememberedAppsList, remembered.Select(name =>
             {
-                var index = sendAppsList.Items.Add(c);
-                if (tickedNames.Contains(c.ProcessName)) sendAppsList.SetItemChecked(index, true);
-            }
-            sendAppsList.EndUpdate();
+                var live = running.FirstOrDefault(a => string.Equals(a.ProcessName, name, StringComparison.OrdinalIgnoreCase));
+                return new AudioAppChoice(name, live?.DisplayName ?? name, running: runningNames.Contains(name));
+            }));
         }
         finally
         {
             suppressSendAppEvents = false;
         }
         UpdateCheckedListStatus(sendAppsList, sendAppsStatusLabel, "application");
+        UpdateCheckedListStatus(rememberedAppsList, rememberedAppsStatusLabel, "remembered application");
+    }
+
+    /// <summary>Rebuild a CheckedListBox from a set of app choices, ticking each one that's in the shared
+    /// send set. Caller must hold <see cref="suppressSendAppEvents"/>.</summary>
+    private void FillAppList(CheckedListBox list, IEnumerable<AudioAppChoice> choices)
+    {
+        list.BeginUpdate();
+        list.Items.Clear();
+        foreach (var c in choices)
+        {
+            var i = list.Items.Add(c);
+            if (selectedSendApps.Contains(c.ProcessName)) list.SetItemChecked(i, true);
+        }
+        list.EndUpdate();
     }
 
     /// <summary>Re-resolve the ticked apps' current process ids and, if they changed (an app opened or
@@ -3800,13 +3847,12 @@ public sealed class MainForm : Form
             sendModeList.SelectedIndex = wantApps ? SendModeApplicationsIndex : SendModeDevicesIndex;
             sendAllApplicationsCheckbox.Checked = p.SendAllApplications;
 
-            sendAppsList.Items.Clear();
-            foreach (var name in (p.SelectedSendApplications ?? new()).Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                if (string.IsNullOrWhiteSpace(name)) continue;
-                var idx = sendAppsList.Items.Add(new AudioAppChoice(name, name, running: false));
-                sendAppsList.SetItemChecked(idx, true);
-            }
+            // The profile's active apps become the shared send set; ReconcileSendAppsList (below) then
+            // renders both lists (active + remembered) from it.
+            selectedSendApps.Clear();
+            foreach (var name in (p.SelectedSendApplications ?? new())
+                         .Where(n => !string.IsNullOrWhiteSpace(n)).Distinct(StringComparer.OrdinalIgnoreCase))
+                selectedSendApps.Add(name);
         }
         finally
         {
@@ -3833,8 +3879,7 @@ public sealed class MainForm : Form
     }
 
     /// <summary>The process names the user has ticked in the app list (lower-case, no extension).</summary>
-    private List<string> CheckedSendApplicationNames() =>
-        sendAppsList.CheckedItems.OfType<AudioAppChoice>().Select(c => c.ProcessName).Distinct().ToList();
+    private List<string> CheckedSendApplicationNames() => selectedSendApps.ToList();
 
     /// <summary>One row in the "Applications to send" list. Identity is the process NAME; the display
     /// adds a "(not running)" hint for a remembered-but-closed app.</summary>
@@ -5466,9 +5511,10 @@ public sealed class MainForm : Form
         sendModeList.TabIndex = 6;               // how-to-send chooser, right after "Send my audio"
         sendOutputDevicesList.TabIndex = 7;      // devices mode
         sendAllApplicationsCheckbox.TabIndex = 8;  // applications mode
-        sendAppsList.TabIndex = 9;                 // applications mode
-        sendInputDevicesList.TabIndex = 10;
-        asioSendDevicesList.TabIndex = 11;
+        sendAppsList.TabIndex = 9;                 // applications mode — currently active
+        rememberedAppsList.TabIndex = 10;          // applications mode — remembered
+        sendInputDevicesList.TabIndex = 11;
+        asioSendDevicesList.TabIndex = 12;
         // Profiles & preferences tab retired 2026-05-08 — the controls that used to live
         // there have moved to the File menu (Open/Save/Save as/Rename/etc.) and the
         // Preferences dialog (Mute cues / Accept remote vol / Startup behaviour).
@@ -5753,7 +5799,7 @@ public sealed class MainForm : Form
     /// <summary>True when applications mode will actually send something: "send all applications" is on,
     /// or at least one specific app is ticked.</summary>
     private bool HasAppModeSend() =>
-        AppsModeActive() && (sendAllApplicationsCheckbox.Checked || sendAppsList.CheckedItems.Count > 0);
+        AppsModeActive() && (sendAllApplicationsCheckbox.Checked || selectedSendApps.Count > 0);
 
     private bool HasCheckedSendDevice() =>
         (!AppsModeActive() && sendOutputDevicesList.CheckedItems.OfType<AudioDeviceChoice>().Any(c => c.DeviceId is not null))
