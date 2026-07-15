@@ -209,9 +209,20 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     {
         if (asio is not null)
         {
+            // Step-by-step logging: closing some drivers (notably Audient) can crash NATIVELY inside their
+            // own Stop/Dispose — a native access violation blows past these try/catch blocks and kills the
+            // process with no managed stack (why the ASIO->none crash leaves no crash file). Logging each
+            // step means the log ends right AFTER the line for whichever native call died, pinpointing it.
+            onDiagnostic?.Invoke("asio close: unhooking callback");
             try { asio.AudioAvailable -= OnAudioAvailable; } catch { /* ignore */ }
-            try { asio.Stop(); } catch { /* ignore */ }
-            try { asio.Dispose(); } catch { /* ignore */ }
+            // Let any ASIO buffer callback already in flight finish before we stop/release the driver, so
+            // the native close isn't racing a live callback (a common trigger for the crash).
+            System.Threading.Thread.Sleep(60);
+            onDiagnostic?.Invoke("asio close: stopping stream");
+            try { asio.Stop(); } catch (Exception ex) { onDiagnostic?.Invoke($"asio close: stop threw {ex.GetType().Name}: {ex.Message}"); }
+            onDiagnostic?.Invoke("asio close: releasing driver (dispose)");
+            try { asio.Dispose(); } catch (Exception ex) { onDiagnostic?.Invoke($"asio close: dispose threw {ex.GetType().Name}: {ex.Message}"); }
+            onDiagnostic?.Invoke("asio close: driver released cleanly");
             asio = null;
         }
         uptime.Stop();
