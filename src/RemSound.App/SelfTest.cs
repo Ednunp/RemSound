@@ -68,6 +68,7 @@ internal static class SelfTest
         RunStep(results, "Service send host (headless stream + yield)", ServiceSendHostStream);
         RunStep(results, "Service network presence (reachable + shell teardown)", ServiceNetworkPresenceReachable);
         RunStep(results, "Service reachability-gated sending (drop dead peers, re-arm recovered)", ServiceReachabilityGating);
+        RunStep(results, "Send-app capture change-detection (catch an app the instant it opens)", SendAppCaptureChangeDetection);
         RunStep(results, "Service registration args", ServiceRegistrationArgs);
         RunStep(results, "Recording engine (all formats + source gate + mono)", RecordingEngine);
         RunStep(results, "Recording split tracks (per-peer + own)", RecordingSplitTracks);
@@ -1516,6 +1517,38 @@ internal static class SelfTest
         Check(ServiceSendHost.ComputeArmedEndpoints(all, new List<PeerHealth>(), prune).Length == 2, "with no heartbeat data yet, arm the full set");
 
         return "reachable armed; long-unreachable dropped; grace-window kept; recovery re-arms (issues #8/#15)";
+    }
+
+    /// <summary>The fix for "a saved app that launches later never gets captured": the send engine
+    /// re-applies capture whenever the ticked apps' running process ids change. This tests the pure
+    /// change-detector that drives it — the signature is stable while nothing changes (so we don't churn),
+    /// and changes the moment a ticked app opens or closes a process.</summary>
+    private static string? SendAppCaptureChangeDetection()
+    {
+        var pids = new Dictionary<string, IReadOnlyList<int>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["vlc"] = new[] { 100 },
+            ["firefox"] = Array.Empty<int>(),   // remembered but not running yet
+        };
+        IReadOnlyList<int> Lookup(string n) => pids.TryGetValue(n, out var v) ? v : Array.Empty<int>();
+        var names = new[] { "vlc", "firefox" };
+
+        var s1 = MainForm.ComputeSendAppPidSignature(names, Lookup);
+        Check(MainForm.ComputeSendAppPidSignature(names, Lookup) == s1, "the signature must be stable while nothing changes (no needless re-apply)");
+
+        // firefox launches → a new process id appears → the signature must change (triggers capture).
+        pids["firefox"] = new[] { 200 };
+        var s2 = MainForm.ComputeSendAppPidSignature(names, Lookup);
+        Check(s2 != s1, "a ticked app opening must change the signature (so capture starts for it)");
+
+        // firefox closes again → back to the original signature.
+        pids["firefox"] = Array.Empty<int>();
+        Check(MainForm.ComputeSendAppPidSignature(names, Lookup) == s1, "the app closing must return the signature (so its capture is dropped)");
+
+        // A second instance of a ticked app (another PID) also changes it.
+        pids["vlc"] = new[] { 100, 101 };
+        Check(MainForm.ComputeSendAppPidSignature(names, Lookup) != s1, "a second process of a ticked app must change the signature too");
+        return "signature stable when unchanged; changes when a ticked app opens/closes (drives instant capture)";
     }
 
     private static int FreeUdpPort()

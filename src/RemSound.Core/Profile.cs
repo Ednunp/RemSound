@@ -87,6 +87,13 @@ public sealed class Profile
     /// list (remembered) and start being captured again the moment they reappear.</summary>
     public List<string> SelectedSendApplications { get; set; } = [];
 
+    /// <summary>The profile's REMEMBERED application names — apps the user has set this profile up to send,
+    /// whether or not they're running right now (the "Remembered applications" list, mirroring remembered
+    /// peers but profile-scoped). Includes apps that were added by name while closed. A subset of these is
+    /// ticked/active at any time (that active subset is <see cref="SelectedSendApplications"/>); the rest
+    /// stay remembered so they can be re-ticked later. Lower-case process names, no path/extension.</summary>
+    public List<string> RememberedSendApplications { get; set; } = [];
+
     // === Connectivity & transport ===
     public int AudioPort { get; set; } = 47830;
     public int CodecRaw { get; set; } = (int)AudioTransportCodec.Pcm;

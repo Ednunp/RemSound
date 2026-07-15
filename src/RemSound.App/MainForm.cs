@@ -109,6 +109,12 @@ public sealed class MainForm : Form
     private readonly Label sendAppsStatusLabel = new() { AutoSize = true, Text = "No application selected." };
     private MnemonicLabel? sendAppsLabel;
     private System.Windows.Forms.Timer? sendAppsReconcileTimer;
+    // Instant capture-on-start: fires the moment a ticked app opens an audio session, so we begin
+    // capturing it right at the start (the poll below is only a backstop). Live only while sending
+    // specific apps. lastSendAppPidSignature debounces the re-apply so we only reconfigure the engine
+    // when the ticked apps' actual process ids change (an app opened or closed).
+    private RemSound.Sender.AudioSessionStartWatcher? sessionStartWatcher;
+    private string? lastSendAppPidSignature;
     // Guards the sendModeList / sendAllApplicationsCheckbox / sendAppsList handlers while we
     // programmatically repopulate them (mode switch, profile apply, reconcile) so those handlers
     // don't fire MarkProfileDirty or trigger re-entrant rebuilds on our own writes.
@@ -1409,6 +1415,7 @@ public sealed class MainForm : Form
             updateCheckTimer.Stop(); updateCheckTimer.Dispose();
             asioDriverChangeDebounce.Stop(); asioDriverChangeDebounce.Dispose();
             try { sendAppsReconcileTimer?.Stop(); sendAppsReconcileTimer?.Dispose(); } catch { }
+            DisposeSessionStartWatcher();
             try { processSelfMeter.Dispose(); } catch { }
             try { deviceChangeNotifier?.Dispose(); } catch { }
             try { powerResumeHandler?.Dispose(); } catch { }
@@ -3614,8 +3621,12 @@ public sealed class MainForm : Form
         sendAppsReconcileTimer = new System.Windows.Forms.Timer { Interval = 3000 };
         sendAppsReconcileTimer.Tick += (_, _) =>
         {
-            if (sendModeList.SelectedIndex == SendModeApplicationsIndex && sendAppsList.Visible)
-                ReconcileSendAppsList();
+            if (sendModeList.SelectedIndex != SendModeApplicationsIndex) return;
+            // Backstop for the instant watcher: catch an app opening/closing even when this tab isn't
+            // showing, so a remembered app still starts being captured. The list redraw only matters when
+            // the list is actually on screen.
+            RefreshSendAppCapture();
+            if (sendAppsList.Visible) ReconcileSendAppsList();
         };
 
         ApplySendModeVisibility();
@@ -3657,14 +3668,18 @@ public sealed class MainForm : Form
         if (sendAppsLabel is not null) sendAppsLabel.Visible = showAppList;
         SetRowControlVisible(sendAppsList, showAppList);
 
-        if (appsMode)
+        // Only the specific-apps case needs the reconcile poll + the instant session-start watcher (in
+        // "send all applications" mode we just loopback the whole default device, no per-app tracking).
+        if (appsMode && !sendAllApplicationsCheckbox.Checked)
         {
             if (sendAppsList.Items.Count == 0) ReconcileSendAppsList();
             sendAppsReconcileTimer?.Start();
+            EnsureSessionStartWatcher();
         }
         else
         {
             sendAppsReconcileTimer?.Stop();
+            DisposeSessionStartWatcher();
         }
     }
 
@@ -3710,6 +3725,52 @@ public sealed class MainForm : Form
             suppressSendAppEvents = false;
         }
         UpdateCheckedListStatus(sendAppsList, sendAppsStatusLabel, "application");
+    }
+
+    /// <summary>Re-resolve the ticked apps' current process ids and, if they changed (an app opened or
+    /// closed), re-apply the send sources so a remembered app STARTS being captured the instant it opens
+    /// (or stops when it closes). Cheap: only touches the engine when the resolved PID set actually
+    /// changes. Runs regardless of which tab is showing, so a remembered app is caught even when you're not
+    /// looking at the list — this is the fix for "a saved app that launches later never gets captured".</summary>
+    private void RefreshSendAppCapture()
+    {
+        if (!connected || suppressSendAppEvents) return;
+        if (!ProcessLoopbackCapture.IsSupported) return;
+        if (sendModeList.SelectedIndex != SendModeApplicationsIndex || sendAllApplicationsCheckbox.Checked) return;
+        var sig = ComputeSendAppPidSignature(CheckedSendApplicationNames(), AudioAppEnumerator.PidsForProcessName);
+        if (sig == lastSendAppPidSignature) return;
+        lastSendAppPidSignature = sig;
+        ApplyAudioRuntime();
+    }
+
+    /// <summary>Pure, testable: a stable signature of the ticked apps' current process ids. Changes exactly
+    /// when a ticked app opens or closes a process — which is when the send capture needs re-applying.</summary>
+    internal static string ComputeSendAppPidSignature(IEnumerable<string> checkedNames, Func<string, IReadOnlyList<int>> pidsFor)
+        => string.Join("|", checkedNames
+            .SelectMany(name => pidsFor(name).Select(pid => $"{name}:{pid}"))
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase));
+
+    /// <summary>Session-start callback (COM thread): an app just opened an audio session. Marshal to the UI
+    /// thread and re-check our ticked apps — RefreshSendAppCapture no-ops if the new session isn't one of
+    /// ours, and begins capturing immediately if it is. Best-effort.</summary>
+    private void OnAppSessionStarted(int pid)
+    {
+        try { if (!IsDisposed) BeginInvoke((Action)RefreshSendAppCapture); } catch { /* form gone */ }
+    }
+
+    /// <summary>Stand up the session-start watcher while we're sending specific applications, so a remembered
+    /// app is captured the instant it starts. No-op if already running or process-loopback isn't supported.</summary>
+    private void EnsureSessionStartWatcher()
+    {
+        if (sessionStartWatcher is not null || !ProcessLoopbackCapture.IsSupported) return;
+        try { sessionStartWatcher = new RemSound.Sender.AudioSessionStartWatcher(OnAppSessionStarted, m => logFile.Event($"session-start: {m}")); }
+        catch (Exception ex) { logFile.Event($"session-start watcher unavailable: {ex.GetType().Name}: {ex.Message}"); }
+    }
+
+    private void DisposeSessionStartWatcher()
+    {
+        try { sessionStartWatcher?.Dispose(); } catch { }
+        sessionStartWatcher = null;
     }
 
     /// <summary>Restores the WASAPI send mode, the "Send all applications" master toggle and the ticked
@@ -5807,6 +5868,9 @@ public sealed class MainForm : Form
                 if (IsDisposed) return;
                 deviceRefreshTimer.Stop();
                 deviceRefreshTimer.Start();
+                // The default render device may have changed — re-point the session-start watcher at it so
+                // it keeps hearing new app sessions on whatever device apps now play to.
+                sessionStartWatcher?.Rehook();
             }));
         }
         catch { /* handle gone / form closing — nothing to refresh */ }
