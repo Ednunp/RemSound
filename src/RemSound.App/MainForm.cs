@@ -2182,17 +2182,16 @@ public sealed class MainForm : Form
         // and the arrow keys.
         menu.Items.Add(fileMenu);
         menu.Items.Add(recordMenu);
-        // Offer the Service menu on Windows 10+ only. This is a VERSION check on purpose, not a runtime
-        // probe: a probe would have to construct a ServiceController to test it, which loads
-        // System.ServiceProcess — the exact assembly that won't load on Windows 7 — during window
-        // construction on EVERY launch. Deciding by version is free (it touches no service type), so on
-        // Windows 7/8 the menu is simply hidden and that assembly is never referenced at launch at all,
-        // which is what keeps the app launching there. On Windows 10+ the assembly loads only later, if the
-        // user actually opens the Service menu (the DropDownOpening handler, wrapped in try/catch). Feature-
-        // detecting on Win7 and keeping Win7 launch-safe are mutually exclusive — you can't test whether the
-        // assembly loads without loading it — so we choose guaranteed launch safety.
-        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0))
-            menu.Items.Add(BuildServiceMenu());
+        // The Service menu is shown on EVERY Windows now (2026-07-14) so a Win7 user can actually try it —
+        // we don't yet know whether the service works there, and the only way to find out is to let it try.
+        // This is launch-safe: BUILDING the menu references no service type (the verb strings are inlined
+        // consts and the handlers are method-group lambdas), so System.ServiceProcess is NOT loaded at
+        // window construction on any OS — proven by the "main window builds without loading the service
+        // assembly" self-test. That assembly loads only when the user OPENS the menu (the DropDownOpening
+        // status query) or runs an action, both of which are wrapped in try/catch, so if it can't load on
+        // Win7 the menu degrades to "status unavailable" instead of crashing. If Win7 turns out unable to
+        // run the service, re-gate this with OperatingSystem.IsWindowsVersionAtLeast(10, 0).
+        menu.Items.Add(BuildServiceMenu());
         menu.Items.Add(optionsMenu);
         menu.Items.Add(helpMenu);
         return menu;
