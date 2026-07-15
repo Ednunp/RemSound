@@ -50,6 +50,21 @@ internal sealed class PreferencesDialog : Form
     // Parallel to autoSaveList.Items: the minute interval each row means (0 = Never).
     private static readonly int[] AutoSaveMinuteOptions = { 0, 2, 5, 10, 15, 20, 30 };
 
+    // Clear the GLOBAL (machine-wide) remembered lists — peers and applications are a shared address book
+    // across all profiles, so these live in Preferences, not per-profile. Each asks for confirmation first.
+    private readonly Button clearRememberedPeersButton = new()
+    {
+        Text = "Clear remembered &peers list...",
+        AccessibleName = "Clear remembered peers list",
+        AutoSize = true,
+    };
+    private readonly Button clearRememberedAppsButton = new()
+    {
+        Text = "Clear remembered applications &list...",
+        AccessibleName = "Clear remembered applications list",
+        AutoSize = true,
+    };
+
     /// <summary>Test seam: the auto-save interval rows (minutes; 0 = Never), so a self-test can assert the
     /// list Ed asked for stays intact.</summary>
     internal static IReadOnlyList<int> AutoSaveMinuteOptionsForTest => AutoSaveMinuteOptions;
@@ -490,6 +505,8 @@ internal sealed class PreferencesDialog : Form
         Action checkForUpdatesNow,
         Action onUpdateFrequencyChanged,
         Action onAutoSaveIntervalChanged,
+        Action onClearRememberedPeers,
+        Action onClearRememberedApplications,
         Action<bool> applyUpnpEnabled,
         Func<(RouterMappingStatus Status, IPEndPoint? External, string LastError)> getUpnpSnapshot,
         Action<EventHandler> subscribeUpnpStatusChanged,
@@ -656,6 +673,21 @@ internal sealed class PreferencesDialog : Form
             onAutoSaveIntervalChanged();
         };
         autoSaveLabel.Click += (_, _) => autoSaveList.Focus();
+
+        clearRememberedPeersButton.Click += (_, _) =>
+        {
+            if (MessageBox.Show(this,
+                    "Clear the whole remembered peers list?\n\nThis empties the shared list of peers RemSound has remembered, for every profile. Peers you're actively connected to aren't affected, and any peer will simply be remembered again next time you connect to it.",
+                    "RemSound", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+                onClearRememberedPeers();
+        };
+        clearRememberedAppsButton.Click += (_, _) =>
+        {
+            if (MessageBox.Show(this,
+                    "Clear the whole remembered applications list?\n\nThis empties the shared list of applications RemSound has remembered to send, for every profile. Apps you're actively sending aren't affected, and an app is remembered again the next time you tick it.",
+                    "RemSound", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+                onClearRememberedApplications();
+        };
 
         // Update settings — wired against AppConfig directly since they're machine-local.
         // The frequency combo's index maps 1:1 to the UpdateCheckFrequency enum so reordering
@@ -990,8 +1022,12 @@ internal sealed class PreferencesDialog : Form
         };
         autoSavePanel.Controls.Add(autoSaveLabel);
         autoSavePanel.Controls.Add(autoSaveList);
+        // The two "clear remembered list" actions sit at the END of the General tab (they're machine-wide
+        // maintenance, not a per-profile setting). A header separates them from the settings above.
+        var clearListsHeader = Theme.SectionHeader("Remembered lists (shared across all profiles)");
         tabs.TabPages.Add(MakeTab("General",
-            browseProfilesFolderButton, autoSavePanel, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel));
+            browseProfilesFolderButton, autoSavePanel, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel,
+            clearListsHeader, clearRememberedPeersButton, clearRememberedAppsButton));
         tabs.TabPages.Add(MakeTab("Appearance",
             themeRow, showPanEqTabBox, tabOrderLabel, tabOrderList, tabOrderButtons,
             enableDiscoveredPeersBox, enableRememberedPeersBox));

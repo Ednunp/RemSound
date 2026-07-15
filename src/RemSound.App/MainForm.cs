@@ -2912,6 +2912,18 @@ public sealed class MainForm : Form
             checkForUpdatesNow: () => CheckForUpdatesManually(),
             onUpdateFrequencyChanged: ApplyUpdateCheckTimer,
             onAutoSaveIntervalChanged: ApplyAutoSaveTimer,
+            onClearRememberedPeers: () =>
+            {
+                settings.SaveRememberedPeers(Array.Empty<string>());
+                rememberedPeerInstanceIds.Clear();
+                RefreshKnownPeers();
+                logFile.Event("remembered peers list cleared (Preferences)");
+            },
+            onClearRememberedApplications: () =>
+            {
+                settings.SaveRememberedApplications(Array.Empty<string>());
+                logFile.Event("remembered applications list cleared (Preferences)");
+            },
             applyUpnpEnabled: enabled =>
             {
                 // The persist already happened in the dialog; this callback only flips the
@@ -3612,6 +3624,7 @@ public sealed class MainForm : Form
                 if (suppressSendAppEvents) return;
                 MarkProfileDirty();
                 ApplySendSources();
+                RememberCheckedApps();
             });
         };
 
@@ -3802,6 +3815,21 @@ public sealed class MainForm : Form
 
         ApplySendModeVisibility();
         if (sendModeList.SelectedIndex == SendModeApplicationsIndex) ReconcileSendAppsList();
+        RememberCheckedApps();
+    }
+
+    /// <summary>Add the currently-ticked app names to the GLOBAL remembered-applications list (the shared
+    /// "apps I send" address book) — so a tick in any profile remembers the app for all of them, mirroring
+    /// how remembered peers work. Cleared from Preferences → General.</summary>
+    private void RememberCheckedApps()
+    {
+        var names = CheckedSendApplicationNames();
+        if (names.Count == 0) return;
+        var remembered = settings.LoadRememberedApplications().ToList();
+        var added = false;
+        foreach (var n in names)
+            if (!remembered.Any(e => string.Equals(e, n, StringComparison.OrdinalIgnoreCase))) { remembered.Add(n); added = true; }
+        if (added) settings.SaveRememberedApplications(remembered);
     }
 
     /// <summary>The process names the user has ticked in the app list (lower-case, no extension).</summary>

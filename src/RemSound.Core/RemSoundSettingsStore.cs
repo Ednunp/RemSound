@@ -222,6 +222,24 @@ public sealed class RemSoundSettingsStore
         Save(s);
     }
 
+    /// <summary>GLOBAL remembered application names (lower-case process names) — the shared "apps I send"
+    /// list, machine-wide like <see cref="LoadRememberedPeers"/>, not per-profile.</summary>
+    public IReadOnlyList<string> LoadRememberedApplications() =>
+        Try(() => Load()?.RememberedApplications?
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList())
+        ?? [];
+
+    public void SaveRememberedApplications(IEnumerable<string> apps)
+    {
+        var s = Load() ?? new Settings();
+        s.RememberedApplications = apps
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Select(static value => value.Trim().ToLowerInvariant())
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        Save(s);
+    }
+
     // LoggingEnabled lives in AppConfig now — it's a machine-local debug knob, not a
     // per-profile setting. LoadLoggingEnabled / SaveLoggingEnabled were retired here;
     // callers go to AppConfig.LoggingEnabled directly.
@@ -639,6 +657,10 @@ public sealed class RemSoundSettingsStore
         public int? MaxLatencyMsAsio { get; set; }
         public bool? ContinuousAutoTuneAsioEnabled { get; set; }
         public List<string>? RememberedPeers { get; set; }
+        // GLOBAL (machine-wide) remembered application names, like RememberedPeers — deliberately NOT
+        // per-profile and NOT copied into profile files (see ExportProfile/ImportProfile, which don't
+        // touch it), so one shared "apps I send" address book serves every profile. 2026-07-15.
+        public List<string>? RememberedApplications { get; set; }
         public string? AsioDriverName { get; set; }
         // AudioMode and BothModeWarningSuppressed both retired from this cache. Mode is
         // derived from AsioDriverName via LoadAudioMode; the Both-mode warning popup is gone.

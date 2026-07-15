@@ -69,6 +69,7 @@ internal static class SelfTest
         RunStep(results, "Service network presence (reachable + shell teardown)", ServiceNetworkPresenceReachable);
         RunStep(results, "Service reachability-gated sending (drop dead peers, re-arm recovered)", ServiceReachabilityGating);
         RunStep(results, "Send-app capture change-detection (catch an app the instant it opens)", SendAppCaptureChangeDetection);
+        RunStep(results, "Remembered applications list is global + clearable", RememberedApplicationsGlobal);
         RunStep(results, "Service registration args", ServiceRegistrationArgs);
         RunStep(results, "Recording engine (all formats + source gate + mono)", RecordingEngine);
         RunStep(results, "Recording split tracks (per-peer + own)", RecordingSplitTracks);
@@ -1116,7 +1117,7 @@ internal static class SelfTest
             ("Recording settings", () => new RecordingSettingsDialog(new RecordingSettings())),
             ("Preferences", () => new PreferencesDialog(
                 new RemSoundSettingsStore("RemSound"), null,
-                () => false, _ => { }, () => { }, () => 0, () => { }, () => { }, () => { }, _ => { },
+                () => false, _ => { }, () => { }, () => 0, () => { }, () => { }, () => { }, () => { }, () => { }, _ => { },
                 () => (default(RouterMappingStatus), (IPEndPoint?)null, ""),
                 _ => { }, _ => { })),
             ("Service profile", () => new ServiceProfileDialog(RemSound.Core.Profile.NewBlank(), false)),
@@ -1549,6 +1550,27 @@ internal static class SelfTest
         pids["vlc"] = new[] { 100, 101 };
         Check(MainForm.ComputeSendAppPidSignature(names, Lookup) != s1, "a second process of a ticked app must change the signature too");
         return "signature stable when unchanged; changes when a ticked app opens/closes (drives instant capture)";
+    }
+
+    /// <summary>Remembered applications are a GLOBAL, machine-wide list (like remembered peers), not
+    /// per-profile — a shared "apps I send" address book — and can be cleared (the Preferences button).
+    /// Verifies the store round-trips, dedupes case-insensitively to lower-case, and clears.</summary>
+    private static string? RememberedApplicationsGlobal()
+    {
+        var store = new RemSoundSettingsStore("RemSound");
+        var original = store.LoadRememberedApplications().ToList();
+        try
+        {
+            store.SaveRememberedApplications(new[] { "VLC", "Firefox", "vlc" });
+            var loaded = store.LoadRememberedApplications();
+            Check(loaded.Count == 2, $"remembered apps must dedupe case-insensitively (got {loaded.Count})");
+            Check(loaded.All(a => a == a.ToLowerInvariant()), "remembered app names must be stored lower-case");
+
+            store.SaveRememberedApplications(Array.Empty<string>());
+            Check(store.LoadRememberedApplications().Count == 0, "clearing must empty the remembered applications list");
+            return "global remembered applications: round-trip, case-insensitive dedupe, and clear";
+        }
+        finally { store.SaveRememberedApplications(original); }
     }
 
     private static int FreeUdpPort()
