@@ -1340,7 +1340,12 @@ internal static class SelfTest
             File.SetLastWriteTimeUtc(older, new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc));
             File.SetLastWriteTimeUtc(newer, new DateTime(2020, 1, 2, 0, 0, 0, DateTimeKind.Utc));
             Check(ServiceStore.NewestLogFile() == newer, "NewestLogFile must return the most recently written .log");
-            return "log folder resolves under the service data dir; newest .log is found; empty case handled";
+
+            // Always-on service events log: writes without any toggle, and is where a Win7 failure reason lands.
+            ServiceStore.AppendServiceEvent("selftest: install THREW FileLoadException: could not load System.ServiceProcess");
+            Check(File.Exists(ServiceStore.ServiceEventsLogPath), "AppendServiceEvent must write even with no logging enabled");
+            Check(File.ReadAllText(ServiceStore.ServiceEventsLogPath).Contains("install THREW"), "the service events log must contain the recorded event");
+            return "log folder resolves; newest .log found; empty case handled; always-on events log records without a toggle";
         }
         finally
         {

@@ -130,6 +130,25 @@ public static class ServiceStore
         catch { /* best-effort */ }
     }
 
+    // === Service events log (ALWAYS written, not gated on any logging toggle) ===
+    // The trail of what the app did to the service — open the menu, install, start, stop, configure — AND
+    // why any of it failed. Always on, so if the service breaks on a machine where nobody thought to turn
+    // logging on first (e.g. a Win7 tester), the reason is still captured. Distinct from the service's own
+    // runtime diagnostic log (that one only exists while the service is actually running with logging on).
+    public static string ServiceEventsLogPath => Path.Combine(Directory, "service-events.log");
+
+    /// <summary>Append a timestamped line to the always-on service events log. Never throws; caps its size.</summary>
+    public static void AppendServiceEvent(string line)
+    {
+        try
+        {
+            System.IO.Directory.CreateDirectory(Directory);
+            try { if (File.Exists(ServiceEventsLogPath) && new FileInfo(ServiceEventsLogPath).Length > 200_000) File.Delete(ServiceEventsLogPath); } catch { }
+            File.AppendAllText(ServiceEventsLogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {line}{Environment.NewLine}");
+        }
+        catch { /* best-effort */ }
+    }
+
     /// <summary>Marker dropped when a self-update restart is triggered; the next start consumes it and logs
     /// completion — so the update log shows the update actually finished (and its absence flags a stuck one).</summary>
     public static void SetUpdatePending()

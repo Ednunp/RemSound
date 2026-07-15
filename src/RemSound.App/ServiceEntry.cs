@@ -28,14 +28,42 @@ internal static class ServiceEntry
             // profile — otherwise a headless SYSTEM service logs into the SYSTEM account's AppData, which
             // is near-impossible to find. (The profile itself always comes from ServiceStore.)
             AppConfig.SetUserDataDirectoryOverride(ServiceStore.Directory);
-            RemSoundService.RunAsService();
+            ServiceStore.AppendServiceEvent("elevated run-service: starting host");
+            try { RemSoundService.RunAsService(); }
+            catch (Exception ex) { ServiceStore.AppendServiceEvent($"elevated run-service: THREW {ex.GetType().Name}: {ex.Message}"); throw; }
             return 0;
         }
-        if (Has(args, ServiceControl.InstallVerb)) return ServiceControl.DoInstall();
-        if (Has(args, ServiceControl.UninstallVerb)) return ServiceControl.DoUninstall();
-        if (Has(args, ServiceControl.StartVerb)) return ServiceControl.DoStart();
-        if (Has(args, ServiceControl.StopVerb)) return ServiceControl.DoStop();
-        return 0;
+
+        var verb = Has(args, ServiceControl.InstallVerb) ? "install"
+            : Has(args, ServiceControl.UninstallVerb) ? "uninstall"
+            : Has(args, ServiceControl.StartVerb) ? "start"
+            : Has(args, ServiceControl.StopVerb) ? "stop"
+            : null;
+        if (verb is null) return 0;
+
+        // Log to the always-on events log BEFORE touching the service machinery, and wrap the call: if
+        // System.ServiceProcess can't load on this OS (the Win7 unknown), the exception is caught HERE and
+        // its reason recorded — then rethrown so the crash file also captures the full stack. Either way we
+        // learn WHY, with no logging toggle needed.
+        ServiceStore.AppendServiceEvent($"elevated {verb}: starting (loading service machinery)");
+        try
+        {
+            var rc = verb switch
+            {
+                "install" => ServiceControl.DoInstall(),
+                "uninstall" => ServiceControl.DoUninstall(),
+                "start" => ServiceControl.DoStart(),
+                "stop" => ServiceControl.DoStop(),
+                _ => 0,
+            };
+            ServiceStore.AppendServiceEvent($"elevated {verb}: finished with code {rc}");
+            return rc;
+        }
+        catch (Exception ex)
+        {
+            ServiceStore.AppendServiceEvent($"elevated {verb}: THREW {ex.GetType().Name}: {ex.Message}");
+            throw;
+        }
     }
 
     private static bool Has(string[] args, string flag) =>

@@ -2254,8 +2254,12 @@ public sealed class MainForm : Form
             }
             catch (Exception ex)
             {
-                status.Text = "Service: status unavailable";
+                // Show the reason right in the status line (a screen reader reads it), AND record it to the
+                // always-on service events log — so even with app logging off (e.g. a Win7 tester) we learn
+                // WHY the service machinery couldn't load, not just that it didn't.
+                status.Text = $"Service: unavailable — {ex.GetType().Name}: {ex.Message}";
                 logFile.Event($"service menu: status query failed {ex.GetType().Name}: {ex.Message}");
+                ServiceStore.AppendServiceEvent($"menu status query FAILED: {ex.GetType().Name}: {ex.Message}");
             }
         };
         return serviceMenu;
@@ -2268,12 +2272,16 @@ public sealed class MainForm : Form
     /// there's nothing here yet, that's the first thing to turn on.</summary>
     private void OpenServiceLog()
     {
+        // Prefer the service's runtime diagnostic log (only exists if the service actually ran with logging
+        // on); otherwise fall back to the ALWAYS-ON service events log, which records every menu/install/
+        // start/stop and any failure reason — so there's a trail to view even if nobody enabled logging.
         var path = ServiceStore.NewestLogFile();
+        if (path is null && File.Exists(ServiceStore.ServiceEventsLogPath)) path = ServiceStore.ServiceEventsLogPath;
         if (path is null)
         {
             var msg = ServiceStore.LoadLoggingEnabled()
-                ? "No service log yet. The service writes one once it starts with logging on — start (or restart) the service, then check back here."
-                : "No service log yet. Turn on logging first: Service menu → Configure service profile → Logging tab → enable service logging, then start (or restart) the service. The log records what the service does and why it is or isn't sending.";
+                ? "No service log yet. The service writes one once it starts with logging on — start (or restart) the service, then check back here. (The service events log appears here too once you install/start it.)"
+                : "No service log yet. Once you install or start the service, its events (and any failure reason) are recorded here automatically. For the fuller runtime log, also turn on logging: Service menu → Configure service profile → Logging tab.";
             MessageBox.Show(this, msg, AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -2359,8 +2367,11 @@ public sealed class MainForm : Form
             if (MessageBox.Show(this, msg, AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         }
         logFile.Event($"service: {label} requested (elevated)");
+        ServiceStore.AppendServiceEvent($"{label} requested (elevated)");
         var rc = ServiceControl.RunElevated(verb);
-        logFile.Event($"service: {label} finished with code {rc} ({(rc == 0 ? "success" : rc == -1 ? "cancelled/declined" : "failed")})");
+        var outcome = rc == 0 ? "success" : rc == -1 ? "cancelled/declined" : "failed";
+        logFile.Event($"service: {label} finished with code {rc} ({outcome})");
+        ServiceStore.AppendServiceEvent($"{label} finished: code {rc} ({outcome})");
         if (rc == 0)
             MessageBox.Show(this, $"Service {label} succeeded.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
         else if (rc == -1)
