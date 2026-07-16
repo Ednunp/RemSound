@@ -89,7 +89,7 @@ public sealed class ServiceSendHost : IDisposable
     private long lastCapturePulseTick;
     private long lastCallbacks = -1;
     private long lastCallbacksChangeTick;
-    private bool everHeardAudio;
+    private volatile bool everHeardAudio; // read from the session-kick COM path as well as the loop
     private long deafSinceTick;          // when continuous meter-audible + capture-silent began; 0 = not deaf
     private int reopenAttempts;
     private long lastReopenTick;
@@ -99,6 +99,14 @@ public sealed class ServiceSendHost : IDisposable
     // Meter readers for the captured loopback endpoints — swapped on every (re)apply, read lock-free
     // on the watch tick (a torn read against a just-disposed device is caught per-device).
     private volatile MMDevice[] meterDevices = [];
+    // INSTANT trigger (no polling): Windows raises a session-created notification the moment an app sets
+    // up an audio session on the device — BEFORE its first sound plays. At the boot lock screen that's
+    // LogonUI / NVDA arriving. If a new session appears while this capture has never heard audio, we
+    // re-open right then, so the re-attached capture is listening from the first note. The meter
+    // watchdog below stays as the backstop in case this notification doesn't cross sessions at the
+    // lock screen. Our own silence keepalive also creates a session — filtered by process id, or it
+    // would kick an endless reopen loop.
+    private AudioSessionStartWatcher? sessionKick;
 
     private const int MaxReopens = 3;              // per sending stint; refilled on Resume/power-resume
     private const float AudiblePeak = 0.003f;      // endpoint meter level considered "audibly playing"
@@ -158,15 +166,11 @@ public sealed class ServiceSendHost : IDisposable
         var stalled = now - lastCallbacksChangeTick > StallMsToReopen;
 
         var deaf = deafSinceTick != 0 && now - deafSinceTick >= DeafMsToReopen;
-        if (ShouldReopenCapture(deaf, everHeardAudio, stalled, reopenAttempts) && now - lastReopenTick >= ReopenSpacingMs)
+        if (ShouldReopenCapture(deaf, everHeardAudio, stalled, reopenAttempts))
         {
-            reopenAttempts++;
-            lastReopenTick = now;
-            deafSinceTick = 0;
-            log?.Invoke($"service: capture {(stalled ? "STALLED — callbacks frozen" : $"is DEAF — endpoint meter reads {meter:F3} (audible) but the capture has heard nothing since it opened")} "
-                + $"— re-opening capture to re-attach to the live audio graph (attempt {reopenAttempts}/{MaxReopens}, issue #23 boot self-heal)");
-            var profile = loadProfile();
-            if (profile is not null) { Suspend(); ApplyProfile(profile); }
+            ReopenCapture(stalled
+                ? "capture STALLED — callbacks frozen"
+                : $"capture is DEAF — endpoint meter reads {meter:F3} (audible) but the capture has heard nothing since it opened");
             return;
         }
 
@@ -218,6 +222,60 @@ public sealed class ServiceSendHost : IDisposable
         foreach (var d in old) { try { d.Dispose(); } catch { /* ignore */ } }
     }
 
+    /// <summary>Session-created notification (COM thread) — the INSTANT path of the issue-#23 self-heal.
+    /// An app just set up an audio session on the default render device, i.e. sound is about to start.
+    /// If this capture has never heard audio, re-open it right now so the re-attached capture is
+    /// listening from the first note (at boot: the Windows tune / NVDA at the logon screen). Hops to the
+    /// thread pool — never tear down audio objects from inside an audio notification callback.</summary>
+    private void OnAudioSessionCreated(int pid)
+    {
+        if (pid == Environment.ProcessId) return; // our own silence keepalive — reacting would loop forever
+        if (everHeardAudio || !wantSending || disposed) return;
+        Task.Run(() => ReopenCapture($"new audio session (pid {pid}) appeared while the capture has heard nothing — sound is starting"));
+    }
+
+    /// <summary>Tear down and re-open JUST the audio capture (sender stop → rebuild specs → start),
+    /// leaving the network presence up so peers see no discovery blip. The shared exit of both
+    /// self-heal paths (instant session-kick + meter watchdog); rate-limited and capped here so the
+    /// two paths can't stack re-opens.</summary>
+    private void ReopenCapture(string reason)
+    {
+        lock (gate)
+        {
+            if (!running || disposed) return;
+            var now = Environment.TickCount64;
+            if (reopenAttempts >= MaxReopens || now - lastReopenTick < ReopenSpacingMs) return;
+            reopenAttempts++;
+            lastReopenTick = now;
+            deafSinceTick = 0;
+            log?.Invoke($"service: {reason} — re-opening capture to re-attach to the live audio graph "
+                + $"(attempt {reopenAttempts}/{MaxReopens}, issue #23 boot self-heal)");
+            var profile = loadProfile();
+            if (profile is null) return;
+            try
+            {
+                sender.Stop();
+                var specs = BuildSendSpecs(profile); // re-resolve (the default device may have moved)
+                if (specs.Count == 0) { log?.Invoke("service: re-open found no send sources — capture left stopped"); running = false; return; }
+                sender.Configure(specs);
+                sender.Start();
+                SwapMeterDevices(specs);
+                captureWatchStartTick = Environment.TickCount64;
+                loggedFirstCallback = false;
+                loggedZeroCallbacks = false;
+                lastCallbacks = -1;
+                lastCallbacksChangeTick = Environment.TickCount64;
+                pulsePeakMax = 0f;
+                pulseMeterMax = 0f;
+                pulseFramesSent = 0;
+            }
+            catch (Exception ex)
+            {
+                log?.Invoke($"service: capture re-open failed: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+    }
+
     /// <summary>Convenience factory for the real service: loads the profile from the machine-wide
     /// <see cref="ServiceStore"/> (ProgramData) each time it's asked — the same file the config dialog
     /// writes, readable by the SYSTEM service account. Re-read on each resume so edits are picked up.</summary>
@@ -267,6 +325,10 @@ public sealed class ServiceSendHost : IDisposable
             sender.Configure(specs);
             sender.Start();
             SwapMeterDevices(specs); // endpoint-meter readers for the deaf-capture detector
+            // Instant self-heal trigger: session-created notification on the default render device.
+            // Recreated per apply so it re-points at the current default after a device change.
+            try { sessionKick?.Dispose(); } catch { /* ignore */ }
+            sessionKick = new AudioSessionStartWatcher(OnAudioSessionCreated, msg => log?.Invoke($"service: {msg}"));
             captureWatchStartTick = Environment.TickCount64;
             loggedFirstCallback = false;
             loggedZeroCallbacks = false;
@@ -302,6 +364,8 @@ public sealed class ServiceSendHost : IDisposable
             try { presence.Stop(); } catch (Exception ex) { log?.Invoke($"service: presence stop error {ex.GetType().Name}: {ex.Message}"); }
             try { sender.Stop(); } catch (Exception ex) { log?.Invoke($"service: stop error {ex.GetType().Name}: {ex.Message}"); }
             SwapMeterDevices(Array.Empty<CaptureSourceSpec>()); // release the endpoint-meter readers
+            try { sessionKick?.Dispose(); } catch { /* ignore */ }
+            sessionKick = null;
             running = false;
             log?.Invoke("service: suspended (interactive app present)");
         }
@@ -541,6 +605,8 @@ public sealed class ServiceSendHost : IDisposable
         }
         wantSending = false;
         try { deviceNotifier?.Dispose(); } catch { } deviceNotifier = null;
+        try { sessionKick?.Dispose(); } catch { } sessionKick = null;
+        SwapMeterDevices(Array.Empty<CaptureSourceSpec>());
         try { presence.Dispose(); } catch { }
         try { sender.Stop(); } catch { }
         try { sender.Dispose(); } catch { }
