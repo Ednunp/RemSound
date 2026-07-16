@@ -59,6 +59,33 @@ public sealed class ServiceSendHost : IDisposable
         this.loadProfile = loadProfile;
         this.log = log;
         presence = new ServiceNetworkPresence(sender, log);
+        // Wire the audio engine's own diagnostics into the service log — capture opens/failures, backend
+        // switches, the silence keepalive, composite mode. Without this the service log is blind below
+        // "streaming N sources" (issue #23 taught us that the hard way).
+        sender.Diagnostic = msg => log?.Invoke($"sender: {msg}");
+    }
+
+    // Capture-health watch (issue #23): the lock-screen bug is "capture open but ZERO buffers ever arrive".
+    // Log the first callback when audio genuinely flows, and an explicit zero-callbacks line after 10s so
+    // the log names the fault instead of just going quiet.
+    private long captureWatchStartTick;
+    private bool loggedFirstCallback;
+    private bool loggedZeroCallbacks;
+
+    private void WatchCaptureHealth()
+    {
+        if (loggedFirstCallback) return;
+        if (sender.CaptureCallbacks > 0)
+        {
+            loggedFirstCallback = true;
+            log?.Invoke($"service: first capture callback received — audio is flowing ({sender.CaptureBytes} bytes so far)");
+            return;
+        }
+        if (!loggedZeroCallbacks && Environment.TickCount64 - captureWatchStartTick > 10_000)
+        {
+            loggedZeroCallbacks = true;
+            log?.Invoke("service: capture is OPEN but has delivered ZERO audio callbacks after 10s — the audio engine is not feeding the loopback; peers hear nothing (issue #23 signature)");
+        }
     }
 
     /// <summary>Convenience factory for the real service: loads the profile from the machine-wide
@@ -109,6 +136,9 @@ public sealed class ServiceSendHost : IDisposable
             sender.SetReceivers(endpoints);
             sender.Configure(specs);
             sender.Start();
+            captureWatchStartTick = Environment.TickCount64;
+            loggedFirstCallback = false;
+            loggedZeroCallbacks = false;
             // Come up on the network too, so the peers can discover and connect to us — not just receive a
             // blind push. Same well-known audio port and the same components the interactive app uses.
             presence.Start(RemPacket.DefaultPort, endpoints);
@@ -219,9 +249,14 @@ public sealed class ServiceSendHost : IDisposable
                     if (!triedThisAbsence && !IsSending) { Resume(); triedThisAbsence = true; }
                 }
             }
-            // While streaming, re-arm to only the reachable peers (drop dead ones, pick up recovered ones).
-            // Piggybacks this existing tick — no extra timer, no background pile-up.
-            if (IsSending) RefreshSendArming();
+            // While streaming, re-arm to only the reachable peers (drop dead ones, pick up recovered ones)
+            // and watch capture health (issue #23: open-but-starved loopback). Piggybacks this existing
+            // tick — no extra timer, no background pile-up.
+            if (IsSending)
+            {
+                RefreshSendArming();
+                WatchCaptureHealth();
+            }
             appWasPresent = appPresent;
             ct.WaitHandle.WaitOne(pollMs);
         }
