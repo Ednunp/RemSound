@@ -68,77 +68,154 @@ public sealed class ServiceSendHost : IDisposable
     // Capture-health watch (issue #23): the lock-screen bug is "capture open but ZERO buffers ever arrive".
     // Log the first callback when audio genuinely flows, and an explicit zero-callbacks line after 10s so
     // the log names the fault instead of just going quiet.
+    // ---- Capture-health watch + boot self-heal (issue #23) --------------------------------------
+    // Boot fingerprint (Jonathan's logs + Ed): at the boot lock screen the machine's OWN speakers play
+    // the Windows tune and NVDA, the loopback capture opens fine in session 0 and callbacks flow — yet
+    // the mix it taps carries none of that audio and peers hear nothing. Signing in fixes it INSTANTLY
+    // with no change on our side; a capture opened after sign-out works fine at the lock screen. So: a
+    // capture attached in the first seconds of boot can land on an engine mix the logon-session audio
+    // path was never wired into, and Windows raises no device event about it.
+    //
+    // THE DETECTOR: the endpoint's own output METER (IAudioMeterInformation.MasterPeakValue) is read
+    // straight from the device, independently of our capture stream. Every watch tick (~0.5s) we
+    // compare it with what the capture is hearing. Device audibly playing + capture silent since it
+    // opened = the capture is provably DEAF → re-open it immediately (a fresh attach lands on the live
+    // graph) — fast enough that the boot tune itself comes through. A quiet machine reads quiet on
+    // BOTH sides, so nothing ever fires on healthy captures; the first real audio the capture hears
+    // ends the ladder for the stint. Frozen callbacks (2s+) also re-open, deafness aside.
     private long captureWatchStartTick;
     private bool loggedFirstCallback;
     private bool loggedZeroCallbacks;
     private long lastCapturePulseTick;
-    private long pulsePrevCallbacks = -1;
-    // Issue #23 self-heal state. Boot fingerprint (Jonathan's logs + reports): the machine's own
-    // speakers PLAY the Windows tune and NVDA at the boot lock screen, the service's loopback capture
-    // opens fine and callbacks flow — yet the mix it taps carries none of that audio, and peers hear
-    // nothing. Signing in fixes it INSTANTLY with zero change on our side; a capture opened after a
-    // sign-out (audio graph fully live) works at the lock screen. Conclusion: a capture attached in the
-    // first seconds of boot can land on the engine before the logon-session audio path is wired into
-    // it, and Windows fires no device event to tell us — so we RE-OPEN it ourselves. Ladder: while
-    // sending, if the capture has been silent since it opened (or its callbacks freeze), re-open the
-    // capture, at most MaxSilentReopens times per sending stint. The first real audio (peak ≥ 0.001)
-    // ends the ladder for the stint, so a quiet-but-healthy capture is left alone after that; a stint
-    // that IS genuinely silent throughout just gets 3 logged, inaudible re-opens.
+    private long lastCallbacks = -1;
+    private long lastCallbacksChangeTick;
     private bool everHeardAudio;
-    private int silentReopenAttempts;
-    private const int MaxSilentReopens = 3;
+    private long deafSinceTick;          // when continuous meter-audible + capture-silent began; 0 = not deaf
+    private int reopenAttempts;
+    private long lastReopenTick;
+    private float pulsePeakMax;          // loudest capture sample since the last pulse log line
+    private float pulseMeterMax;         // loudest endpoint-meter reading since the last pulse log line
+    private long pulseFramesSent;
+    // Meter readers for the captured loopback endpoints — swapped on every (re)apply, read lock-free
+    // on the watch tick (a torn read against a just-disposed device is caught per-device).
+    private volatile MMDevice[] meterDevices = [];
 
-    // How often the periodic capture pulse is written while the service is sending. 15s keeps a
-    // boot-to-login window (typically 30s+) covered by at least two readings without bloating the log.
-    private const int CapturePulseIntervalMs = 15_000;
+    private const int MaxReopens = 3;              // per sending stint; refilled on Resume/power-resume
+    private const float AudiblePeak = 0.003f;      // endpoint meter level considered "audibly playing"
+    private const float SilentPeak = 0.001f;       // capture level below this counts as silence
+    // Time-based (not tick-based) so the reaction doesn't depend on the loop cadence and a fast test
+    // cadence can't trip it: a healthy capture hears real sound within ~200ms of it starting, so 450ms
+    // of CONTINUOUS device-audible-but-capture-silent can only mean a genuinely deaf capture. At the
+    // 500ms service tick this re-opens on the second deaf reading — about 1s after the sound starts.
+    private const int DeafMsToReopen = 450;
+    private const int StallMsToReopen = 2_000;     // healthy callbacks tick every few ms
+    private const int ReopenSpacingMs = 2_000;     // don't thrash between attempts
+    private const int CapturePulseIntervalMs = 15_000; // diagnostic log cadence (NOT the trigger)
 
     /// <summary>Pure decision core of the issue-#23 boot self-heal, split out so the self-test can pin
-    /// it: re-open when the capture stalled or has never heard audio this stint, but never more than
-    /// <see cref="MaxSilentReopens"/> times — and never again once real audio has been heard.</summary>
-    internal static bool ShouldReopenSilentCapture(bool stalled, bool everHeardAudio, int attemptsSoFar) =>
-        (stalled || !everHeardAudio) && attemptsSoFar < MaxSilentReopens;
+    /// it: re-open when the capture is provably deaf (the endpoint meter shows the device audibly
+    /// playing while the capture has heard nothing since it opened) or its callbacks froze — but never
+    /// more than <see cref="MaxReopens"/> times a stint, and never for deafness once real audio has
+    /// been heard (after that, silence is just silence).</summary>
+    internal static bool ShouldReopenCapture(bool captureDeaf, bool everHeardAudio, bool stalled, int attemptsSoFar) =>
+        (stalled || (captureDeaf && !everHeardAudio)) && attemptsSoFar < MaxReopens;
 
     private void WatchCaptureHealth()
     {
-        // Callbacks alone can't distinguish real sound from our own silence keepalive feeding back, so
-        // the pulse also samples the loudest pre-encode sample + frames actually handed to the wire.
         var now = Environment.TickCount64;
+
+        // What is the CAPTURE hearing? (Resets on read — this watch is the only reader; the pulse log
+        // uses the accumulated maxima.) Callbacks alone can't distinguish real sound from our own
+        // silence keepalive feeding back, which is why the peak matters.
+        var peak = sender.TakeMaxSenderPreEncodePeak();
+        if (peak > pulsePeakMax) pulsePeakMax = peak;
+        if (peak >= SilentPeak) { everHeardAudio = true; deafSinceTick = 0; }
+        pulseFramesSent += sender.TakeSenderAudioFramesSent();
+
+        // What is the DEVICE playing? The endpoint's own meter, independent of our capture stream.
+        var meter = 0f;
+        foreach (var dev in meterDevices)
+        {
+            try { var v = dev.AudioMeterInformation.MasterPeakValue; if (v > meter) meter = v; }
+            catch { /* endpoint invalidated mid-read — the device watcher / next reopen re-resolves */ }
+        }
+        if (meter > pulseMeterMax) pulseMeterMax = meter;
+
+        // Deafness evidence: device audibly playing while the capture stays silent-since-open. Track
+        // WHEN the continuous deaf state began; any tick that breaks it resets the clock.
+        if (meter >= AudiblePeak && peak < SilentPeak && !everHeardAudio)
+        {
+            if (deafSinceTick == 0) deafSinceTick = now;
+        }
+        else if (meter < AudiblePeak)
+        {
+            deafSinceTick = 0;
+        }
+
+        // Callback stall: frozen for 2s while sending = the stream is broken regardless of loudness.
+        var callbacks = sender.CaptureCallbacks;
+        if (callbacks != lastCallbacks) { lastCallbacks = callbacks; lastCallbacksChangeTick = now; }
+        var stalled = now - lastCallbacksChangeTick > StallMsToReopen;
+
+        var deaf = deafSinceTick != 0 && now - deafSinceTick >= DeafMsToReopen;
+        if (ShouldReopenCapture(deaf, everHeardAudio, stalled, reopenAttempts) && now - lastReopenTick >= ReopenSpacingMs)
+        {
+            reopenAttempts++;
+            lastReopenTick = now;
+            deafSinceTick = 0;
+            log?.Invoke($"service: capture {(stalled ? "STALLED — callbacks frozen" : $"is DEAF — endpoint meter reads {meter:F3} (audible) but the capture has heard nothing since it opened")} "
+                + $"— re-opening capture to re-attach to the live audio graph (attempt {reopenAttempts}/{MaxReopens}, issue #23 boot self-heal)");
+            var profile = loadProfile();
+            if (profile is not null) { Suspend(); ApplyProfile(profile); }
+            return;
+        }
+
+        // Periodic diagnostic pulse (accumulated maxima since the previous line).
         if (now - lastCapturePulseTick >= CapturePulseIntervalMs)
         {
             lastCapturePulseTick = now;
-            var callbacks = sender.CaptureCallbacks;
-            var peak = sender.TakeMaxSenderPreEncodePeak();
-            var frames = sender.TakeSenderAudioFramesSent();
-            if (peak >= 0.001f) everHeardAudio = true;
-            log?.Invoke($"service: capture pulse — callbacks={callbacks} bytes={sender.CaptureBytes} peak={peak:F3} framesSent={frames}"
-                + (peak < 0.001f ? " (capturing SILENCE — nothing audible in the endpoint mix)" : ""));
-
-            var stalled = pulsePrevCallbacks >= 0 && callbacks == pulsePrevCallbacks;
-            pulsePrevCallbacks = callbacks;
-            if (ShouldReopenSilentCapture(stalled, everHeardAudio, silentReopenAttempts))
-            {
-                silentReopenAttempts++;
-                log?.Invoke($"service: capture {(stalled ? "STALLED — callbacks frozen" : "has heard only silence since it opened")} "
-                    + $"while the endpoint may be audibly playing — re-opening capture to re-attach to the live audio graph "
-                    + $"(attempt {silentReopenAttempts}/{MaxSilentReopens}, issue #23 boot self-heal)");
-                var profile = loadProfile();
-                if (profile is not null) { Suspend(); ApplyProfile(profile); }
-                return;
-            }
+            log?.Invoke($"service: capture pulse — callbacks={callbacks} bytes={sender.CaptureBytes} capPeak={pulsePeakMax:F3} meterPeak={pulseMeterMax:F3} framesSent={pulseFramesSent}"
+                + (pulsePeakMax < SilentPeak && pulseMeterMax >= AudiblePeak ? " (DEVICE AUDIBLE BUT CAPTURE SILENT)" : "")
+                + (pulsePeakMax < SilentPeak && pulseMeterMax < AudiblePeak ? " (machine quiet — both sides silent)" : ""));
+            pulsePeakMax = 0f;
+            pulseMeterMax = 0f;
+            pulseFramesSent = 0;
         }
 
         if (loggedFirstCallback) return;
-        if (sender.CaptureCallbacks > 0)
+        if (callbacks > 0)
         {
             loggedFirstCallback = true;
             log?.Invoke($"service: first capture callback received — audio is flowing ({sender.CaptureBytes} bytes so far)");
             return;
         }
-        if (!loggedZeroCallbacks && Environment.TickCount64 - captureWatchStartTick > 10_000)
+        if (!loggedZeroCallbacks && now - captureWatchStartTick > 10_000)
         {
             loggedZeroCallbacks = true;
             log?.Invoke("service: capture is OPEN but has delivered ZERO audio callbacks after 10s — the audio engine is not feeding the loopback; peers hear nothing (issue #23 signature)");
         }
+    }
+
+    /// <summary>Replace the endpoint-meter readers with ones for the given specs' loopback devices
+    /// (empty to clear). Old readers are disposed after the swap; a watch tick racing the swap reads
+    /// the old snapshot and its per-device catch absorbs a disposed COM object.</summary>
+    private void SwapMeterDevices(IReadOnlyList<CaptureSourceSpec> specs)
+    {
+        var old = meterDevices;
+        var fresh = new List<MMDevice>();
+        try
+        {
+            using var enumerator = new MMDeviceEnumerator();
+            foreach (var id in specs.Where(s => s.Kind == CaptureKind.Loopback && !string.IsNullOrEmpty(s.DeviceId))
+                                    .Select(s => s.DeviceId).Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                try { fresh.Add(enumerator.GetDevice(id)); }
+                catch { /* device gone — opening the capture itself will have failed and logged too */ }
+            }
+        }
+        catch { /* enumerator unavailable — the watch runs meter-blind; stall detection still works */ }
+        meterDevices = fresh.ToArray();
+        foreach (var d in old) { try { d.Dispose(); } catch { /* ignore */ } }
     }
 
     /// <summary>Convenience factory for the real service: loads the profile from the machine-wide
@@ -189,14 +266,22 @@ public sealed class ServiceSendHost : IDisposable
             sender.SetReceivers(endpoints);
             sender.Configure(specs);
             sender.Start();
+            SwapMeterDevices(specs); // endpoint-meter readers for the deaf-capture detector
             captureWatchStartTick = Environment.TickCount64;
             loggedFirstCallback = false;
             loggedZeroCallbacks = false;
             lastCapturePulseTick = Environment.TickCount64; // first pulse lands one interval after start
-            pulsePrevCallbacks = -1; // fresh capture instance — the counter restarts, don't misread it as a stall
-            // everHeardAudio / silentReopenAttempts deliberately NOT reset here: the silent-capture
-            // self-heal calls straight back into ApplyProfile, so resetting them here would make the
-            // re-open ladder infinite. They reset per sending STINT in Resume() (and on power resume).
+            // Fresh capture instance — restart the per-capture watch state so a new stream isn't
+            // misread as stalled or deaf on its very first ticks.
+            lastCallbacks = -1;
+            lastCallbacksChangeTick = Environment.TickCount64;
+            deafSinceTick = 0;
+            pulsePeakMax = 0f;
+            pulseMeterMax = 0f;
+            pulseFramesSent = 0;
+            // everHeardAudio / reopenAttempts deliberately NOT reset here: the self-heal calls straight
+            // back into ApplyProfile, so resetting them here would make the re-open ladder infinite.
+            // They reset per sending STINT in Resume() (and on power resume).
             // Come up on the network too, so the peers can discover and connect to us — not just receive a
             // blind push. Same well-known audio port and the same components the interactive app uses.
             presence.Start(RemPacket.DefaultPort, endpoints);
@@ -216,6 +301,7 @@ public sealed class ServiceSendHost : IDisposable
             // interactive app can take it over cleanly, then stop the audio send.
             try { presence.Stop(); } catch (Exception ex) { log?.Invoke($"service: presence stop error {ex.GetType().Name}: {ex.Message}"); }
             try { sender.Stop(); } catch (Exception ex) { log?.Invoke($"service: stop error {ex.GetType().Name}: {ex.Message}"); }
+            SwapMeterDevices(Array.Empty<CaptureSourceSpec>()); // release the endpoint-meter readers
             running = false;
             log?.Invoke("service: suspended (interactive app present)");
         }
@@ -227,9 +313,9 @@ public sealed class ServiceSendHost : IDisposable
     {
         var profile = loadProfile();
         if (profile is null) { log?.Invoke("service: no service profile configured — staying idle"); return false; }
-        // Fresh sending stint — refill the silent-capture self-heal ladder (issue #23).
+        // Fresh sending stint — refill the deaf-capture self-heal ladder (issue #23).
         everHeardAudio = false;
-        silentReopenAttempts = 0;
+        reopenAttempts = 0;
         return ApplyProfile(profile);
     }
 
@@ -270,7 +356,11 @@ public sealed class ServiceSendHost : IDisposable
     /// forth. Starts sending immediately if no app is present. A short settle delay before resuming
     /// stops rapid app open/close from thrashing the engine. Returns when <paramref name="ct"/> is
     /// cancelled (service stop).</summary>
-    public void RunLoop(CancellationToken ct, int pollMs = 1000, int resumeSettleMs = 2000)
+    // 500ms tick (was 1000): the capture-health watch rides this loop, and the deaf-capture detector
+    // must react while the boot tune is still PLAYING — two deaf ticks at 500ms = re-open within ~1s of
+    // the first audible sound. The per-tick work is trivial (a mutex probe, a few counter reads and one
+    // meter read per captured device), so the faster cadence costs nothing measurable.
+    public void RunLoop(CancellationToken ct, int pollMs = 500, int resumeSettleMs = 2000)
         => RunLoopCore(ct, InteractivePresence.IsInteractiveAppRunning, pollMs, resumeSettleMs);
 
     /// <summary>Test seam: run the loop against a caller-supplied presence-token name so a test can't
@@ -337,7 +427,7 @@ public sealed class ServiceSendHost : IDisposable
         log?.Invoke("service: re-opening capture after power resume");
         // Wake-from-sleep re-plumbs the audio graph much like boot does — refill the self-heal ladder.
         everHeardAudio = false;
-        silentReopenAttempts = 0;
+        reopenAttempts = 0;
         Suspend();
         ApplyProfile(profile);
     }
