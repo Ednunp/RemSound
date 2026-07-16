@@ -71,9 +71,29 @@ public sealed class ServiceSendHost : IDisposable
     private long captureWatchStartTick;
     private bool loggedFirstCallback;
     private bool loggedZeroCallbacks;
+    private long lastCapturePulseTick;
+
+    // How often the periodic capture pulse is written while the service is sending. 15s keeps a
+    // boot-to-login window (typically 30s+) covered by at least two readings without bloating the log.
+    private const int CapturePulseIntervalMs = 15_000;
 
     private void WatchCaptureHealth()
     {
+        // Jonathan's follow-up log proved callbacks CAN flow at the lock screen while peers still hear
+        // nothing — callbacks alone can't distinguish real sound from the silence keepalive feeding back.
+        // So while sending, also pulse the loudest pre-encode sample + frames actually sent every 15s:
+        // peak≈0.000 pre-login flipping to real values at login = the captured endpoint mix is genuinely
+        // silent on the lock screen (device/session routing), NOT a service pipeline fault.
+        var now = Environment.TickCount64;
+        if (now - lastCapturePulseTick >= CapturePulseIntervalMs)
+        {
+            lastCapturePulseTick = now;
+            var peak = sender.TakeMaxSenderPreEncodePeak();
+            var frames = sender.TakeSenderAudioFramesSent();
+            log?.Invoke($"service: capture pulse — callbacks={sender.CaptureCallbacks} bytes={sender.CaptureBytes} peak={peak:F3} framesSent={frames}"
+                + (peak < 0.001f ? " (capturing SILENCE — nothing audible in the endpoint mix)" : ""));
+        }
+
         if (loggedFirstCallback) return;
         if (sender.CaptureCallbacks > 0)
         {
@@ -139,6 +159,7 @@ public sealed class ServiceSendHost : IDisposable
             captureWatchStartTick = Environment.TickCount64;
             loggedFirstCallback = false;
             loggedZeroCallbacks = false;
+            lastCapturePulseTick = Environment.TickCount64; // first pulse lands one interval after start
             // Come up on the network too, so the peers can discover and connect to us — not just receive a
             // blind push. Same well-known audio port and the same components the interactive app uses.
             presence.Start(RemPacket.DefaultPort, endpoints);

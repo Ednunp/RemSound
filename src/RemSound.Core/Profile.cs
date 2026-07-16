@@ -76,12 +76,14 @@ public sealed class Profile
     /// runs alongside either way. On a machine too old for process loopback this is forced back to
     /// "devices" on load.</summary>
     public string WasapiSendMode { get; set; } = "devices";
-    /// <summary>In "applications" send mode: when true (the default) every app's audio is sent — i.e.
-    /// exactly the same result as sending the whole system's default output. When false, only the apps
-    /// named in <see cref="SelectedSendApplications"/> are sent. Mirrors the "Send all applications"
-    /// master checkbox.</summary>
+    /// <summary>SERVICE profiles only (ServiceProfileDialog / ServiceSendHost): when true (the default)
+    /// in "applications" send mode every app's audio is sent — i.e. exactly the same result as sending
+    /// the whole system's default output. When false, only the apps named in
+    /// <see cref="SelectedSendApplications"/> are sent. The MAIN window no longer has a "send all
+    /// applications" option (removed 2026-07-16): there, applications mode always means specific ticked
+    /// apps, and whole-system audio is devices mode's job. The main window neither reads nor writes this.</summary>
     public bool SendAllApplications { get; set; } = true;
-    /// <summary>In "applications" send mode with <see cref="SendAllApplications"/> off: the process
+    /// <summary>In "applications" send mode: the process
     /// names (lower-case, no path/extension, e.g. "vlc", "firefox") whose audio to send. Tracked by
     /// NAME not PID so the selection survives an app restarting. Apps not currently running stay in the
     /// list (remembered) and start being captured again the moment they reappear.</summary>

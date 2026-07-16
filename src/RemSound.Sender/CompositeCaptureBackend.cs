@@ -166,6 +166,22 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
         return w + a;
     }
 
+    /// <summary>Whether the WASAPI lane should run the single-source push-mode fast path for this spec
+    /// set. Requires tight-latency mode and exactly one WASAPI source, and that source must NOT be a
+    /// process-loopback ("proc:&lt;pid&gt;") spec — push mode opens an MMDevice by id, which a synthetic
+    /// process id has no counterpart for (feeding one to <see cref="PushModeWasapiBackend"/> throws
+    /// ArgumentException from MMDeviceEnumerator.GetDevice). Per-app sources always go through
+    /// MixingEngine. This is the single authority for the decision; Start, UpdateSources and the
+    /// coalesced rebuild all defer to it so they can never disagree about which backend a spec set needs.</summary>
+    private bool IsPushEligible(IReadOnlyList<CaptureSourceSpec> wasapiOnlySpecs) =>
+        IsPushEligibleFor(wasapiOnlySpecs, useTightLatencyWasapi);
+
+    /// <summary>Pure decision core (no instance state) so the self-test can pin the routing rule that a
+    /// per-app process-loopback source must never be handed to the push-mode backend. Exposed for testing.</summary>
+    internal static bool IsPushEligibleFor(IReadOnlyList<CaptureSourceSpec> wasapiOnlySpecs, bool tightLatency) =>
+        tightLatency && wasapiOnlySpecs.Count == 1
+        && wasapiOnlySpecs[0].Kind != CaptureKind.ProcessLoopback;
+
     public void Start(IReadOnlyList<CaptureSourceSpec> specs)
     {
         lock (gate)
@@ -182,8 +198,7 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
             // Process-loopback (per-application) sources are never eligible for push mode — that fast
             // path opens an MMDevice by id, which a synthetic "proc:<pid>" id has no counterpart for.
             // They always go through MixingEngine, which knows how to open a process-loopback capture.
-            var wantPushMode = useTightLatencyWasapi && wasapiSpecs.Count == 1
-                && wasapiSpecs[0].Kind != CaptureKind.ProcessLoopback;
+            var wantPushMode = IsPushEligible(wasapiSpecs);
             var currentIsPush = wasapi is PushModeWasapiBackend;
             if (wantPushMode != currentIsPush)
             {
@@ -232,7 +247,7 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
             // burst of restarts. Coalesce instead: stash the target and (re)arm a short timer so a run
             // of changes collapses into ONE rebuild to the final state. PushModeWasapiBackend still
             // supports only one source; this just defers the swap, it doesn't change the end result.
-            var wouldBePush = useTightLatencyWasapi && newWasapi.Count == 1;
+            var wouldBePush = IsPushEligible(newWasapi);
             var isPush = wasapi is PushModeWasapiBackend;
             if (wouldBePush != isPush)
             {
@@ -274,7 +289,7 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
             pendingRebuildSpecs = null;
             if (specs is null || !started) return;
             var (newWasapi, newAsio) = SplitSpecs(specs);
-            var wouldBePush = useTightLatencyWasapi && newWasapi.Count == 1;
+            var wouldBePush = IsPushEligible(newWasapi);
             var isPush = wasapi is PushModeWasapiBackend;
             if (wouldBePush != isPush)
             {

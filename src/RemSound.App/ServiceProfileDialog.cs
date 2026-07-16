@@ -27,6 +27,9 @@ internal sealed class ServiceProfileDialog : Form
     private readonly ListBox sendModeList = new() { Width = 460, Height = 40, IntegralHeight = false, AccessibleName = "How to send WASAPI audio (Alt+1)" };
     private readonly CheckedListBox outputsList = new() { CheckOnClick = true, Width = 460, Height = 110, AccessibleName = "WASAPI audio outputs to send (Alt+2)" };
     private readonly Label outputsStatus = new() { AutoSize = true, Text = "No output device selected." };
+    // DELIBERATE divergence from the main window (which dropped its send-all option 2026-07-16): the
+    // headless service's whole point is streaming the machine's system audio from the lock screen, so
+    // "send all applications" stays here as the sensible default.
     private readonly AccessibleCheckBox sendAllAppsBox = new() { Text = "Send all applications (Alt+&3)", AccessibleName = "Send all applications", AutoSize = true, Checked = true };
     private readonly CheckedListBox appsList = new() { CheckOnClick = true, Width = 460, Height = 110, AccessibleName = "Applications to send (Alt+4)" };
     private readonly Label appsStatus = new() { AutoSize = true, Text = "No application selected." };

@@ -206,38 +206,44 @@ public sealed class RemSoundSettingsStore
         Save(s);
     }
 
+    // Remembered peers + remembered applications are MACHINE-WIDE, backed by AppConfig (the same
+    // persistent per-machine file the global hotkeys use) — NOT the in-memory settings cache. They used
+    // to go through the cache: peers survived only because each profile's JSON carried a copy (making
+    // them per-profile in practice, against Ed's "both lists are global" ask), and applications didn't
+    // survive an app exit AT ALL — the cache is intra-process only. 2026-07-16 fix.
+
     public IReadOnlyList<string> LoadRememberedPeers() =>
-        Try(() => Load()?.RememberedPeers?
+        Try(() => AppConfig.Load().RememberedPeers?
             .Where(static value => !string.IsNullOrWhiteSpace(value))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToList())
         ?? [];
 
     public void SaveRememberedPeers(IEnumerable<string> peers)
     {
-        var s = Load() ?? new Settings();
-        s.RememberedPeers = peers
+        var c = AppConfig.Load();
+        c.RememberedPeers = peers
             .Where(static value => !string.IsNullOrWhiteSpace(value))
             .Select(static value => value.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        Save(s);
+        try { c.Save(); } catch { /* best-effort, like the app's other AppConfig writes */ }
     }
 
     /// <summary>GLOBAL remembered application names (lower-case process names) — the shared "apps I send"
     /// list, machine-wide like <see cref="LoadRememberedPeers"/>, not per-profile.</summary>
     public IReadOnlyList<string> LoadRememberedApplications() =>
-        Try(() => Load()?.RememberedApplications?
+        Try(() => AppConfig.Load().RememberedApplications?
             .Where(static value => !string.IsNullOrWhiteSpace(value))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToList())
         ?? [];
 
     public void SaveRememberedApplications(IEnumerable<string> apps)
     {
-        var s = Load() ?? new Settings();
-        s.RememberedApplications = apps
+        var c = AppConfig.Load();
+        c.RememberedApplications = apps
             .Where(static value => !string.IsNullOrWhiteSpace(value))
             .Select(static value => value.Trim().ToLowerInvariant())
             .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        Save(s);
+        try { c.Save(); } catch { /* best-effort, like the app's other AppConfig writes */ }
     }
 
     // LoggingEnabled lives in AppConfig now — it's a machine-local debug knob, not a
@@ -564,7 +570,8 @@ public sealed class RemSoundSettingsStore
             ContinuousAutoTuneIntervalSec = profile.ContinuousAutoTuneIntervalSec,
             MaxLatencyMsAsio = profile.MaxLatencyMsAsio,
             ContinuousAutoTuneAsioEnabled = profile.ContinuousAutoTuneAsioEnabled,
-            RememberedPeers = profile.RememberedPeers is null ? null : new List<string>(profile.RememberedPeers),
+            // RememberedPeers no longer rides the cache — it's machine-wide in AppConfig now; the
+            // profile's legacy copy is unioned in below (migration) instead of replacing anything.
             AsioDriverName = profile.AsioDriverName,
             // Profile.AudioModeRaw and Profile.BothModeWarningSuppressed are no longer carried
             // through the settings cache. Both fields are retired (2026-05-07 / 2026-05-11);
@@ -590,6 +597,28 @@ public sealed class RemSoundSettingsStore
             CustomCuePaths = profile.CustomCuePaths is null ? new() : new Dictionary<string, string>(profile.CustomCuePaths),
             RecordingSettings = profile.RecordingSettings?.Clone() ?? new RecordingSettings(),
         };
+        MigrateRememberedPeersToGlobal(profile);
+    }
+
+    /// <summary>Migration for the peers list going machine-wide (2026-07-16): profiles written by older
+    /// builds carry their own remembered-peers list, so the first time each one is opened its entries
+    /// are UNIONED into the AppConfig book — nothing is lost, nothing is overwritten. Once the sets
+    /// match this is a no-op (no file write).</summary>
+    private static void MigrateRememberedPeersToGlobal(Profile profile)
+    {
+        if (profile.RememberedPeers is not { Count: > 0 } legacy) return;
+        try
+        {
+            var c = AppConfig.Load();
+            var current = c.RememberedPeers ?? [];
+            var merged = current
+                .Concat(legacy.Where(static v => !string.IsNullOrWhiteSpace(v)).Select(static v => v.Trim()))
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (merged.Count == current.Count) return; // nothing new — skip the write
+            c.RememberedPeers = merged;
+            c.Save();
+        }
+        catch { /* best-effort, like the app's other AppConfig writes */ }
     }
 
     /// <summary>Copies the current in-memory settings cache into a Profile. Note: this only
@@ -609,7 +638,10 @@ public sealed class RemSoundSettingsStore
         if (s.ContinuousAutoTuneIntervalSec is int cai) profile.ContinuousAutoTuneIntervalSec = cai;
         if (s.MaxLatencyMsAsio is int mla) profile.MaxLatencyMsAsio = mla;
         if (s.ContinuousAutoTuneAsioEnabled is bool cata) profile.ContinuousAutoTuneAsioEnabled = cata;
-        if (s.RememberedPeers is { } rp) profile.RememberedPeers = new List<string>(rp);
+        // Write the CURRENT machine-wide peers book into the profile on save. The global AppConfig copy
+        // is the authority now; this snapshot just keeps older builds (which read the profile's list)
+        // working against the same profile file, and makes the load-time migration union a no-op.
+        profile.RememberedPeers = new List<string>(LoadRememberedPeers());
         profile.AsioDriverName = s.AsioDriverName;
         // AudioMode and BothModeWarningSuppressed are not copied — both Profile fields were
         // retired in the 2026-05-11 cleanup. Mode is derived from AsioDriverName and the
@@ -656,11 +688,9 @@ public sealed class RemSoundSettingsStore
         // the user opt either lane in or out independently.
         public int? MaxLatencyMsAsio { get; set; }
         public bool? ContinuousAutoTuneAsioEnabled { get; set; }
-        public List<string>? RememberedPeers { get; set; }
-        // GLOBAL (machine-wide) remembered application names, like RememberedPeers — deliberately NOT
-        // per-profile and NOT copied into profile files (see ExportProfile/ImportProfile, which don't
-        // touch it), so one shared "apps I send" address book serves every profile. 2026-07-15.
-        public List<string>? RememberedApplications { get; set; }
+        // RememberedPeers / RememberedApplications retired from this cache 2026-07-16 — both books are
+        // machine-wide in AppConfig now (this cache is intra-process only, so applications were being
+        // forgotten on every exit and peers were per-profile in practice).
         public string? AsioDriverName { get; set; }
         // AudioMode and BothModeWarningSuppressed both retired from this cache. Mode is
         // derived from AsioDriverName via LoadAudioMode; the Both-mode warning popup is gone.

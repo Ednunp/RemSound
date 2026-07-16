@@ -132,6 +132,14 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
             throw new InvalidOperationException(
                 $"PushModeWasapiBackend supports only one source, got {specs.Count}. Caller must fall back to MixingEngine for multi-source.");
         }
+        if (specs[0].Kind == CaptureKind.ProcessLoopback)
+        {
+            // Per-app process-loopback has no MMDevice to open — it must go through MixingEngine.
+            // CompositeCaptureBackend.IsPushEligible already excludes these, but backstop it here so a
+            // routing slip degrades to a clear diagnostic instead of GetDevice's opaque ArgumentException.
+            throw new InvalidOperationException(
+                $"PushModeWasapiBackend cannot capture a process-loopback source (\"{specs[0].Name}\"). Caller must route per-app sources to MixingEngine.");
+        }
 
         lock (gate)
         {

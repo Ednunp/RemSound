@@ -96,6 +96,19 @@ public sealed class AppConfig
     /// and the Options → Manage named peers dialog. Empty by default.</summary>
     public Dictionary<string, NamedPeer> NamedPeers { get; set; } = new();
 
+    /// <summary>Machine-wide remembered PEER entries — ONE shared address book across all profiles
+    /// (Ed, 2026-07: both remembered lists live in global, not the profile). Before this the list rode
+    /// in each profile's JSON, so it was per-profile in practice; each old profile's legacy list is
+    /// unioned in here the first time it's opened (RemSoundSettingsStore.ApplyProfile). Null = none yet.
+    /// Cleared from Preferences → General.</summary>
+    public List<string>? RememberedPeers { get; set; }
+
+    /// <summary>Machine-wide remembered APPLICATION process names (lower-case) — the shared "apps I
+    /// send" address book, companion to <see cref="RememberedPeers"/>. Before 2026-07-16 this only
+    /// lived in the in-memory settings cache, which silently forgot the list on every app exit. Null =
+    /// none yet. Cleared from Preferences → General.</summary>
+    public List<string>? RememberedApplications { get; set; }
+
     /// <summary>Legacy flat name map (friendly name only). Kept so pre-registry configs still deserialise;
     /// migrated into <see cref="NamedPeers"/> on load, then no longer written.</summary>
     public Dictionary<string, string> PeerFriendlyNames { get; set; } = new();

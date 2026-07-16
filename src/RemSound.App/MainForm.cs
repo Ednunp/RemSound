@@ -94,18 +94,15 @@ public sealed class MainForm : Form
     // is forced to "devices". The app list is tracked by process NAME (so a selection survives an app
     // restart) and reconciled on sendAppsReconcileTimer so apps dropping in and out don't pile up.
     // Unlike the device lists this selection IS persisted — per profile (WasapiSendMode /
-    // SendAllApplications / SelectedSendApplications) — matching how Ed wants a profile to remember its
-    // whole send setup.
+    // SelectedSendApplications) — matching how Ed wants a profile to remember its whole send setup.
+    // There is deliberately NO "send all applications" option here (Ed removed it 2026-07-16): picking
+    // the applications mode means picking specific apps; whole-system audio is what devices mode is for.
+    // (The SERVICE still has its own send-all concept — a headless lock-screen sender wants system audio —
+    // so Profile.SendAllApplications stays for ServiceProfileDialog/ServiceSendHost.)
     private readonly ListBox sendModeList = new() { Width = 430, Height = 38, IntegralHeight = false };
     private MnemonicLabel? sendModeLabel;
-    private readonly AccessibleCheckBox sendAllApplicationsCheckbox = new()
-    {
-        Text = "Send all applications (Alt+&7)",
-        AccessibleName = "Send all applications",
-        AutoSize = true,
-        Checked = true,
-    };
-    // "Currently active applications" — the apps running right now (like Discovered peers).
+    // "Currently active applications" — the apps running right now (like Discovered peers), PLUS any
+    // ticked app that isn't running (shown "(not running)") so the user can always find and untick it.
     private readonly CheckedListBox sendAppsList = new() { CheckOnClick = true, Width = 430, Height = 90 };
     private readonly Label sendAppsStatusLabel = new() { AutoSize = true, Text = "No application selected." };
     private MnemonicLabel? sendAppsLabel;
@@ -124,12 +121,7 @@ public sealed class MainForm : Form
     // when the ticked apps' actual process ids change (an app opened or closed).
     private RemSound.Sender.AudioSessionStartWatcher? sessionStartWatcher;
     private string? lastSendAppPidSignature;
-    // The active-apps list's FIRST ROW is a synthetic "Send all applications" toggle (Ed's design): ticked =
-    // send the whole system, and the individual apps below collapse away; unticked reveals them. It's backed
-    // by sendAllApplicationsCheckbox (kept as hidden state). This reserved process-name marks that row so the
-    // handlers can tell it apart from a real app.
-    private const string SendAllAppsSentinel = " __send_all_apps__";
-    // Guards the sendModeList / sendAllApplicationsCheckbox / sendAppsList handlers while we
+    // Guards the sendModeList / sendAppsList handlers while we
     // programmatically repopulate them (mode switch, profile apply, reconcile) so those handlers
     // don't fire MarkProfileDirty or trigger re-entrant rebuilds on our own writes.
     private bool suppressSendAppEvents;
@@ -3499,7 +3491,7 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
             ColumnCount = 2,
-            RowCount = 14,
+            RowCount = 13,
             AutoScroll = true,
         };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -3560,17 +3552,16 @@ public sealed class MainForm : Form
         // Row 8 (devices mode): the classic WASAPI outputs-to-send loopback list.
         sendOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 8, "WASAPI audio outputs to send (Alt+&4)", sendOutputDevicesList, sendOutputDevicesStatusLabel, FocusListControl);
 
-        // Rows 9-11 (applications mode): the "Send all applications" master checkbox, then TWO app lists —
-        // currently-active (running now) and remembered (the global address book), mirroring the peers lists.
-        var sendAllAppsPanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        sendAllAppsPanel.Controls.Add(sendAllApplicationsCheckbox);
-        panel.Controls.Add(sendAllAppsPanel, 1, 9);
-        sendAppsLabel = FormLayoutRows.AddCheckedListRow(panel, 10, "Currently active applications (Alt+&8)", sendAppsList, sendAppsStatusLabel, FocusListControl);
-        rememberedAppsLabel = FormLayoutRows.AddCheckedListRow(panel, 11, "Remembered applications (Alt+&9)", rememberedAppsList, rememberedAppsStatusLabel, FocusListControl);
+        // Rows 9-10 (applications mode): TWO app lists — currently-active (running now, plus any ticked
+        // app that isn't, so it can always be unticked) and remembered (the global address book, minus
+        // whatever is ticked), mirroring the peers lists. No "send all applications" toggle — picking this
+        // mode means picking specific apps; whole-system audio is devices mode's job (Ed, 2026-07-16).
+        sendAppsLabel = FormLayoutRows.AddCheckedListRow(panel, 9, "Currently active applications (Alt+&8)", sendAppsList, sendAppsStatusLabel, FocusListControl);
+        rememberedAppsLabel = FormLayoutRows.AddCheckedListRow(panel, 10, "Remembered applications (Alt+&9)", rememberedAppsList, rememberedAppsStatusLabel, FocusListControl);
 
-        // Rows 12-13: the remaining send lists (shifted down one row for the remembered-apps list above).
-        sendInputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 12, "WASAPI audio inputs to send (Alt+&5)", sendInputDevicesList, sendInputDevicesStatusLabel, FocusListControl);
-        asioSendDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 13, "ASIO audio inputs to send (Alt+&2)", asioSendDevicesList, asioSendDevicesStatusLabel, FocusListControl);
+        // Rows 11-12: the remaining send lists.
+        sendInputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 11, "WASAPI audio inputs to send (Alt+&5)", sendInputDevicesList, sendInputDevicesStatusLabel, FocusListControl);
+        asioSendDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 12, "ASIO audio inputs to send (Alt+&2)", asioSendDevicesList, asioSendDevicesStatusLabel, FocusListControl);
 
         WireSendModeControls();
 
@@ -3609,9 +3600,9 @@ public sealed class MainForm : Form
         panel.Controls.Add(wrapper, 1, row);
     }
 
-    /// <summary>Wires the send-mode chooser, the "Send all applications" master checkbox and the app
-    /// list, sets up the reconcile timer, and applies the initial visibility. On Windows older than the
-    /// process-loopback API the whole applications path is hidden and the mode is pinned to devices.</summary>
+    /// <summary>Wires the send-mode chooser and the two app lists, sets up the reconcile timer, and
+    /// applies the initial visibility. On Windows older than the process-loopback API the whole
+    /// applications path is hidden and the mode is pinned to devices.</summary>
     private void WireSendModeControls()
     {
         WireCheckedListAccessibility(sendAppsList, sendAppsStatusLabel, "application");
@@ -3626,14 +3617,6 @@ public sealed class MainForm : Form
             ApplySendSources();
         };
 
-        sendAllApplicationsCheckbox.CheckedChanged += (_, _) =>
-        {
-            if (suppressSendAppEvents) return;
-            ApplySendModeVisibility();   // re-renders the active list (show/hide apps under the "send all" row)
-            MarkProfileDirty();
-            ApplySendSources();
-        };
-
         // Both app lists toggle the SAME send set: ticking an app in either the active or the remembered
         // list adds it; unticking removes it. The other list re-renders to match, exactly like the peers
         // lists. Defer to after the check state settles.
@@ -3644,12 +3627,7 @@ public sealed class MainForm : Form
                 if (suppressSendAppEvents) return;
                 if (list.Items[args.Index] is not AudioAppChoice choice) return;
                 var nowChecked = args.NewValue == CheckState.Checked;
-                // The "Send all applications" first row drives the backing checkbox (which re-applies the
-                // mode and rebuilds the list to show/hide the individual apps); real rows toggle the send set.
-                if (choice.ProcessName == SendAllAppsSentinel)
-                    BeginInvoke(() => sendAllApplicationsCheckbox.Checked = nowChecked);
-                else
-                    BeginInvoke(() => OnSendAppToggled(choice.ProcessName, nowChecked));
+                BeginInvoke(() => OnSendAppToggled(choice.ProcessName, nowChecked));
             };
         }
         WireAppList(sendAppsList);
@@ -3701,23 +3679,18 @@ public sealed class MainForm : Form
         if (sendOutputDevicesLabel is not null) sendOutputDevicesLabel.Visible = !appsMode;
         SetRowControlVisible(sendOutputDevicesList, !appsMode);
 
-        // The "Send all applications" toggle is now the first ROW of the active list, so the standalone
-        // checkbox is hidden (kept only as backing state). The active list (with that row on top) shows
-        // whenever we're in applications mode. The remembered list only makes sense when picking specific
-        // apps — i.e. when "send all" is off.
-        SetRowControlVisible(sendAllApplicationsCheckbox, false);
+        // Applications mode shows both app lists (active + remembered); devices mode collapses them.
         if (sendAppsLabel is not null) sendAppsLabel.Visible = appsMode;
         SetRowControlVisible(sendAppsList, appsMode);
-        var showRemembered = appsMode && !sendAllApplicationsCheckbox.Checked;
-        if (rememberedAppsLabel is not null) rememberedAppsLabel.Visible = showRemembered;
-        SetRowControlVisible(rememberedAppsList, showRemembered);
+        if (rememberedAppsLabel is not null) rememberedAppsLabel.Visible = appsMode;
+        SetRowControlVisible(rememberedAppsList, appsMode);
 
-        // Populate the active list whenever it's on screen (so the "Send all applications" row — and the
-        // apps beneath it, when send-all is off — are shown). Only the specific-apps case needs the ongoing
-        // reconcile poll + the instant session-start watcher; "send all" just loopbacks the whole device.
-        if (appsMode) ReconcileSendAppsList();
-        if (appsMode && !sendAllApplicationsCheckbox.Checked)
+        // Populate the lists whenever they're on screen, and keep the reconcile poll + the instant
+        // session-start watcher running the whole time we're in applications mode — a ticked app must be
+        // caught from its very start even when the user is looking at another tab.
+        if (appsMode)
         {
+            ReconcileSendAppsList();
             sendAppsReconcileTimer?.Start();
             EnsureSessionStartWatcher();
         }
@@ -3749,10 +3722,12 @@ public sealed class MainForm : Form
         ReconcileSendAppsList();   // re-render both lists to reflect the new shared selection
     }
 
-    /// <summary>Refreshes BOTH send-app lists from the current state: the "currently active" list = apps
-    /// running right now; the "remembered" list = the global remembered-apps address book (plus anything in
-    /// the active selection). Every item is ticked iff it's in <see cref="selectedSendApps"/>, so the two
-    /// lists stay in lock-step. A "(not running)" hint marks a remembered app that isn't live.</summary>
+    /// <summary>Refreshes BOTH send-app lists from the current state. Active list = apps running right
+    /// now PLUS every ticked app (a ticked app that closed stays visible, marked "(not running)", so the
+    /// user can always find and untick it). Remembered list = the global remembered-apps address book
+    /// MINUS whatever is ticked — ticking an app "moves" it to the active list; unticking drops it back
+    /// into remembered (Ed's design, 2026-07-16). Every item is ticked iff it's in
+    /// <see cref="selectedSendApps"/>.</summary>
     private void ReconcileSendAppsList()
     {
         if (!ProcessLoopbackCapture.IsSupported) return;
@@ -3760,30 +3735,31 @@ public sealed class MainForm : Form
         var running = AudioAppEnumerator.Snapshot();
         var runningNames = new HashSet<string>(running.Select(a => a.ProcessName), StringComparer.OrdinalIgnoreCase);
 
-        // Remembered = the global address book, unioned with the current selection (so a just-ticked app
-        // always appears) — sorted by display name.
-        var remembered = settings.LoadRememberedApplications()
-            .Concat(selectedSendApps)
+        // Active = running apps (alphabetical), then any ticked app that ISN'T running appended after.
+        var activeChoices = running
+            .Select(a => new AudioAppChoice(a.ProcessName, a.DisplayName, running: true))
+            .ToList();
+        activeChoices.AddRange(selectedSendApps
+            .Where(n => !runningNames.Contains(n))
+            .OrderBy(n => n, StringComparer.CurrentCultureIgnoreCase)
+            .Select(n => new AudioAppChoice(n, n, running: false)));
+
+        // Remembered = the global address book minus the ticked apps, sorted by name.
+        var rememberedChoices = settings.LoadRememberedApplications()
+            .Where(n => !selectedSendApps.Contains(n))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(n => n, StringComparer.CurrentCultureIgnoreCase)
-            .ToList();
-
-        var sendAll = sendAllApplicationsCheckbox.Checked;
-        // Active list: the "Send all applications" toggle is always the first row. Ticked, the individual
-        // apps below collapse away (there's nothing to pick); unticked, the running apps appear under it.
-        var activeChoices = new List<AudioAppChoice> { new(SendAllAppsSentinel, "Send all applications", running: true) };
-        if (!sendAll)
-            activeChoices.AddRange(running.Select(a => new AudioAppChoice(a.ProcessName, a.DisplayName, running: true)));
+            .Select(name =>
+            {
+                var live = running.FirstOrDefault(a => string.Equals(a.ProcessName, name, StringComparison.OrdinalIgnoreCase));
+                return new AudioAppChoice(name, live?.DisplayName ?? name, running: runningNames.Contains(name));
+            }).ToList();
 
         suppressSendAppEvents = true;
         try
         {
-            FillAppList(sendAppsList, activeChoices);
-            FillAppList(rememberedAppsList, remembered.Select(name =>
-            {
-                var live = running.FirstOrDefault(a => string.Equals(a.ProcessName, name, StringComparison.OrdinalIgnoreCase));
-                return new AudioAppChoice(name, live?.DisplayName ?? name, running: runningNames.Contains(name));
-            }));
+            ReconcileAppListInPlace(sendAppsList, activeChoices);
+            ReconcileAppListInPlace(rememberedAppsList, rememberedChoices);
         }
         finally
         {
@@ -3793,21 +3769,62 @@ public sealed class MainForm : Form
         UpdateCheckedListStatus(rememberedAppsList, rememberedAppsStatusLabel, "remembered application");
     }
 
-    /// <summary>Rebuild a CheckedListBox from a set of app choices, ticking each one that's in the shared
-    /// send set. Caller must hold <see cref="suppressSendAppEvents"/>.</summary>
-    private void FillAppList(CheckedListBox list, IEnumerable<AudioAppChoice> choices)
+    /// <summary>Test seam: reconcile now and return the two send-app lists' rows — the active list's
+    /// process names, which of them are ticked, and the remembered list's process names. Lets the
+    /// self-test pin the list semantics (ticked apps leave Remembered; a ticked app that isn't running
+    /// still shows in Active so it can be unticked) against the REAL reconcile logic.</summary>
+    internal (string[] ActiveRows, string[] ActiveChecked, string[] RememberedRows) SnapshotAppListsForTest()
+    {
+        ReconcileSendAppsList();
+        return (
+            sendAppsList.Items.OfType<AudioAppChoice>().Select(c => c.ProcessName).ToArray(),
+            sendAppsList.CheckedItems.OfType<AudioAppChoice>().Select(c => c.ProcessName).ToArray(),
+            rememberedAppsList.Items.OfType<AudioAppChoice>().Select(c => c.ProcessName).ToArray());
+    }
+
+    /// <summary>Reconcile a CheckedListBox to exactly <paramref name="choices"/> with MINIMAL mutation:
+    /// a row already showing the right app with the right tick state is left completely untouched, so the
+    /// row the user is sitting on is not destroyed and re-announced by NVDA when the reconcile timer fires
+    /// or a toggle rebuilds the list. Only differing rows are replaced, and only
+    /// surplus rows past the end are removed. This is what killed the "double read the top checkbox" glitch
+    /// — a full Clear()+re-add used to recreate the very row that had just been toggled. Every app row is
+    /// ticked from the shared send set. Caller must
+    /// hold <see cref="suppressSendAppEvents"/> (SetItemChecked would otherwise re-enter ItemCheck).</summary>
+    private void ReconcileAppListInPlace(CheckedListBox list, IReadOnlyList<AudioAppChoice> choices)
     {
         list.BeginUpdate();
-        list.Items.Clear();
-        foreach (var c in choices)
+        try
         {
-            var i = list.Items.Add(c);
-            // The "Send all applications" sentinel row is ticked from the send-all state; every real app row
-            // is ticked from the shared send set.
-            var ticked = c.ProcessName == SendAllAppsSentinel ? sendAllApplicationsCheckbox.Checked : selectedSendApps.Contains(c.ProcessName);
-            if (ticked) list.SetItemChecked(i, true);
+            // Trim rows that no longer have a counterpart (from the end, so surviving indices don't shift).
+            while (list.Items.Count > choices.Count) list.Items.RemoveAt(list.Items.Count - 1);
+
+            for (var i = 0; i < choices.Count; i++)
+            {
+                var c = choices[i];
+                var wantChecked = selectedSendApps.Contains(c.ProcessName);
+
+                if (i < list.Items.Count)
+                {
+                    // Replace only when the row's identity or visible label actually changed — leaving a
+                    // matching row in place is what prevents the spurious re-read.
+                    var existing = list.Items[i] as AudioAppChoice;
+                    var sameRow = existing is not null
+                        && string.Equals(existing.ProcessName, c.ProcessName, StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(existing.ToString(), c.ToString(), StringComparison.Ordinal);
+                    if (!sameRow) list.Items[i] = c;
+                    if (list.GetItemChecked(i) != wantChecked) list.SetItemChecked(i, wantChecked);
+                }
+                else
+                {
+                    var idx = list.Items.Add(c);
+                    if (wantChecked) list.SetItemChecked(idx, true);
+                }
+            }
         }
-        list.EndUpdate();
+        finally
+        {
+            list.EndUpdate();
+        }
     }
 
     /// <summary>Re-resolve the ticked apps' current process ids and, if they changed (an app opened or
@@ -3819,7 +3836,7 @@ public sealed class MainForm : Form
     {
         if (!connected || suppressSendAppEvents) return;
         if (!ProcessLoopbackCapture.IsSupported) return;
-        if (sendModeList.SelectedIndex != SendModeApplicationsIndex || sendAllApplicationsCheckbox.Checked) return;
+        if (sendModeList.SelectedIndex != SendModeApplicationsIndex) return;
         var sig = ComputeSendAppPidSignature(CheckedSendApplicationNames(), AudioAppEnumerator.PidsForProcessName);
         if (sig == lastSendAppPidSignature) return;
         lastSendAppPidSignature = sig;
@@ -3868,7 +3885,6 @@ public sealed class MainForm : Form
             var wantApps = ProcessLoopbackCapture.IsSupported
                 && string.Equals(p.WasapiSendMode, "applications", StringComparison.OrdinalIgnoreCase);
             sendModeList.SelectedIndex = wantApps ? SendModeApplicationsIndex : SendModeDevicesIndex;
-            sendAllApplicationsCheckbox.Checked = p.SendAllApplications;
 
             // The profile's active apps become the shared send set; ReconcileSendAppsList (below) then
             // renders both lists (active + remembered) from it.
@@ -5533,11 +5549,10 @@ public sealed class MainForm : Form
         sendMyAudioCheckbox.TabIndex = 5;
         sendModeList.TabIndex = 6;               // how-to-send chooser, right after "Send my audio"
         sendOutputDevicesList.TabIndex = 7;      // devices mode
-        sendAllApplicationsCheckbox.TabIndex = 8;  // applications mode
-        sendAppsList.TabIndex = 9;                 // applications mode — currently active
-        rememberedAppsList.TabIndex = 10;          // applications mode — remembered
-        sendInputDevicesList.TabIndex = 11;
-        asioSendDevicesList.TabIndex = 12;
+        sendAppsList.TabIndex = 8;                 // applications mode — currently active
+        rememberedAppsList.TabIndex = 9;           // applications mode — remembered
+        sendInputDevicesList.TabIndex = 10;
+        asioSendDevicesList.TabIndex = 11;
         // Profiles & preferences tab retired 2026-05-08 — the controls that used to live
         // there have moved to the File menu (Open/Save/Save as/Rename/etc.) and the
         // Preferences dialog (Mute cues / Accept remote vol / Startup behaviour).
@@ -5819,10 +5834,9 @@ public sealed class MainForm : Form
     private bool AppsModeActive() =>
         ProcessLoopbackCapture.IsSupported && sendModeList.SelectedIndex == SendModeApplicationsIndex;
 
-    /// <summary>True when applications mode will actually send something: "send all applications" is on,
-    /// or at least one specific app is ticked.</summary>
+    /// <summary>True when applications mode will actually send something: at least one app is ticked.</summary>
     private bool HasAppModeSend() =>
-        AppsModeActive() && (sendAllApplicationsCheckbox.Checked || selectedSendApps.Count > 0);
+        AppsModeActive() && selectedSendApps.Count > 0;
 
     private bool HasCheckedSendDevice() =>
         (!AppsModeActive() && sendOutputDevicesList.CheckedItems.OfType<AudioDeviceChoice>().Any(c => c.DeviceId is not null))
@@ -5859,22 +5873,12 @@ public sealed class MainForm : Form
                 }
             }
         }
-        else if (sendAllApplicationsCheckbox.Checked)
-        {
-            // Applications mode, "send all applications" = the same result as sending the whole
-            // system output: loopback the current default render device (and follow it if it changes).
-            followedDefaultLoopback = ResolveDefaultDeviceId(NAudio.CoreAudioApi.DataFlow.Render);
-            if (!string.IsNullOrEmpty(followedDefaultLoopback) && addedLoopbackIds.Add(followedDefaultLoopback))
-            {
-                specs.Add(new CaptureSourceSpec(followedDefaultLoopback, CaptureKind.Loopback, "All applications (system audio)"));
-            }
-        }
         else
         {
-            // Applications mode, specific apps: one process-loopback spec per running process of each
-            // ticked app name. Apps not currently running contribute nothing until they reappear (the
-            // reconcile timer keeps the list fresh and re-applies). Child processes are captured too
-            // (the process-loopback include-tree mode), so a browser's audio renderers are covered.
+            // Applications mode: one process-loopback spec per running process of each ticked app name.
+            // Apps not currently running contribute nothing until they reappear (the reconcile timer and
+            // the session-start watcher keep the list fresh and re-apply). Child processes are captured
+            // too (the process-loopback include-tree mode), so a browser's audio renderers are covered.
             foreach (var name in CheckedSendApplicationNames())
             {
                 foreach (var pid in AudioAppEnumerator.PidsForProcessName(name))
@@ -8437,7 +8441,9 @@ public sealed class MainForm : Form
         profile.SelectedAsioSendInputs = ExtractCheckedDeviceIds(asioSendDevicesList);
         // WASAPI send mode (whole devices vs specific applications) — persisted per profile.
         profile.WasapiSendMode = sendModeList.SelectedIndex == SendModeApplicationsIndex ? "applications" : "devices";
-        profile.SendAllApplications = sendAllApplicationsCheckbox.Checked;
+        // SendAllApplications is deliberately NOT written here — the main window no longer has that
+        // concept (Ed removed it 2026-07-16). The field itself stays on Profile for the SERVICE, whose
+        // headless lock-screen use case is exactly whole-system audio.
         profile.SelectedSendApplications = CheckedSendApplicationNames();
         profile.SelectedConnectedPeers = GatherSelectedPeerEntries();
         profile.EnableAllPeerShaping = enableAllPeerShapingBox.Checked;

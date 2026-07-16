@@ -70,6 +70,7 @@ internal static class SelfTest
         RunStep(results, "Service reachability-gated sending (drop dead peers, re-arm recovered)", ServiceReachabilityGating);
         RunStep(results, "Send-app capture change-detection (catch an app the instant it opens)", SendAppCaptureChangeDetection);
         RunStep(results, "Remembered applications list is global + clearable", RememberedApplicationsGlobal);
+        RunStep(results, "Send-app lists semantics (ticked → Active, out of Remembered)", SendAppListSemantics);
         RunStep(results, "Service registration args", ServiceRegistrationArgs);
         RunStep(results, "Recording engine (all formats + source gate + mono)", RecordingEngine);
         RunStep(results, "Recording split tracks (per-peer + own)", RecordingSplitTracks);
@@ -303,6 +304,21 @@ internal static class SelfTest
         var supported = RemSound.Sender.ProcessLoopbackCapture.IsSupported;
         Check(supported == OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041),
             "support gate disagrees with the OS build check");
+
+        // Push-mode routing rule: a single whole-device loopback source IS push-eligible under tight
+        // latency, but a single per-app process-loopback source must NEVER be — the push backend opens an
+        // MMDevice by id and a synthetic "proc:<pid>" id makes GetDevice throw ArgumentException. This is
+        // the regression guard for "I only heard foobar with 'all applications' ticked": switching from the
+        // whole-device spec to a per-app spec used to keep the push backend and feed it the proc id.
+        var oneLoopback = new[] { new CaptureSourceSpec("dev-x", CaptureKind.Loopback, "device") };
+        var oneProc = new[] { new CaptureSourceSpec(ProcessLoopbackId.Format(1234), CaptureKind.ProcessLoopback, "app") };
+        Check(RemSound.Sender.CompositeCaptureBackend.IsPushEligibleFor(oneLoopback, tightLatency: true),
+            "a single whole-device loopback source should be push-eligible under tight latency");
+        Check(!RemSound.Sender.CompositeCaptureBackend.IsPushEligibleFor(oneProc, tightLatency: true),
+            "a per-app process-loopback source must never be routed to the push backend");
+        Check(!RemSound.Sender.CompositeCaptureBackend.IsPushEligibleFor(oneLoopback, tightLatency: false),
+            "nothing is push-eligible when tight latency is off");
+
         return $"enumerated {apps.Count} app(s); process-loopback supported={supported}";
     }
 
@@ -322,13 +338,24 @@ internal static class SelfTest
         {
             var capture = new RemSound.Sender.ProcessLoopbackCapture(pid);
             var frames = 0L;
+            Exception? stopError = null;
             capture.DataAvailable += (_, e) => Interlocked.Add(ref frames, e.BytesRecorded);
+            capture.RecordingStopped += (_, e) => stopError = e.Exception;
             capture.StartRecording();
             Thread.Sleep(150);         // let activation + the capture loop run and then be torn down
             capture.Dispose();          // teardown while the capture thread is live — the crash scenario
+
+            // Activation MUST have succeeded. This is the regression guard for the E_NOINTERFACE cast on
+            // IActivateAudioInterfaceAsyncOperation that silently killed every per-app capture: it was
+            // caught and reported via RecordingStopped, so "no crash" alone passed green while the feature
+            // was completely dead. A clean process-loopback teardown carries no exception (a silent process
+            // still activates fine — it just yields silence). Anything surfaced here is a real activation
+            // failure, so fail the gate on it.
+            if (stopError is not null)
+                return $"process-loopback activation failed: {stopError.GetType().Name}: {stopError.Message}";
             cycles++;
         }
-        return $"ran {cycles} start/stop/dispose cycles on pid {pid} with no crash";
+        return $"ran {cycles} start/stop/dispose cycles on pid {pid}; activation clean, no crash";
     }
 
     /// <summary>Soak test for runtime lifecycle transitions — the class of bug that hard-crashed when Ed
@@ -1196,7 +1223,6 @@ internal static class SelfTest
                 SendAudioOn = true,
                 EnableAllPeerShaping = true,
                 WasapiSendMode = "applications",
-                SendAllApplications = false,
             };
             input.SelectedSendApplications.Add("vlc");
             input.SelectedSendApplications.Add("firefox");
@@ -1212,7 +1238,8 @@ internal static class SelfTest
             if (RemSound.Sender.ProcessLoopbackCapture.IsSupported)
             {
                 Check(back.WasapiSendMode == "applications", $"send mode must round-trip (got {back.WasapiSendMode})");
-                Check(!back.SendAllApplications, "the send-all-applications toggle must round-trip");
+                // No send-all check: the main window has no "send all applications" concept any more
+                // (removed 2026-07-16) — Profile.SendAllApplications is service-only and untouched here.
                 Check(back.SelectedSendApplications.Contains("vlc") && back.SelectedSendApplications.Contains("firefox"),
                     "the selected applications must round-trip through the app list");
                 covered += ", send-mode, apps";
@@ -1566,9 +1593,58 @@ internal static class SelfTest
             Check(loaded.Count == 2, $"remembered apps must dedupe case-insensitively (got {loaded.Count})");
             Check(loaded.All(a => a == a.ToLowerInvariant()), "remembered app names must be stored lower-case");
 
+            // Cross-instance read: the list must be MACHINE-WIDE (AppConfig-backed). The old backing was
+            // the per-instance in-memory settings cache, so a second instance — or the next launch of the
+            // app — saw an empty list and every remembered application was silently forgotten on exit.
+            var second = new RemSoundSettingsStore("RemSound");
+            Check(second.LoadRememberedApplications().Count == 2,
+                "a separate store instance must see the same remembered applications (machine-wide persistence)");
+
             store.SaveRememberedApplications(Array.Empty<string>());
             Check(store.LoadRememberedApplications().Count == 0, "clearing must empty the remembered applications list");
-            return "global remembered applications: round-trip, case-insensitive dedupe, and clear";
+            return "global remembered applications: round-trip, case-insensitive dedupe, cross-instance, and clear";
+        }
+        finally { store.SaveRememberedApplications(original); }
+    }
+
+    /// <summary>Pins the two-list semantics Ed specified 2026-07-16 (no send-all option): a TICKED app
+    /// must live in the Active list — even when it isn't running, marked "(not running)", so it can
+    /// always be found and unticked — and must NOT appear in Remembered; an UNTICKED remembered app
+    /// stays in Remembered. Runs the REAL reconcile against a headless main window, seeding the global
+    /// remembered store with fake names (restored afterwards) so nothing on the machine can interfere.</summary>
+    private static string? SendAppListSemantics()
+    {
+        if (!RemSound.Sender.ProcessLoopbackCapture.IsSupported)
+            return Skip("process loopback needs Windows 10 build 19041+");
+
+        const string ticked = "zzremsound_selftest_ticked";      // never a real process name
+        const string unticked = "zzremsound_selftest_unticked";
+        var store = new RemSoundSettingsStore("RemSound");
+        var original = store.LoadRememberedApplications().ToList();
+        try
+        {
+            store.SaveRememberedApplications(original.Concat(new[] { ticked, unticked }).ToList());
+
+            MainForm mf;
+            try { mf = new MainForm(null, RemSound.Core.Profile.NewBlank(), null, null, headless: true); }
+            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+            using (mf)
+            {
+                var p = new Profile { Title = "app list semantics", WasapiSendMode = "applications" };
+                p.SelectedSendApplications.Add(ticked);
+                mf.ApplyThenCaptureForTest(p);
+
+                var (activeRows, activeChecked, rememberedRows) = mf.SnapshotAppListsForTest();
+                Check(activeRows.Contains(ticked, StringComparer.OrdinalIgnoreCase),
+                    "a ticked app that isn't running must still appear in the Active list (so it can be unticked)");
+                Check(activeChecked.Contains(ticked, StringComparer.OrdinalIgnoreCase),
+                    "the ticked app must actually be ticked in the Active list");
+                Check(!rememberedRows.Contains(ticked, StringComparer.OrdinalIgnoreCase),
+                    "a ticked app must NOT appear in the Remembered list");
+                Check(rememberedRows.Contains(unticked, StringComparer.OrdinalIgnoreCase),
+                    "an unticked remembered app must stay in the Remembered list");
+            }
+            return "ticked app: in Active (not running) + out of Remembered; unticked app: stays in Remembered";
         }
         finally { store.SaveRememberedApplications(original); }
     }

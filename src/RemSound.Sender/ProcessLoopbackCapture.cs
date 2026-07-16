@@ -140,14 +140,27 @@ public sealed class ProcessLoopbackCapture : IWaveIn
 
             var handler = new ActivationHandler();
             var iidAudioClient = typeof(IAudioClient).GUID;
-            var hr = ActivateAudioInterfaceAsync(VirtualDevicePath, ref iidAudioClient, ref propVariant, handler, out _);
-            if (hr != 0) Marshal.ThrowExceptionForHR(hr);
+            // The out operation is taken as a raw pointer, NOT the typed interface: the eager RCW cast of a
+            // context-bound operation object is exactly what threw InvalidCastException / E_NOINTERFACE in
+            // the field and killed every specific-app capture ("foobar2000 sends no audio"). We don't need
+            // the operation object — the completion handler carries the result — so just hold and release
+            // the reference.
+            var opPtr = IntPtr.Zero;
+            try
+            {
+                var hr = ActivateAudioInterfaceAsync(VirtualDevicePath, ref iidAudioClient, ref propVariant, handler, out opPtr);
+                if (hr != 0) Marshal.ThrowExceptionForHR(hr);
 
-            if (!handler.Completed.WaitOne(3000))
-                throw new TimeoutException("Process-loopback activation timed out.");
-            if (handler.ActivateResult != 0) Marshal.ThrowExceptionForHR(handler.ActivateResult);
+                if (!handler.Completed.WaitOne(3000))
+                    throw new TimeoutException("Process-loopback activation timed out.");
+                if (handler.ActivateResult != 0) Marshal.ThrowExceptionForHR(handler.ActivateResult);
 
-            audioClient = (IAudioClient)handler.Interface!;
+                audioClient = (IAudioClient)handler.Interface!;
+            }
+            finally
+            {
+                if (opPtr != IntPtr.Zero) Marshal.Release(opPtr);
+            }
         }
         finally
         {
@@ -297,7 +310,7 @@ public sealed class ProcessLoopbackCapture : IWaveIn
         ref Guid riid,
         ref PROPVARIANT activationParams,
         IActivateAudioInterfaceCompletionHandler completionHandler,
-        out IActivateAudioInterfaceAsyncOperation activationOperation);
+        out IntPtr activationOperation);
 
     private enum AUDIOCLIENT_ACTIVATION_TYPE { DEFAULT = 0, PROCESS_LOOPBACK = 1 }
 
