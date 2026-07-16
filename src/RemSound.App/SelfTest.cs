@@ -68,6 +68,7 @@ internal static class SelfTest
         RunStep(results, "Service send host (headless stream + yield)", ServiceSendHostStream);
         RunStep(results, "Service network presence (reachable + shell teardown)", ServiceNetworkPresenceReachable);
         RunStep(results, "Service reachability-gated sending (drop dead peers, re-arm recovered)", ServiceReachabilityGating);
+        RunStep(results, "Service silent-capture self-heal (issue #23 boot re-open ladder)", ServiceSilentCaptureSelfHeal);
         RunStep(results, "Send-app capture change-detection (catch an app the instant it opens)", SendAppCaptureChangeDetection);
         RunStep(results, "Remembered applications list is global + clearable", RememberedApplicationsGlobal);
         RunStep(results, "Send-app lists semantics (ticked → Active, out of Remembered)", SendAppListSemantics);
@@ -1545,6 +1546,25 @@ internal static class SelfTest
         Check(ServiceSendHost.ComputeArmedEndpoints(all, new List<PeerHealth>(), prune).Length == 2, "with no heartbeat data yet, arm the full set");
 
         return "reachable armed; long-unreachable dropped; grace-window kept; recovery re-arms (issues #8/#15)";
+    }
+
+    /// <summary>Issue #23 boot self-heal decision core: a capture that has heard only silence since it
+    /// opened (or whose callbacks froze) gets re-opened, capped at 3 attempts per stint, and the ladder
+    /// ends for good once real audio has been heard. The scenario: at the boot lock screen the machine's
+    /// speakers audibly play (Windows tune, NVDA) but a capture attached in the first seconds of boot
+    /// taps an engine mix the logon-session audio was never wired into — re-attaching lands on the live
+    /// graph.</summary>
+    private static string? ServiceSilentCaptureSelfHeal()
+    {
+        Check(ServiceSendHost.ShouldReopenSilentCapture(stalled: false, everHeardAudio: false, attemptsSoFar: 0),
+            "a capture that has never heard audio must be re-opened");
+        Check(ServiceSendHost.ShouldReopenSilentCapture(stalled: true, everHeardAudio: true, attemptsSoFar: 0),
+            "a stalled capture must be re-opened even after audio has been heard");
+        Check(!ServiceSendHost.ShouldReopenSilentCapture(stalled: false, everHeardAudio: true, attemptsSoFar: 0),
+            "a healthy capture that has heard real audio must be left alone");
+        Check(!ServiceSendHost.ShouldReopenSilentCapture(stalled: false, everHeardAudio: false, attemptsSoFar: 3),
+            "the re-open ladder must stop at the attempt cap");
+        return "silent-since-open and stalled captures re-open; heard-audio healthy captures don't; capped at 3";
     }
 
     /// <summary>The fix for "a saved app that launches later never gets captured": the send engine

@@ -72,26 +72,59 @@ public sealed class ServiceSendHost : IDisposable
     private bool loggedFirstCallback;
     private bool loggedZeroCallbacks;
     private long lastCapturePulseTick;
+    private long pulsePrevCallbacks = -1;
+    // Issue #23 self-heal state. Boot fingerprint (Jonathan's logs + reports): the machine's own
+    // speakers PLAY the Windows tune and NVDA at the boot lock screen, the service's loopback capture
+    // opens fine and callbacks flow — yet the mix it taps carries none of that audio, and peers hear
+    // nothing. Signing in fixes it INSTANTLY with zero change on our side; a capture opened after a
+    // sign-out (audio graph fully live) works at the lock screen. Conclusion: a capture attached in the
+    // first seconds of boot can land on the engine before the logon-session audio path is wired into
+    // it, and Windows fires no device event to tell us — so we RE-OPEN it ourselves. Ladder: while
+    // sending, if the capture has been silent since it opened (or its callbacks freeze), re-open the
+    // capture, at most MaxSilentReopens times per sending stint. The first real audio (peak ≥ 0.001)
+    // ends the ladder for the stint, so a quiet-but-healthy capture is left alone after that; a stint
+    // that IS genuinely silent throughout just gets 3 logged, inaudible re-opens.
+    private bool everHeardAudio;
+    private int silentReopenAttempts;
+    private const int MaxSilentReopens = 3;
 
     // How often the periodic capture pulse is written while the service is sending. 15s keeps a
     // boot-to-login window (typically 30s+) covered by at least two readings without bloating the log.
     private const int CapturePulseIntervalMs = 15_000;
 
+    /// <summary>Pure decision core of the issue-#23 boot self-heal, split out so the self-test can pin
+    /// it: re-open when the capture stalled or has never heard audio this stint, but never more than
+    /// <see cref="MaxSilentReopens"/> times — and never again once real audio has been heard.</summary>
+    internal static bool ShouldReopenSilentCapture(bool stalled, bool everHeardAudio, int attemptsSoFar) =>
+        (stalled || !everHeardAudio) && attemptsSoFar < MaxSilentReopens;
+
     private void WatchCaptureHealth()
     {
-        // Jonathan's follow-up log proved callbacks CAN flow at the lock screen while peers still hear
-        // nothing — callbacks alone can't distinguish real sound from the silence keepalive feeding back.
-        // So while sending, also pulse the loudest pre-encode sample + frames actually sent every 15s:
-        // peak≈0.000 pre-login flipping to real values at login = the captured endpoint mix is genuinely
-        // silent on the lock screen (device/session routing), NOT a service pipeline fault.
+        // Callbacks alone can't distinguish real sound from our own silence keepalive feeding back, so
+        // the pulse also samples the loudest pre-encode sample + frames actually handed to the wire.
         var now = Environment.TickCount64;
         if (now - lastCapturePulseTick >= CapturePulseIntervalMs)
         {
             lastCapturePulseTick = now;
+            var callbacks = sender.CaptureCallbacks;
             var peak = sender.TakeMaxSenderPreEncodePeak();
             var frames = sender.TakeSenderAudioFramesSent();
-            log?.Invoke($"service: capture pulse — callbacks={sender.CaptureCallbacks} bytes={sender.CaptureBytes} peak={peak:F3} framesSent={frames}"
+            if (peak >= 0.001f) everHeardAudio = true;
+            log?.Invoke($"service: capture pulse — callbacks={callbacks} bytes={sender.CaptureBytes} peak={peak:F3} framesSent={frames}"
                 + (peak < 0.001f ? " (capturing SILENCE — nothing audible in the endpoint mix)" : ""));
+
+            var stalled = pulsePrevCallbacks >= 0 && callbacks == pulsePrevCallbacks;
+            pulsePrevCallbacks = callbacks;
+            if (ShouldReopenSilentCapture(stalled, everHeardAudio, silentReopenAttempts))
+            {
+                silentReopenAttempts++;
+                log?.Invoke($"service: capture {(stalled ? "STALLED — callbacks frozen" : "has heard only silence since it opened")} "
+                    + $"while the endpoint may be audibly playing — re-opening capture to re-attach to the live audio graph "
+                    + $"(attempt {silentReopenAttempts}/{MaxSilentReopens}, issue #23 boot self-heal)");
+                var profile = loadProfile();
+                if (profile is not null) { Suspend(); ApplyProfile(profile); }
+                return;
+            }
         }
 
         if (loggedFirstCallback) return;
@@ -160,6 +193,10 @@ public sealed class ServiceSendHost : IDisposable
             loggedFirstCallback = false;
             loggedZeroCallbacks = false;
             lastCapturePulseTick = Environment.TickCount64; // first pulse lands one interval after start
+            pulsePrevCallbacks = -1; // fresh capture instance — the counter restarts, don't misread it as a stall
+            // everHeardAudio / silentReopenAttempts deliberately NOT reset here: the silent-capture
+            // self-heal calls straight back into ApplyProfile, so resetting them here would make the
+            // re-open ladder infinite. They reset per sending STINT in Resume() (and on power resume).
             // Come up on the network too, so the peers can discover and connect to us — not just receive a
             // blind push. Same well-known audio port and the same components the interactive app uses.
             presence.Start(RemPacket.DefaultPort, endpoints);
@@ -190,6 +227,9 @@ public sealed class ServiceSendHost : IDisposable
     {
         var profile = loadProfile();
         if (profile is null) { log?.Invoke("service: no service profile configured — staying idle"); return false; }
+        // Fresh sending stint — refill the silent-capture self-heal ladder (issue #23).
+        everHeardAudio = false;
+        silentReopenAttempts = 0;
         return ApplyProfile(profile);
     }
 
@@ -295,6 +335,9 @@ public sealed class ServiceSendHost : IDisposable
         var profile = loadProfile();
         if (profile is null) return;
         log?.Invoke("service: re-opening capture after power resume");
+        // Wake-from-sleep re-plumbs the audio graph much like boot does — refill the self-heal ladder.
+        everHeardAudio = false;
+        silentReopenAttempts = 0;
         Suspend();
         ApplyProfile(profile);
     }
