@@ -33,9 +33,18 @@ function Invoke-Robocopy([string[]]$rcArgs) {
     if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE): $($rcArgs -join ' ')" }
 }
 
-$soundOnly = @(Get-Process RemSound -ErrorAction SilentlyContinue).Count -gt 0
+# Only a RemSound process running FROM the publish folder locks its binaries. The send-only Windows
+# service runs from its own copy under ProgramData (...\service\bin) and an installed app runs from
+# %LocalAppData%\Programs\RemSound - neither locks publish, so neither should force a sounds-only deploy.
+# (This is the bug that silently skipped binary deploys while the service was running - 2026-07-17.)
+$publishFull = (Resolve-Path -LiteralPath $publish -ErrorAction SilentlyContinue).Path
+$locking = @(Get-Process RemSound -ErrorAction SilentlyContinue | Where-Object {
+    try { $_.Path -and $publishFull -and $_.Path.StartsWith($publishFull, [System.StringComparison]::OrdinalIgnoreCase) }
+    catch { $false }   # .Path throws for the SYSTEM service (access denied) - it's not in publish, so ignore it
+})
+$soundOnly = $locking.Count -gt 0
 if ($soundOnly) {
-    Write-Host "RemSound is running - refreshing SOUNDS only (binaries are locked; close RemSound to update them)." -ForegroundColor Yellow
+    Write-Host "A RemSound is running FROM the publish folder - refreshing SOUNDS only (its binaries are locked; close that copy to update them)." -ForegroundColor Yellow
 }
 else {
     # Never deploy a build to test that hasn't passed the tests. The gate publishes + tests its own

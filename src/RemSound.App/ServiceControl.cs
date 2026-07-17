@@ -1,6 +1,8 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.IO;
 using System.ServiceProcess;
+using RemSound.Core;
 
 namespace RemSound.App;
 
@@ -86,22 +88,98 @@ public static class ServiceControl
 
     // ---- Elevated-side (called from Program.cs when running an --xxx-service verb) ---------------
 
-    /// <summary>Creates the service (auto-start) pointing at this exe with <see cref="RunVerb"/>. Must be
-    /// run elevated. Returns 0 on success. Idempotent-ish: if it already exists, reports success.</summary>
+    /// <summary>Installs the service. Must be run elevated. Copies the program to the service's OWN folder
+    /// (<see cref="ServiceStore.BinDirectory"/>) and registers it to run from THERE — never from the app's
+    /// install folder or a dev working copy — so it can't lock those files or block the app's auto-updater.
+    /// Also grants the machine's authenticated users start/stop rights, so the service can be stopped with
+    /// a plain <c>sc stop</c> (no admin, no app). Returns 0 on success. Idempotent-ish: already-installed
+    /// reports success.</summary>
     public static int DoInstall()
     {
         if (IsInstalled()) return 0;
         var exe = Environment.ProcessPath;
         if (string.IsNullOrEmpty(exe)) return 2;
+        var sourceDir = Path.GetDirectoryName(exe);
+        if (string.IsNullOrEmpty(sourceDir)) return 2;
 
-        var rc = RunSc(BuildCreateArgs(exe));
+        // Copy the whole program (exe + DLLs + runtimes/ + default sounds/) into the service's own bin
+        // folder, so the running service uses ITS copy, not the source it was installed from.
+        try { CopyProgramTo(sourceDir, ServiceStore.BinDirectory); }
+        catch (Exception ex) { ServiceStore.AppendServiceEvent($"install: copy program failed: {ex.GetType().Name}: {ex.Message}"); return 5; }
+
+        var rc = RunSc(BuildCreateArgs(ServiceStore.BinExePath));
         if (rc != 0) return rc;
         // Best-effort description; failure here doesn't fail the install.
         RunSc($"description {ServiceName} \"{Description}\"");
         // Auto-restart on crash: without this a crashed service stays dead until reboot, which defeats
         // an always-on streamer. Restart 5s / 10s / then every 60s; reset the failure counter daily.
         RunSc(BuildFailureArgs());
+        // Let a normal (non-admin) user start/stop it — otherwise stopping needs the app's UAC prompt.
+        GrantUserStartStop();
         return 0;
+    }
+
+    /// <summary>Copies the program files from <paramref name="sourceDir"/> to <paramref name="destDir"/>,
+    /// recursively, but NEVER the user-state folders (logs, profiles, config, recordings) — the service
+    /// keeps its own state in ProgramData. Overwrites so a re-install refreshes the binaries.</summary>
+    internal static void CopyProgramTo(string sourceDir, string destDir)
+    {
+        // Guard against copying a folder onto itself (re-install from the service bin folder).
+        if (string.Equals(Path.GetFullPath(sourceDir).TrimEnd('\\'),
+                          Path.GetFullPath(destDir).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+            return;
+
+        var skipDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "user settings and logs", "logs", "recordings", "profiles", "config" };
+
+        static void CopyDir(string src, string dst, HashSet<string> skip)
+        {
+            Directory.CreateDirectory(dst);
+            foreach (var file in Directory.GetFiles(src))
+                File.Copy(file, Path.Combine(dst, Path.GetFileName(file)), overwrite: true);
+            foreach (var dir in Directory.GetDirectories(src))
+            {
+                var name = Path.GetFileName(dir);
+                if (skip.Contains(name)) continue;
+                CopyDir(dir, Path.Combine(dst, name), skip);
+            }
+        }
+        CopyDir(sourceDir, destDir, skipDirs);
+    }
+
+    /// <summary>Adds an ACE granting Authenticated Users start + stop + query on the service, so the
+    /// service can be stopped/started without administrator rights (a plain <c>sc stop RemSoundService</c>
+    /// or the app's Service menu without a UAC prompt). Reads the current security descriptor and inserts
+    /// the ACE, so nothing already granted is lost. Best-effort — a failure just leaves the default
+    /// (admin-only) rights in place.</summary>
+    private static void GrantUserStartStop()
+    {
+        try
+        {
+            var sddl = RunScCapture($"sdshow {ServiceName}").Trim();
+            var newSddl = AddUserStartStopAce(sddl);
+            if (newSddl is null || string.Equals(newSddl, sddl, StringComparison.Ordinal)) return;
+            var rc = RunSc($"sdset {ServiceName} {newSddl}");
+            if (rc != 0) ServiceStore.AppendServiceEvent($"install: sdset (user start/stop) returned {rc}");
+        }
+        catch (Exception ex) { ServiceStore.AppendServiceEvent($"install: grant user start/stop failed: {ex.GetType().Name}: {ex.Message}"); }
+    }
+
+    /// <summary>The ACE granting Authenticated Users start (RP) + stop (WP) + query status (LC) + read
+    /// control (RC). Public-ish for the self-test.</summary>
+    internal const string UserStartStopAce = "(A;;RPWPLCRC;;;AU)";
+
+    /// <summary>Pure, testable: insert <see cref="UserStartStopAce"/> into a service SDDL's DACL (right
+    /// after "D:" and any DACL flags, ahead of the first ACE and the SACL). Returns null for an SDDL that
+    /// doesn't start with a DACL, and the input unchanged if the ACE is already present.</summary>
+    internal static string? AddUserStartStopAce(string? sddl)
+    {
+        if (string.IsNullOrEmpty(sddl) || !sddl.StartsWith("D:", StringComparison.Ordinal)) return null;
+        if (sddl.Contains(UserStartStopAce, StringComparison.OrdinalIgnoreCase)) return sddl; // already granted
+        var firstAce = sddl.IndexOf('(');
+        var sacl = sddl.IndexOf("S:", StringComparison.Ordinal);
+        var insertAt = firstAce >= 0 && (sacl < 0 || firstAce < sacl) ? firstAce : (sacl >= 0 ? sacl : sddl.Length);
+        return sddl.Insert(insertAt, UserStartStopAce);
     }
 
     /// <summary>The sc.exe "failure" args that make the service auto-restart on a crash. Pure, so a
@@ -115,7 +193,12 @@ public static class ServiceControl
     {
         if (!IsInstalled()) return 0;
         try { DoStop(); } catch { /* best-effort */ }
-        return RunSc($"delete {ServiceName}");
+        var rc = RunSc($"delete {ServiceName}");
+        // Remove the service's own copy of the program (best-effort; a failure — e.g. a file still briefly
+        // locked as the service exits — just leaves a stale bin folder, which a re-install overwrites).
+        try { if (Directory.Exists(ServiceStore.BinDirectory)) Directory.Delete(ServiceStore.BinDirectory, recursive: true); }
+        catch (Exception ex) { ServiceStore.AppendServiceEvent($"uninstall: could not remove bin folder: {ex.GetType().Name}: {ex.Message}"); }
+        return rc;
     }
 
     /// <summary>Starts the service. Must be run elevated. Returns 0 on success.</summary>
@@ -165,6 +248,30 @@ public static class ServiceControl
             return p.HasExited ? p.ExitCode : 3;
         }
         catch { return 4; }
+    }
+
+    /// <summary>Runs sc.exe and returns its stdout (empty on failure). Used to read the service's security
+    /// descriptor (<c>sdshow</c>) before amending it.</summary>
+    private static string RunScCapture(string arguments)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "sc.exe",
+                Arguments = arguments,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            using var p = Process.Start(psi);
+            if (p is null) return "";
+            var stdout = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(20000);
+            return stdout;
+        }
+        catch { return ""; }
     }
 
     /// <summary>Builds the exact sc.exe "create" argument string for a given exe path. Pure and

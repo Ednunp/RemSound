@@ -27,6 +27,15 @@ public static class ServiceStore
     public static string Directory => TestDirectoryOverride ?? Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "RemSound", "service");
 
+    /// <summary>ProgramData\RemSound\service\bin — the service's OWN copy of the program. The service is
+    /// registered to run from here, NOT from wherever it was installed from, so it never locks the app's
+    /// install folder or a developer's working copy (which used to block every rebuild and break the app's
+    /// auto-updater). Install copies the binaries here; uninstall removes them.</summary>
+    public static string BinDirectory => Path.Combine(Directory, "bin");
+
+    /// <summary>Full path to the service's own RemSound.exe under <see cref="BinDirectory"/>.</summary>
+    public static string BinExePath => Path.Combine(BinDirectory, "RemSound.exe");
+
     private static string ProfilePath => Path.Combine(Directory, "service-profile.json");
     private static string SettingsPath => Path.Combine(Directory, "service-settings.json");
 

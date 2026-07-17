@@ -170,6 +170,33 @@ internal static class AppInstaller
             "Press OK to finish. RemSound will now close and reopen from the new install location.",
             "RemSound installed", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
+        // Offer to install the send-only Windows service too (Ed, 2026-07-17). It's a separate, optional
+        // component that needs its own admin (UAC) step, so we ask rather than assume. Declining is fine —
+        // it can be installed any time from the app's Service menu. Never block the app install on it.
+        try
+        {
+            if (!ServiceControl.IsInstalled())
+            {
+                var wantService = MessageBox.Show(owner,
+                    "Do you also want to install the RemSound service?" + Environment.NewLine + Environment.NewLine +
+                    "The service streams this PC's audio to your RemSound peers even when nobody is logged in " +
+                    "(for example at the lock screen after a reboot). It's send-only and steps aside whenever the " +
+                    "RemSound app is open. You can install or remove it later from the app's Service menu.",
+                    "Install the RemSound service?", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (wantService == DialogResult.Yes)
+                {
+                    log?.Invoke("install: user opted to install the service too");
+                    var rc = ServiceControl.RunElevated(ServiceControl.InstallVerb);
+                    MessageBox.Show(owner,
+                        rc == 0
+                            ? "The RemSound service was installed. Configure and start it from the app's Service menu when you want it running."
+                            : "The RemSound service was not installed (the elevation prompt was declined, or it failed). You can try again later from the app's Service menu.",
+                        "RemSound service", MessageBoxButtons.OK, rc == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                }
+            }
+        }
+        catch (Exception ex) { log?.Invoke($"install: optional service step skipped ({ex.GetType().Name}: {ex.Message})"); }
+
         // Hand over cleanly. We can't just launch the installed exe and exit: the single-instance
         // lock would still be held for the instant it takes us to shut down, and the new copy would
         // see "already running". So a tiny batch waits for THIS process to exit (lock released), then

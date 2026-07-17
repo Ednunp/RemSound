@@ -73,6 +73,7 @@ internal static class SelfTest
         RunStep(results, "Remembered applications list is global + clearable", RememberedApplicationsGlobal);
         RunStep(results, "Send-app lists semantics (ticked → Active, out of Remembered)", SendAppListSemantics);
         RunStep(results, "Service registration args", ServiceRegistrationArgs);
+        RunStep(results, "Service self-contained install (own bin + user stop rights)", ServiceSelfContainedInstall);
         RunStep(results, "Recording engine (all formats + source gate + mono)", RecordingEngine);
         RunStep(results, "Recording split tracks (per-peer + own)", RecordingSplitTracks);
         RunStep(results, "Recording churn / soak", RecordingChurn);
@@ -740,6 +741,61 @@ internal static class SelfTest
         Check(!ServiceUpdate.IsNewer(v, null) && !ServiceUpdate.IsNewer(v, "garbage") && !ServiceUpdate.IsNewer(null, "5.3"),
             "missing/unparseable versions must NOT trigger a restart");
         return "sc create + failure args well-formed; self-update comparison loop-safe";
+    }
+
+    /// <summary>The service installs and runs from its OWN copy of the program under ProgramData, never the
+    /// folder it was installed from — so it can't lock the app's install folder / a dev working copy or
+    /// block the auto-updater. And it grants authenticated users start/stop so it's stoppable without admin.
+    /// Tests the pure pieces: the run-from path, the SDDL amendment, and the program-copy exclusions.</summary>
+    private static string? ServiceSelfContainedInstall()
+    {
+        // 1. The service runs from ProgramData\RemSound\service\bin\RemSound.exe, and BuildCreateArgs points there.
+        var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        Check(ServiceStore.BinExePath.StartsWith(programData, StringComparison.OrdinalIgnoreCase)
+              && ServiceStore.BinExePath.EndsWith(@"\bin\RemSound.exe", StringComparison.OrdinalIgnoreCase),
+            $"the service must run from its own ProgramData bin copy (got {ServiceStore.BinExePath})");
+        var createArgs = ServiceControl.BuildCreateArgs(ServiceStore.BinExePath);
+        Check(createArgs.Contains("\\\"" + ServiceStore.BinExePath + "\\\" " + ServiceControl.RunVerb),
+            "the create command must register the ProgramData bin exe as the service binary");
+
+        // 2. AddUserStartStopAce inserts the AU start/stop ACE into the DACL, ahead of the SACL, and is idempotent.
+        const string sample = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCLCSWLOCRRC;;;IU)S:(AU;FA;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;WD)";
+        var amended = ServiceControl.AddUserStartStopAce(sample);
+        Check(amended is not null && amended.Contains(ServiceControl.UserStartStopAce), "the AU start/stop ACE must be added");
+        Check(amended!.IndexOf(ServiceControl.UserStartStopAce, StringComparison.Ordinal) < amended.IndexOf("S:", StringComparison.Ordinal),
+            "the ACE must sit inside the DACL, before the SACL");
+        Check(amended.StartsWith("D:", StringComparison.Ordinal), "the result must still be a valid DACL-first SDDL");
+        Check(ServiceControl.AddUserStartStopAce(amended) == amended, "adding the ACE twice must be a no-op (idempotent)");
+        Check(ServiceControl.AddUserStartStopAce("garbage") is null, "a non-DACL SDDL must be rejected");
+
+        // 3. CopyProgramTo copies program files but NEVER the user-state folders.
+        var root = Path.Combine(Path.GetTempPath(), "remsound-svccopy-" + Guid.NewGuid().ToString("N"));
+        var src = Path.Combine(root, "src");
+        var dst = Path.Combine(root, "dst");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(src, "runtimes", "win-x64", "native"));
+            Directory.CreateDirectory(Path.Combine(src, "default sounds"));
+            Directory.CreateDirectory(Path.Combine(src, "user settings and logs", "logs"));
+            Directory.CreateDirectory(Path.Combine(src, "logs"));
+            File.WriteAllText(Path.Combine(src, "RemSound.exe"), "exe");
+            File.WriteAllText(Path.Combine(src, "RemSound.Sender.dll"), "dll");
+            File.WriteAllText(Path.Combine(src, "runtimes", "win-x64", "native", "opus.dll"), "opus");
+            File.WriteAllText(Path.Combine(src, "default sounds", "connect.wav"), "wav");
+            File.WriteAllText(Path.Combine(src, "user settings and logs", "logs", "secret.log"), "log");
+            File.WriteAllText(Path.Combine(src, "logs", "stray.log"), "log");
+
+            ServiceControl.CopyProgramTo(src, dst);
+
+            Check(File.Exists(Path.Combine(dst, "RemSound.exe")), "the exe must be copied");
+            Check(File.Exists(Path.Combine(dst, "RemSound.Sender.dll")), "sibling DLLs must be copied");
+            Check(File.Exists(Path.Combine(dst, "runtimes", "win-x64", "native", "opus.dll")), "native runtimes must be copied");
+            Check(File.Exists(Path.Combine(dst, "default sounds", "connect.wav")), "bundled default sounds must be copied");
+            Check(!Directory.Exists(Path.Combine(dst, "user settings and logs")), "user settings/logs must NOT be copied");
+            Check(!Directory.Exists(Path.Combine(dst, "logs")), "stray logs folder must NOT be copied");
+            return "runs from own ProgramData bin; AU start/stop ACE added idempotently; program copy excludes user state";
+        }
+        finally { try { Directory.Delete(root, recursive: true); } catch { /* temp */ } }
     }
 
     /// <summary>The service profile is fully isolated from the normal profile machinery: it lives in a
