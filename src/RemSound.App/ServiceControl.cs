@@ -120,7 +120,36 @@ public static class ServiceControl
         RunSc(BuildFailureArgs());
         // Let a normal (non-admin) user start/stop it — otherwise stopping needs the app's UAC prompt.
         GrantUserStartStop();
+        // Let a normal user REPLACE the binaries in the service's bin folder too (once the service is
+        // stopped), so a new build can be dropped in without admin — the auto-updater does this as SYSTEM,
+        // but it also makes "stop the service, copy the new files in, start it" work for a developer/tester
+        // with no UAC. (Trust note: a user-writable folder whose contents run as SYSTEM is the same posture
+        // as the auto-update copy; fine for this app, a hardened build would code-sign instead.)
+        GrantUsersWriteToBin();
         return 0;
+    }
+
+    /// <summary>Grant Authenticated Users Modify rights on the service's bin folder (via icacls), so a
+    /// stopped service's binaries can be refreshed without administrator rights. Best-effort.</summary>
+    private static void GrantUsersWriteToBin()
+    {
+        try
+        {
+            // *S-1-5-11 = Authenticated Users (locale-independent). (OI)(CI) = inherit to files+subfolders; M = Modify.
+            var psi = new ProcessStartInfo
+            {
+                FileName = "icacls.exe",
+                Arguments = $"\"{ServiceStore.BinDirectory}\" /grant \"*S-1-5-11:(OI)(CI)M\" /T /C /Q",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            using var p = Process.Start(psi);
+            p?.WaitForExit(20000);
+            if (p is { ExitCode: not 0 }) ServiceStore.AppendServiceEvent($"install: icacls grant-write on bin returned {p.ExitCode}");
+        }
+        catch (Exception ex) { ServiceStore.AppendServiceEvent($"install: grant-write on bin failed: {ex.GetType().Name}: {ex.Message}"); }
     }
 
     /// <summary>Copies the program files from <paramref name="sourceDir"/> to <paramref name="destDir"/>,

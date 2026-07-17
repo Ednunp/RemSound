@@ -2228,8 +2228,6 @@ public sealed class MainForm : Form
         install.Click += (_, _) => ServiceAction(ServiceControl.InstallVerb, "install", confirm: true);
         var uninstall = new ToolStripMenuItem("&Uninstall service") { AccessibleName = "Uninstall service" };
         uninstall.Click += (_, _) => ServiceAction(ServiceControl.UninstallVerb, "uninstall", confirm: true);
-        var update = new ToolStripMenuItem("Up&date service to this version") { AccessibleName = "Update service to this version — copies the currently-running RemSound build into the service" };
-        update.Click += (_, _) => ServiceAction(ServiceControl.UpdateVerb, "update", confirm: false);
         var start = new ToolStripMenuItem("S&tart service") { AccessibleName = "Start service" };
         start.Click += (_, _) => ServiceAction(ServiceControl.StartVerb, "start", confirm: false);
         var stop = new ToolStripMenuItem("Sto&p service") { AccessibleName = "Stop service" };
@@ -2243,7 +2241,7 @@ public sealed class MainForm : Form
         {
             status, new ToolStripSeparator(),
             configure, new ToolStripSeparator(),
-            install, uninstall, update, start, stop, new ToolStripSeparator(),
+            install, uninstall, start, stop, new ToolStripSeparator(),
             activityLog, updateLog,
         });
         serviceMenu.DropDownOpening += (_, _) =>
@@ -2263,7 +2261,6 @@ public sealed class MainForm : Form
                 var installed = state != ServiceState.NotInstalled;
                 install.Enabled = !installed;
                 uninstall.Enabled = installed;
-                update.Enabled = installed; // refresh the service's copy with the running build (stop→copy→start)
                 start.Enabled = installed && state is ServiceState.Stopped;
                 stop.Enabled = installed && state is ServiceState.Running;
             }
