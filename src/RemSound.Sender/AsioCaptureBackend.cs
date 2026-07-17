@@ -205,8 +205,10 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
             // seconds, which is exactly the pattern the user produces by unticking the last
             // ASIO source and then ticking another one. Keeping the driver open with zero
             // active pairs makes the callback fire harmlessly (zeros) and the next pair
-            // addition takes effect on the very next callback. The driver only truly closes
-            // on Stop() or Dispose(), which fire on sender disabled or app exit.
+            // addition takes effect on the very next callback. Toggling pairs never closes the
+            // driver; the actual close happens elsewhere — Stop()/Dispose() (sender disabled or
+            // app exit) and AudioSender releasing the driver when ASIO is deselected or the user
+            // picks a different driver — all of which are now safe on the apartment thread.
             activeChannelPairIndices = newPairs;
             onDiagnostic?.Invoke($"asio capture: pairs updated to [{string.Join(",", activeChannelPairIndices)}] (no driver restart)");
         }
