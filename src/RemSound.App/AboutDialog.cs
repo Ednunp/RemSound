@@ -20,6 +20,16 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v5.3
+
+        Send a single app, and stream from the lock screen.
+
+        Send one application, not the whole device. In the send list you can now pick a specific program — just your music player, or just your game — and send only its sound, keeping the rest of your PC private. Tick apps that are already running, or name ones to be caught the instant they open.
+
+        Stream before you even sign in. A new, optional RemSound service can send a machine's audio from the Windows lock screen, so you can hear a computer that's switched on but not yet logged in. You install it once from the RemSound installer; it runs quietly in the background, steps aside the moment you open RemSound normally, and updates itself whenever RemSound does.
+
+        Freer with pro (ASIO) sound cards. You can now switch between ASIO drivers while RemSound is open, and RemSound lets go of the sound card when it isn't using it, so another app — a DAW, say — can take over. Plus fixes and polish under the hood.
+
         RemSound v5.2
 
         A stability and polish release — bug fixes and tidy-ups from a deep code review. No new features; it should just feel a bit more solid.
