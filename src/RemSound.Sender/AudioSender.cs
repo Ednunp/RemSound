@@ -358,16 +358,19 @@ public sealed class AudioSender : IDisposable
 
         if (!willUseAsio)
         {
-            // Mode no longer uses ASIO. Ed's approach (2026-07-15): do NOT close the driver here — closing
-            // it is the native call that crashes Audient (the "ASIO -> none kills the app" bug). Instead
-            // keep the persistent instance OPEN but PARKED: rewire its callback to a no-op and drop it to
-            // zero active pairs. That stops it feeding any lane WITHOUT a native close, so no crash. It's
-            // reused instantly if the user turns ASIO back on, and only truly closes on a driver CHANGE
-            // (below) or app exit — where the OS reclaims it anyway.
+            // ASIO is no longer selected (driver set to "(none)", or a WASAPI-only mode). RELEASE the
+            // driver now — close it on its dedicated apartment thread, which is safe as of the AsioApartment
+            // change — so the sound card is FREE for other applications (a DAW, etc.) instead of being held
+            // exclusively for the whole time RemSound is open. This replaces the old "park it open forever"
+            // workaround, which existed only because closing the Audient driver crashed. The composite is
+            // rebuilt without ASIO immediately after (RebuildEngineLocked); the composite borrows but never
+            // disposes this instance, so disposing it here can't pull the rug from a live engine.
             if (persistentAsio is not null)
             {
-                try { persistentAsio.SetCallback(static _ => { }); } catch { /* ignore */ }
-                try { persistentAsio.UpdateSources(Array.Empty<CaptureSourceSpec>()); } catch { /* ignore */ }
+                try { persistentAsio.Dispose(); }
+                catch (Exception ex) { diagnostic?.Invoke($"asio: release-on-idle dispose threw {ex.GetType().Name}: {ex.Message}"); }
+                persistentAsio = null;
+                persistentAsioDriverName = null;
             }
             return;
         }

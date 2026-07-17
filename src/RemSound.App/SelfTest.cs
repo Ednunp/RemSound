@@ -73,6 +73,7 @@ internal static class SelfTest
         RunStep(results, "Remembered applications list is global + clearable", RememberedApplicationsGlobal);
         RunStep(results, "Remembered peers migrate once (cleared list not resurrected)", RememberedPeersMigrationOnce);
         RunStep(results, "Session-start watcher lifecycle (construct/rehook/dispose)", SessionStartWatcher);
+        RunStep(results, "ASIO apartment thread (single STA home for driver calls)", AsioApartmentThread);
         RunStep(results, "Send-app lists semantics (ticked → Active, out of Remembered)", SendAppListSemantics);
         RunStep(results, "Service registration args", ServiceRegistrationArgs);
         RunStep(results, "Service self-contained install (own bin + user stop rights)", ServiceSelfContainedInstall);
@@ -1760,6 +1761,32 @@ internal static class SelfTest
         {
             var c = AppConfig.Load(); c.RememberedPeers = savedPeers; c.RememberedPeersMigrated = savedMigrated; c.Save();
         }
+    }
+
+    /// <summary>The dedicated ASIO control thread (AsioApartment) must run every work item on ONE STA
+    /// thread (not the caller's), propagate exceptions back to the caller, and keep working after a work
+    /// item throws — the guarantees that let the ASIO driver be opened AND closed from a single, pumped
+    /// home thread (the fix for the native crash-on-close).</summary>
+    private static string? AsioApartmentThread()
+    {
+        using var apt = new RemSound.Sender.AsioApartment("asio-selftest");
+        var state = ApartmentState.Unknown;
+        int workThread = 0, workThread2 = 0;
+        apt.Invoke(() => { state = Thread.CurrentThread.GetApartmentState(); workThread = Environment.CurrentManagedThreadId; });
+        apt.Invoke(() => workThread2 = Environment.CurrentManagedThreadId);
+        Check(state == ApartmentState.STA, "the ASIO apartment must run work on an STA thread");
+        Check(workThread == workThread2, "all work must run on the SAME dedicated thread");
+        Check(workThread != Environment.CurrentManagedThreadId, "work must run on the apartment thread, not the caller's");
+
+        var threw = false;
+        try { apt.Invoke(() => throw new InvalidOperationException("boom")); }
+        catch (InvalidOperationException ex) when (ex.Message == "boom") { threw = true; }
+        Check(threw, "an exception on the apartment thread must propagate to the caller");
+
+        var ranAfter = false;
+        apt.Invoke(() => ranAfter = true);
+        Check(ranAfter, "the apartment must keep working after a work item threw");
+        return "runs work on one dedicated STA thread; exceptions propagate; survives a throw";
     }
 
     /// <summary>The instant capture-on-app-open watcher (AudioSessionStartWatcher) must construct, re-hook
