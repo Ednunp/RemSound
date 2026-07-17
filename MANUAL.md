@@ -12,7 +12,7 @@ I built RemSound to solve a specific problem of my own. I do a lot of work on a 
   1. [Quick start](#2-quick-start)
   1. [Profiles](#3-profiles)
   1. [The main window: menu bar and tabs](#4-the-main-window-menu-bar-and-tabs)
-  1. [Menus (File, Record, Options, Help)](#5-menus-file-record-options-help)
+  1. [Menus (File, Record, Options, Service, Help)](#5-menus-file-record-options-service-help)
   1. [Connectivity tab](#6-connectivity-tab)
   1. [Audio inputs and outputs tab](#7-audio-inputs-and-outputs-tab)
   1. [Audio profile tab](#8-audio-profile-tab)
@@ -31,8 +31,9 @@ I built RemSound to solve a specific problem of my own. I do a lot of work on a 
   1. [Recording to a file](#21-recording-to-a-file)
   1. [Logs and diagnostics](#22-logs-and-diagnostics)
   1. [Command-line options](#23-command-line-options)
-  1. [Troubleshooting](#24-troubleshooting)
-  1. [Glossary](#25-glossary)
+  1. [The lock-screen service (send only)](#24-the-lock-screen-service-send-only)
+  1. [Troubleshooting](#25-troubleshooting)
+  1. [Glossary](#26-glossary)
 
 
 ## 1. What RemSound does
@@ -198,7 +199,7 @@ Tab| What it's for
 **Connectivity**|  Connected, discovered and remembered peers. Adding a peer by address. A connection status read-out.
 **Audio inputs and outputs**|  The ASIO driver picker (when an ASIO driver is installed), the Receive audio and Send my audio checkboxes, and all the device lists. Choosing a real driver in the picker brings up the ASIO device lists alongside the ordinary Windows ones; choosing _(none)_ hides them.
 **Volume, pan and EQ for peers** (optional)| Shape each connected peer's sound on its own — their volume, pan (left/right) and EQ. Shown by default; untick “Show the volume, pan and EQ for peers tab” on the Appearance tab of Preferences to hide it. See Volume, pan and EQ for peers tab.
-**Audio profile**|  Codec, packet size, lock-to-audio-clock, latency, continuous auto-tune, buffer smoothness, artefact sound. Split into an _Audio send parameters_ group and an _Audio receive parameters_ group.
+**Audio profile**|  Codec, packet size, latency, continuous auto-tune, buffer smoothness, artefact sound. Split into an _Audio send parameters_ group and an _Audio receive parameters_ group.
 
 ### The system tray icon and its menu
 
@@ -236,7 +237,7 @@ RemSound only ever runs as a single copy. If you try to open it while it's alrea
 
 
 
-## 5. Menus (File, Record, Options, Help)
+## 5. Menus (File, Record, Options, Service, Help)
 
 There are four menus on the main window: **File (Alt+F)** , **Record (Alt+K)** , **Options (Alt+O)** and **Help (Alt+H)**. The Record menu opens with Alt+K rather than Alt+R because Alt+R is already used by the **Receive audio** checkbox on the main window. The menu's title is shown as “Record (Alt+K)” so you can find the shortcut even though there is no K in the word.
 
@@ -279,7 +280,7 @@ Item| Shortcut| What it does
 **Reset the default audio device prompt**|  Alt+O, R| Brings back the “use only the default audio device?” question if you previously ticked “Don't ask me this again” on it. See Following the Windows default audio device.
 **Enable / Disable Realtek ASIO**|  —| Only shown if a Realtek ASIO driver is installed. Lets you reverse the choice RemSound offered about disabling that driver (Realtek's generic ASIO driver tends to grab the wrong device and clash with your screen reader).
 **Install RemSound on this PC …** (or **Uninstall …**)| Alt+O, I (Alt+O, U once installed)| Turns the copy you're running into a properly installed Windows app — on the Start menu, with a desktop shortcut, and listed in Windows’ Installed apps — or removes it again. Once it's installed, this item changes to **Uninstall RemSound from this PC**. See Installing RemSound on your PC.
-**Preferences …**| Ctrl+P, or Alt+O, P| Opens the Preferences dialog, organised into six tabs (move between them with Ctrl+Tab, or the arrow keys when the tab names have focus): **General** — the profiles folder, accept remote volume commands, and UPnP router opening; **Appearance** — **Colour theme (Alt+T)** (Match Windows / Light / Dark; changes only how the window looks, takes effect next launch, no effect on the screen reader), “Show the volume, pan and EQ for peers tab” (on by default; hides the Volume, pan and EQ for peers tab if you untick it), **Tab order (Alt+O)** — a list of the window's tabs with **Move up (Alt+U)** and **Move down (Alt+N)** buttons to reorder them, and two toggles to **enable the Discovered (Alt+D)** and **Remembered (Alt+R)** peer lists on the Connectivity tab (both on by default — untick one to hide that list); **Audio cues** — the cue list and its sounds (see Audio cue sounds); **Startup behaviour** — start minimised / with Windows / with a specific profile; **Update settings** — the update checks and install options; and **Logging** — enable logs, write logs now, and the log-folder housekeeping (see Logs and diagnostics). Esc or the Close button dismisses it.
+**Preferences …**| Ctrl+P, or Alt+O, P| Opens the Preferences dialog, organised into six tabs (move between them with Ctrl+Tab, or the arrow keys when the tab names have focus): **General** — the profiles folder, accept remote volume commands, UPnP router opening, and two buttons to clear the shared address books: **Clear remembered peers list (Alt+P)** and **Clear remembered applications list (Alt+L)** (each asks you to confirm first; these lists are shared across all your profiles, so clearing empties them everywhere); **Appearance** — **Colour theme (Alt+T)** (Match Windows / Light / Dark; changes only how the window looks, takes effect next launch, no effect on the screen reader), “Show the volume, pan and EQ for peers tab” (on by default; hides the Volume, pan and EQ for peers tab if you untick it), **Tab order (Alt+O)** — a list of the window's tabs with **Move up (Alt+U)** and **Move down (Alt+N)** buttons to reorder them, and two toggles to **enable the Discovered (Alt+D)** and **Remembered (Alt+R)** peer lists on the Connectivity tab (both on by default — untick one to hide that list); **Audio cues** — the cue list and its sounds (see Audio cue sounds); **Startup behaviour** — start minimised / with Windows / with a specific profile; **Update settings** — the update checks and install options; and **Logging** — enable logs, write logs now, and the log-folder housekeeping (see Logs and diagnostics). Esc or the Close button dismisses it.
 
 ### Installing RemSound on your PC
 
@@ -321,6 +322,8 @@ Control| Shortcut| What it does
 **Tab order**|  Alt+O| A list of the main window's tabs. Pick one, then use **Move up (Alt+U)** and **Move down (Alt+N)** to change the order the tabs appear in — which also sets their Ctrl+number (Ctrl+1 is always whichever tab is first). All four tabs are listed even when the volume/pan/EQ tab is hidden.
 **Enable the discovered peers list on the Connectivity tab**|  Alt+D| On by default. Untick to hide the Discovered peers list from the Connectivity tab.
 **Enable the remembered peers list on the Connectivity tab**|  Alt+R| On by default. Untick to hide the Remembered peers list from the Connectivity tab.
+
+The **Service** menu (Alt+S) installs and controls the optional lock-screen service that keeps sending your audio when you are not at the machine. See that section for the details.
 
 ## 6. Connectivity tab
 
@@ -403,6 +406,24 @@ Tick any combination across the three lists. RemSound mixes them together into o
 
 > **If your microphone sends silence:** Windows can block desktop apps from using the microphone, and when it does, RemSound's mic capture still switches on but only sends silence — so you look like you're sending, but the other person hears nothing. RemSound watches for this: when you tick a microphone in **WASAPI audio inputs to send** while Windows is blocking it — or load a profile that already has one ticked — a message pops up telling you, with the exact two settings to turn on — open Windows Settings → Privacy & security → Microphone, then turn on both _Microphone access_ and _Let desktop apps access your microphone_. The check also catches the sneakier kinds of block: one aimed at RemSound alone in that same Settings page's per-app list, and one set by an administrator or workplace policy — that last kind doesn't show up as a switch you can flip, so if the warning says a policy is involved, it needs whoever manages the computer to lift it. (ASIO inputs aren't affected, because ASIO talks straight to the hardware and bypasses that Windows privacy gate.) It doesn't change anything you receive — only sending your own mic.
 
+### Sending specific applications instead of whole devices
+
+By default the WASAPI output list sends _everything_ playing on a sound device. If you'd rather send only **one particular program** — say foobar2000 or a browser — and nothing else, use the **How to send WASAPI audio (Alt+6)** chooser, just below _Send my audio_. It has two settings:
+
+  * **Send whole audio devices** (the default) — the ordinary behaviour, using the “WASAPI audio outputs to send” list described above.
+  * **Send specific applications** — swaps that device list for two application lists. (This needs Windows 10 version 2004 or newer; on older Windows the chooser is hidden and only whole-device sending is available.)
+
+
+
+When you choose _Send specific applications_ , two lists appear:
+
+List| What it holds
+---|---
+**Currently active applications (Alt+8)**|  Every program making sound right now. Tick one and only that program's audio is captured and sent — its own private stream, separate from everything else on the machine. Tick several to send several. A program you've ticked that isn't running at the moment still shows here marked _(not running)_ , so you can always find it and untick it; it starts being sent again the instant it reopens.
+**Remembered applications (Alt+9)**|  Your saved “apps I send” address book — shared across all your profiles, like the remembered peers list. Tick a program here and it moves up to the active list the moment it's running (and is captured from its very first sound). Untick a program in either list and it drops back here.
+
+Because sending is by program _name_ , your choice survives that program being closed and reopened, or even the computer restarting. There is deliberately no “send everything” option in applications mode — if you want the whole machine's sound, that's what _Send whole audio devices_ is for.
+
 ## 8. Audio profile tab
 
 Everything that shapes the trade-off between sound quality and delay lives here. The first control on the tab is the _priority mode_ checkbox — it sits on its own at the top because it has the biggest single effect on how the audio feels in the first few seconds. Below it are two groups: **Audio send parameters** first, then **Audio receive parameters**.
@@ -429,7 +450,8 @@ Control| Shortcut| What it does
 ---|---|---
 **Audio codec**|  Alt+C| The codec is the method RemSound uses to package the sound before sending it. Three choices: PCM 48k 24-bit (uncompressed), Opus broadcast quality (loss tolerant), or Opus live latency (for jamming and monitoring). See codec choice.
 **Packet size**|  Alt+P|  _Standard_ (the default) or _Small_ (for a local network only). Smaller packets save a couple of milliseconds of delay on the sending side, but they double how many packets are sent.
-**Lock to audio clock**|  Alt+D| A timing setting on the sending side. It ties the sending of packets to the sound device's own hardware clock, which removes a little jitter (jitter means uneven packet timing). Brief clicks are possible if the connection can't keep up. The label changes depending on whether ASIO is in use, so it always describes what it does in your setup.
+
+RemSound always **locks its sending timing to the sound device's own hardware clock** — this used to be a “Lock to audio clock” checkbox, but it is now always on, because turning it off only ever added delay. There is nothing to set.
 
 ### Audio receive parameters
 
@@ -694,12 +716,11 @@ If you connect to someone whose password is different from yours, RemSound shows
 
 ## 14. Latency and audio quality
 
-Latency is the small delay between sound leaving one computer and arriving at the other. Five controls together shape the trade-off between latency and sound quality, all on the Audio profile tab:
+Latency is the small delay between sound leaving one computer and arriving at the other. Four controls together shape the trade-off between latency and sound quality, all on the Audio profile tab:
 
   * **Audio latency in milliseconds (Alt+L)** — the main target for how much sound the receiving side keeps in reserve.
   * **Buffer smoothness (Alt+B)** — how hard the receiving side works to protect against sudden jitter.
   * **Packet size (Alt+P)** — Standard or Small. Small packets shave a couple of milliseconds off the sending delay, but double how many packets are sent.
-  * **Lock to audio clock (Alt+D)** — ties the timing of packets to the sound device's hardware clock, removing wobble caused by Windows.
   * **Continuous auto-tune** — lets the receiving side choose the latency target for you, re-checking every few seconds.
 
 
@@ -747,16 +768,11 @@ Small (local network only)| Halves how much sound each packet carries. Saves up 
 
 The saving is small — at most a few milliseconds end to end. Small packets are useful when you and your collaborator are on the same local network and want to chase every last millisecond. For any internet connection it's a false economy, because doubling how many packets are sent also doubles the chance of running into jitter at the wrong moment, which you hear as clicks.
 
-### Lock to audio clock
+### Locking to the audio clock (automatic)
 
-The **Lock to audio clock** checkbox ties RemSound's sending timing to the sound device's own hardware clock, instead of letting Windows decide the pace. It's off by default. The label tells you what it does in your particular setup:
+RemSound always ties its sending timing to the sound device's own hardware clock, instead of letting Windows decide the pace. This used to be a **Lock to audio clock** checkbox that was off by default; it is now always on and there is nothing to set, because turning it off only ever added delay. On a WASAPI-only setup the sender takes its timing from the WASAPI capture; when an ASIO driver is also in use, both paths tighten independently.
 
-Your setup| What “Lock to audio clock” does
----|---
-No ASIO driver chosen (WASAPI only)| The sender takes its timing from the WASAPI capture instead of from Windows' general timer. Tightens the sending delay.
-An ASIO driver chosen (WASAPI and ASIO both running)| Both paths tighten independently. Brief clicks are possible on either path if the connection can't keep up.
-
-> **Why you'd use it:** Windows' general timer can wake the audio loop with up to about 6 ms of wobble, even at top priority. At target latencies under about 15 ms, that wobble shows up as clicks. Locking to the audio clock takes Windows' timer out of the picture — the sound device itself drives the timing.
+> **Why it matters:** Windows' general timer can wake the audio loop with up to about 6 ms of wobble, even at top priority. At target latencies under about 15 ms, that wobble shows up as clicks. Locking to the audio clock takes Windows' timer out of the picture — the sound device itself drives the timing.
 
 ### Continuous auto-tune
 
@@ -825,6 +841,9 @@ Alt+2| Focus ASIO audio inputs to send
 Alt+3| Focus WASAPI outputs for received audio
 Alt+4| Focus WASAPI audio outputs to send
 Alt+5| Focus WASAPI audio inputs to send
+Alt+6| Focus the “How to send WASAPI audio” chooser (whole devices vs specific applications)
+Alt+8| (Applications mode) Focus the Currently active applications list
+Alt+9| (Applications mode) Focus the Remembered applications list
 Alt+V| Focus the volume slider
 Alt+S| Toggle Send my audio
 
@@ -837,7 +856,6 @@ Key| Action
 Alt+U| Toggle Use CPU and Windows performance settings in high priority mode (for this profile)
 Alt+C| Focus Audio codec
 Alt+P| Focus Packet size
-Alt+D| Toggle Lock to audio clock
 Alt+L| Focus the latency control — the ASIO path when an ASIO driver is chosen, otherwise the single Audio latency control
 Alt+T| Toggle continuous auto-tune — the ASIO path when an ASIO driver is chosen, otherwise the single Continuous auto-tune toggle
 Alt+W| (Only when an ASIO driver is chosen.) Focus the WASAPI-path latency control
@@ -1321,7 +1339,41 @@ Option| What it does
 
 A common support sequence: ask the person to run `--diagnostics` and send you the file, then have them run `--selftest` — if that says PASS, capture, encoding and the audio path are all sound on their machine and the problem is somewhere in the connection between you.
 
-## 24. Troubleshooting
+## 24. The lock-screen service (send only)
+
+Normally RemSound runs as an app you open and close. The **lock-screen service** is a second, silent way to run it: a Windows service that keeps _sending_ this machine's audio to your peers even when the screen is locked, when you have signed out, and when nobody is logged in at all (for example after an unattended restart). It is useful when a machine needs to stream its audio continuously without someone sitting at it.
+
+It is deliberately limited:
+
+  * **Send only.** The service captures and sends; it never plays received audio. (Windows silences audio output when no one is logged in, so receiving on the lock screen is not possible.) Use the normal app for listening.
+  * **WASAPI only.** ASIO devices cannot be used by a Windows service. If you need ASIO, use the normal app.
+  * **It gets out of your way.** Whenever you open the normal RemSound app, the service automatically stops sending and hands over to you — so you are always in control while you are at the machine. When you close the app (or it crashes, or you sign out), the service takes over again a couple of seconds later, re-reading its profile so any changes you made are picked up. You never need to stop it by hand to make a change.
+
+
+
+### Setting it up
+
+Everything lives in the **Service** menu on the menu bar:
+
+  1. **Configure service profile …** — opens a small window with two tabs (Connectivity and Audio send) where you choose who to send to (plus a password) and what to send. There is no “send my audio” switch because the service always sends, and there is no audio-quality tab to fiddle with: the service always uses the settings that work best for live streaming (the Opus live-latency codec, small packets, locked to the audio clock), so it just sounds right. This is a separate profile from your normal ones and does not appear in the usual profile list. The **Additional options** button lets you turn the connect/disconnect sounds and the service's own log on or off.
+  2. **Install service** — registers it with Windows so it starts automatically at every boot. Windows asks for administrator permission (one prompt). Do this once. (When you first install RemSound on a PC, the installer also offers to set the service up for you, so you may have done this already.)
+  3. **Start service** / **Stop service** — run or halt it now without waiting for a reboot.
+  4. **Uninstall service** — removes it entirely.
+
+
+
+The top of the Service menu always shows the current state: not installed, installed and running, or installed and stopped.
+
+### Good to know
+
+  * The service sends to the exact peer addresses you list in its profile (a computer on your network, or a reachable address across the internet). Automatic peer discovery and hole-punching are handled by the normal app, not the service.
+  * Because the service runs even when you are not logged in, it sends from the system account. If Windows Firewall ever prompts about RemSound, allow it so the audio can get out.
+  * When RemSound updates itself, the service updates itself too, automatically — it notices the newer version, copies it in and restarts onto it on its own, with no prompt and nothing for you to do. (This happens on the service's own schedule shortly after the app updates; nothing breaks in the meantime.)
+  * If two computers should each stream to the other unattended, install the service on both.
+
+
+
+## 25. Troubleshooting
 
 ### I don't hear my friend
 
@@ -1412,7 +1464,7 @@ The most common reasons:
 
 If none of those apply, just fall back to Tailscale — it works without involving the router at all.
 
-## 25. Glossary
+## 26. Glossary
 
 Term| Meaning
 ---|---
@@ -1436,7 +1488,7 @@ Carrier-grade NAT| An extra layer of NAT that some internet providers (especiall
 Auto-tune| RemSound automatically adjusting the latency target based on how evenly packets are arriving. Off by default; turn it on with the Continuous auto-tune checkbox on the Audio profile tab.
 Profile| A saved snapshot of every RemSound setting and choice — device ticks, send / receive states, codec, latency, peers, ASIO driver choice, the lot. (Keyboard shortcuts are the exception — they're shared across all profiles, not saved per profile.) Stored as one settings file. You pick one at startup, and can switch with File → Open profile.
 New profile| An entry in the startup profile picker that begins a session with all the defaults — nothing ticked, no peers, no saved name. A clean starting point for a new profile, or for a one-off session you don't plan to save.
-Lock to audio clock| A sending-side timing mode that takes its timing straight from the sound device's hardware clock instead of from Windows. Removes a few milliseconds of wobble at tight latency targets. Off by default. Set with the checkbox of the same name on the Audio profile tab.
+Lock to audio clock| A sending-side timing mode that takes its timing straight from the sound device's hardware clock instead of from Windows. Removes a few milliseconds of wobble at tight latency targets. RemSound now does this always — it used to be a checkbox on the Audio profile tab, but it is on permanently and no longer a setting.
 Concealment| A receiving-side feature that fills brief gaps in the playback reserve with a small noise burst (the default) or an obvious click. You choose which on the Audio profile tab, in the _Artefact sound type_ list. Opus also has its own repair of lost packets on top of this.
 Remote control| A RemSound feature that lets one connected peer adjust another peer's listening volume (or toggle their receive mute) using global hotkeys. There are two sets of commands: one adjusts the receiver's RemSound volume slider, the other adjusts the receiver's Windows volume. Off by default on both ends; the receiver opts in via “Accept remote volume commands from peers” in the Preferences dialog (Ctrl+P), and the sender sets up hotkeys in the Keyboard shortcuts dialog (Ctrl+K). Designed for the “I'm NVDA-Remote'd into my desktop and want to nudge the laptop's volume” case. See Remote control.
 
