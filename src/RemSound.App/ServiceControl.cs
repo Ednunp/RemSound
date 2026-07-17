@@ -135,19 +135,24 @@ public static class ServiceControl
     {
         try
         {
-            // *S-1-5-11 = Authenticated Users (locale-independent). (OI)(CI) = inherit to files+subfolders; M = Modify.
+            // *S-1-5-32-545 = BUILTIN\Users (locale-independent) — the group the interactive user is in.
+            // (OI)(CI) = inherit to files + subfolders; (M) = Modify. /T applies to the existing contents too
+            // (the bin was just populated), /C keeps going past any single-file error. Capture stderr so a
+            // real failure is logged rather than swallowed.
             var psi = new ProcessStartInfo
             {
                 FileName = "icacls.exe",
-                Arguments = $"\"{ServiceStore.BinDirectory}\" /grant \"*S-1-5-11:(OI)(CI)M\" /T /C /Q",
+                Arguments = $"\"{ServiceStore.BinDirectory}\" /grant \"*S-1-5-32-545:(OI)(CI)(M)\" /T /C",
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             };
             using var p = Process.Start(psi);
+            var err = p?.StandardError.ReadToEnd();
+            var outp = p?.StandardOutput.ReadToEnd();
             p?.WaitForExit(20000);
-            if (p is { ExitCode: not 0 }) ServiceStore.AppendServiceEvent($"install: icacls grant-write on bin returned {p.ExitCode}");
+            if (p is { ExitCode: not 0 }) ServiceStore.AppendServiceEvent($"install: icacls grant-write on bin returned {p.ExitCode}: {err}{outp}");
         }
         catch (Exception ex) { ServiceStore.AppendServiceEvent($"install: grant-write on bin failed: {ex.GetType().Name}: {ex.Message}"); }
     }
