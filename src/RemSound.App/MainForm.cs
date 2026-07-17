@@ -2380,14 +2380,32 @@ public sealed class MainForm : Form
         }
         logFile.Event($"service: {label} requested (elevated)");
         ServiceStore.AppendServiceEvent($"{label} requested (elevated)");
-        var rc = ServiceControl.RunElevated(verb);
-        var outcome = rc == 0 ? "success" : rc == -1 ? "cancelled/declined" : "failed";
+        // Run the elevated helper OFF the UI thread. A slow or stuck helper must never freeze the window or
+        // its audio — that was the install hang: the UI thread sat in WaitForExit while the pipe-deadlocked
+        // installer never returned, so the app locked up and streaming died. The UI stays live; we report
+        // the outcome (on the UI thread) when the helper comes back or the wait times out.
+        Task.Run(() =>
+        {
+            var rc = ServiceControl.RunElevated(verb);
+            if (IsDisposed) return;
+            try { BeginInvoke(new Action(() => ReportServiceActionResult(label, rc))); } catch { /* window closing */ }
+        });
+    }
+
+    private void ReportServiceActionResult(string label, int rc)
+    {
+        var outcome = rc == 0 ? "success"
+            : rc == -1 ? "cancelled/declined"
+            : rc == ServiceControl.ElevatedTimedOut ? "timed out"
+            : "failed";
         logFile.Event($"service: {label} finished with code {rc} ({outcome})");
         ServiceStore.AppendServiceEvent($"{label} finished: code {rc} ({outcome})");
         if (rc == 0)
             MessageBox.Show(this, $"Service {label} succeeded.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
         else if (rc == -1)
             MessageBox.Show(this, $"Service {label} was cancelled, or administrator rights were declined.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        else if (rc == ServiceControl.ElevatedTimedOut)
+            MessageBox.Show(this, $"Service {label} is taking longer than expected and hasn't finished yet. It may still complete on its own — check the Service menu status in a moment.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         else
             MessageBox.Show(this, $"Service {label} failed (code {rc}).", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }

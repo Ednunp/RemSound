@@ -64,6 +64,7 @@ internal static class SelfTest
         RunStep(results, "Lifecycle churn (modes, sources, pan/EQ, send/receive)", LifecycleChurn);
         RunStep(results, "Service app-yield token", ServiceInteractivePresence);
         RunStep(results, "Service sender parity (crypto + Opus frame)", ServiceSenderParity);
+        RunStep(results, "Elevated helper: no pipe deadlock on flooded output", ServiceProcessCaptureNoDeadlock);
         RunStep(results, "Default-output follower (service follows Windows default)", DefaultOutputFollower);
         RunStep(results, "Default follower exclusivity (locks out specific cards)", DefaultFollowerExclusivity);
         RunStep(results, "Service profile isolation (location + hidden from pickers)", ServiceProfileIsolation);
@@ -942,6 +943,20 @@ internal static class SelfTest
         Check(specs.Any(s => s.Kind == CaptureKind.Loopback && s.DeviceId == expected),
             "the follower must resolve to a loopback spec on the current Windows default output");
         return "follower flagged + sentinel shared with the app; service resolves it to the live default render endpoint";
+    }
+
+    /// <summary>Reproduces the install-hang condition and proves it's fixed: a child that floods BOTH
+    /// stdout and stderr far past the ~4 KB pipe buffer (a big directory listing plus a failing dir). The
+    /// old "read stderr to end, then stdout" order deadlocked exactly here (icacls /T over the 100-file
+    /// service bin); RunProcessCaptured drains both pipes concurrently and must return promptly, in full.</summary>
+    private static string? ServiceProcessCaptureNoDeadlock()
+    {
+        var r = ServiceControl.RunProcessCaptured("cmd.exe",
+            "/c dir \"%SystemRoot%\\System32\" & dir \"%SystemRoot%\\__no_such_dir_remsound_test__\"", 20000);
+        Check(r.Started, "the test child process must launch");
+        Check(r.Exited, "RunProcessCaptured must NOT hang on a child whose output overflows the pipe buffer");
+        Check(r.StdOut.Length > 4096, $"the full flooded stdout must be captured, past the pipe buffer (got {r.StdOut.Length} bytes)");
+        return $"drained {r.StdOut.Length} bytes stdout + {r.StdErr.Length} stderr concurrently, no deadlock";
     }
 
     private static string? ServiceSenderParity()

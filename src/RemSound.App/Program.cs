@@ -83,8 +83,13 @@ internal static class Program
         // normal launch never touches that assembly.
         if (args.Length > 0 && IsServiceInvocation(args))
         {
-            Environment.ExitCode = ServiceEntry.Dispatch(args);
-            return;
+            var serviceRc = ServiceEntry.Dispatch(args);
+            // Terminate decisively. These verbs run in an elevated helper the app is waiting on; if any
+            // library it touched left a non-background thread alive, a plain return would leave the process
+            // lingering and the app blocked on it (part of the install-hang, 2026-07-17). Environment.Exit
+            // guarantees the helper dies once its one-shot work is done. (--run-service returns here only
+            // after the SCM has stopped the service, so exiting then is correct too.)
+            Environment.Exit(serviceRc);
         }
 
         // --config-dir <folder> (test / portable isolation): redirect ALL user state - config,

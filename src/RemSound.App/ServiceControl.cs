@@ -62,8 +62,20 @@ public static class ServiceControl
 
     // ---- UI-side (unprivileged): re-launch self elevated to do the work --------------------------
 
-    /// <summary>Re-launch this exe elevated with <paramref name="verb"/>, wait, and return its exit code
-    /// (0 = success). Returns -1 if the user declined the UAC prompt or elevation failed.</summary>
+    /// <summary>Returned by <see cref="RunElevated"/> when the elevated helper didn't finish within the
+    /// time limit (it hung, or the user left the UAC prompt sitting). Distinct from -1 (declined/failed).</summary>
+    public const int ElevatedTimedOut = -2;
+
+    /// <summary>How long to wait for an elevated one-shot verb to finish. Generous: it covers the UAC
+    /// prompt, the file copy into the service bin, and the SCM calls. If it's exceeded, the helper is
+    /// assumed stuck and we stop waiting rather than block the caller forever.</summary>
+    private const int ElevatedTimeoutMs = 120000;
+
+    /// <summary>Re-launch this exe elevated with <paramref name="verb"/>, wait (bounded), and return its
+    /// exit code (0 = success). Returns -1 if the user declined the UAC prompt or elevation failed, or
+    /// <see cref="ElevatedTimedOut"/> if it didn't finish in time. NEVER waits forever — a stuck helper
+    /// must not be able to freeze the caller (that was the install-hang, 2026-07-17). Best called off the
+    /// UI thread so even the bounded wait can't stall the window or its audio.</summary>
     public static int RunElevated(string verb)
     {
         var exe = Environment.ProcessPath;
@@ -80,7 +92,7 @@ public static class ServiceControl
         {
             using var p = Process.Start(psi);
             if (p is null) return -1;
-            p.WaitForExit();
+            if (!p.WaitForExit(ElevatedTimeoutMs)) return ElevatedTimedOut;
             return p.ExitCode;
         }
         catch (Win32Exception) { return -1; } // user cancelled the UAC prompt
@@ -144,28 +156,16 @@ public static class ServiceControl
     /// stopped service's binaries can be refreshed without administrator rights. Best-effort.</summary>
     private static void GrantUsersWriteToBin()
     {
-        try
-        {
-            // Grant the installing user (see InstallingUserSid) Modify. (OI)(CI) = inherit to files +
-            // subfolders; (M) = Modify. /T applies to the existing contents too (the bin was just
-            // populated), /C keeps going past any single-file error. Capture stderr so a real failure is
-            // logged rather than swallowed.
-            var psi = new ProcessStartInfo
-            {
-                FileName = "icacls.exe",
-                Arguments = $"\"{ServiceStore.BinDirectory}\" /grant \"*{InstallingUserSid()}:(OI)(CI)(M)\" /T /C",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            };
-            using var p = Process.Start(psi);
-            var err = p?.StandardError.ReadToEnd();
-            var outp = p?.StandardOutput.ReadToEnd();
-            p?.WaitForExit(20000);
-            if (p is { ExitCode: not 0 }) ServiceStore.AppendServiceEvent($"install: icacls grant-write on bin returned {p.ExitCode}: {err}{outp}");
-        }
-        catch (Exception ex) { ServiceStore.AppendServiceEvent($"install: grant-write on bin failed: {ex.GetType().Name}: {ex.Message}"); }
+        // Grant the installing user (see InstallingUserSid) Modify. (OI)(CI) = inherit to files +
+        // subfolders; (M) = Modify. /T applies to the existing contents too (the bin was just populated),
+        // /C keeps going past any single-file error. Runs through RunProcessCaptured, which drains both
+        // pipes concurrently — icacls /T over 100+ files emits far more than the pipe buffer holds, and the
+        // old read-stderr-then-stdout order deadlocked here (the install hang Ed hit, 2026-07-17).
+        var r = RunProcessCaptured("icacls.exe",
+            $"\"{ServiceStore.BinDirectory}\" /grant \"*{InstallingUserSid()}:(OI)(CI)(M)\" /T /C", 30000);
+        if (!r.Started) ServiceStore.AppendServiceEvent("install: grant-write on bin failed to launch icacls");
+        else if (!r.Exited) ServiceStore.AppendServiceEvent("install: grant-write on bin timed out (icacls killed)");
+        else if (r.ExitCode != 0) ServiceStore.AppendServiceEvent($"install: icacls grant-write on bin returned {r.ExitCode}: {r.StdErr}{r.StdOut}");
     }
 
     /// <summary>Copies the program files from <paramref name="sourceDir"/> to <paramref name="destDir"/>,
@@ -281,34 +281,30 @@ public static class ServiceControl
 
     private static int RunSc(string arguments)
     {
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "sc.exe",
-                Arguments = arguments,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            };
-            using var p = Process.Start(psi);
-            if (p is null) return 2;
-            p.WaitForExit(20000);
-            return p.HasExited ? p.ExitCode : 3;
-        }
-        catch { return 4; }
+        var r = RunProcessCaptured("sc.exe", arguments, 20000);
+        return r.Started ? (r.Exited ? r.ExitCode : 3) : 4;
     }
 
     /// <summary>Runs sc.exe and returns its stdout (empty on failure). Used to read the service's security
     /// descriptor (<c>sdshow</c>) before amending it.</summary>
-    private static string RunScCapture(string arguments)
+    private static string RunScCapture(string arguments) => RunProcessCaptured("sc.exe", arguments, 20000).StdOut;
+
+    internal readonly record struct ProcResult(bool Started, bool Exited, int ExitCode, string StdOut, string StdErr);
+
+    /// <summary>Run a console tool and capture its output SAFELY. Both stdout and stderr are drained
+    /// CONCURRENTLY (async) while the process runs, then bounded by <paramref name="timeoutMs"/>. This is
+    /// the fix for a real hang: reading one pipe to end before the other deadlocks whenever the child's
+    /// output exceeds the ~4 KB pipe buffer — e.g. <c>icacls /T</c> over the service bin's 100+ files
+    /// blocked writing stdout while we blocked reading stderr, hanging the elevated installer forever (and
+    /// with it the app that was waiting on it). On timeout the child is killed (whole tree) so nothing is
+    /// left stuck. Never throws.</summary>
+    internal static ProcResult RunProcessCaptured(string fileName, string arguments, int timeoutMs)
     {
         try
         {
             var psi = new ProcessStartInfo
             {
-                FileName = "sc.exe",
+                FileName = fileName,
                 Arguments = arguments,
                 UseShellExecute = false,
                 CreateNoWindow = true,
@@ -316,12 +312,22 @@ public static class ServiceControl
                 RedirectStandardError = true,
             };
             using var p = Process.Start(psi);
-            if (p is null) return "";
-            var stdout = p.StandardOutput.ReadToEnd();
-            p.WaitForExit(20000);
-            return stdout;
+            if (p is null) return new ProcResult(false, false, -1, "", "");
+            var outTask = p.StandardOutput.ReadToEndAsync();
+            var errTask = p.StandardError.ReadToEndAsync();
+            if (!p.WaitForExit(timeoutMs))
+            {
+                try { p.Kill(entireProcessTree: true); } catch { /* best-effort */ }
+                return new ProcResult(true, false, -1, Drain(outTask), Drain(errTask));
+            }
+            return new ProcResult(true, true, p.ExitCode, Drain(outTask), Drain(errTask));
         }
-        catch { return ""; }
+        catch { return new ProcResult(false, false, -1, "", ""); }
+
+        static string Drain(Task<string> t)
+        {
+            try { return t.Wait(2000) ? t.Result : ""; } catch { return ""; }
+        }
     }
 
     /// <summary>Builds the exact sc.exe "create" argument string for a given exe path. Pure and
