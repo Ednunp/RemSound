@@ -348,6 +348,14 @@ public sealed class ServiceSendHost : IDisposable
             // blind push. Same well-known audio port and the same components the interactive app uses.
             presence.Start(RemPacket.DefaultPort, endpoints);
             running = true;
+            // Un-throttle the process while streaming. A headless Windows SERVICE is treated by the OS as a
+            // background process and gets aggressively downclocked (EcoQoS), migrated onto efficiency cores
+            // and given a coarse scheduler quantum — which starves the send loop and makes the stream
+            // CRACKLE even though capture and the network look clean. The interactive app only does this on
+            // the user's opt-in "high priority" toggle, but the service has no foreground/battery use case
+            // (it exists solely to stream), so it always engages while sending. Idempotent; released in
+            // Suspend. This is the fix for "the service sounds hideous vs the main app".
+            try { PerformanceMode.Apply(true, msg => log?.Invoke($"service: {msg}")); } catch { /* best-effort */ }
             log?.Invoke($"service: streaming \"{profile.Title}\" — {specs.Count} source(s) to {endpoints.Count} peer(s)");
             return true;
         }
@@ -366,6 +374,7 @@ public sealed class ServiceSendHost : IDisposable
             SwapMeterDevices(Array.Empty<CaptureSourceSpec>()); // release the endpoint-meter readers
             try { sessionKick?.Dispose(); } catch { /* ignore */ }
             sessionKick = null;
+            try { PerformanceMode.Apply(false, msg => log?.Invoke($"service: {msg}")); } catch { /* best-effort */ }
             running = false;
             log?.Invoke("service: suspended (interactive app present)");
         }
@@ -607,6 +616,7 @@ public sealed class ServiceSendHost : IDisposable
         try { deviceNotifier?.Dispose(); } catch { } deviceNotifier = null;
         try { sessionKick?.Dispose(); } catch { } sessionKick = null;
         SwapMeterDevices(Array.Empty<CaptureSourceSpec>());
+        try { PerformanceMode.Apply(false); } catch { }
         try { presence.Dispose(); } catch { }
         try { sender.Stop(); } catch { }
         try { sender.Dispose(); } catch { }
