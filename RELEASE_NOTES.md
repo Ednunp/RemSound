@@ -1,47 +1,37 @@
-# RemSound v5.3
+# RemSound v5.4
 
-Send a single application's sound, and stream a machine from its lock screen. Plus freer use of pro (ASIO) sound cards.
+Service polish and an important install fix. If you use the lock-screen service, this is a worthwhile update; if you don't, the "Use Windows default output" option and its tidier behaviour still apply to the main app.
 
-## Send one application, not the whole device
+## Use the Windows default output
 
-Until now you sent a whole audio device — everything coming out of your PC. In the send list you can now choose a **specific application** instead: just your music player, just your game, just a call. Only that program's sound goes out; the rest of your PC stays private.
+Both the service and the main app can now send **"Use Windows default audio device"** — pick it and RemSound sends whatever this machine is currently playing, and **follows the Windows default** if you change it later (handy for the service: tell a machine "send whatever it plays" without pinning a named card).
 
-- Tick any app that's **currently making sound**, or **name an app** so RemSound catches it the moment it opens.
-- Whole-device sending works exactly as before — this is an extra choice, not a replacement.
+Ticking it is now **exclusive**: it unticks the specific cards in that list and locks them out until you turn the default entry back off. In each list you're clearly either following the default or picking devices — never a confusing mix. (This replaces the old optional "shall I untick the others?" prompt.)
 
-## Stream from the lock screen, before anyone signs in
+## Fixed: a service-install freeze
 
-There's a new, **optional RemSound service**. It can send a machine's audio from the Windows **lock screen** — so you can hear a computer that's powered on but not yet logged in, which the normal app can't do because nothing runs until you sign in.
+Installing or reinstalling the service could **hang and lock RemSound up** — the window froze and its audio stopped, though the connection stayed alive. That's fixed at the root (a pipe deadlock in the elevated installer), and the install now runs so that a slow or stuck step **can never freeze the app again**.
 
-- Install it **once**, from the RemSound installer (it offers to set it up for you). It needs administrator rights that one time only.
-- It runs quietly in the background and **steps aside automatically** the instant you open RemSound normally, handing the audio back to the app.
-- It **updates itself** whenever RemSound updates — there's nothing to maintain.
+Straight after installing, RemSound now also asks whether you'd like to **start the service right away** (it otherwise waits until the next reboot).
 
-If you never want it, don't install it: nothing about the normal app changes.
+## Service tidy-up
 
-## Freer with professional (ASIO) sound cards
-
-- You can now **switch between ASIO drivers** while RemSound is open.
-- RemSound **releases the sound card** when it isn't using it, so another program (a DAW, for example) can take it over instead of being locked out.
-
-## Also
-
-- Per-application sending is fully wired through the app, and a range of fixes and internal tidy-ups from continued review.
+The service now sends this machine's **output audio, or specific applications** only — the microphone-inputs list has been removed, since capturing a mic from a logged-out machine isn't what the service is for. (The main app still has its full inputs list.)
 
 ## Compatibility
 
-Nothing about the over-the-network format changed, so **v5.3 talks to v3.3 through v5.2** with no trouble — you don't have to update both ends at once. (Everyone still needs **v3.3 or newer**, where end-to-end encryption came in.)
+Nothing about the over-the-network format changed, so **v5.4 talks to v3.3 through v5.3** with no trouble — you don't have to update both ends at once. (Everyone still needs **v3.3 or newer**, where end-to-end encryption came in.)
 
 ## Install
 
-1. Download `RemSound-v5.3.zip` from this release.
+1. Download `RemSound-v5.4.zip` from this release.
 2. Close RemSound.
 3. Extract the zip **over your existing RemSound folder**, overwriting program files when prompted. The zip is program files only — it won't touch your settings, profiles, logs or recordings.
 4. Run `RemSound.exe`.
 
 ## Upgrading
 
-**From v3.6 or newer:** Help → Check for updates installs v5.3 with the in-app updater — and if it can't finish, it puts your old version back exactly as it was.
+**From v3.6 or newer:** Help → Check for updates installs v5.4 with the in-app updater — and if it can't finish, it puts your old version back exactly as it was.
 
 **From v1.9–v3.5:** Check for updates works, but uses your current version's older updater for this one hop. If auto-update has been failing on your machine, install by hand using the steps above.
 

@@ -20,6 +20,16 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v5.4
+
+        Service polish, and an important fix.
+
+        Use the Windows default output. The service — and the main app — can now "Use Windows default audio device" for what they send: pick it and RemSound sends whatever this machine is currently playing, following the Windows default if you later change it. Ticking it is now exclusive — it clears the specific cards and locks them out until you turn it back off — so in each list you're clearly either following the default or picking devices, never a confusing mix.
+
+        Fixed a service-install freeze. Installing or reinstalling the service could hang and lock RemSound up, with its audio stopping while it sat frozen. That's fixed, and the install now runs in a way that can never freeze the app again. Straight after installing, RemSound also asks whether you'd like to start the service right away.
+
+        Service tidy-up. The service now sends this machine's output audio, or specific applications — the microphone-inputs list has been removed, since capturing a mic from a logged-out machine isn't what the service is for.
+
         RemSound v5.3
 
         Send a single app, and stream from the lock screen.
