@@ -187,11 +187,32 @@ internal static class AppInstaller
                 {
                     log?.Invoke("install: user opted to install the service too");
                     var rc = ServiceControl.RunElevated(ServiceControl.InstallVerb);
-                    MessageBox.Show(owner,
-                        rc == 0
-                            ? "The RemSound service was installed. Configure and start it from the app's Service menu when you want it running."
-                            : "The RemSound service was not installed (the elevation prompt was declined, or it failed). You can try again later from the app's Service menu.",
-                        "RemSound service", MessageBoxButtons.OK, rc == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                    if (rc == 0)
+                    {
+                        // Offer to start it now — otherwise it only comes up at the next boot, so a
+                        // first-time user sees nothing happen after installing it.
+                        var startNow = MessageBox.Show(owner,
+                            "The RemSound service was installed." + Environment.NewLine + Environment.NewLine +
+                            "Do you want to start it now? It will also start automatically at every boot. " +
+                            "You can configure who it sends to from the app's Service menu.",
+                            "Start the RemSound service?", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                        if (startNow == DialogResult.Yes)
+                        {
+                            log?.Invoke("install: user opted to start the service now");
+                            var startRc = ServiceControl.RunElevated(ServiceControl.StartVerb);
+                            MessageBox.Show(owner,
+                                startRc == 0
+                                    ? "The RemSound service is running."
+                                    : "The service was installed but couldn't be started just now. You can start it later from the app's Service menu.",
+                                "RemSound service", MessageBoxButtons.OK, startRc == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                        }
+                    }
+                    else
+                    {
+                        MessageBox.Show(owner,
+                            "The RemSound service was not installed (the elevation prompt was declined, or it failed). You can try again later from the app's Service menu.",
+                            "RemSound service", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
                 }
             }
         }

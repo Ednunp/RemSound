@@ -2378,12 +2378,17 @@ public sealed class MainForm : Form
                 : "Uninstall the RemSound service?\n\nWindows will ask for administrator permission.";
             if (MessageBox.Show(this, msg, AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         }
+        RunServiceVerbAsync(verb, label);
+    }
+
+    /// <summary>Run an elevated service verb OFF the UI thread and report the outcome on it. A slow or
+    /// stuck helper must never freeze the window or its audio — that was the install hang: the UI thread
+    /// sat in WaitForExit while the pipe-deadlocked installer never returned, so the app locked up and
+    /// streaming died. The UI stays live; we report when the helper comes back or the wait times out.</summary>
+    private void RunServiceVerbAsync(string verb, string label)
+    {
         logFile.Event($"service: {label} requested (elevated)");
         ServiceStore.AppendServiceEvent($"{label} requested (elevated)");
-        // Run the elevated helper OFF the UI thread. A slow or stuck helper must never freeze the window or
-        // its audio — that was the install hang: the UI thread sat in WaitForExit while the pipe-deadlocked
-        // installer never returned, so the app locked up and streaming died. The UI stays live; we report
-        // the outcome (on the UI thread) when the helper comes back or the wait times out.
         Task.Run(() =>
         {
             var rc = ServiceControl.RunElevated(verb);
@@ -2401,7 +2406,19 @@ public sealed class MainForm : Form
         logFile.Event($"service: {label} finished with code {rc} ({outcome})");
         ServiceStore.AppendServiceEvent($"{label} finished: code {rc} ({outcome})");
         if (rc == 0)
+        {
+            // After a successful install, offer to start it now — it otherwise only starts at the next
+            // boot, so a first-time user would see nothing happen.
+            if (label == "install")
+            {
+                var startNow = MessageBox.Show(this,
+                    "The RemSound service was installed. Do you want to start it now?\n\nIt will also start automatically at every boot.",
+                    AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (startNow == DialogResult.Yes) RunServiceVerbAsync(ServiceControl.StartVerb, "start");
+                return;
+            }
             MessageBox.Show(this, $"Service {label} succeeded.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
         else if (rc == -1)
             MessageBox.Show(this, $"Service {label} was cancelled, or administrator rights were declined.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         else if (rc == ServiceControl.ElevatedTimedOut)
