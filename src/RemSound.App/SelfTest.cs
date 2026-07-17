@@ -1399,7 +1399,7 @@ internal static class SelfTest
         foreach (var verb in new[]
                  {
                      ServiceControl.RunVerb, ServiceControl.InstallVerb, ServiceControl.UninstallVerb,
-                     ServiceControl.StartVerb, ServiceControl.StopVerb,
+                     ServiceControl.UpdateVerb, ServiceControl.StartVerb, ServiceControl.StopVerb,
                  })
         {
             Check(Program.IsServiceInvocation(new[] { verb }), $"'{verb}' must be recognised as a service invocation");
@@ -1417,7 +1417,7 @@ internal static class SelfTest
         if (!loadedBefore)
             Check(!IsAssemblyLoaded(svcAsm), "deciding a normal launch must not load the Windows-service assembly");
 
-        return "normal launches stay load-safe; all five service verbs recognised (case-insensitive)";
+        return "normal launches stay load-safe; all six service verbs recognised (case-insensitive)";
     }
 
     /// <summary>The Service menu's "View service log" opens the newest diagnostic log — the log that says

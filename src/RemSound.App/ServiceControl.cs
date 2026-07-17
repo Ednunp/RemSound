@@ -33,6 +33,7 @@ public static class ServiceControl
     /// the Program.cs dispatcher agree.</summary>
     public const string InstallVerb = "--install-service";
     public const string UninstallVerb = "--uninstall-service";
+    public const string UpdateVerb = "--update-service";
     public const string StartVerb = "--start-service";
     public const string StopVerb = "--stop-service";
     public const string RunVerb = "--run-service";
@@ -199,6 +200,29 @@ public static class ServiceControl
         try { if (Directory.Exists(ServiceStore.BinDirectory)) Directory.Delete(ServiceStore.BinDirectory, recursive: true); }
         catch (Exception ex) { ServiceStore.AppendServiceEvent($"uninstall: could not remove bin folder: {ex.GetType().Name}: {ex.Message}"); }
         return rc;
+    }
+
+    /// <summary>Refreshes the service's OWN copy of the program with the CURRENTLY-running build, without
+    /// an uninstall/reinstall: stop → overwrite the binaries in <see cref="ServiceStore.BinDirectory"/>
+    /// from this exe's folder → start. Must be run elevated (writing into the admin-only service bin
+    /// folder, and stop/start). Returns 0 on success. Used by the Service menu's "Update service" so a new
+    /// build reaches the service in one UAC prompt.</summary>
+    public static int DoUpdate()
+    {
+        if (!IsInstalled()) return DoInstall(); // not installed yet — a plain install does the copy too
+        var exe = Environment.ProcessPath;
+        var sourceDir = string.IsNullOrEmpty(exe) ? null : Path.GetDirectoryName(exe);
+        if (string.IsNullOrEmpty(sourceDir)) return 2;
+
+        try { DoStop(); } catch { /* best-effort — copy may still fail if files stay locked, handled below */ }
+        try { CopyProgramTo(sourceDir, ServiceStore.BinDirectory); }
+        catch (Exception ex)
+        {
+            ServiceStore.AppendServiceEvent($"update: copy program failed: {ex.GetType().Name}: {ex.Message}");
+            try { DoStart(); } catch { /* leave it stopped rather than half-updated */ }
+            return 5;
+        }
+        return DoStart();
     }
 
     /// <summary>Starts the service. Must be run elevated. Returns 0 on success.</summary>

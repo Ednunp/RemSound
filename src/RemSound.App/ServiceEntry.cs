@@ -36,6 +36,7 @@ internal static class ServiceEntry
 
         var verb = Has(args, ServiceControl.InstallVerb) ? "install"
             : Has(args, ServiceControl.UninstallVerb) ? "uninstall"
+            : Has(args, ServiceControl.UpdateVerb) ? "update"
             : Has(args, ServiceControl.StartVerb) ? "start"
             : Has(args, ServiceControl.StopVerb) ? "stop"
             : null;
@@ -52,6 +53,7 @@ internal static class ServiceEntry
             {
                 "install" => ServiceControl.DoInstall(),
                 "uninstall" => ServiceControl.DoUninstall(),
+                "update" => ServiceControl.DoUpdate(),
                 "start" => ServiceControl.DoStart(),
                 "stop" => ServiceControl.DoStop(),
                 _ => 0,
