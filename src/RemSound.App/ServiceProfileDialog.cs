@@ -7,8 +7,9 @@ namespace RemSound.App;
 /// The "Configure RemSound service profile" dialog: a self-contained, modal editor for the send-only
 /// service profile, built to match the main window — same house controls, same layout rows, and the
 /// same screen-reader wiring on the lists (via <see cref="CheckedListAccessibility"/>), so it reads and
-/// behaves exactly like the real tabs. Tab order mirrors the main window: Connectivity, then Audio send,
-/// then Audio profile. Send-only and WASAPI-only: no receive controls, no ASIO, no "Send my audio"
+/// behaves exactly like the real tabs. Two tabs: Connectivity, then Audio send. The Audio profile tab
+/// was removed (2026-07-17) — codec/packet/lock-to-clock are fixed to known-good live values so nobody
+/// mis-tunes the service. Send-only and WASAPI-only: no receive controls, no ASIO, no "Send my audio"
 /// toggle. Edits a <see cref="Profile"/> clone; nothing is persisted until the caller acts on OK.
 /// </summary>
 internal sealed class ServiceProfileDialog : Form
@@ -37,10 +38,13 @@ internal sealed class ServiceProfileDialog : Form
     private readonly Label inputsStatus = new() { AutoSize = true, Text = "No input device selected." };
     private MnemonicLabel? sendModeLabel, outputsLabel, appsLabel, inputsLabel;
 
-    // --- Audio profile tab ---
-    private readonly ComboBox codecBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 360, AccessibleName = "Audio codec (Alt+C)" };
-    private readonly ListBox sendRateBox = new() { Width = 360, Height = 40, IntegralHeight = false, AccessibleName = "Packet size (Alt+P)" };
-    private readonly AccessibleCheckBox tightLatencyBox = new() { AutoSize = true };
+    // No "Audio profile" tab: the service always sends Opus at the live-jamming frame (2.5 ms), Small
+    // packets, and locked to the audio clock — the settings Ed found sound good. They're forced in
+    // SaveToProfile below and again at runtime in ServiceSendHost, so there's nothing to misconfigure
+    // (Ed, 2026-07-17: removed the tab; nobody should be touching these).
+    private const AudioTransportCodec ServiceCodec = AudioTransportCodec.Opus;
+    private const int ServiceOpusFrameSamples = 120;      // 2.5 ms at 48 kHz — live latency
+    private const SendRate ServiceSendRate = SendRate.Tight; // "Small" packets
 
     // --- Button row ---
     private readonly Button saveButton = new() { Text = "&Save and Close", AutoSize = true, DialogResult = DialogResult.OK };
@@ -69,10 +73,10 @@ internal sealed class ServiceProfileDialog : Form
         AccessibleName = "Configure RemSound service profile";
         if (Theme.AppIcon is { } icon) Icon = icon;
 
-        // Tabs in the main window's order: Connectivity, Audio send, Audio profile.
+        // Two tabs only now: Connectivity and Audio send. The Audio profile tab was removed — the codec,
+        // packet size and lock-to-clock are fixed to known-good live-jamming values (see fields above).
         BuildConnectivityTab();
         BuildAudioSendTab();
-        BuildAudioProfileTab();
         BuildButtonRow();
 
         LoadFromProfile();
@@ -168,33 +172,6 @@ internal sealed class ServiceProfileDialog : Form
         tabs.TabPages.Add(page);
     }
 
-    private void BuildAudioProfileTab()
-    {
-        var page = new TabPage("Audio profile");
-        var panel = NewPanel();
-
-        // Exact same codec choices, packet-size items and lock-to-clock label as the main window.
-        codecBox.Items.AddRange(new object[]
-        {
-            new CodecChoice("PCM 48K 24 bit — uncompressed", AudioTransportCodec.Pcm, 0),
-            new CodecChoice("Opus, broadcast quality — loss tolerant", AudioTransportCodec.Opus, 960),
-            new CodecChoice("Opus, live latency — for jamming and monitoring", AudioTransportCodec.Opus, 120),
-        });
-        sendRateBox.Items.Add("Standard (5 ms PCM, 10/20 ms Opus)");
-        sendRateBox.Items.Add("Small (2.5 ms PCM, 5/10 ms Opus, LAN only)");
-        tightLatencyBox.Text = "Lock to au&dio clock, WASAPI sender";
-        tightLatencyBox.AccessibleName = "Lock to audio clock (Alt+D) — sender uses the WASAPI capture event for timing instead of a Stopwatch tick. Tightens delay; brief clicks possible if the link can't keep up.";
-
-        FormLayoutRows.AddRow(panel, 0, "Audio &codec (Alt+C)", codecBox, c => c.Focus());
-        FormLayoutRows.AddRow(panel, 1, "&Packet size (Alt+P)", sendRateBox, c => c.Focus());
-        var tightWrap = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        tightWrap.Controls.Add(tightLatencyBox);
-        panel.Controls.Add(tightWrap, 1, 2);
-
-        page.Controls.Add(panel);
-        tabs.TabPages.Add(page);
-    }
-
     private void BuildButtonRow()
     {
         var outer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
@@ -237,10 +214,6 @@ internal sealed class ServiceProfileDialog : Form
             sendAllAppsBox.Checked = working.SendAllApplications;
             PopulateAppsList();
 
-            SelectCodec();
-            sendRateBox.SelectedIndex = Math.Clamp((int)working.SendRate, 0, sendRateBox.Items.Count - 1);
-            tightLatencyBox.Checked = working.TightLatencyMode;
-
             peersList.Items.Clear();
             var allPeers = working.RememberedPeers.Concat(working.SelectedConnectedPeers)
                 .Where(p => !string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
@@ -263,9 +236,12 @@ internal sealed class ServiceProfileDialog : Form
         working.SendAllApplications = sendAllAppsBox.Checked;
         working.SelectedSendApplications = appsList.CheckedItems.OfType<AppRow>().Select(a => a.ProcessName).Distinct().ToList();
 
-        if (codecBox.SelectedItem is CodecChoice c) { working.Codec = c.Codec; working.OpusFrameSamplesPerChannel = c.OpusFrameSamples; }
-        working.SendRate = (SendRate)Math.Max(0, sendRateBox.SelectedIndex);
-        working.TightLatencyMode = tightLatencyBox.Checked;
+        // Audio profile is fixed for the service (no tab): Opus live-jamming frame, Small packets, locked
+        // to the audio clock. These are also re-forced at runtime in ServiceSendHost.
+        working.Codec = ServiceCodec;
+        working.OpusFrameSamplesPerChannel = ServiceOpusFrameSamples;
+        working.SendRate = ServiceSendRate;
+        working.TightLatencyMode = true;
 
         // Ticked peers are the ones the service sends to; keep every listed peer as remembered.
         working.SelectedConnectedPeers = peersList.CheckedItems.OfType<string>().Distinct().ToList();
@@ -301,14 +277,6 @@ internal sealed class ServiceProfileDialog : Form
             var idx = appsList.Items.Add(new AppRow(proc, display, running));
             if (tickedSet.Contains(proc)) appsList.SetItemChecked(idx, true);
         }
-    }
-
-    private void SelectCodec()
-    {
-        foreach (var item in codecBox.Items.OfType<CodecChoice>())
-            if (item.Codec == working.Codec && (working.Codec == AudioTransportCodec.Pcm || item.OpusFrameSamples == working.OpusFrameSamplesPerChannel))
-            { codecBox.SelectedItem = item; return; }
-        if (codecBox.Items.Count > 0) codecBox.SelectedIndex = 0;
     }
 
     private void ApplySendModeVisibility()

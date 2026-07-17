@@ -279,21 +279,9 @@ public sealed class RemSoundSettingsStore
         Save(s);
     }
 
-    /// <summary>Tight-latency mode toggle. Sender-side only as of 2026-05-06 (the receiver no
-    /// longer has a resampler to bypass). In WasapiOnly + single source mode the sender swaps
-    /// from the timer-driven MixingEngine to the audio-clock-locked PushModeWasapiBackend; in
-    /// AsioOnly + PCM mode the sender emits one packet per ASIO callback instead of accumulating
-    /// to the chosen frame size. Saves a few ms of send-side latency at the cost of brief
-    /// clicks if the link can't keep up. Off by default.</summary>
-    public bool LoadTightLatencyMode(bool defaultValue = false) =>
-        Try(() => Load()?.TightLatencyMode) ?? defaultValue;
-
-    public void SaveTightLatencyMode(bool value)
-    {
-        var s = Load() ?? new Settings();
-        s.TightLatencyMode = value;
-        Save(s);
-    }
+    // Tight-latency mode ("Lock to audio clock") is ALWAYS ON as of 2026-07-17 — no longer a user option,
+    // so the Load/Save accessors were removed. The app forces the sender tight at startup and the service
+    // per stream. The Settings cache still round-trips Profile.TightLatencyMode for file compatibility.
 
     /// <summary>Priority mode for the current profile. When true, the App's
     /// <c>PerformanceMode</c> helper drives every Win32 lever that elevates a process's

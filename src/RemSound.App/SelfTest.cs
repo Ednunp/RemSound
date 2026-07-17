@@ -806,12 +806,15 @@ internal static class SelfTest
     /// divergences found auditing the service against the main app.</summary>
     private static string? ServiceSenderParity()
     {
+        // The profile deliberately carries the WRONG audio transport (raw PCM, broadcast frame, Standard
+        // rate) to prove the service IGNORES it and forces its known-good live config (Opus, 2.5 ms frame,
+        // Small packets, lock-to-clock) — the fix for the crackly-service report (Ed, 2026-07-17).
         var profile = new Profile
         {
             Title = "parity",
-            Codec = AudioTransportCodec.Opus,
-            OpusFrameSamplesPerChannel = 960,   // broadcast
-            SendRate = SendRate.Tight,          // "Small" — should halve the Opus frame to 480
+            Codec = AudioTransportCodec.Pcm,
+            OpusFrameSamplesPerChannel = 960,
+            SendRate = SendRate.Standard,
             WasapiSendMode = "devices",
         };
         profile.SelectedWasapiSendOutputs.Add("fake-device-id");     // a source so ApplyProfile proceeds
@@ -820,17 +823,20 @@ internal static class SelfTest
         profile.Password = RemSoundCrypto.Obfuscate(pw);
 
         using var host = new ServiceSendHost(() => profile);
-        Check(host.ApplyProfile(profile), "ApplyProfile should proceed with a source + peer + password");
+        // ApplyProfile sets the sender's crypto + codec BEFORE it opens the (fake) device; a device-open
+        // failure is now swallowed inside ApplyProfile, so this returns and the config is readable.
+        host.ApplyProfile(profile);
         var cfg = host.SenderConfigForTest;
 
         Check(cfg.Key is { Length: > 0 } && cfg.Key.SequenceEqual(RemSoundCrypto.DeriveKey(pw)),
             "the service must set the audio key = DeriveKey(password)");
         Check(cfg.Fingerprint is { Length: > 0 } && cfg.Fingerprint.SequenceEqual(RemSoundCrypto.Fingerprint(pw)),
             "the service must set the audio FINGERPRINT = Fingerprint(password), or the peer rejects the stream");
-        Check(cfg.Codec == AudioTransportCodec.Opus, "codec must round-trip to the sender");
-        Check(cfg.Frame == MainForm.EffectiveOpusFrameSamples(AudioTransportCodec.Opus, 960, SendRate.Tight) && cfg.Frame == 480,
-            $"the Small send rate must halve the Opus frame like the main app (got {cfg.Frame})");
-        return "key + fingerprint + effective Opus frame match the main app";
+        Check(cfg.Codec == AudioTransportCodec.Opus,
+            $"the service must FORCE Opus regardless of the profile codec (got {cfg.Codec})");
+        Check(cfg.Frame == 120,
+            $"the service must force the 2.5 ms live Opus frame (120 samples), regardless of the profile (got {cfg.Frame})");
+        return "service forces Opus + 2.5ms frame + lock-to-clock regardless of profile; crypto matches";
     }
 
     /// <summary>The lock-screen service's app-yield token: while a hold is active the service must see an

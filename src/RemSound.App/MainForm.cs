@@ -289,7 +289,6 @@ public sealed class MainForm : Form
     private readonly AccessibleCheckBox continuousTuneAsioBox = new() { Text = "Continuous auto-tune ASIO latency", AutoSize = true };
     private readonly ListBox smoothnessBox = new() { Width = 420, Height = 200, IntegralHeight = false, AccessibleName = "Buffer smoothness (Alt+B)" };
     private readonly ListBox artefactBox = new() { Width = 420, Height = 60, IntegralHeight = false, AccessibleName = "Artefact sound type (Alt+A) — controls how audio gaps sound" };
-    private readonly AccessibleCheckBox tightLatencyBox = new() { AutoSize = true };
     // Priority mode (per profile). Sits as the first control on the Audio profile tab,
     // ungrouped above the two GroupBoxes, so it's the first thing focus lands on when the
     // user Tabs into the tab. Toggling marks the profile dirty (the setting lives in
@@ -1122,12 +1121,10 @@ public sealed class MainForm : Form
         // The receiver-side hook was removed in the 2026-05-06 cleanup since the resampler is
         // no longer in the receive path. The dialog checkbox label still says "Lock to audio
         // clock" but only affects the sender now.
-        var initialTightLatency = settings.LoadTightLatencyMode();
-        sender.SetTightLatency(initialTightLatency);
-        // Log it so post-test analysis can correlate clicks with tight-latency state without
-        // having to infer from sender-engine restarts. Includes the audio mode because what
-        // "tight" means is mode-dependent (per-callback ASIO emission vs. WASAPI push-mode).
-        logFile.Event($"tight latency at startup: {(initialTightLatency ? "on" : "off")} (audio mode={settings.LoadAudioMode()})");
+        // Lock to audio clock is always on now (no longer a user option) — put the sender into
+        // tight-latency mode unconditionally.
+        sender.SetTightLatency(true);
+        logFile.Event($"tight latency at startup: on (always) (audio mode={settings.LoadAudioMode()})");
 
         // Priority mode (per-profile). Applies every PerformanceMode lever on first launch
         // under this profile so the OS doesn't start coasting before the user has tabbed
@@ -4630,40 +4627,10 @@ public sealed class MainForm : Form
         panel.Controls.Add(codecAndSendLabel, 0, 0);
         panel.Controls.Add(codecRowPanel, 1, 0);
 
-        // === Row 1: Tight latency (sender-side, mode-dependent label) ===
-        // Mnemonic was Alt+K until v1.5 (2026-05-15) when the Record menu took Alt+K at
-        // the menu-bar level. Replaced with Alt+D — the D in "au&dio" is naturally part of
-        // the word, no explicit "(Alt+...)" hint needed. Free on the Audio profile tab
-        // (no other Audio-profile control uses D).
-        var currentAudioModeForLabel = settings.LoadAudioMode();
-        var tightLatencyText = currentAudioModeForLabel switch
-        {
-            AudioMode.WasapiOnly      => "Lock to au&dio clock, WASAPI sender",
-            AudioMode.BothIndependent => "Lock to au&dio clock, WASAPI + ASIO senders",
-            _                         => "Lock to au&dio clock",
-        };
-        var tightLatencyAccessible = currentAudioModeForLabel switch
-        {
-            AudioMode.WasapiOnly      => "Lock to audio clock (Alt+D) — sender uses the WASAPI capture event for timing instead of a Stopwatch tick. Tightens delay; brief clicks possible if the link can't keep up.",
-            AudioMode.BothIndependent => "Lock to audio clock (Alt+D) — both lanes tighten independently. WASAPI lane uses push-mode (single source); ASIO lane emits per callback. Brief clicks possible on either if the link can't keep up.",
-            _                         => "Lock to audio clock (Alt+D) — sender-side timing tighten.",
-        };
-        tightLatencyBox.Text = tightLatencyText;
-        tightLatencyBox.AccessibleName = tightLatencyAccessible;
-        tightLatencyBox.Checked = settings.LoadTightLatencyMode();
-        tightLatencyBox.CheckedChanged += (_, _) =>
-        {
-            settings.SaveTightLatencyMode(tightLatencyBox.Checked);
-            sender.SetTightLatency(tightLatencyBox.Checked);
-            logFile.Event($"tight latency changed to {(tightLatencyBox.Checked ? "on" : "off")} (audio mode={settings.LoadAudioMode()})");
-            MarkProfileDirty();
-        };
-        var tightLatencyLabel = new Label { Text = tightLatencyText, AutoSize = true, Anchor = AnchorStyles.Left };
-        tightLatencyLabel.Click += (_, _) => tightLatencyBox.Focus();
-        var tightLatencyContainer = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        tightLatencyContainer.Controls.Add(tightLatencyBox);
-        panel.Controls.Add(tightLatencyLabel, 0, 1);
-        panel.Controls.Add(tightLatencyContainer, 1, 1);
+        // "Lock to audio clock" (sender uses the WASAPI capture event for timing instead of a Stopwatch
+        // tick) is now ALWAYS ON and is no longer a user option (Ed, 2026-07-17: nobody ever runs with it
+        // off — off just adds delay). The sender is put into tight-latency mode unconditionally at startup;
+        // the old per-profile checkbox is gone.
 
         group.Controls.Add(panel);
     }
@@ -9493,8 +9460,8 @@ public sealed class MainForm : Form
             // EffectiveOpusFrameSamples is samples-per-channel at 48 kHz; ÷ 48 → ms, ÷ 2 → half-frame.
             return EffectiveOpusFrameSamples(item.Codec, item.OpusFrameSamples, rate) / 96.0;
         }
-        // PCM
-        if (settings.LoadTightLatencyMode() && settings.LoadAudioMode() == AudioMode.AsioOnly)
+        // PCM. Lock to audio clock is always on now, so ASIO-only means per-callback emission.
+        if (settings.LoadAudioMode() == AudioMode.AsioOnly)
         {
             return 0.5; // per-callback ASIO send → ~one ASIO buffer, hard to know without driver introspection
         }

@@ -107,7 +107,11 @@ public sealed class Profile
     [JsonPropertyName("OpusFrameMilliseconds")]
     public int OpusFrameSamplesPerChannel { get; set; } = 480;
     public int SendRateRaw { get; set; } = (int)SendRate.Standard;
-    public bool TightLatencyMode { get; set; }
+    /// <summary>"Lock to audio clock" — sender uses the WASAPI capture event for timing. As of 2026-07-17
+    /// this is ALWAYS ON and no longer user-configurable (the app forces it true at startup and the
+    /// service forces it per stream); the field is kept only for profile-file backward compatibility.
+    /// Defaults true so any freshly created profile reflects the real behaviour.</summary>
+    public bool TightLatencyMode { get; set; } = true;
     /// <summary>True if this profile asks Windows to keep the RemSound process in
     /// high-priority mode while it's running — CPU scheduling, power management, memory
     /// priority, working-set lock, and MMCSS thread priority all elevated. Off by default;

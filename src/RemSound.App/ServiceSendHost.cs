@@ -311,19 +311,30 @@ public sealed class ServiceSendHost : IDisposable
             var plainPassword = string.IsNullOrEmpty(profile.Password) ? "" : RemSoundCrypto.Deobfuscate(profile.Password);
             sender.AudioKey = string.IsNullOrEmpty(plainPassword) ? null : RemSoundCrypto.DeriveKey(plainPassword);
             sender.AudioFingerprint = string.IsNullOrEmpty(plainPassword) ? null : RemSoundCrypto.Fingerprint(plainPassword);
-            // Opus frame size follows the send rate the same way the main app does (the "Small" rate
-            // halves the Opus frame) — otherwise the service would encode at a different frame than the
-            // main app would for the identical profile.
-            sender.ConfigureCodec(profile.Codec, MainForm.EffectiveOpusFrameSamples(profile.Codec, profile.OpusFrameSamplesPerChannel, profile.SendRate));
-            sender.SetSendRate(profile.SendRate);
-            sender.SetTightLatency(profile.TightLatencyMode);
+            // The service's audio transport is FIXED to the known-good live-jamming config, regardless of
+            // what the profile carries (the config dialog no longer exposes these — Ed, 2026-07-17). Raw
+            // PCM sounded hideous over the service; Opus at the 2.5 ms live frame with Small packets and
+            // lock-to-clock is what sounds right. Forcing it here means a stale or hand-edited profile can
+            // never put the service back on a bad codec.
+            const AudioTransportCodec serviceCodec = AudioTransportCodec.Opus;
+            const int serviceOpusFrameSamples = 120; // 2.5 ms at 48 kHz
+            const SendRate serviceSendRate = SendRate.Tight; // "Small" packets
+            sender.ConfigureCodec(serviceCodec, MainForm.EffectiveOpusFrameSamples(serviceCodec, serviceOpusFrameSamples, serviceSendRate));
+            sender.SetSendRate(serviceSendRate);
+            sender.SetTightLatency(true); // lock to audio clock — always on
             // Arm the full set to begin with (nothing is known-dead yet); RefreshSendArming then prunes any
             // peer the heartbeat can't reach and re-arms it when it recovers.
             allEndpoints = endpoints.ToArray();
             armedSignature = null;
             sender.SetReceivers(endpoints);
             sender.Configure(specs);
-            sender.Start();
+            // A device-open failure at Start must NOT throw out of the service loop. With lock-to-clock
+            // always on, the WASAPI lane uses push-mode, which opens the endpoint synchronously and throws
+            // (e.g. ArgumentException) if the device id is invalid or the device has vanished. Swallow it:
+            // presence still comes up, and the device-change watcher / self-heal re-open the capture when a
+            // good device appears. Without this guard a disappeared device would crash the whole service.
+            try { sender.Start(); }
+            catch (Exception ex) { log?.Invoke($"service: capture start failed ({ex.GetType().Name}: {ex.Message}) — presence up; will re-open when a device is available"); }
             SwapMeterDevices(specs); // endpoint-meter readers for the deaf-capture detector
             // Instant self-heal trigger: session-created notification on the default render device.
             // Recreated per apply so it re-points at the current default after a device change.
