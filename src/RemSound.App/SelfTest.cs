@@ -768,6 +768,22 @@ internal static class SelfTest
         Check(ServiceControl.AddUserStartStopAce(amended) == amended, "adding the ACE twice must be a no-op (idempotent)");
         Check(ServiceControl.AddUserStartStopAce("garbage") is null, "a non-DACL SDDL must be rejected");
 
+        // 2b. The app-source path (which the SYSTEM service watches for auto-updates) round-trips, and drives
+        //     the update check: unknown/empty source => no update, so the service never acts on uncertainty.
+        var savedOverride = ServiceStore.TestDirectoryOverride;
+        var storeTmp = Path.Combine(Path.GetTempPath(), "remsound-appsrc-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            ServiceStore.TestDirectoryOverride = storeTmp;
+            Check(ServiceStore.LoadAppSourcePath() is null, "no app-source recorded yet must read back null");
+            ServiceStore.SaveAppSourcePath(@"C:\Some\App\Folder");
+            Check(ServiceStore.LoadAppSourcePath() == @"C:\Some\App\Folder", "the app-source path must round-trip");
+            // Points at a folder with no RemSound.exe => version unreadable => no update landed (never act on uncertainty).
+            Check(ServiceUpdate.OnDiskVersion() is null, "an app-source folder with no RemSound.exe must yield no version");
+            Check(!ServiceUpdate.UpdateLanded(), "with no readable app version, no update must be detected");
+        }
+        finally { ServiceStore.TestDirectoryOverride = savedOverride; try { Directory.Delete(storeTmp, recursive: true); } catch { } }
+
         // 3. CopyProgramTo copies program files but NEVER the user-state folders.
         var root = Path.Combine(Path.GetTempPath(), "remsound-svccopy-" + Guid.NewGuid().ToString("N"));
         var src = Path.Combine(root, "src");

@@ -121,6 +121,28 @@ public static class ServiceStore
         catch { return null; }
     }
 
+    // === App source path (for the service's own auto-update) ===
+    // Recorded at install/update time (elevated): the folder the interactive RemSound app lives in — the
+    // one its auto-updater swaps new builds into. The SYSTEM service watches THIS folder for a newer
+    // RemSound.exe and copies it into its own bin, so it auto-updates without the user clicking anything
+    // and without a UAC prompt (the service runs as SYSTEM). Written in ProgramData so the SYSTEM account
+    // can read it regardless of which user installed.
+    private static string AppSourcePathFile => Path.Combine(Directory, "app-source.txt");
+
+    /// <summary>Record the folder the app that installed/updated the service runs from. Never throws.</summary>
+    public static void SaveAppSourcePath(string folder)
+    {
+        try { System.IO.Directory.CreateDirectory(Directory); File.WriteAllText(AppSourcePathFile, folder); }
+        catch { /* best-effort */ }
+    }
+
+    /// <summary>The recorded app-source folder, or null if none / unreadable.</summary>
+    public static string? LoadAppSourcePath()
+    {
+        try { return File.Exists(AppSourcePathFile) ? File.ReadAllText(AppSourcePathFile).Trim() : null; }
+        catch { return null; }
+    }
+
     // === Update log (ALWAYS written, not gated on the service-logging toggle) ===
     // Updates are rare but important, so we always keep a small trail of them where the user can find it.
     public static string UpdateLogPath => Path.Combine(Directory, "update.log");

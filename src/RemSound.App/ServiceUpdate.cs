@@ -5,14 +5,21 @@ using RemSound.Core;
 namespace RemSound.App;
 
 /// <summary>
-/// Lets the running Windows service pick up an app update on its own. The interactive auto-updater
-/// swaps the install files in place (rename-aside, which a running service tolerates) but has no admin
-/// rights to restart the service — so instead the SERVICE, which runs as SYSTEM and DOES have the rights,
-/// notices that a newer RemSound.exe has landed next to it and restarts itself onto the new binary.
+/// Lets the running Windows service pick up an app update ON ITS OWN, with no admin prompt and no menu
+/// click. The service runs from its own copy under ProgramData (so it never locks the app folder), and
+/// the app's non-admin auto-updater can't touch that copy or restart the service. So instead the SERVICE
+/// — which runs as SYSTEM and CAN write its own bin and restart itself — watches the folder the app was
+/// installed from (recorded at install: <see cref="ServiceStore.LoadAppSourcePath"/>). When the app's
+/// auto-updater drops a strictly-newer RemSound.exe there, the service copies that build into its own bin
+/// and restarts onto it.
 ///
-/// <para>Loop-safe by construction: it only restarts when the on-disk version is STRICTLY newer than the
-/// running one, and any uncertainty (file missing mid-swap, unparseable version) means "don't restart".
-/// After the restart the new process's on-disk == running, so it never re-triggers.</para>
+/// <para>Loop-safe: only fires when the app-folder version is STRICTLY newer than the running one, and any
+/// uncertainty (folder unknown, file missing mid-swap, unparseable version) means "don't act". After the
+/// copy+restart the running bin == the app version, so it never re-triggers.</para>
+///
+/// <para>Trust note: the service copies from a user-writable folder and runs it as SYSTEM — the same trust
+/// posture as the previous in-place scheme. Acceptable for this personal app; a hardened build would
+/// code-sign and verify before copying.</para>
 /// </summary>
 internal static class ServiceUpdate
 {
@@ -28,13 +35,16 @@ internal static class ServiceUpdate
     /// update landed). Reads the on-disk exe's file version; never throws.</summary>
     public static bool UpdateLanded() => IsNewer(RunningVersion(), OnDiskVersion());
 
-    /// <summary>The version string of the RemSound.exe sitting next to the service, or null if unreadable.</summary>
+    /// <summary>The version of RemSound.exe in the recorded APP-SOURCE folder (the app's install location,
+    /// which its auto-updater swaps in place), or null if the folder is unknown/unreadable.</summary>
     public static string? OnDiskVersion()
     {
         try
         {
-            var onDiskExe = Path.Combine(AppContext.BaseDirectory, "RemSound.exe");
-            return File.Exists(onDiskExe) ? FileVersionInfo.GetVersionInfo(onDiskExe).FileVersion : null;
+            var appDir = ServiceStore.LoadAppSourcePath();
+            if (string.IsNullOrEmpty(appDir)) return null;
+            var appExe = Path.Combine(appDir, "RemSound.exe");
+            return File.Exists(appExe) ? FileVersionInfo.GetVersionInfo(appExe).FileVersion : null;
         }
         catch { return null; }
     }
@@ -50,15 +60,24 @@ internal static class ServiceUpdate
     {
         try
         {
+            var appDir = ServiceStore.LoadAppSourcePath();
+            var binDir = ServiceStore.BinDirectory;
             var dir = ServiceStore.Directory;
             System.IO.Directory.CreateDirectory(dir);
             var script = Path.Combine(dir, "restart.ps1");
             var log = ServiceStore.UpdateLogPath;
             var svc = ServiceControl.ServiceName;
+            // robocopy the new build into bin, minus user-state; exit codes 0-7 are success (8+ = failure).
+            var copyLine = string.IsNullOrEmpty(appDir)
+                ? "$rc = 0  # no app-source recorded; restart onto whatever is already in bin"
+                : $"robocopy \"{appDir}\" \"{binDir}\" /E /XD \"user settings and logs\" logs recordings profiles config /XF \"global config.json\" remsound.config.json /R:2 /W:1 | Out-Null; $rc = $LASTEXITCODE";
             var content =
                 "$ts = { (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') }\r\n" +
                 $"Add-Content -LiteralPath '{log}' -Value \"$(& $ts)  restarter: stopping {svc}\"\r\n" +
                 $"Stop-Service -Name {svc} -Force -ErrorAction SilentlyContinue\r\n" +
+                copyLine + "\r\n" +
+                $"Add-Content -LiteralPath '{log}' -Value \"$(& $ts)  restarter: copied new build (robocopy code $rc)\"\r\n" +
+                $"if ($rc -ge 8) {{ Add-Content -LiteralPath '{log}' -Value \"$(& $ts)  restart: COPY FAILED (code $rc) - starting existing build\" }}\r\n" +
                 $"try {{ Start-Service -Name {svc} -ErrorAction Stop; $r = 'restart: service started' }} catch {{ $r = 'restart: START FAILED - ' + $_.Exception.Message }}\r\n" +
                 $"Add-Content -LiteralPath '{log}' -Value \"$(& $ts)  $r\"\r\n";
             File.WriteAllText(script, content);

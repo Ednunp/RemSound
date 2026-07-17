@@ -107,6 +107,9 @@ public static class ServiceControl
         // folder, so the running service uses ITS copy, not the source it was installed from.
         try { CopyProgramTo(sourceDir, ServiceStore.BinDirectory); }
         catch (Exception ex) { ServiceStore.AppendServiceEvent($"install: copy program failed: {ex.GetType().Name}: {ex.Message}"); return 5; }
+        // Remember where the app lives, so the SYSTEM service can watch it and auto-update itself when the
+        // app's auto-updater drops a newer build there (no UAC — see ServiceUpdate).
+        ServiceStore.SaveAppSourcePath(sourceDir);
 
         var rc = RunSc(BuildCreateArgs(ServiceStore.BinExePath));
         if (rc != 0) return rc;
@@ -222,6 +225,7 @@ public static class ServiceControl
             try { DoStart(); } catch { /* leave it stopped rather than half-updated */ }
             return 5;
         }
+        ServiceStore.SaveAppSourcePath(sourceDir); // keep the auto-update watch pointed at the current app
         return DoStart();
     }
 
