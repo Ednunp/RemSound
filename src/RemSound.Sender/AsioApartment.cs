@@ -23,6 +23,7 @@ internal sealed class AsioApartment : IDisposable
     private readonly object queueGate = new();
     private readonly Queue<WorkItem> queue = new();
     private readonly AutoResetEvent workAvailable = new(false);
+    private readonly Action<string>? log;
     private volatile bool shutdown;
 
     private sealed class WorkItem
@@ -32,12 +33,14 @@ internal sealed class AsioApartment : IDisposable
         public Exception? Error;
     }
 
-    public AsioApartment(string name = "asio-control")
+    public AsioApartment(string name = "asio-control", Action<string>? log = null)
     {
+        this.log = log;
         thread = new Thread(Run) { IsBackground = true, Name = name };
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
         started.Wait(); // don't accept Invoke()s until the pump is up
+        log?.Invoke($"asio apartment: thread up (STA, managed id {thread.ManagedThreadId})");
     }
 
     /// <summary>Run <paramref name="action"/> on the apartment thread and block until it finishes,
@@ -90,7 +93,9 @@ internal sealed class AsioApartment : IDisposable
         if (shutdown) return;
         shutdown = true;
         workAvailable.Set();
-        try { if (thread.IsAlive && Thread.CurrentThread != thread) thread.Join(2000); } catch { /* leaked thread beats a hang */ }
+        var joined = true; // already-terminated or self-call counts as clean; only a real timeout is a leak
+        try { if (thread.IsAlive && Thread.CurrentThread != thread) joined = thread.Join(2000); } catch { /* leaked thread beats a hang */ }
+        log?.Invoke(joined ? "asio apartment: thread down (clean)" : "asio apartment: thread did not join in 2s (leaked)");
         try { workAvailable.Dispose(); } catch { }
         try { started.Dispose(); } catch { }
     }

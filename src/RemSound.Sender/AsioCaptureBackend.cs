@@ -51,7 +51,8 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     // Every AsioOut control call (create / init / play / stop / dispose) is marshalled onto this one
     // dedicated STA+message-pump thread. That single-threaded, pumped home is what lets the driver close
     // WITHOUT the native crash we used to hit on "ASIO → none" and driver switches — see AsioApartment.
-    private readonly AsioApartment apartment = new();
+    // Created in the ctor so it can announce its own thread up/down through the same diagnostic sink.
+    private readonly AsioApartment apartment;
     private List<int> activeChannelPairIndices = [];
     private int recordChannelCount;
     private float[] mixScratch = new float[1024];
@@ -83,6 +84,7 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
         this.driverName = driverName;
         this.onMixedSamples = onMixedSamples;
         this.onDiagnostic = onDiagnostic;
+        apartment = new AsioApartment($"asio-control:{driverName}", onDiagnostic);
     }
 
     /// <summary>
@@ -141,6 +143,11 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
                 // channel driver becomes a throw so the catch below runs the same StopInternal cleanup.
                 apartment.Invoke(() =>
                 {
+                    // Step-by-step breadcrumbs, symmetric with the close path in StopInternal. If a
+                    // native call here takes the process down (as the driver used to do on close), the
+                    // last line in the log names exactly which stage died — with AutoFlush on, each line
+                    // is on disk before the next native call runs.
+                    onDiagnostic?.Invoke($"asio open: creating driver \"{driverName}\"");
                     asio = new AsioOut(driverName);
                     // Always open with the driver's full input channel count. Pulling channels we
                     // don't immediately need is essentially free — the driver fills them anyway —
@@ -160,10 +167,13 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
                     var highestNeededChannel = (maxPairIndex + 1) * 2;
                     if (highestNeededChannel > recordChannelCount)
                         onDiagnostic?.Invoke($"asio capture: driver \"{driverName}\" only has {recordChannelCount} input channels, but spec requests channel pair {maxPairIndex} (channels {maxPairIndex * 2 + 1}/{maxPairIndex * 2 + 2})");
+                    onDiagnostic?.Invoke($"asio open: init record+playback ({recordChannelCount} ch @ {MixSampleRate} Hz)");
                     asio.InitRecordAndPlayback(null, recordChannelCount, MixSampleRate);
                     asio.AudioAvailable += OnAudioAvailable;
                     captureFormat = $"{MixSampleRate} Hz, {recordChannelCount} input channel(s), 32-bit float (ASIO)";
+                    onDiagnostic?.Invoke("asio open: starting stream (play)");
                     asio.Play();
+                    onDiagnostic?.Invoke("asio open: stream running");
                 });
                 uptime.Restart();
                 onDiagnostic?.Invoke($"asio capture started \"{driverName}\" {captureFormat}; pairs={string.Join(",", activeChannelPairIndices)}");
