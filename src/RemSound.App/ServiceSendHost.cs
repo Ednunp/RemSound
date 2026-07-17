@@ -462,11 +462,13 @@ public sealed class ServiceSendHost : IDisposable
         var appWasPresent = true; // force an initial evaluation
         var absentSince = Environment.TickCount64;
         var triedThisAbsence = false;
+        var haveSeenApp = false; // the settle delay only matters AFTER a real app yield
         while (!ct.IsCancellationRequested)
         {
             var appPresent = isAppPresent();
             if (appPresent)
             {
+                haveSeenApp = true;
                 wantSending = false;
                 if (IsSending) Suspend();
                 absentSince = long.MaxValue;
@@ -475,7 +477,11 @@ public sealed class ServiceSendHost : IDisposable
             else
             {
                 if (appWasPresent) { absentSince = Environment.TickCount64; triedThisAbsence = false; } // app just left
-                if (Environment.TickCount64 - absentSince >= resumeSettleMs)
+                // The resume-settle delay exists to stop rapid app open/close from thrashing the engine —
+                // but ONLY once the app has actually been present. At BOOT the app has never run, so waiting
+                // it out is pure dead time in which the Windows startup sound plays uncaptured. Start
+                // immediately on the first-ever stint; apply the settle only on later app→absent transitions.
+                if (!haveSeenApp || Environment.TickCount64 - absentSince >= resumeSettleMs)
                 {
                     wantSending = true;
                     // One start attempt per absence. If capture isn't ready yet (audio stack still coming
