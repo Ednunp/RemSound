@@ -79,11 +79,11 @@ public sealed class Profile
     /// <summary>SERVICE profiles only (ServiceProfileDialog / ServiceSendHost): when true (the default)
     /// in "applications" send mode every app's audio is sent — i.e. exactly the same result as sending
     /// the whole system's default output. When false, only the apps named in
-    /// <see cref="SelectedSendApplications"/> are sent. The MAIN window no longer has a "send all
-    /// applications" option (removed 2026-07-16): there, applications mode always means specific ticked
-    /// apps, and whole-system audio is devices mode's job. The main window never READS this to drive
-    /// behaviour; it does still write the default true when it saves a profile (harmless — main-app and
-    /// service profiles live in separate stores and are never the same file).</summary>
+    /// <see cref="SelectedSendApplications"/> are sent. VESTIGIAL as of 2026-07-17: neither the main
+    /// window NOR the service honours this any more — applications mode always means the specific ticked
+    /// apps in both, and whole-system audio is devices mode's job. The "send all applications" option was
+    /// removed from both UIs and both send-spec builders ignore this flag. Kept only so existing profile
+    /// files still deserialize; the service now writes it false on save. Do not add new reads.</summary>
     public bool SendAllApplications { get; set; } = true;
     /// <summary>In "applications" send mode: the process
     /// names (lower-case, no path/extension, e.g. "vlc", "firefox") whose audio to send. Tracked by

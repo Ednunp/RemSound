@@ -573,17 +573,12 @@ public sealed class ServiceSendHost : IDisposable
             && string.Equals(p.WasapiSendMode, "applications", StringComparison.OrdinalIgnoreCase);
         if (appsMode)
         {
-            if (p.SendAllApplications)
-            {
-                var def = ResolveDefaultRenderId();
-                if (def is not null) specs.Add(new CaptureSourceSpec(def, CaptureKind.Loopback, "All applications (system audio)"));
-            }
-            else
-            {
-                foreach (var name in p.SelectedSendApplications.Distinct(StringComparer.OrdinalIgnoreCase))
-                    foreach (var pid in AudioAppEnumerator.PidsForProcessName(name))
-                        specs.Add(new CaptureSourceSpec(ProcessLoopbackId.Format(pid), CaptureKind.ProcessLoopback, name));
-            }
+            // Specific applications only — matches the main app. The old "send all applications"
+            // path (SendAllApplications) was removed from both the app and the service; the profile
+            // flag is ignored here so a stale profile can't resurrect whole-system capture.
+            foreach (var name in p.SelectedSendApplications.Distinct(StringComparer.OrdinalIgnoreCase))
+                foreach (var pid in AudioAppEnumerator.PidsForProcessName(name))
+                    specs.Add(new CaptureSourceSpec(ProcessLoopbackId.Format(pid), CaptureKind.ProcessLoopback, name));
         }
         else
         {
@@ -632,18 +627,6 @@ public sealed class ServiceSendHost : IDisposable
         var host = text[..colon];
         if (host.Contains(':')) return (text, null); // looks like an IPv6 literal — treat whole as host
         return int.TryParse(text[(colon + 1)..], out var port) && port is >= 1 and <= 65535 ? (host, port) : (text, null);
-    }
-
-    private static string? ResolveDefaultRenderId()
-    {
-        try
-        {
-            using var en = new MMDeviceEnumerator();
-            if (!en.HasDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia)) return null;
-            using var d = en.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
-            return d.ID;
-        }
-        catch { return null; }
     }
 
     public void Dispose()

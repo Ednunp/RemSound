@@ -28,13 +28,9 @@ internal sealed class ServiceProfileDialog : Form
     private readonly ListBox sendModeList = new() { Width = 460, Height = 40, IntegralHeight = false, AccessibleName = "How to send WASAPI audio (Alt+1)" };
     private readonly CheckedListBox outputsList = new() { CheckOnClick = true, Width = 460, Height = 110, AccessibleName = "WASAPI audio outputs to send (Alt+2)" };
     private readonly Label outputsStatus = new() { AutoSize = true, Text = "No output device selected." };
-    // DELIBERATE divergence from the main window (which dropped its send-all option 2026-07-16): the
-    // headless service's whole point is streaming the machine's system audio from the lock screen, so
-    // "send all applications" stays here as the sensible default.
-    private readonly AccessibleCheckBox sendAllAppsBox = new() { Text = "Send all applications (Alt+&3)", AccessibleName = "Send all applications", AutoSize = true, Checked = true };
-    private readonly CheckedListBox appsList = new() { CheckOnClick = true, Width = 460, Height = 110, AccessibleName = "Applications to send (Alt+4)" };
+    private readonly CheckedListBox appsList = new() { CheckOnClick = true, Width = 460, Height = 110, AccessibleName = "Applications to send (Alt+3)" };
     private readonly Label appsStatus = new() { AutoSize = true, Text = "No application selected." };
-    private readonly CheckedListBox inputsList = new() { CheckOnClick = true, Width = 460, Height = 90, AccessibleName = "WASAPI audio inputs to send (Alt+5)" };
+    private readonly CheckedListBox inputsList = new() { CheckOnClick = true, Width = 460, Height = 90, AccessibleName = "WASAPI audio inputs to send (Alt+4)" };
     private readonly Label inputsStatus = new() { AutoSize = true, Text = "No input device selected." };
     private MnemonicLabel? sendModeLabel, outputsLabel, appsLabel, inputsLabel;
 
@@ -154,15 +150,11 @@ internal sealed class ServiceProfileDialog : Form
         sendModeList.Items.Add("Send specific applications");
         sendModeList.SelectedIndex = 0;
         sendModeList.SelectedIndexChanged += (_, _) => { if (!suppressAppEvents) ApplySendModeVisibility(); };
-        sendAllAppsBox.CheckedChanged += (_, _) => { if (!suppressAppEvents) ApplySendModeVisibility(); };
 
         sendModeLabel = AddListRow(panel, 0, "How to send WASAPI audio (Alt+&1)", sendModeList);
         outputsLabel = FormLayoutRows.AddCheckedListRow(panel, 1, "WASAPI audio outputs to send (Alt+&2)", outputsList, outputsStatus, l => l.Focus());
-        var allAppsWrap = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        allAppsWrap.Controls.Add(sendAllAppsBox);
-        panel.Controls.Add(allAppsWrap, 1, 2);
-        appsLabel = FormLayoutRows.AddCheckedListRow(panel, 3, "Applications to send (Alt+&4)", appsList, appsStatus, l => l.Focus());
-        inputsLabel = FormLayoutRows.AddCheckedListRow(panel, 4, "WASAPI audio inputs to send (Alt+&5)", inputsList, inputsStatus, l => l.Focus());
+        appsLabel = FormLayoutRows.AddCheckedListRow(panel, 2, "Applications to send (Alt+&3)", appsList, appsStatus, l => l.Focus());
+        inputsLabel = FormLayoutRows.AddCheckedListRow(panel, 3, "WASAPI audio inputs to send (Alt+&4)", inputsList, inputsStatus, l => l.Focus());
 
         CheckedListAccessibility.Wire(outputsList, outputsStatus, "output device");
         CheckedListAccessibility.Wire(appsList, appsStatus, "application");
@@ -211,7 +203,6 @@ internal sealed class ServiceProfileDialog : Form
             var appsMode = ProcessLoopbackCapture.IsSupported
                 && string.Equals(working.WasapiSendMode, "applications", StringComparison.OrdinalIgnoreCase);
             sendModeList.SelectedIndex = appsMode ? 1 : 0;
-            sendAllAppsBox.Checked = working.SendAllApplications;
             PopulateAppsList();
 
             peersList.Items.Clear();
@@ -233,7 +224,10 @@ internal sealed class ServiceProfileDialog : Form
         working.SelectedWasapiSendOutputs = CheckedIds(outputsList);
         working.SelectedWasapiSendInputs = CheckedIds(inputsList);
         working.WasapiSendMode = sendModeList.SelectedIndex == 1 ? "applications" : "devices";
-        working.SendAllApplications = sendAllAppsBox.Checked;
+        // Applications mode = pick specific apps only (matches the main app; the "send all applications"
+        // option was removed from both). Force the legacy flag off so a stale profile that still carries
+        // SendAllApplications=true can't make the service quietly capture the whole system.
+        working.SendAllApplications = false;
         working.SelectedSendApplications = appsList.CheckedItems.OfType<AppRow>().Select(a => a.ProcessName).Distinct().ToList();
 
         // Audio profile is fixed for the service (no tab): Opus live-jamming frame, Small packets, locked
@@ -289,10 +283,9 @@ internal sealed class ServiceProfileDialog : Form
         var appsMode = supported && sendModeList.SelectedIndex == 1;
         if (outputsLabel is not null) outputsLabel.Visible = !appsMode;
         SetRowVisible(outputsList, !appsMode);
-        SetRowVisible(sendAllAppsBox, appsMode);
-        var showApps = appsMode && !sendAllAppsBox.Checked;
-        if (appsLabel is not null) appsLabel.Visible = showApps;
-        SetRowVisible(appsList, showApps);
+        // Applications mode always shows the specific-apps list (no "send all" option any more).
+        if (appsLabel is not null) appsLabel.Visible = appsMode;
+        SetRowVisible(appsList, appsMode);
     }
 
     private static void SetRowVisible(Control c, bool visible)

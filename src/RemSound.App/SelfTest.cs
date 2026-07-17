@@ -914,7 +914,22 @@ internal static class SelfTest
             $"the service must FORCE Opus regardless of the profile codec (got {cfg.Codec})");
         Check(cfg.Frame == 120,
             $"the service must force the 2.5 ms live Opus frame (120 samples), regardless of the profile (got {cfg.Frame})");
-        return "service forces Opus + 2.5ms frame + lock-to-clock regardless of profile; crypto matches";
+
+        // Applications-mode parity with the main app: specific apps only. Even with the legacy
+        // SendAllApplications flag set true, the service must NOT emit a whole-system "all applications"
+        // loopback spec — it must build one process-loopback spec per ticked app. (Guards the drift where
+        // the service kept the removed "send all applications" checkbox + code path — Ed, 2026-07-17.)
+        if (RemSound.Sender.ProcessLoopbackCapture.IsSupported)
+        {
+            var appsProfile = new Profile { WasapiSendMode = "applications", SendAllApplications = true };
+            appsProfile.SelectedSendApplications.Add("nonexistent-proc-for-test");
+            var appSpecs = ServiceSendHost.BuildSendSpecs(appsProfile);
+            Check(!appSpecs.Any(s => s.Kind == CaptureKind.Loopback),
+                "applications mode must NOT produce a whole-system loopback spec, even with SendAllApplications=true");
+            Check(appSpecs.All(s => s.Kind is CaptureKind.ProcessLoopback or CaptureKind.Input),
+                "applications mode must build only per-application (or input) specs — the 'send all' path is gone");
+        }
+        return "service forces Opus + 2.5ms frame + lock-to-clock; apps mode is specific-apps-only; crypto matches";
     }
 
     /// <summary>The lock-screen service's app-yield token: while a hold is active the service must see an
