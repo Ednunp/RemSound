@@ -73,6 +73,9 @@ public sealed class AudioSessionStartWatcher : IDisposable
     private void UnhookLocked()
     {
         try { if (manager is not null) manager.OnSessionCreated -= HandleSessionCreated; } catch { }
+        // Dispose the session manager too, not just the device — it holds its own WASAPI COM state, and
+        // Rehook() runs on every default-device change, so leaking it here is a slow WASAPI handle drip.
+        try { (manager as IDisposable)?.Dispose(); } catch { }
         manager = null;
         try { device?.Dispose(); } catch { }
         device = null;

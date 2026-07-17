@@ -233,7 +233,7 @@ ul, ol { padding-left: 1.4em; }
 <tr><td><strong>Connectivity</strong></td><td>Connected, discovered and remembered peers. Adding a peer by address. A connection status read-out.</td></tr>
 <tr><td><strong>Audio inputs and outputs</strong></td><td>The ASIO driver picker (when an ASIO driver is installed), the Receive audio and Send my audio checkboxes, and all the device lists. Choosing a real driver in the picker brings up the ASIO device lists alongside the ordinary Windows ones; choosing <em>(none)</em> hides them.</td></tr>
 <tr><td><strong>Volume, pan and EQ for peers</strong> (optional)</td><td>Shape each connected peer's sound on its own &mdash; their volume, pan (left/right) and EQ. Shown by default; untick &ldquo;Show the volume, pan and EQ for peers tab&rdquo; on the Appearance tab of Preferences to hide it. See <a href="#pan-eq">Volume, pan and EQ for peers tab</a>.</td></tr>
-<tr><td><strong>Audio profile</strong></td><td>Codec, packet size, lock-to-audio-clock, latency, continuous auto-tune, buffer smoothness, artefact sound. Split into an <em>Audio send parameters</em> group and an <em>Audio receive parameters</em> group.</td></tr>
+<tr><td><strong>Audio profile</strong></td><td>Codec, packet size, latency, continuous auto-tune, buffer smoothness, artefact sound. Split into an <em>Audio send parameters</em> group and an <em>Audio receive parameters</em> group.</td></tr>
 </table>
 
 <h3>The system tray icon and its menu</h3>
@@ -480,8 +480,9 @@ ul, ol { padding-left: 1.4em; }
 <tr><th>Control</th><th>Shortcut</th><th>What it does</th></tr>
 <tr><td><strong>Audio codec</strong></td><td>Alt+C</td><td>The codec is the method RemSound uses to package the sound before sending it. Three choices: PCM 48k 24-bit (uncompressed), Opus broadcast quality (loss tolerant), or Opus live latency (for jamming and monitoring). See <a href="#latency">codec choice</a>.</td></tr>
 <tr><td><strong>Packet size</strong></td><td>Alt+P</td><td><em>Standard</em> (the default) or <em>Small</em> (for a local network only). Smaller packets save a couple of milliseconds of delay on the sending side, but they double how many packets are sent.</td></tr>
-<tr><td><strong>Lock to audio clock</strong></td><td>Alt+D</td><td>A timing setting on the sending side. It ties the sending of packets to the sound device's own hardware clock, which removes a little jitter (jitter means uneven packet timing). Brief clicks are possible if the connection can't keep up. The label changes depending on whether ASIO is in use, so it always describes what it does in your setup.</td></tr>
 </table>
+
+<p>RemSound always <strong>locks its sending timing to the sound device's own hardware clock</strong> &mdash; this used to be a &ldquo;Lock to audio clock&rdquo; checkbox, but it is now always on, because turning it off only ever added delay. There is nothing to set.</p>
 
 <h3>Audio receive parameters</h3>
 
@@ -736,13 +737,12 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 
 <h2 id="latency">14. Latency and audio quality</h2>
 
-<p>Latency is the small delay between sound leaving one computer and arriving at the other. Five controls together shape the trade-off between latency and sound quality, all on the Audio profile tab:</p>
+<p>Latency is the small delay between sound leaving one computer and arriving at the other. Four controls together shape the trade-off between latency and sound quality, all on the Audio profile tab:</p>
 
 <ul>
 <li><strong>Audio latency in milliseconds (Alt+L)</strong> &mdash; the main target for how much sound the receiving side keeps in reserve.</li>
 <li><strong>Buffer smoothness (Alt+B)</strong> &mdash; how hard the receiving side works to protect against sudden jitter.</li>
 <li><strong>Packet size (Alt+P)</strong> &mdash; Standard or Small. Small packets shave a couple of milliseconds off the sending delay, but double how many packets are sent.</li>
-<li><strong>Lock to audio clock (Alt+D)</strong> &mdash; ties the timing of packets to the sound device's hardware clock, removing wobble caused by Windows.</li>
 <li><strong>Continuous auto-tune</strong> &mdash; lets the receiving side choose the latency target for you, re-checking every few seconds.</li>
 </ul>
 
@@ -792,18 +792,12 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 
 <p>The saving is small &mdash; at most a few milliseconds end to end. Small packets are useful when you and your collaborator are on the same local network and want to chase every last millisecond. For any internet connection it's a false economy, because doubling how many packets are sent also doubles the chance of running into jitter at the wrong moment, which you hear as clicks.</p>
 
-<h3>Lock to audio clock</h3>
+<h3>Locking to the audio clock (automatic)</h3>
 
-<p>The <strong>Lock to audio clock</strong> checkbox ties RemSound's sending timing to the sound device's own hardware clock, instead of letting Windows decide the pace. It's off by default. The label tells you what it does in your particular setup:</p>
-
-<table>
-<tr><th>Your setup</th><th>What &ldquo;Lock to audio clock&rdquo; does</th></tr>
-<tr><td>No ASIO driver chosen (WASAPI only)</td><td>The sender takes its timing from the WASAPI capture instead of from Windows' general timer. Tightens the sending delay.</td></tr>
-<tr><td>An ASIO driver chosen (WASAPI and ASIO both running)</td><td>Both paths tighten independently. Brief clicks are possible on either path if the connection can't keep up.</td></tr>
-</table>
+<p>RemSound always ties its sending timing to the sound device's own hardware clock, instead of letting Windows decide the pace. This used to be a <strong>Lock to audio clock</strong> checkbox that was off by default; it is now always on and there is nothing to set, because turning it off only ever added delay. On a WASAPI-only setup the sender takes its timing from the WASAPI capture; when an ASIO driver is also in use, both paths tighten independently.</p>
 
 <div class="note">
-<strong>Why you'd use it:</strong> Windows' general timer can wake the audio loop with up to about 6 ms of wobble, even at top priority. At target latencies under about 15 ms, that wobble shows up as clicks. Locking to the audio clock takes Windows' timer out of the picture &mdash; the sound device itself drives the timing.
+<strong>Why it matters:</strong> Windows' general timer can wake the audio loop with up to about 6 ms of wobble, even at top priority. At target latencies under about 15 ms, that wobble shows up as clicks. Locking to the audio clock takes Windows' timer out of the picture &mdash; the sound device itself drives the timing.
 </div>
 
 <h3>Continuous auto-tune</h3>
@@ -884,7 +878,6 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <tr><td>Alt+U</td><td>Toggle Use CPU and Windows performance settings in high priority mode (for this profile)</td></tr>
 <tr><td>Alt+C</td><td>Focus Audio codec</td></tr>
 <tr><td>Alt+P</td><td>Focus Packet size</td></tr>
-<tr><td>Alt+D</td><td>Toggle Lock to audio clock</td></tr>
 <tr><td>Alt+L</td><td>Focus the latency control &mdash; the ASIO path when an ASIO driver is chosen, otherwise the single Audio latency control</td></tr>
 <tr><td>Alt+T</td><td>Toggle continuous auto-tune &mdash; the ASIO path when an ASIO driver is chosen, otherwise the single Continuous auto-tune toggle</td></tr>
 <tr><td>Alt+W</td><td>(Only when an ASIO driver is chosen.) Focus the WASAPI-path latency control</td></tr>
@@ -1398,9 +1391,9 @@ RemSound.exe --connect 192.168.1.42
 <h3>Setting it up</h3>
 <p>Everything lives in the <strong>Service</strong> menu on the menu bar:</p>
 <ol>
-<li><strong>Configure service profile&hellip;</strong> &mdash; opens a small window with three tabs (Audio send, Audio profile, Connectivity) where you choose what to send, how to send it, and who to send it to, plus a password. This is a separate profile from your normal ones and does not appear in the usual profile list. There is no &ldquo;send my audio&rdquo; switch because the service always sends. The <strong>Additional options</strong> button lets you turn the connect/disconnect sounds and the service's own log on or off.</li>
-<li><strong>Install service</strong> &mdash; registers it with Windows so it starts automatically at every boot. Windows asks for administrator permission (one prompt). Do this once.</li>
-<li><strong>Start service</strong> / <strong>Stop service</strong> &mdash; run or halt it now without waiting for a reboot. Also administrator actions.</li>
+<li><strong>Configure service profile&hellip;</strong> &mdash; opens a small window with two tabs (Connectivity and Audio send) where you choose who to send to (plus a password) and what to send. There is no &ldquo;send my audio&rdquo; switch because the service always sends, and there is no audio-quality tab to fiddle with: the service always uses the settings that work best for live streaming (the Opus live-latency codec, small packets, locked to the audio clock), so it just sounds right. This is a separate profile from your normal ones and does not appear in the usual profile list. The <strong>Additional options</strong> button lets you turn the connect/disconnect sounds and the service's own log on or off.</li>
+<li><strong>Install service</strong> &mdash; registers it with Windows so it starts automatically at every boot. Windows asks for administrator permission (one prompt). Do this once. (When you first install RemSound on a PC, the installer also offers to set the service up for you, so you may have done this already.)</li>
+<li><strong>Start service</strong> / <strong>Stop service</strong> &mdash; run or halt it now without waiting for a reboot.</li>
 <li><strong>Uninstall service</strong> &mdash; removes it entirely.</li>
 </ol>
 <p>The top of the Service menu always shows the current state: not installed, installed and running, or installed and stopped.</p>
@@ -1408,8 +1401,8 @@ RemSound.exe --connect 192.168.1.42
 <h3>Good to know</h3>
 <ul>
 <li>The service sends to the exact peer addresses you list in its profile (a computer on your network, or a reachable address across the internet). Automatic peer discovery and hole-punching are handled by the normal app, not the service.</li>
-<li>Because the service runs even when you are not logged in, it sends from the system account &mdash; the installer arranges the firewall so its audio can get out.</li>
-<li>When RemSound updates itself, the service keeps running the previous version until its next restart (or the next reboot), then picks up the new one. Nothing breaks in the meantime.</li>
+<li>Because the service runs even when you are not logged in, it sends from the system account. If Windows Firewall ever prompts about RemSound, allow it so the audio can get out.</li>
+<li>When RemSound updates itself, the service updates itself too, automatically &mdash; it notices the newer version, copies it in and restarts onto it on its own, with no prompt and nothing for you to do. (This happens on the service's own schedule shortly after the app updates; nothing breaks in the meantime.)</li>
 <li>If two computers should each stream to the other unattended, install the service on both.</li>
 </ul>
 
@@ -1512,7 +1505,7 @@ RemSound.exe --connect 192.168.1.42
 <tr><td>Auto-tune</td><td>RemSound automatically adjusting the latency target based on how evenly packets are arriving. Off by default; turn it on with the Continuous auto-tune checkbox on the Audio profile tab.</td></tr>
 <tr><td>Profile</td><td>A saved snapshot of every RemSound setting and choice &mdash; device ticks, send / receive states, codec, latency, peers, ASIO driver choice, the lot. (Keyboard shortcuts are the exception &mdash; they're shared across all profiles, not saved per profile.) Stored as one settings file. You pick one at startup, and can switch with File &rarr; Open profile.</td></tr>
 <tr><td>New profile</td><td>An entry in the startup profile picker that begins a session with all the defaults &mdash; nothing ticked, no peers, no saved name. A clean starting point for a new profile, or for a one-off session you don't plan to save.</td></tr>
-<tr><td>Lock to audio clock</td><td>A sending-side timing mode that takes its timing straight from the sound device's hardware clock instead of from Windows. Removes a few milliseconds of wobble at tight latency targets. Off by default. Set with the checkbox of the same name on the Audio profile tab.</td></tr>
+<tr><td>Lock to audio clock</td><td>A sending-side timing mode that takes its timing straight from the sound device's hardware clock instead of from Windows. Removes a few milliseconds of wobble at tight latency targets. RemSound now does this always &mdash; it used to be a checkbox on the Audio profile tab, but it is on permanently and no longer a setting.</td></tr>
 <tr><td>Concealment</td><td>A receiving-side feature that fills brief gaps in the playback reserve with a small noise burst (the default) or an obvious click. You choose which on the Audio profile tab, in the <em>Artefact sound type</em> list. Opus also has its own repair of lost packets on top of this.</td></tr>
 <tr><td>Remote control</td><td>A RemSound feature that lets one connected peer adjust another peer's listening volume (or toggle their receive mute) using global hotkeys. There are two sets of commands: one adjusts the receiver's RemSound volume slider, the other adjusts the receiver's Windows volume. Off by default on both ends; the receiver opts in via &ldquo;Accept remote volume commands from peers&rdquo; in the Preferences dialog (Ctrl+P), and the sender sets up hotkeys in the Keyboard shortcuts dialog (Ctrl+K). Designed for the &ldquo;I'm NVDA-Remote'd into my desktop and want to nudge the laptop's volume&rdquo; case. See <a href="#remote-control">Remote control</a>.</td></tr>
 </table>

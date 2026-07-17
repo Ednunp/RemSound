@@ -588,22 +588,26 @@ public sealed class RemSoundSettingsStore
         MigrateRememberedPeersToGlobal(profile);
     }
 
-    /// <summary>Migration for the peers list going machine-wide (2026-07-16): profiles written by older
-    /// builds carry their own remembered-peers list, so the first time each one is opened its entries
-    /// are UNIONED into the AppConfig book — nothing is lost, nothing is overwritten. Once the sets
-    /// match this is a no-op (no file write).</summary>
+    /// <summary>ONE-TIME migration for the peers list going machine-wide (2026-07-16): profiles written by
+    /// older builds carry their own remembered-peers list, so the first opened profile that has peers has
+    /// them UNIONED into the AppConfig book (nothing lost, nothing overwritten), and a marker
+    /// (<see cref="AppConfig.RememberedPeersMigrated"/>) then stops it re-running — otherwise a cleared
+    /// list would be resurrected from the profile file on the next launch.</summary>
     private static void MigrateRememberedPeersToGlobal(Profile profile)
     {
-        if (profile.RememberedPeers is not { Count: > 0 } legacy) return;
         try
         {
             var c = AppConfig.Load();
+            // ONE-TIME only. Re-running every launch re-unioned the profile file's stale copy, which
+            // resurrected peers the user had just cleared in Preferences (the global store was emptied
+            // but the profile JSON still held them). The marker stops that.
+            if (c.RememberedPeersMigrated) return;
+            if (profile.RememberedPeers is not { Count: > 0 } legacy) return; // nothing to migrate yet; try again with a profile that has peers
             var current = c.RememberedPeers ?? [];
-            var merged = current
+            c.RememberedPeers = current
                 .Concat(legacy.Where(static v => !string.IsNullOrWhiteSpace(v)).Select(static v => v.Trim()))
                 .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            if (merged.Count == current.Count) return; // nothing new — skip the write
-            c.RememberedPeers = merged;
+            c.RememberedPeersMigrated = true;
             c.Save();
         }
         catch { /* best-effort, like the app's other AppConfig writes */ }

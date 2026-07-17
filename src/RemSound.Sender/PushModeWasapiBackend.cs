@@ -210,10 +210,14 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
             }
             catch (Exception ex)
             {
+                // A device-open failure (device disabled/unplugged between enumeration and GetDevice/
+                // Initialize) must NOT propagate: it used to be rethrown, and because CompositeCaptureBackend
+                // and AudioSender don't wrap the engine's Start, it could crash the whole app during device
+                // churn. Match MixingEngine/AsioCaptureBackend — log, stay stopped, let the caller carry on
+                // (the device-change watcher / capture self-heal re-open when a good device appears).
                 lastError = ex.Message;
-                onDiagnostic?.Invoke($"push-wasapi start failed for \"{spec.Name}\": {ex.GetType().Name}: {ex.Message}");
+                onDiagnostic?.Invoke($"push-wasapi start failed for \"{spec.Name}\": {ex.GetType().Name}: {ex.Message} — staying stopped (will re-open when the device is available)");
                 StopInternal();
-                throw;
             }
         }
     }

@@ -137,7 +137,9 @@ public sealed class ServiceSendHost : IDisposable
         // silence keepalive feeding back, which is why the peak matters.
         var peak = sender.TakeMaxSenderPreEncodePeak();
         if (peak > pulsePeakMax) pulsePeakMax = peak;
-        if (peak >= SilentPeak) { everHeardAudio = true; deafSinceTick = 0; }
+        // Real audio proves the capture works — refund the self-heal ladder so a LATER hiccup (hours or
+        // days into an always-on stream) gets fresh re-open attempts instead of finding the budget spent.
+        if (peak >= SilentPeak) { everHeardAudio = true; deafSinceTick = 0; reopenAttempts = 0; }
         pulseFramesSent += sender.TakeSenderAudioFramesSent();
 
         // What is the DEVICE playing? The endpoint's own meter, independent of our capture stream.
@@ -256,7 +258,20 @@ public sealed class ServiceSendHost : IDisposable
             {
                 sender.Stop();
                 var specs = BuildSendSpecs(profile); // re-resolve (the default device may have moved)
-                if (specs.Count == 0) { log?.Invoke("service: re-open found no send sources — capture left stopped"); running = false; return; }
+                if (specs.Count == 0)
+                {
+                    // The source went away (e.g. the only loopback device was unplugged). Release the whole
+                    // send stack — presence, meter readers, the session watcher AND the perf-mode overrides
+                    // — instead of sitting "running" with High priority / EcoQoS-off held while streaming
+                    // nothing. The device-change watcher re-opens (via ApplyProfile) when a device returns.
+                    log?.Invoke("service: re-open found no send sources — releasing until a device returns");
+                    try { presence.Stop(); } catch { }
+                    SwapMeterDevices(Array.Empty<CaptureSourceSpec>());
+                    try { sessionKick?.Dispose(); } catch { } sessionKick = null;
+                    try { PerformanceMode.Apply(false, msg => log?.Invoke($"service: {msg}")); } catch { }
+                    running = false;
+                    return;
+                }
                 sender.Configure(specs);
                 sender.Start();
                 SwapMeterDevices(specs);
@@ -297,11 +312,16 @@ public sealed class ServiceSendHost : IDisposable
     /// false (and stays stopped) if the profile has nothing to send or no reachable peers.</summary>
     public bool ApplyProfile(Profile profile)
     {
+        // Resolve sources + peer addresses OUTSIDE the lock. BuildEndpoints does DNS (Dns.GetHostAddresses)
+        // and BuildSendSpecs enumerates devices — either can block for seconds at boot as SYSTEM before the
+        // network/audio stack is fully up. Doing that while holding `gate` would stall Suspend() (yielding
+        // to the interactive app), the RunLoop tick and the self-heal for the whole timeout.
+        if (disposed) return false;
+        var specs = BuildSendSpecs(profile);
+        var endpoints = BuildEndpoints(profile);
         lock (gate)
         {
             if (disposed) return false;
-            var specs = BuildSendSpecs(profile);
-            var endpoints = BuildEndpoints(profile);
             if (specs.Count == 0) { log?.Invoke("service: profile has no WASAPI send sources — nothing to stream"); return false; }
             if (endpoints.Count == 0) { log?.Invoke("service: profile has no reachable peers — nothing to stream to"); return false; }
 
@@ -536,6 +556,10 @@ public sealed class ServiceSendHost : IDisposable
         }
         var profile = loadProfile();
         if (profile is null) return;
+        // A device hot-plug re-plumbs the audio graph much like a power resume or a fresh boot — refill the
+        // self-heal ladder so a brand-new device that comes up momentarily deaf still gets its re-opens.
+        everHeardAudio = false;
+        reopenAttempts = 0;
         Suspend();
         ApplyProfile(profile);
     }

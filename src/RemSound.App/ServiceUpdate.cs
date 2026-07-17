@@ -17,9 +17,9 @@ namespace RemSound.App;
 /// uncertainty (folder unknown, file missing mid-swap, unparseable version) means "don't act". After the
 /// copy+restart the running bin == the app version, so it never re-triggers.</para>
 ///
-/// <para>Trust note: the service copies from a user-writable folder and runs it as SYSTEM — the same trust
-/// posture as the previous in-place scheme. Acceptable for this personal app; a hardened build would
-/// code-sign and verify before copying.</para>
+/// <para>Trust note: the service copies from a user-writable folder (the app's install location) and runs
+/// it as SYSTEM. That is a local-privilege-escalation surface — a hardened build would code-sign the app
+/// and verify the signature before copying. Accepted deliberately for this personal app.</para>
 /// </summary>
 internal static class ServiceUpdate
 {

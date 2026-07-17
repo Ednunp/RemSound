@@ -99,9 +99,14 @@ public sealed class AppConfig
     /// <summary>Machine-wide remembered PEER entries — ONE shared address book across all profiles
     /// (Ed, 2026-07: both remembered lists live in global, not the profile). Before this the list rode
     /// in each profile's JSON, so it was per-profile in practice; each old profile's legacy list is
-    /// unioned in here the first time it's opened (RemSoundSettingsStore.ApplyProfile). Null = none yet.
-    /// Cleared from Preferences → General.</summary>
+    /// unioned in here ONCE (RemSoundSettingsStore.MigrateRememberedPeersToGlobal, gated by
+    /// <see cref="RememberedPeersMigrated"/>). Null = none yet. Cleared from Preferences → General.</summary>
     public List<string>? RememberedPeers { get; set; }
+
+    /// <summary>Set true after the one-time migration of a profile's legacy per-profile peers into
+    /// <see cref="RememberedPeers"/>. Without this the migration re-ran every launch and re-unioned the
+    /// profile file's stale copy — which silently resurrected peers the user had just cleared.</summary>
+    public bool RememberedPeersMigrated { get; set; }
 
     /// <summary>Machine-wide remembered APPLICATION process names (lower-case) — the shared "apps I
     /// send" address book, companion to <see cref="RememberedPeers"/>. Before 2026-07-16 this only

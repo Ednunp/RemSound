@@ -81,7 +81,9 @@ public sealed class Profile
     /// the whole system's default output. When false, only the apps named in
     /// <see cref="SelectedSendApplications"/> are sent. The MAIN window no longer has a "send all
     /// applications" option (removed 2026-07-16): there, applications mode always means specific ticked
-    /// apps, and whole-system audio is devices mode's job. The main window neither reads nor writes this.</summary>
+    /// apps, and whole-system audio is devices mode's job. The main window never READS this to drive
+    /// behaviour; it does still write the default true when it saves a profile (harmless — main-app and
+    /// service profiles live in separate stores and are never the same file).</summary>
     public bool SendAllApplications { get; set; } = true;
     /// <summary>In "applications" send mode: the process
     /// names (lower-case, no path/extension, e.g. "vlc", "firefox") whose audio to send. Tracked by

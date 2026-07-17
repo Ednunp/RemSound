@@ -71,6 +71,8 @@ internal static class SelfTest
         RunStep(results, "Service silent-capture self-heal (issue #23 boot re-open ladder)", ServiceSilentCaptureSelfHeal);
         RunStep(results, "Send-app capture change-detection (catch an app the instant it opens)", SendAppCaptureChangeDetection);
         RunStep(results, "Remembered applications list is global + clearable", RememberedApplicationsGlobal);
+        RunStep(results, "Remembered peers migrate once (cleared list not resurrected)", RememberedPeersMigrationOnce);
+        RunStep(results, "Session-start watcher lifecycle (construct/rehook/dispose)", SessionStartWatcher);
         RunStep(results, "Send-app lists semantics (ticked → Active, out of Remembered)", SendAppListSemantics);
         RunStep(results, "Service registration args", ServiceRegistrationArgs);
         RunStep(results, "Service self-contained install (own bin + user stop rights)", ServiceSelfContainedInstall);
@@ -1715,6 +1717,68 @@ internal static class SelfTest
             return "global remembered applications: round-trip, case-insensitive dedupe, cross-instance, and clear";
         }
         finally { store.SaveRememberedApplications(original); }
+    }
+
+    /// <summary>The peers list went machine-wide (AppConfig) with a ONE-TIME migration from each old
+    /// profile's per-profile list. Regression guard for the bug where the migration re-ran every launch
+    /// and RESURRECTED peers the user had just cleared: after a clear, re-loading the same profile (whose
+    /// JSON still holds the old peers) must NOT bring them back. Touches the real AppConfig; saves/restores.</summary>
+    private static string? RememberedPeersMigrationOnce()
+    {
+        var store = new RemSoundSettingsStore("RemSound");
+        var saved = AppConfig.Load();
+        var savedPeers = saved.RememberedPeers;
+        var savedMigrated = saved.RememberedPeersMigrated;
+        try
+        {
+            // Clean slate: no global peers, migration not yet done.
+            var c0 = AppConfig.Load(); c0.RememberedPeers = new(); c0.RememberedPeersMigrated = false; c0.Save();
+
+            var p = new Profile { Title = "peers-migration-selftest" };
+            p.RememberedPeers = new List<string> { "Alice", "Bob" };
+
+            // First load of a profile that has legacy peers migrates them and sets the one-time flag.
+            store.ApplyProfile(p);
+            var migrated = store.LoadRememberedPeers();
+            Check(migrated.Contains("Alice") && migrated.Contains("Bob"), "legacy per-profile peers must migrate into the global list");
+            Check(AppConfig.Load().RememberedPeersMigrated, "the one-time migration flag must be set after migrating");
+
+            // User clears the global peers list (the Preferences button).
+            store.SaveRememberedPeers(Array.Empty<string>());
+            Check(store.LoadRememberedPeers().Count == 0, "clearing must empty the global peers list");
+
+            // Re-loading the SAME profile (its JSON still lists Alice/Bob) must NOT resurrect them.
+            store.ApplyProfile(p);
+            Check(store.LoadRememberedPeers().Count == 0,
+                "a cleared peers list must NOT be resurrected by re-loading a profile (migration is one-time)");
+            return "peers migrate once; a cleared list stays cleared across profile re-loads";
+        }
+        finally
+        {
+            var c = AppConfig.Load(); c.RememberedPeers = savedPeers; c.RememberedPeersMigrated = savedMigrated; c.Save();
+        }
+    }
+
+    /// <summary>The instant capture-on-app-open watcher (AudioSessionStartWatcher) must construct, re-hook
+    /// its default-device notification without throwing, and dispose idempotently — the plumbing behind
+    /// "catch a per-app send from its very start" and the service's boot session-kick. (It hooks live
+    /// WASAPI, so this proves lifecycle safety, not delivery of a real session event.)</summary>
+    private static string? SessionStartWatcher()
+    {
+        RemSound.Sender.AudioSessionStartWatcher w;
+        try { w = new RemSound.Sender.AudioSessionStartWatcher(_ => { }, _ => { }); }
+        catch (Exception ex) { return Skip($"session watcher could not construct (no audio endpoint?): {ex.GetType().Name}: {ex.Message}"); }
+        try
+        {
+            w.Rehook(); // re-point at the current default device — must never throw
+            w.Rehook();
+            return "constructed, re-hooked twice, and disposed idempotently without throwing";
+        }
+        finally
+        {
+            w.Dispose();
+            w.Dispose(); // idempotent
+        }
     }
 
     /// <summary>Pins the two-list semantics Ed specified 2026-07-16 (no send-all option): a TICKED app

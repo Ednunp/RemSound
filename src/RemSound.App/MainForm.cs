@@ -3870,10 +3870,10 @@ public sealed class MainForm : Form
         sessionStartWatcher = null;
     }
 
-    /// <summary>Restores the WASAPI send mode, the "Send all applications" master toggle and the ticked
-    /// app names from a loaded profile. Remembered apps that aren't running right now are seeded into the
-    /// list (ticked, marked "not running") so they resume capture the moment they reappear. On Windows
-    /// too old for process loopback the mode is forced back to devices.</summary>
+    /// <summary>Restores the WASAPI send mode and the ticked app names from a loaded profile (the main
+    /// window's "Send all applications" master toggle was removed 2026-07-16). Remembered apps that aren't
+    /// running right now are seeded into the list (ticked, marked "not running") so they resume capture the
+    /// moment they reappear. On Windows too old for process loopback the mode is forced back to devices.</summary>
     private void RestoreSendModeFromProfile(Profile p)
     {
         suppressSendAppEvents = true;
