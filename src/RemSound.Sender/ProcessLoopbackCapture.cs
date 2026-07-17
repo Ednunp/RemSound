@@ -67,6 +67,10 @@ public sealed class ProcessLoopbackCapture : IWaveIn
     /// e.g. the send-mode UI that crashed at launch on Win7 (issue #22). Null = use the real OS check.</summary>
     internal static bool? ForceSupportedForTest;
 
+    /// <summary>Diagnostic sink for activation-path tracing (hr codes, callback delivery, timing). Static
+    /// so a probe can wire it without touching every construction site. Null = no tracing.</summary>
+    internal static Action<string>? Diagnostic;
+
     /// <summary>True on Windows builds new enough for the process-loopback API (10.0.19041+).</summary>
     public static bool IsSupported =>
         ForceSupportedForTest ?? OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041);
@@ -138,21 +142,20 @@ public sealed class ProcessLoopbackCapture : IWaveIn
             propVariant.blobSize = (uint)paramsSize;
             propVariant.blobData = paramsPtr;
 
-            var handler = new ActivationHandler();
             var iidAudioClient = typeof(IAudioClient).GUID;
-            // The out operation is taken as a raw pointer, NOT the typed interface: the eager RCW cast of a
-            // context-bound operation object is exactly what threw InvalidCastException / E_NOINTERFACE in
-            // the field and killed every specific-app capture ("foobar2000 sends no audio"). We don't need
-            // the operation object — the completion handler carries the result — so just hold and release
-            // the reference.
+            var handler = new ActivationHandler();
+            // The out operation is taken as a raw pointer, NOT the typed interface: casting the not-yet-
+            // completed operation object threw here. We don't need it — the completion handler carries the
+            // result — so just hold and release the reference.
             var opPtr = IntPtr.Zero;
             try
             {
                 var hr = ActivateAudioInterfaceAsync(VirtualDevicePath, ref iidAudioClient, ref propVariant, handler, out opPtr);
+                Diagnostic?.Invoke($"activate: ActivateAudioInterfaceAsync hr=0x{hr:X8} for pid {targetPid}");
                 if (hr != 0) Marshal.ThrowExceptionForHR(hr);
 
                 if (!handler.Completed.WaitOne(3000))
-                    throw new TimeoutException("Process-loopback activation timed out.");
+                    throw new TimeoutException("Process-loopback activation timed out (completion callback never arrived).");
                 if (handler.ActivateResult != 0) Marshal.ThrowExceptionForHR(handler.ActivateResult);
 
                 audioClient = (IAudioClient)handler.Interface!;
@@ -276,6 +279,16 @@ public sealed class ProcessLoopbackCapture : IWaveIn
 
     // ---- Async activation completion handler -------------------------------------------------
 
+    // Completion handler for ActivateAudioInterfaceAsync. TWO things here are load-bearing and were the
+    // reason per-app capture NEVER worked on any machine (activation always "timed out"):
+    //   1. ActivateCompleted takes the operation as a raw IntPtr, NOT the typed
+    //      IActivateAudioInterfaceAsyncOperation. Typing it made the CLR QueryInterface the operation as
+    //      the call was delivered; that QI returns E_NOINTERFACE, and it fails INSIDE the interop stub —
+    //      before our method body — so the whole callback was silently dropped and the wait timed out.
+    //   2. We read the result by calling GetActivateResult through the vtable directly (see below) rather
+    //      than casting the pointer to our interface — the same QI that fails in (1).
+    // The callback is delivered on an MTA worker thread; a plain WaitOne on the activation thread catches
+    // it. (Apartment-agility via IAgileObject was tried and is NOT required — removed to avoid confusion.)
     [ComVisible(true)]
     private sealed class ActivationHandler : IActivateAudioInterfaceCompletionHandler
     {
@@ -283,20 +296,36 @@ public sealed class ProcessLoopbackCapture : IWaveIn
         public int ActivateResult { get; private set; } = unchecked((int)0x80004005); // E_FAIL until proven otherwise
         public object? Interface { get; private set; }
 
-        public void ActivateCompleted(IActivateAudioInterfaceAsyncOperation activateOperation)
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int GetActivateResultDelegate(IntPtr self, out int activateResult, out IntPtr activatedInterface);
+
+        public void ActivateCompleted(IntPtr activateOperation)
         {
+            Diagnostic?.Invoke($"ActivateCompleted ENTERED on thread apartment={Thread.CurrentThread.GetApartmentState()}, op={(activateOperation == IntPtr.Zero ? "null" : "set")}");
+            var ifacePtr = IntPtr.Zero;
             try
             {
-                activateOperation.GetActivateResult(out var hr, out var iface);
-                ActivateResult = hr;
-                Interface = iface;
+                // The pointer we're handed ALREADY IS an IActivateAudioInterfaceAsyncOperation* (that's the
+                // API contract) — do NOT QueryInterface it (that QI returns E_NOINTERFACE here, cross-proxy).
+                // Call GetActivateResult directly through vtable slot 3 (after IUnknown's 3 slots).
+                var vtbl = Marshal.ReadIntPtr(activateOperation);
+                var fnPtr = Marshal.ReadIntPtr(vtbl, 3 * IntPtr.Size);
+                var getResult = Marshal.GetDelegateForFunctionPointer<GetActivateResultDelegate>(fnPtr);
+                var callHr = getResult(activateOperation, out var activateHr, out ifacePtr);
+                if (callHr != 0) { ActivateResult = callHr; Diagnostic?.Invoke($"ActivateCompleted: GetActivateResult call failed hr=0x{callHr:X8}"); return; }
+                ActivateResult = activateHr;
+                if (activateHr == 0 && ifacePtr != IntPtr.Zero)
+                    Interface = Marshal.GetTypedObjectForIUnknown(ifacePtr, typeof(IAudioClient));
+                Diagnostic?.Invoke($"ActivateCompleted: activateHr=0x{activateHr:X8}, iface={(ifacePtr == IntPtr.Zero ? "null" : "got")}");
             }
             catch (Exception ex)
             {
                 ActivateResult = ex.HResult != 0 ? ex.HResult : unchecked((int)0x80004005);
+                Diagnostic?.Invoke($"ActivateCompleted: THREW {ex.GetType().Name}: {ex.Message} (hr=0x{ActivateResult:X8})");
             }
             finally
             {
+                if (ifacePtr != IntPtr.Zero) Marshal.Release(ifacePtr); // GetTypedObjectForIUnknown took its own ref
                 Completed.Set();
             }
         }
@@ -343,19 +372,20 @@ public sealed class ProcessLoopbackCapture : IWaveIn
 
 // ---- COM interfaces (declared in vtable order — DO NOT reorder methods) -----------------------
 
-[ComImport, Guid("72A22D78-CDE4-4B31-B8CC-843A71199B6D"),
- InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-internal interface IActivateAudioInterfaceAsyncOperation
-{
-    void GetActivateResult(out int activateResult,
-        [MarshalAs(UnmanagedType.IUnknown)] out object activatedInterface);
-}
+// NB: IActivateAudioInterfaceAsyncOperation is deliberately NOT declared as a managed interface — its
+// GetActivateResult is invoked through the vtable directly in ActivationHandler.ActivateCompleted,
+// because QueryInterface-ing the operation pointer to a managed interface returns E_NOINTERFACE here.
 
 [ComImport, Guid("41D949AB-9862-444A-80F6-C261334DA5EB"),
  InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface IActivateAudioInterfaceCompletionHandler
 {
-    void ActivateCompleted(IActivateAudioInterfaceAsyncOperation activateOperation);
+    // The operation is taken as a RAW pointer, NOT the typed interface. Typing it made the CLR marshal
+    // (QueryInterface) the operation object as the call was delivered; that QI returns E_NOINTERFACE
+    // here, and the failure happened INSIDE the interop stub — before our method body — so the callback
+    // was silently dropped and activation always "timed out". With IntPtr the stub marshals nothing, the
+    // method runs, and we QI the operation ourselves on this (the delivery) thread.
+    void ActivateCompleted(IntPtr activateOperation);
 }
 
 [ComImport, Guid("1CB9AD4C-DBFA-4C32-B178-C2F568A703B2"),

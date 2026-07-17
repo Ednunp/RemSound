@@ -87,6 +87,14 @@ internal static class Program
             return;
         }
 
+        // --probe-apploopback [pid]: temporary focused diagnostic for the per-app-send activation hang.
+        // Runs the process-loopback activation with full tracing and exits. Not part of the gate.
+        if (args.Length > 0 && Array.Exists(args, a => string.Equals(a, "--probe-apploopback", StringComparison.OrdinalIgnoreCase)))
+        {
+            Environment.ExitCode = ProbeAppLoopback.Run(args);
+            return;
+        }
+
         // --config-dir <folder> (test / portable isolation): redirect ALL user state - config,
         // profiles, logs, cue sounds - to an explicit folder for THIS process only. Applied first,
         // before the layout migration and sound consolidation below read or write the default

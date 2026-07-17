@@ -335,6 +335,7 @@ internal static class SelfTest
 
         var pid = Process.GetCurrentProcess().Id;
         var cycles = 0;
+        var disposeTimes = new List<long>();
         for (var i = 0; i < 3; i++)
         {
             var capture = new RemSound.Sender.ProcessLoopbackCapture(pid);
@@ -344,7 +345,10 @@ internal static class SelfTest
             capture.RecordingStopped += (_, e) => stopError = e.Exception;
             capture.StartRecording();
             Thread.Sleep(150);         // let activation + the capture loop run and then be torn down
+            var sw = Stopwatch.StartNew();
             capture.Dispose();          // teardown while the capture thread is live — the crash scenario
+            sw.Stop();
+            disposeTimes.Add(sw.ElapsedMilliseconds);
 
             // Activation MUST have succeeded. This is the regression guard for the E_NOINTERFACE cast on
             // IActivateAudioInterfaceAsyncOperation that silently killed every per-app capture: it was
@@ -356,7 +360,13 @@ internal static class SelfTest
                 return $"process-loopback activation failed: {stopError.GetType().Name}: {stopError.Message}";
             cycles++;
         }
-        return $"ran {cycles} start/stop/dispose cycles on pid {pid}; activation clean, no crash";
+        // Activation must also be FAST. A dispose that takes ~2s means the capture thread was still stuck
+        // waiting on activation 150ms after start (StopRecording's thread-join times out at 2s) — per-app
+        // capture "working" but starting seconds late is still broken from the user's chair, and this is
+        // exactly how the completion-never-arrives regression looks when a retry happens to save it.
+        var worst = disposeTimes.Max();
+        Check(worst < 1000, $"activation too slow — a dispose took {worst}ms, meaning the capture thread was still activating long after start (dispose times: {string.Join(", ", disposeTimes)}ms)");
+        return $"ran {cycles} start/stop/dispose cycles on pid {pid}; activation clean + prompt (dispose {string.Join("/", disposeTimes)}ms), no crash";
     }
 
     /// <summary>Soak test for runtime lifecycle transitions — the class of bug that hard-crashed when Ed
