@@ -67,9 +67,6 @@ public sealed class ProcessLoopbackCapture : IWaveIn
     /// e.g. the send-mode UI that crashed at launch on Win7 (issue #22). Null = use the real OS check.</summary>
     internal static bool? ForceSupportedForTest;
 
-    /// <summary>Diagnostic sink for activation-path tracing (hr codes, callback delivery, timing). Static
-    /// so a probe can wire it without touching every construction site. Null = no tracing.</summary>
-    internal static Action<string>? Diagnostic;
 
     /// <summary>True on Windows builds new enough for the process-loopback API (10.0.19041+).</summary>
     public static bool IsSupported =>
@@ -151,7 +148,6 @@ public sealed class ProcessLoopbackCapture : IWaveIn
             try
             {
                 var hr = ActivateAudioInterfaceAsync(VirtualDevicePath, ref iidAudioClient, ref propVariant, handler, out opPtr);
-                Diagnostic?.Invoke($"activate: ActivateAudioInterfaceAsync hr=0x{hr:X8} for pid {targetPid}");
                 if (hr != 0) Marshal.ThrowExceptionForHR(hr);
 
                 if (!handler.Completed.WaitOne(3000))
@@ -301,7 +297,6 @@ public sealed class ProcessLoopbackCapture : IWaveIn
 
         public void ActivateCompleted(IntPtr activateOperation)
         {
-            Diagnostic?.Invoke($"ActivateCompleted ENTERED on thread apartment={Thread.CurrentThread.GetApartmentState()}, op={(activateOperation == IntPtr.Zero ? "null" : "set")}");
             var ifacePtr = IntPtr.Zero;
             try
             {
@@ -312,16 +307,14 @@ public sealed class ProcessLoopbackCapture : IWaveIn
                 var fnPtr = Marshal.ReadIntPtr(vtbl, 3 * IntPtr.Size);
                 var getResult = Marshal.GetDelegateForFunctionPointer<GetActivateResultDelegate>(fnPtr);
                 var callHr = getResult(activateOperation, out var activateHr, out ifacePtr);
-                if (callHr != 0) { ActivateResult = callHr; Diagnostic?.Invoke($"ActivateCompleted: GetActivateResult call failed hr=0x{callHr:X8}"); return; }
+                if (callHr != 0) { ActivateResult = callHr; return; }
                 ActivateResult = activateHr;
                 if (activateHr == 0 && ifacePtr != IntPtr.Zero)
                     Interface = Marshal.GetTypedObjectForIUnknown(ifacePtr, typeof(IAudioClient));
-                Diagnostic?.Invoke($"ActivateCompleted: activateHr=0x{activateHr:X8}, iface={(ifacePtr == IntPtr.Zero ? "null" : "got")}");
             }
             catch (Exception ex)
             {
                 ActivateResult = ex.HResult != 0 ? ex.HResult : unchecked((int)0x80004005);
-                Diagnostic?.Invoke($"ActivateCompleted: THREW {ex.GetType().Name}: {ex.Message} (hr=0x{ActivateResult:X8})");
             }
             finally
             {

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Security.Principal;
 using System.ServiceProcess;
 using RemSound.Core;
 
@@ -33,7 +34,6 @@ public static class ServiceControl
     /// the Program.cs dispatcher agree.</summary>
     public const string InstallVerb = "--install-service";
     public const string UninstallVerb = "--uninstall-service";
-    public const string UpdateVerb = "--update-service";
     public const string StartVerb = "--start-service";
     public const string StopVerb = "--stop-service";
     public const string RunVerb = "--run-service";
@@ -129,20 +129,31 @@ public static class ServiceControl
         return 0;
     }
 
-    /// <summary>Grant Authenticated Users Modify rights on the service's bin folder (via icacls), so a
+    /// <summary>The SID to grant the no-admin service rights to: the account that installed it (the
+    /// elevated install runs as the same interactive user with an elevated token, so its SID is that user).
+    /// Scoping the grants to ONE account instead of all Users/Authenticated-Users keeps the effortless
+    /// stop/update workflow for that user while removing the "any account on this PC could replace a
+    /// SYSTEM-run binary" escalation surface. Falls back to BUILTIN\Users only if the SID can't be read.</summary>
+    private static string InstallingUserSid()
+    {
+        try { return WindowsIdentity.GetCurrent().User?.Value ?? "S-1-5-32-545"; }
+        catch { return "S-1-5-32-545"; }
+    }
+
+    /// <summary>Grant the installing user Modify rights on the service's bin folder (via icacls), so a
     /// stopped service's binaries can be refreshed without administrator rights. Best-effort.</summary>
     private static void GrantUsersWriteToBin()
     {
         try
         {
-            // *S-1-5-32-545 = BUILTIN\Users (locale-independent) — the group the interactive user is in.
-            // (OI)(CI) = inherit to files + subfolders; (M) = Modify. /T applies to the existing contents too
-            // (the bin was just populated), /C keeps going past any single-file error. Capture stderr so a
-            // real failure is logged rather than swallowed.
+            // Grant the installing user (see InstallingUserSid) Modify. (OI)(CI) = inherit to files +
+            // subfolders; (M) = Modify. /T applies to the existing contents too (the bin was just
+            // populated), /C keeps going past any single-file error. Capture stderr so a real failure is
+            // logged rather than swallowed.
             var psi = new ProcessStartInfo
             {
                 FileName = "icacls.exe",
-                Arguments = $"\"{ServiceStore.BinDirectory}\" /grant \"*S-1-5-32-545:(OI)(CI)(M)\" /T /C",
+                Arguments = $"\"{ServiceStore.BinDirectory}\" /grant \"*{InstallingUserSid()}:(OI)(CI)(M)\" /T /C",
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
@@ -195,7 +206,7 @@ public static class ServiceControl
         try
         {
             var sddl = RunScCapture($"sdshow {ServiceName}").Trim();
-            var newSddl = AddUserStartStopAce(sddl);
+            var newSddl = AddUserStartStopAce(sddl, InstallingUserSid());
             if (newSddl is null || string.Equals(newSddl, sddl, StringComparison.Ordinal)) return;
             var rc = RunSc($"sdset {ServiceName} {newSddl}");
             if (rc != 0) ServiceStore.AppendServiceEvent($"install: sdset (user start/stop) returned {rc}");
@@ -203,21 +214,22 @@ public static class ServiceControl
         catch (Exception ex) { ServiceStore.AppendServiceEvent($"install: grant user start/stop failed: {ex.GetType().Name}: {ex.Message}"); }
     }
 
-    /// <summary>The ACE granting Authenticated Users start (RP) + stop (WP) + query status (LC) + read
-    /// control (RC). Public-ish for the self-test.</summary>
-    internal const string UserStartStopAce = "(A;;RPWPLCRC;;;AU)";
+    /// <summary>The ACE granting <paramref name="sid"/> start (RP) + stop (WP) + query status (LC) + read
+    /// control (RC) on the service.</summary>
+    internal static string UserStartStopAceFor(string sid) => $"(A;;RPWPLCRC;;;{sid})";
 
-    /// <summary>Pure, testable: insert <see cref="UserStartStopAce"/> into a service SDDL's DACL (right
-    /// after "D:" and any DACL flags, ahead of the first ACE and the SACL). Returns null for an SDDL that
-    /// doesn't start with a DACL, and the input unchanged if the ACE is already present.</summary>
-    internal static string? AddUserStartStopAce(string? sddl)
+    /// <summary>Pure, testable: insert the start/stop ACE for <paramref name="sid"/> into a service SDDL's
+    /// DACL (right after "D:" and any DACL flags, ahead of the first ACE and the SACL). Returns null for an
+    /// SDDL that doesn't start with a DACL, and the input unchanged if the ACE is already present.</summary>
+    internal static string? AddUserStartStopAce(string? sddl, string sid)
     {
         if (string.IsNullOrEmpty(sddl) || !sddl.StartsWith("D:", StringComparison.Ordinal)) return null;
-        if (sddl.Contains(UserStartStopAce, StringComparison.OrdinalIgnoreCase)) return sddl; // already granted
+        var ace = UserStartStopAceFor(sid);
+        if (sddl.Contains(ace, StringComparison.OrdinalIgnoreCase)) return sddl; // already granted
         var firstAce = sddl.IndexOf('(');
         var sacl = sddl.IndexOf("S:", StringComparison.Ordinal);
         var insertAt = firstAce >= 0 && (sacl < 0 || firstAce < sacl) ? firstAce : (sacl >= 0 ? sacl : sddl.Length);
-        return sddl.Insert(insertAt, UserStartStopAce);
+        return sddl.Insert(insertAt, ace);
     }
 
     /// <summary>The sc.exe "failure" args that make the service auto-restart on a crash. Pure, so a
@@ -237,30 +249,6 @@ public static class ServiceControl
         try { if (Directory.Exists(ServiceStore.BinDirectory)) Directory.Delete(ServiceStore.BinDirectory, recursive: true); }
         catch (Exception ex) { ServiceStore.AppendServiceEvent($"uninstall: could not remove bin folder: {ex.GetType().Name}: {ex.Message}"); }
         return rc;
-    }
-
-    /// <summary>Refreshes the service's OWN copy of the program with the CURRENTLY-running build, without
-    /// an uninstall/reinstall: stop → overwrite the binaries in <see cref="ServiceStore.BinDirectory"/>
-    /// from this exe's folder → start. Must be run elevated (writing into the admin-only service bin
-    /// folder, and stop/start). Returns 0 on success. Used by the Service menu's "Update service" so a new
-    /// build reaches the service in one UAC prompt.</summary>
-    public static int DoUpdate()
-    {
-        if (!IsInstalled()) return DoInstall(); // not installed yet — a plain install does the copy too
-        var exe = Environment.ProcessPath;
-        var sourceDir = string.IsNullOrEmpty(exe) ? null : Path.GetDirectoryName(exe);
-        if (string.IsNullOrEmpty(sourceDir)) return 2;
-
-        try { DoStop(); } catch { /* best-effort — copy may still fail if files stay locked, handled below */ }
-        try { CopyProgramTo(sourceDir, ServiceStore.BinDirectory); }
-        catch (Exception ex)
-        {
-            ServiceStore.AppendServiceEvent($"update: copy program failed: {ex.GetType().Name}: {ex.Message}");
-            try { DoStart(); } catch { /* leave it stopped rather than half-updated */ }
-            return 5;
-        }
-        ServiceStore.SaveAppSourcePath(sourceDir); // keep the auto-update watch pointed at the current app
-        return DoStart();
     }
 
     /// <summary>Starts the service. Must be run elevated. Returns 0 on success.</summary>

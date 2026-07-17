@@ -22,7 +22,7 @@ internal static class Program
     /// never reached.</summary>
     internal static bool IsServiceInvocation(string[] args) =>
         HasArg(args, ServiceControl.RunVerb) || HasArg(args, ServiceControl.InstallVerb)
-        || HasArg(args, ServiceControl.UninstallVerb) || HasArg(args, ServiceControl.UpdateVerb)
+        || HasArg(args, ServiceControl.UninstallVerb)
         || HasArg(args, ServiceControl.StartVerb) || HasArg(args, ServiceControl.StopVerb);
 
     // Writes an otherwise-fatal exception to a timestamped crash file in the logs folder, so a
@@ -84,14 +84,6 @@ internal static class Program
         if (args.Length > 0 && IsServiceInvocation(args))
         {
             Environment.ExitCode = ServiceEntry.Dispatch(args);
-            return;
-        }
-
-        // --probe-apploopback [pid]: temporary focused diagnostic for the per-app-send activation hang.
-        // Runs the process-loopback activation with full tracing and exits. Not part of the gate.
-        if (args.Length > 0 && Array.Exists(args, a => string.Equals(a, "--probe-apploopback", StringComparison.OrdinalIgnoreCase)))
-        {
-            Environment.ExitCode = ProbeAppLoopback.Run(args);
             return;
         }
 

@@ -760,15 +760,18 @@ internal static class SelfTest
         Check(createArgs.Contains("\\\"" + ServiceStore.BinExePath + "\\\" " + ServiceControl.RunVerb),
             "the create command must register the ProgramData bin exe as the service binary");
 
-        // 2. AddUserStartStopAce inserts the AU start/stop ACE into the DACL, ahead of the SACL, and is idempotent.
+        // 2. AddUserStartStopAce inserts the user's start/stop ACE into the DACL, ahead of the SACL, idempotently.
         const string sample = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCLCSWLOCRRC;;;IU)S:(AU;FA;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;WD)";
-        var amended = ServiceControl.AddUserStartStopAce(sample);
-        Check(amended is not null && amended.Contains(ServiceControl.UserStartStopAce), "the AU start/stop ACE must be added");
-        Check(amended!.IndexOf(ServiceControl.UserStartStopAce, StringComparison.Ordinal) < amended.IndexOf("S:", StringComparison.Ordinal),
+        const string sid = "S-1-5-21-111-222-333-1001"; // a specific user SID (the installing user, scoped grant)
+        var ace = ServiceControl.UserStartStopAceFor(sid);
+        var amended = ServiceControl.AddUserStartStopAce(sample, sid);
+        Check(amended is not null && amended.Contains(ace), "the user's start/stop ACE must be added");
+        Check(amended!.IndexOf(ace, StringComparison.Ordinal) < amended.IndexOf("S:", StringComparison.Ordinal),
             "the ACE must sit inside the DACL, before the SACL");
         Check(amended.StartsWith("D:", StringComparison.Ordinal), "the result must still be a valid DACL-first SDDL");
-        Check(ServiceControl.AddUserStartStopAce(amended) == amended, "adding the ACE twice must be a no-op (idempotent)");
-        Check(ServiceControl.AddUserStartStopAce("garbage") is null, "a non-DACL SDDL must be rejected");
+        Check(!amended.Contains(";;;AU)"), "the grant must be scoped to the specific user SID, not Authenticated Users");
+        Check(ServiceControl.AddUserStartStopAce(amended, sid) == amended, "adding the ACE twice must be a no-op (idempotent)");
+        Check(ServiceControl.AddUserStartStopAce("garbage", sid) is null, "a non-DACL SDDL must be rejected");
 
         // 2b. The app-source path (which the SYSTEM service watches for auto-updates) round-trips, and drives
         //     the update check: unknown/empty source => no update, so the service never acts on uncertainty.
@@ -811,7 +814,7 @@ internal static class SelfTest
             Check(File.Exists(Path.Combine(dst, "default sounds", "connect.wav")), "bundled default sounds must be copied");
             Check(!Directory.Exists(Path.Combine(dst, "user settings and logs")), "user settings/logs must NOT be copied");
             Check(!Directory.Exists(Path.Combine(dst, "logs")), "stray logs folder must NOT be copied");
-            return "runs from own ProgramData bin; AU start/stop ACE added idempotently; program copy excludes user state";
+            return "runs from own ProgramData bin; user-scoped start/stop ACE added idempotently; program copy excludes user state";
         }
         finally { try { Directory.Delete(root, recursive: true); } catch { /* temp */ } }
     }
@@ -1417,7 +1420,7 @@ internal static class SelfTest
         foreach (var verb in new[]
                  {
                      ServiceControl.RunVerb, ServiceControl.InstallVerb, ServiceControl.UninstallVerb,
-                     ServiceControl.UpdateVerb, ServiceControl.StartVerb, ServiceControl.StopVerb,
+                     ServiceControl.StartVerb, ServiceControl.StopVerb,
                  })
         {
             Check(Program.IsServiceInvocation(new[] { verb }), $"'{verb}' must be recognised as a service invocation");
@@ -1435,7 +1438,7 @@ internal static class SelfTest
         if (!loadedBefore)
             Check(!IsAssemblyLoaded(svcAsm), "deciding a normal launch must not load the Windows-service assembly");
 
-        return "normal launches stay load-safe; all six service verbs recognised (case-insensitive)";
+        return "normal launches stay load-safe; all five service verbs recognised (case-insensitive)";
     }
 
     /// <summary>The Service menu's "View service log" opens the newest diagnostic log — the log that says
