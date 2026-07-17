@@ -1215,6 +1215,8 @@ public sealed class MainForm : Form
         receiveOutputDevicesList.ItemCheck += (_, e) =>
         {
             if (suppressDeviceCheckChange) return;
+            // "Use Windows default" is exclusive: while it's on, specific cards can't be ticked.
+            if (AudioDefaultFollower.VetoRealDeviceCheck(receiveOutputDevicesList, e)) return;
             if (receiveOutputDevicesList.Items[e.Index] is AudioDeviceChoice c)
             {
                 if (c.IsDefaultFollower)
@@ -1222,7 +1224,8 @@ public sealed class MainForm : Form
                     // Machine-wide preference (AppConfig), not part of the profile.
                     var on = e.NewValue == CheckState.Checked;
                     PersistUseDefaultDevice(output: true, on);
-                    if (on) BeginInvoke(new Action(() => MaybeUntickOthersForDefault(receiveOutputDevicesList, output: true)));
+                    // Turning it on clears the specific outputs and locks them out (the veto above).
+                    if (on) BeginInvoke(new Action(() => UntickAllExceptDefaultFollower(receiveOutputDevicesList, output: true)));
                 }
                 else if (c.DeviceId is { } rid)
                 {
@@ -1240,14 +1243,17 @@ public sealed class MainForm : Form
         sendOutputDevicesList.ItemCheck += (_, args) =>
         {
             if (suppressDeviceCheckChange) return;
+            // "Use Windows default" is exclusive: while it's on, specific cards can't be ticked.
+            if (AudioDefaultFollower.VetoRealDeviceCheck(sendOutputDevicesList, args)) return;
             BeginInvoke(ApplyAudioRuntime);
             if (sendOutputDevicesList.Items[args.Index] is AudioDeviceChoice { IsDefaultFollower: true })
             {
                 // "Use Windows default output for loopback" is a machine-wide preference (AppConfig),
-                // not part of the profile — a follower can never go stale. No untick-others prompt: the
-                // capture-spec builder de-dupes ids, so following the default never double-captures a
-                // device already ticked explicitly.
-                PersistUseDefaultLoopbackSend(args.NewValue == CheckState.Checked);
+                // not part of the profile — a follower can never go stale. Turning it on clears the
+                // specific outputs and locks them out (the veto above) so only the default is captured.
+                var on = args.NewValue == CheckState.Checked;
+                PersistUseDefaultLoopbackSend(on);
+                if (on) BeginInvoke(new Action(() => UntickAllExceptDefaultFollower(sendOutputDevicesList, output: false)));
                 return;
             }
             MarkProfileDirty();
@@ -1255,6 +1261,8 @@ public sealed class MainForm : Form
         sendInputDevicesList.ItemCheck += (_, args) =>
         {
             if (suppressDeviceCheckChange) return;
+            // "Use Windows default" is exclusive: while it's on, specific mics can't be ticked.
+            if (AudioDefaultFollower.VetoRealDeviceCheck(sendInputDevicesList, args)) return;
             logFile.Event($"ui: capture (WASAPI mic) '{sendInputDevicesList.Items[args.Index]}' {(args.NewValue == CheckState.Checked ? "ticked" : "unticked")}");
             BeginInvoke(ApplyAudioRuntime);
             if (sendInputDevicesList.Items[args.Index] is AudioDeviceChoice { IsDefaultFollower: true })
@@ -1263,7 +1271,8 @@ public sealed class MainForm : Form
                 // (the default mic could be anything; the runtime apply handles a blocked default).
                 var on = args.NewValue == CheckState.Checked;
                 PersistUseDefaultDevice(output: false, on);
-                if (on) BeginInvoke(new Action(() => MaybeUntickOthersForDefault(sendInputDevicesList, output: false)));
+                // Turning it on clears the specific mics and locks them out (the veto above).
+                if (on) BeginInvoke(new Action(() => UntickAllExceptDefaultFollower(sendInputDevicesList, output: false)));
                 return;
             }
             MarkProfileDirty();
@@ -2097,15 +2106,6 @@ public sealed class MainForm : Form
         };
         manageNamedPeersItem.Click += (_, _) => ShowManageNamedPeersDialog();
 
-        // Reset the one-time "untick the other devices?" prompt that appears when you turn on a
-        // "Use Windows default audio device" box — clears the remembered Yes/No so it asks again.
-        // Mirrors the Realtek toggle's "let the user reverse a one-time decision" pattern.
-        var resetDefaultDeviceItem = new ToolStripMenuItem("&Reset the default audio device prompt")
-        {
-            AccessibleName = "Reset the default audio device prompt",
-        };
-        resetDefaultDeviceItem.Click += (_, _) => ResetDefaultAudioDevicePrompt();
-
         // Realtek ASIO enable/disable toggle — only present when a Realtek ASIO driver is actually
         // installed. Lets the user reverse the disable decision (or disable a driver they kept).
         ToolStripMenuItem? realtekToggle = null;
@@ -2146,7 +2146,6 @@ public sealed class MainForm : Form
             keyboardItem,
             profilePasswordsItem,
             manageNamedPeersItem,
-            resetDefaultDeviceItem,
         };
         if (realtekToggle is not null) optionItems.Add(realtekToggle);
         optionItems.Add(new ToolStripSeparator());
@@ -6552,53 +6551,11 @@ public sealed class MainForm : Form
                     break;
                 }
             }
+            // The default is exclusive: with it on, no specific card may stay ticked. Enforce it at load
+            // too, so a profile/config that somehow carries both doesn't come up with both ticked.
+            AudioDefaultFollower.UncheckRealDevices(list);
         }
         finally { suppressDeviceCheckChange = false; }
-    }
-
-    /// <summary>Offered when the user ticks a "Use Windows default" follower: optionally untick the
-    /// other devices in that list so only the default is used. Remembers the answer if the user ticks
-    /// "Don't ask again".</summary>
-    private void MaybeUntickOthersForDefault(CheckedListBox list, bool output)
-    {
-        if (IsDisposed) return;
-        AppConfig cfg;
-        try { cfg = AppConfig.Load(); }
-        catch { return; }
-        var remembered = output ? cfg.UntickOthersWhenUsingDefaultOutput : cfg.UntickOthersWhenUsingDefaultInput;
-        bool untick;
-        if (remembered is bool r)
-        {
-            untick = r;
-        }
-        else
-        {
-            var verification = new TaskDialogVerificationCheckBox("Don't ask me this again");
-            var page = new TaskDialogPage
-            {
-                Caption = "RemSound",
-                Heading = "Use only the default audio device?",
-                Text = output
-                    ? "You've turned on “Use Windows default audio device”. Do you want to untick the other outputs in this list, so received sound plays only to whatever Windows is using?\n\nChoose No to keep playing to those outputs as well as the default audio device."
-                    : "You've turned on “Use Windows default audio device”. Do you want to untick the other inputs in this list, so only the Windows default audio device is captured?\n\nChoose No to keep capturing those inputs as well as the default audio device.",
-                Icon = TaskDialogIcon.Information,
-                Buttons = { TaskDialogButton.Yes, TaskDialogButton.No },
-                DefaultButton = TaskDialogButton.No,
-                Verification = verification,
-            };
-            untick = TaskDialog.ShowDialog(this, page) == TaskDialogButton.Yes;
-            if (verification.Checked)
-            {
-                try
-                {
-                    var c2 = AppConfig.Load();
-                    if (output) c2.UntickOthersWhenUsingDefaultOutput = untick; else c2.UntickOthersWhenUsingDefaultInput = untick;
-                    c2.Save();
-                }
-                catch { /* harmless */ }
-            }
-        }
-        if (untick) UntickAllExceptDefaultFollower(list, output);
     }
 
     private void UntickAllExceptDefaultFollower(CheckedListBox list, bool output)
@@ -6620,34 +6577,6 @@ public sealed class MainForm : Form
         finally { suppressDeviceCheckChange = false; }
         if (!anyChanged) return;
         if (output) ApplyReceiveDevices(); else ApplyAudioRuntime();
-    }
-
-    /// <summary>Options-menu action: clear the remembered answer to the "untick the other devices?"
-    /// prompt (for both output and input), so it asks again next time the user turns on a "Use Windows
-    /// default audio device" box. The discoverable way back from the prompt's "Don't ask again".</summary>
-    private void ResetDefaultAudioDevicePrompt()
-    {
-        try
-        {
-            var c = AppConfig.Load();
-            c.UntickOthersWhenUsingDefaultOutput = null;
-            c.UntickOthersWhenUsingDefaultInput = null;
-            c.Save();
-            logFile.Event("default audio device: reset the untick-others prompt (will ask again)");
-        }
-        catch (Exception ex)
-        {
-            logFile.Event($"default audio device: reset prompt failed: {ex.GetType().Name}: {ex.Message}");
-        }
-        var page = new TaskDialogPage
-        {
-            Caption = "RemSound",
-            Heading = "Default audio device prompt reset",
-            Text = "RemSound will ask again next time you turn on a “Use Windows default audio device” option.",
-            Icon = TaskDialogIcon.Information,
-            Buttons = { TaskDialogButton.OK },
-        };
-        TaskDialog.ShowDialog(this, page);
     }
 
     /// <summary>A receive-output card that was unplugged drops out of the WASAPI list (and its tick

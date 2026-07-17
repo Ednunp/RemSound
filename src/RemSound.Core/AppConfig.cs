@@ -248,12 +248,6 @@ public sealed class AppConfig
     /// device, following it if the default changes. Machine-wide, opt-in, default false.</summary>
     public bool UseDefaultLoopbackSend { get; set; }
 
-    /// <summary>Remembered answer to the "untick the other outputs/inputs when you turn on Use Windows
-    /// default?" prompt. Null = ask each time; true = always untick; false = never untick. Set when the
-    /// user ticks "Don't ask again" on that prompt. Machine-wide.</summary>
-    public bool? UntickOthersWhenUsingDefaultOutput { get; set; }
-    public bool? UntickOthersWhenUsingDefaultInput { get; set; }
-
     /// <summary>If non-null and a profile with this title exists, RemSound skips the
     /// startup profile picker and loads this profile directly. Combine with
     /// <see cref="StartMinimised"/> + the Windows auto-start registry entry

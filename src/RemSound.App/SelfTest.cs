@@ -65,6 +65,7 @@ internal static class SelfTest
         RunStep(results, "Service app-yield token", ServiceInteractivePresence);
         RunStep(results, "Service sender parity (crypto + Opus frame)", ServiceSenderParity);
         RunStep(results, "Default-output follower (service follows Windows default)", DefaultOutputFollower);
+        RunStep(results, "Default follower exclusivity (locks out specific cards)", DefaultFollowerExclusivity);
         RunStep(results, "Service profile isolation (location + hidden from pickers)", ServiceProfileIsolation);
         RunStep(results, "Service send host (headless stream + yield)", ServiceSendHostStream);
         RunStep(results, "Service network presence (reachable + shell teardown)", ServiceNetworkPresenceReachable);
@@ -883,6 +884,43 @@ internal static class SelfTest
     /// AND the fingerprint from the password (a missing fingerprint gets the encrypted stream rejected at
     /// the peer), and apply the send-rate-adjusted Opus frame (the "Small" rate halves it). Guards the
     /// divergences found auditing the service against the main app.</summary>
+    /// <summary>Ticking a "Use Windows default" follower must be EXCLUSIVE: it clears the specific cards in
+    /// its list and locks them out (a check attempt is vetoed) until the follower is turned off. Unticking
+    /// a card, and the follower entry itself, are never vetoed. (Ed, 2026-07-17.)</summary>
+    private static string? DefaultFollowerExclusivity()
+    {
+        using var list = new System.Windows.Forms.CheckedListBox();
+        list.Items.Add(AudioDefaultFollower.LoopbackSendChoice());                       // 0 = follower
+        list.Items.Add(new AudioDeviceChoice("Card A", "id-a", CaptureKind.Loopback));   // 1
+        list.Items.Add(new AudioDeviceChoice("Card B", "id-b", CaptureKind.Loopback));   // 2
+
+        // Follower OFF: a specific card may be ticked (no veto).
+        var offCheck = new System.Windows.Forms.ItemCheckEventArgs(1, System.Windows.Forms.CheckState.Checked, System.Windows.Forms.CheckState.Unchecked);
+        Check(!AudioDefaultFollower.VetoRealDeviceCheck(list, offCheck), "with the follower off, a specific card must be checkable");
+        Check(offCheck.NewValue == System.Windows.Forms.CheckState.Checked, "no veto must leave the pending check intact");
+
+        // Tick the follower plus both cards, then clearing must leave ONLY the follower.
+        list.SetItemChecked(0, true);
+        list.SetItemChecked(1, true);
+        list.SetItemChecked(2, true);
+        Check(AudioDefaultFollower.IsFollowerChecked(list), "the follower must read as checked");
+        Check(AudioDefaultFollower.UncheckRealDevices(list), "clearing must report a change when cards were ticked");
+        Check(list.GetItemChecked(0), "the follower must stay ticked");
+        Check(!list.GetItemChecked(1) && !list.GetItemChecked(2), "every specific card must be cleared");
+
+        // With the follower ON, a fresh attempt to tick a specific card is vetoed back to unticked.
+        var onCheck = new System.Windows.Forms.ItemCheckEventArgs(1, System.Windows.Forms.CheckState.Checked, System.Windows.Forms.CheckState.Unchecked);
+        Check(AudioDefaultFollower.VetoRealDeviceCheck(list, onCheck), "with the follower on, ticking a specific card must be vetoed");
+        Check(onCheck.NewValue == System.Windows.Forms.CheckState.Unchecked, "the vetoed check must be forced back to unticked");
+
+        // Unticking a card, and the follower entry itself, are never vetoed.
+        var untick = new System.Windows.Forms.ItemCheckEventArgs(1, System.Windows.Forms.CheckState.Unchecked, System.Windows.Forms.CheckState.Checked);
+        Check(!AudioDefaultFollower.VetoRealDeviceCheck(list, untick), "unticking a card must never be vetoed");
+        var followerToggle = new System.Windows.Forms.ItemCheckEventArgs(0, System.Windows.Forms.CheckState.Checked, System.Windows.Forms.CheckState.Unchecked);
+        Check(!AudioDefaultFollower.VetoRealDeviceCheck(list, followerToggle), "the follower entry itself must never be vetoed");
+        return "follower on clears + locks specific cards; off frees them; follower/untick never vetoed";
+    }
+
     /// <summary>The "Use Windows default output" follower (Christopher's request) must be the SAME shared
     /// sentinel + resolver the main app uses, and the service must resolve it to the LIVE default render
     /// endpoint — never pass the raw sentinel through as a device id.</summary>

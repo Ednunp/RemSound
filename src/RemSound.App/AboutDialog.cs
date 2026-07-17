@@ -138,14 +138,7 @@ internal sealed class AboutDialog : Form
         changes" entry at the top. Tick it and RemSound
         uses whatever Windows is currently using, and
         switches with it on its own: make a headset your
-        default and RemSound follows, no clicking. You
-        can still tick specific devices alongside it.
-
-        When you turn it on, RemSound offers to untick
-        the other devices so you use only the default;
-        if you hide that question with "Don't ask
-        again", Options → Reset the default audio device
-        prompt brings it back.
+        default and RemSound follows, no clicking.
 
         RemSound v4.5
 

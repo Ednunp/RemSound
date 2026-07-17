@@ -160,6 +160,21 @@ internal sealed class ServiceProfileDialog : Form
         CheckedListAccessibility.Wire(appsList, appsStatus, "application");
         CheckedListAccessibility.Wire(inputsList, inputsStatus, "input device");
 
+        // "Use Windows default output" is exclusive, same as the main app: while it's ticked the specific
+        // output cards can't be, and ticking it clears them.
+        outputsList.ItemCheck += (_, e) =>
+        {
+            if (suppressAppEvents) return;
+            if (AudioDefaultFollower.VetoRealDeviceCheck(outputsList, e)) return;
+            if (outputsList.Items[e.Index] is AudioDeviceChoice { IsDefaultFollower: true } && e.NewValue == CheckState.Checked)
+                BeginInvoke(new Action(() =>
+                {
+                    suppressAppEvents = true;
+                    try { AudioDefaultFollower.UncheckRealDevices(outputsList); }
+                    finally { suppressAppEvents = false; }
+                }));
+        };
+
         page.Controls.Add(panel);
         tabs.TabPages.Add(page);
     }
@@ -203,6 +218,9 @@ internal sealed class ServiceProfileDialog : Form
             var outputChoices = new List<AudioDeviceChoice> { AudioDefaultFollower.LoopbackSendChoice() };
             outputChoices.AddRange(AudioDeviceCatalog.LoadOutputs());
             PopulateDeviceList(outputsList, outputChoices, working.SelectedWasapiSendOutputs);
+            // Default is exclusive: if the profile carries the follower, drop any specific outputs it also
+            // carried (already inside the suppressAppEvents guard set at the top of LoadFromProfile).
+            if (AudioDefaultFollower.IsFollowerChecked(outputsList)) AudioDefaultFollower.UncheckRealDevices(outputsList);
             PopulateDeviceList(inputsList, AudioDeviceCatalog.LoadInputs(), working.SelectedWasapiSendInputs);
 
             var appsMode = ProcessLoopbackCapture.IsSupported
