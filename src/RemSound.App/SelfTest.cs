@@ -1000,11 +1000,14 @@ internal static class SelfTest
         {
             var appsProfile = new Profile { WasapiSendMode = "applications", SendAllApplications = true };
             appsProfile.SelectedSendApplications.Add("nonexistent-proc-for-test");
+            appsProfile.SelectedWasapiSendInputs.Add("some-mic-id");   // legacy input selection must be ignored
             var appSpecs = ServiceSendHost.BuildSendSpecs(appsProfile);
             Check(!appSpecs.Any(s => s.Kind == CaptureKind.Loopback),
                 "applications mode must NOT produce a whole-system loopback spec, even with SendAllApplications=true");
-            Check(appSpecs.All(s => s.Kind is CaptureKind.ProcessLoopback or CaptureKind.Input),
-                "applications mode must build only per-application (or input) specs — the 'send all' path is gone");
+            Check(appSpecs.All(s => s.Kind == CaptureKind.ProcessLoopback),
+                "the service builds only per-application specs — no whole-system loopback, and no WASAPI inputs");
+            Check(!appSpecs.Any(s => s.Kind == CaptureKind.Input),
+                "the service must never send WASAPI inputs, even if a legacy profile still lists one");
         }
         return "service forces Opus + 2.5ms frame + lock-to-clock; apps mode is specific-apps-only; crypto matches";
     }

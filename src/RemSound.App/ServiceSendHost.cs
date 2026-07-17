@@ -600,8 +600,8 @@ public sealed class ServiceSendHost : IDisposable
                 }
             }
         }
-        foreach (var id in p.SelectedWasapiSendInputs.Distinct())
-            specs.Add(new CaptureSourceSpec(id, CaptureKind.Input, id));
+        // The service never sends WASAPI inputs (mics/line-ins) — outputs and specific apps only. Any
+        // SelectedWasapiSendInputs left in an old profile is deliberately ignored here.
         return specs;
     }
 

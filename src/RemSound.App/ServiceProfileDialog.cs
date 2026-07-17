@@ -30,9 +30,9 @@ internal sealed class ServiceProfileDialog : Form
     private readonly Label outputsStatus = new() { AutoSize = true, Text = "No output device selected." };
     private readonly CheckedListBox appsList = new() { CheckOnClick = true, Width = 460, Height = 110, AccessibleName = "Applications to send (Alt+3)" };
     private readonly Label appsStatus = new() { AutoSize = true, Text = "No application selected." };
-    private readonly CheckedListBox inputsList = new() { CheckOnClick = true, Width = 460, Height = 90, AccessibleName = "WASAPI audio inputs to send (Alt+4)" };
-    private readonly Label inputsStatus = new() { AutoSize = true, Text = "No input device selected." };
-    private MnemonicLabel? sendModeLabel, outputsLabel, appsLabel, inputsLabel;
+    // No WASAPI-inputs (microphone/line-in) list: the service sends this machine's OUTPUT audio (or
+    // specific apps) only — capturing a mic from an unattended, logged-out box isn't a use case (Ed).
+    private MnemonicLabel? sendModeLabel, outputsLabel, appsLabel;
 
     // No "Audio profile" tab: the service always sends Opus at the live-jamming frame (2.5 ms), Small
     // packets, and locked to the audio clock — the settings Ed found sound good. They're forced in
@@ -154,11 +154,9 @@ internal sealed class ServiceProfileDialog : Form
         sendModeLabel = AddListRow(panel, 0, "How to send WASAPI audio (Alt+&1)", sendModeList);
         outputsLabel = FormLayoutRows.AddCheckedListRow(panel, 1, "WASAPI audio outputs to send (Alt+&2)", outputsList, outputsStatus, l => l.Focus());
         appsLabel = FormLayoutRows.AddCheckedListRow(panel, 2, "Applications to send (Alt+&3)", appsList, appsStatus, l => l.Focus());
-        inputsLabel = FormLayoutRows.AddCheckedListRow(panel, 3, "WASAPI audio inputs to send (Alt+&4)", inputsList, inputsStatus, l => l.Focus());
 
         CheckedListAccessibility.Wire(outputsList, outputsStatus, "output device");
         CheckedListAccessibility.Wire(appsList, appsStatus, "application");
-        CheckedListAccessibility.Wire(inputsList, inputsStatus, "input device");
 
         // "Use Windows default output" is exclusive, same as the main app: while it's ticked the specific
         // output cards can't be, and ticking it clears them.
@@ -221,7 +219,6 @@ internal sealed class ServiceProfileDialog : Form
             // Default is exclusive: if the profile carries the follower, drop any specific outputs it also
             // carried (already inside the suppressAppEvents guard set at the top of LoadFromProfile).
             if (AudioDefaultFollower.IsFollowerChecked(outputsList)) AudioDefaultFollower.UncheckRealDevices(outputsList);
-            PopulateDeviceList(inputsList, AudioDeviceCatalog.LoadInputs(), working.SelectedWasapiSendInputs);
 
             var appsMode = ProcessLoopbackCapture.IsSupported
                 && string.Equals(working.WasapiSendMode, "applications", StringComparison.OrdinalIgnoreCase);
@@ -245,7 +242,9 @@ internal sealed class ServiceProfileDialog : Form
     private void SaveToProfile()
     {
         working.SelectedWasapiSendOutputs = CheckedIds(outputsList);
-        working.SelectedWasapiSendInputs = CheckedIds(inputsList);
+        // The service never sends WASAPI inputs (no mic list any more) — clear any legacy selection so a
+        // profile saved by an older build can't keep a mic streaming.
+        working.SelectedWasapiSendInputs = new List<string>();
         working.WasapiSendMode = sendModeList.SelectedIndex == 1 ? "applications" : "devices";
         // Applications mode = pick specific apps only (matches the main app; the "send all applications"
         // option was removed from both). Force the legacy flag off so a stale profile that still carries
