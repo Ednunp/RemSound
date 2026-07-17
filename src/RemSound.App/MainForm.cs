@@ -526,8 +526,9 @@ public sealed class MainForm : Form
     // "Use Windows default" for the SEND side's "WASAPI audio outputs to send" (system-audio/loopback)
     // list: loopback-capture whatever Windows currently uses as the default OUTPUT and follow it. Its own
     // sentinel + persisted flag, distinct from the receive-output follower (which plays TO the default).
-    private static readonly AudioDeviceChoice DefaultLoopbackSendFollower =
-        new("Use Windows default audio device, follows Windows changes", "__use-default-loopback-send__", CaptureKind.Loopback) { IsDefaultFollower = true };
+    // The loopback-send follower is shared with the service (AudioDefaultFollower) so both offer and
+    // resolve the exact same sentinel; the receive-output and send-input followers above stay local.
+    private static readonly AudioDeviceChoice DefaultLoopbackSendFollower = AudioDefaultFollower.LoopbackSendChoice();
     // The Windows-default device id we last routed to while following, per direction. A default-device
     // change doesn't change the device SET, so the list-sync wouldn't catch it — we compare against
     // these to spot it and re-route (see ReapplyIfFollowedDefaultChanged).
@@ -6479,17 +6480,10 @@ public sealed class MainForm : Form
 
     /// <summary>The id of the current Windows default endpoint for the given direction, or null if
     /// there isn't one / it can't be read. Best-effort.</summary>
-    private static string? ResolveDefaultDeviceId(NAudio.CoreAudioApi.DataFlow flow)
-    {
-        try
-        {
-            using var enumerator = new NAudio.CoreAudioApi.MMDeviceEnumerator();
-            if (!enumerator.HasDefaultAudioEndpoint(flow, NAudio.CoreAudioApi.Role.Multimedia)) return null;
-            using var device = enumerator.GetDefaultAudioEndpoint(flow, NAudio.CoreAudioApi.Role.Multimedia);
-            return device.ID;
-        }
-        catch { return null; }
-    }
+    // Shared with the service via AudioDefaultFollower so "the current Windows default" means the same
+    // thing in both. Thin delegate kept so the existing call sites don't all have to change.
+    private static string? ResolveDefaultDeviceId(NAudio.CoreAudioApi.DataFlow flow) =>
+        AudioDefaultFollower.ResolveDefaultDeviceId(flow);
 
     private static bool IsFollowerChecked(CheckedListBox list) =>
         list.CheckedItems.OfType<AudioDeviceChoice>().Any(c => c.IsDefaultFollower);

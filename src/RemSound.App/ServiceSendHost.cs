@@ -582,8 +582,23 @@ public sealed class ServiceSendHost : IDisposable
         }
         else
         {
+            var addedOutputs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var id in p.SelectedWasapiSendOutputs.Distinct())
-                specs.Add(new CaptureSourceSpec(id, CaptureKind.Loopback, id));
+            {
+                if (AudioDefaultFollower.IsLoopbackSend(id))
+                {
+                    // "Use Windows default output" — resolve to the live default render endpoint. Re-run
+                    // on every ApplyProfile (which a default-device change triggers via the notifier), so
+                    // the service FOLLOWS the default. Same sentinel + resolver the main app uses.
+                    var def = AudioDefaultFollower.ResolveDefaultRenderId();
+                    if (def is not null && addedOutputs.Add(def))
+                        specs.Add(new CaptureSourceSpec(def, CaptureKind.Loopback, "Windows default audio device"));
+                }
+                else if (addedOutputs.Add(id))
+                {
+                    specs.Add(new CaptureSourceSpec(id, CaptureKind.Loopback, id));
+                }
+            }
         }
         foreach (var id in p.SelectedWasapiSendInputs.Distinct())
             specs.Add(new CaptureSourceSpec(id, CaptureKind.Input, id));

@@ -64,6 +64,7 @@ internal static class SelfTest
         RunStep(results, "Lifecycle churn (modes, sources, pan/EQ, send/receive)", LifecycleChurn);
         RunStep(results, "Service app-yield token", ServiceInteractivePresence);
         RunStep(results, "Service sender parity (crypto + Opus frame)", ServiceSenderParity);
+        RunStep(results, "Default-output follower (service follows Windows default)", DefaultOutputFollower);
         RunStep(results, "Service profile isolation (location + hidden from pickers)", ServiceProfileIsolation);
         RunStep(results, "Service send host (headless stream + yield)", ServiceSendHostStream);
         RunStep(results, "Service network presence (reachable + shell teardown)", ServiceNetworkPresenceReachable);
@@ -882,6 +883,29 @@ internal static class SelfTest
     /// AND the fingerprint from the password (a missing fingerprint gets the encrypted stream rejected at
     /// the peer), and apply the send-rate-adjusted Opus frame (the "Small" rate halves it). Guards the
     /// divergences found auditing the service against the main app.</summary>
+    /// <summary>The "Use Windows default output" follower (Christopher's request) must be the SAME shared
+    /// sentinel + resolver the main app uses, and the service must resolve it to the LIVE default render
+    /// endpoint — never pass the raw sentinel through as a device id.</summary>
+    private static string? DefaultOutputFollower()
+    {
+        var choice = AudioDefaultFollower.LoopbackSendChoice();
+        Check(choice.IsDefaultFollower, "the default-output follower must be flagged IsDefaultFollower");
+        Check(AudioDefaultFollower.IsLoopbackSend(choice.DeviceId), "the follower's id must be the loopback-send sentinel");
+        Check(!AudioDefaultFollower.IsLoopbackSend("{0.0.0.00000000}.{abc}"), "a real endpoint id must not be taken for the follower sentinel");
+
+        var p = new Profile { WasapiSendMode = "devices" };
+        p.SelectedWasapiSendOutputs.Add(AudioDefaultFollower.LoopbackSendId);
+        var specs = ServiceSendHost.BuildSendSpecs(p);
+        Check(!specs.Any(s => AudioDefaultFollower.IsLoopbackSend(s.DeviceId)),
+            "the raw follower sentinel must never reach a capture spec — it must be resolved first");
+
+        var expected = AudioDefaultFollower.ResolveDefaultRenderId();
+        if (expected is null) return Skip("no Windows default output device on this box to resolve the follower against");
+        Check(specs.Any(s => s.Kind == CaptureKind.Loopback && s.DeviceId == expected),
+            "the follower must resolve to a loopback spec on the current Windows default output");
+        return "follower flagged + sentinel shared with the app; service resolves it to the live default render endpoint";
+    }
+
     private static string? ServiceSenderParity()
     {
         // The profile deliberately carries the WRONG audio transport (raw PCM, broadcast frame, Standard

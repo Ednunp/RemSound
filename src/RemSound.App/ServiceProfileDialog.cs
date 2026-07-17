@@ -197,7 +197,12 @@ internal sealed class ServiceProfileDialog : Form
         suppressAppEvents = true;
         try
         {
-            PopulateDeviceList(outputsList, AudioDeviceCatalog.LoadOutputs(), working.SelectedWasapiSendOutputs);
+            // Offer "Use Windows default output" as the first output choice (Christopher's request):
+            // send whatever this machine currently plays, following the Windows default. Same shared
+            // follower + sentinel the main window uses, so a ticked follower persists and resolves identically.
+            var outputChoices = new List<AudioDeviceChoice> { AudioDefaultFollower.LoopbackSendChoice() };
+            outputChoices.AddRange(AudioDeviceCatalog.LoadOutputs());
+            PopulateDeviceList(outputsList, outputChoices, working.SelectedWasapiSendOutputs);
             PopulateDeviceList(inputsList, AudioDeviceCatalog.LoadInputs(), working.SelectedWasapiSendInputs);
 
             var appsMode = ProcessLoopbackCapture.IsSupported
