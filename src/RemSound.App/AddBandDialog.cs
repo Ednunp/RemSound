@@ -89,8 +89,8 @@ internal sealed class AddBandDialog : Form
         AddRow(grid, 2, "&End frequency in Hz (Alt+E)", endFreq);
         AddRow(grid, 3, "&Gain in dB (Alt+G)", gainDb);
 
-        var okButton = new Button { Text = "OK", AutoSize = true, DialogResult = DialogResult.None, TabIndex = 0 };
-        var cancelButton = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel, TabIndex = 1 };
+        var okButton = new Button { Text = "&OK", AutoSize = true, DialogResult = DialogResult.None, TabIndex = 0 };
+        var cancelButton = new Button { Text = "&Cancel", AutoSize = true, DialogResult = DialogResult.Cancel, TabIndex = 1 };
         okButton.Click += (_, _) => TryAccept();
 
         // OK before Cancel, in both tab order and left-to-right layout.

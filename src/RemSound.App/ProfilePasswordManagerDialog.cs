@@ -66,8 +66,8 @@ internal static class ProfilePasswordManagerDialog
             rows.Add((title, current, box));
         }
 
-        var okButton = new Button { Text = "OK", AutoSize = true, DialogResult = DialogResult.OK };
-        var cancelButton = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
+        var okButton = new Button { Text = "&OK", AutoSize = true, DialogResult = DialogResult.OK };
+        var cancelButton = new Button { Text = "&Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Padding = new Padding(8) };
         buttons.Controls.Add(okButton);
         buttons.Controls.Add(cancelButton);

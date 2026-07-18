@@ -1434,7 +1434,10 @@ public sealed class MainForm : Form
             try { processSelfMeter.Dispose(); } catch { }
             try { deviceChangeNotifier?.Dispose(); } catch { }
             try { powerResumeHandler?.Dispose(); } catch { }
-            try { routerPortMapper?.Dispose(); } catch { }
+            // NOTE: routerPortMapper.Dispose() is NOT called here — it's moved into the bounded
+            // background teardown below. Its Stop() does a SYNCHRONOUS DeletePortMap call to the router,
+            // which blocks (or hangs) when the router is slow/unresponsive; on the UI thread that froze the
+            // close, so enabling UPnP made RemSound impossible to shut (Andre, 2026-07-18).
             // Reverse every Win32 lever PerformanceMode applied. The kernel would clean
             // these up on process exit anyway, but doing it explicitly releases the power
             // request handle and matches our timeBeginPeriod with a timeEndPeriod.
@@ -1449,14 +1452,22 @@ public sealed class MainForm : Form
             // the form-close path run; the OS reclaims any audio resources on process exit.
             // Worst case the user sees a brief tray-icon stutter; before this they saw a
             // ~16 s frozen window before the form went away.
-            var audioDispose = Task.Run(() =>
+            // The UPnP router teardown (DeletePortMap — a synchronous call to a possibly-unresponsive
+            // router) belongs here too: like the ASIO dispose it can block for many seconds, and on the UI
+            // thread it froze the close. Run both OFF the UI thread, in parallel, under one hard timeout.
+            var slowTeardown = Task.Run(() =>
             {
-                try { sender.Dispose(); } catch { /* ignore */ }
-                try { receiver.Dispose(); } catch { /* ignore */ }
+                var upnp = Task.Run(() => { try { routerPortMapper?.Dispose(); } catch { /* ignore */ } });
+                var audio = Task.Run(() =>
+                {
+                    try { sender.Dispose(); } catch { /* ignore */ }
+                    try { receiver.Dispose(); } catch { /* ignore */ }
+                });
+                try { Task.WaitAll(upnp, audio); } catch { /* ignore */ }
             });
-            if (!audioDispose.Wait(TimeSpan.FromSeconds(2)))
+            if (!slowTeardown.Wait(TimeSpan.FromSeconds(3)))
             {
-                try { logFile.Event("close: audio dispose taking >2s; letting process exit reclaim"); } catch { }
+                try { logFile.Event("close: UPnP/audio teardown taking >3s; letting process exit reclaim"); } catch { }
             }
 
             hotkeyController.Dispose();
@@ -2812,8 +2823,8 @@ public sealed class MainForm : Form
     private bool ShowSaveOnReadOnlyWarningDialog()
     {
         var verification = new TaskDialogVerificationCheckBox("Do not show me this message again");
-        var saveButton = new TaskDialogButton("Save anyway");
-        var cancelButton = new TaskDialogButton("Cancel") { AllowCloseDialog = true };
+        var saveButton = new TaskDialogButton("&Save anyway");
+        var cancelButton = new TaskDialogButton("&Cancel") { AllowCloseDialog = true };
         var page = new TaskDialogPage
         {
             Caption = AppName,

@@ -80,7 +80,7 @@ internal sealed class QuickProfileSwitchDialog
             AutoSize = true,
             Padding = new Padding(0, 8, 0, 0),
         };
-        var closeButton = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.Cancel, TabIndex = 1 };
+        var closeButton = new Button { Text = "&Close", AutoSize = true, DialogResult = DialogResult.Cancel, TabIndex = 1 };
         buttons.Controls.Add(closeButton);
         root.Controls.Add(buttons, 0, 2);
 

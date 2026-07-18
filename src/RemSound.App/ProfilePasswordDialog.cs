@@ -47,8 +47,8 @@ internal static class ProfilePasswordDialog
             AutoSize = true,
         };
 
-        var okButton = new Button { Text = "OK", AutoSize = true };
-        var cancelButton = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
+        var okButton = new Button { Text = "&OK", AutoSize = true };
+        var cancelButton = new Button { Text = "&Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
 
         // OK is validated by hand (no auto-close DialogResult) so we can block an empty entry when
         // a password is being REQUIRED. The trigger is the OK/Enter action, not typing — and

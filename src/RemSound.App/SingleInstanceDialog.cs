@@ -28,9 +28,9 @@ internal static class SingleInstanceDialog
 {
     public static SingleInstanceDecision Ask()
     {
-        var switchButton = new TaskDialogButton("Switch to the running copy");
-        var forceButton = new TaskDialogButton("Force the running copy to close and start fresh");
-        var cancelButton = new TaskDialogButton("Cancel") { AllowCloseDialog = true };
+        var switchButton = new TaskDialogButton("&Switch to the running copy");
+        var forceButton = new TaskDialogButton("&Force the running copy to close and start fresh");
+        var cancelButton = new TaskDialogButton("&Cancel") { AllowCloseDialog = true };
 
         var page = new TaskDialogPage
         {

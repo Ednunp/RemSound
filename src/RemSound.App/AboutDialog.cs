@@ -1351,7 +1351,7 @@ internal sealed class AboutDialog : Form
 
         var closeButton = new Button
         {
-            Text = "Close",
+            Text = "&Close",
             AutoSize = true,
             DialogResult = DialogResult.OK,
             TabIndex = 1,
