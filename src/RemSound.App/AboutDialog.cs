@@ -20,6 +20,14 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v5.5
+
+        A close-hang fix, and keyboard shortcuts everywhere.
+
+        Fixed a hang when UPnP is on. With the "open my router's port automatically" option turned on, closing RemSound could hang — on the way out it asks the router to close the port again, and a slow or fussy router left the window stuck waiting. Closing now never waits on the router: it tidies up in the background and shuts straight away.
+
+        Keyboard shortcuts on every dialog. Every button in every pop-up now has an Alt-key shortcut — including the "RemSound is already running" dialog, which previously had none. So you can always choose an option from the keyboard instead of tabbing to it.
+
         RemSound v5.4
 
         Service polish, and an important fix.
