@@ -209,6 +209,7 @@ internal sealed class RouterPortMapper : IDisposable
             if (disposed) return;
         }
         RemoveMappingBestEffort();
+        log?.Invoke("UPnP: stopping discovery...");
         try { NatUtility.StopDiscovery(); } catch { /* ignore */ }
         try { NatUtility.DeviceFound -= OnDeviceFound; } catch { /* ignore */ }
         lock (gate)
@@ -307,6 +308,10 @@ internal sealed class RouterPortMapper : IDisposable
         if (d is null || m is null) return;
         try
         {
+            // Breadcrumb BEFORE the call: DeletePortMap is a synchronous request to the router and is the
+            // usual suspect when close hangs. The log flushes each line, so if this blocks with no reply the
+            // last line in the log names it (and which NAT protocol) instead of leaving us guessing.
+            log?.Invoke($"UPnP: removing port mapping via {d.GetType().Name} (port {AudioPort})...");
             d.DeletePortMap(m);
             log?.Invoke($"UPnP mapping removed (port {AudioPort})");
         }
