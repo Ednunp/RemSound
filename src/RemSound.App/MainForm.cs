@@ -3706,6 +3706,21 @@ public sealed class MainForm : Form
         WireAppList(sendAppsList);
         WireAppList(rememberedAppsList);
 
+        // Delete on a remembered application forgets it — the same affordance the remembered-peers list
+        // has had all along (issue #26; the two remembered lists should feel identical). Items in this
+        // list are by definition not ticked (ticked apps show in the Active list), so deleting one only
+        // edits the machine-wide remembered set; no capture change is implied.
+        rememberedAppsList.KeyDown += (_, args) =>
+        {
+            if (args.KeyCode != Keys.Delete) return;
+            args.Handled = true;
+            args.SuppressKeyPress = true;
+            if (rememberedAppsList.SelectedItem is not AudioAppChoice choice) return;
+            var prevIndex = rememberedAppsList.SelectedIndex;
+            RemoveRememberedApplication(choice.ProcessName);
+            FocusListItemAfterDelete(rememberedAppsList, prevIndex);
+        };
+
         // Reconcile the app list on a slow timer so entries appear/disappear as apps open and close,
         // without ever piling up (each pass releases every session object — see AudioAppEnumerator).
         // Only ticks while the applications list is actually visible.
@@ -3742,8 +3757,8 @@ public sealed class MainForm : Form
         if (!supported && sendModeList.Items.Count > 0 && sendModeList.SelectedIndex != SendModeDevicesIndex)
         {
             suppressSendAppEvents = true;
-            sendModeList.SelectedIndex = SendModeDevicesIndex;
-            suppressSendAppEvents = false;
+            try { sendModeList.SelectedIndex = SendModeDevicesIndex; }
+            finally { suppressSendAppEvents = false; } // a throw must not leave events suppressed for good
         }
 
         var appsMode = supported && sendModeList.SelectedIndex == SendModeApplicationsIndex;
@@ -3840,6 +3855,18 @@ public sealed class MainForm : Form
         }
         UpdateCheckedListStatus(sendAppsList, sendAppsStatusLabel, "application");
         UpdateCheckedListStatus(rememberedAppsList, rememberedAppsStatusLabel, "remembered application");
+    }
+
+    /// <summary>Forget one app from the machine-wide remembered-applications list and re-render both app
+    /// lists. Backs the Delete key on the remembered list (issue #26) — the peers list has the same
+    /// affordance. Internal so the self-test can drive the real removal path headlessly.</summary>
+    internal void RemoveRememberedApplication(string processName)
+    {
+        var remaining = settings.LoadRememberedApplications()
+            .Where(n => !string.Equals(n, processName, StringComparison.OrdinalIgnoreCase));
+        settings.SaveRememberedApplications(remaining);
+        logFile.Event($"ui: remembered application '{processName}' deleted from the remembered list");
+        ReconcileSendAppsList();
     }
 
     /// <summary>Test seam: reconcile now and return the two send-app lists' rows — the active list's
@@ -8682,8 +8709,8 @@ public sealed class MainForm : Form
         {
             // No password → can't stream. Put the box back without re-firing this gate.
             suppressStreamingPasswordGate = true;
-            box.Checked = false;
-            suppressStreamingPasswordGate = false;
+            try { box.Checked = false; }
+            finally { suppressStreamingPasswordGate = false; } // a throw must not disable the gate for good
             return false;
         }
         currentProfilePassword = entered;

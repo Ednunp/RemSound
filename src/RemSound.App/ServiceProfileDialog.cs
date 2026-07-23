@@ -300,7 +300,12 @@ internal sealed class ServiceProfileDialog : Form
         var supported = ProcessLoopbackCapture.IsSupported;
         if (sendModeLabel is not null) sendModeLabel.Visible = supported;
         SetRowVisible(sendModeList, supported);
-        if (!supported && sendModeList.SelectedIndex != 0) { suppressAppEvents = true; sendModeList.SelectedIndex = 0; suppressAppEvents = false; }
+        if (!supported && sendModeList.SelectedIndex != 0)
+        {
+            suppressAppEvents = true;
+            try { sendModeList.SelectedIndex = 0; }
+            finally { suppressAppEvents = false; } // a throw must not leave events suppressed for good
+        }
 
         var appsMode = supported && sendModeList.SelectedIndex == 1;
         if (outputsLabel is not null) outputsLabel.Visible = !appsMode;
@@ -338,23 +343,23 @@ internal sealed class ServiceProfileDialog : Form
             MaximizeBox = false,
             ShowInTaskbar = false,
             StartPosition = FormStartPosition.CenterParent,
-            ClientSize = new Size(460, 200),
+            ClientSize = new Size(460, 110),
             AccessibleName = "Additional service options",
         };
-        var connect = new AccessibleCheckBox { Text = "Play a sound when a peer &connects (Alt+C)", AccessibleName = "Play connect sound", AutoSize = true, Checked = working.EnableConnectCue ?? true };
-        var disconnect = new AccessibleCheckBox { Text = "Play a sound when a peer &disconnects (Alt+D)", AccessibleName = "Play disconnect sound", AutoSize = true, Checked = working.EnableDisconnectCue ?? true };
+        // No connect/disconnect cue checkboxes here (removed 2026-07-19, review sweep): the dialog used
+        // to offer them, but the headless service NEVER plays cues — nothing in the service host touches
+        // CuePlayer, and a logged-out session couldn't render them anyway. Offering a switch that does
+        // nothing is worse than not offering it. The cue fields stay on Profile for the app's own use.
         var logging = new AccessibleCheckBox { Text = "Enable service &logging (Alt+L)", AccessibleName = "Enable service logging", AutoSize = true, Checked = ServiceLoggingEnabled };
         var ok = new Button { Text = "&OK", AutoSize = true, DialogResult = DialogResult.OK };
 
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(12), AutoSize = true };
-        foreach (var c in new Control[] { connect, disconnect, logging, ok }) { var w = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill }; w.Controls.Add(c); layout.Controls.Add(w); }
+        foreach (var c in new Control[] { logging, ok }) { var w = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill }; w.Controls.Add(c); layout.Controls.Add(w); }
         dlg.Controls.Add(layout);
         dlg.AcceptButton = ok;
 
         if (ForegroundDialog.Show(owner => dlg.ShowDialog(owner)) == DialogResult.OK)
         {
-            working.EnableConnectCue = connect.Checked;
-            working.EnableDisconnectCue = disconnect.Checked;
             ServiceLoggingEnabled = logging.Checked;
         }
     }

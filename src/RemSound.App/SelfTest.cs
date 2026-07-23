@@ -1957,8 +1957,17 @@ internal static class SelfTest
                     "a ticked app must NOT appear in the Remembered list");
                 Check(rememberedRows.Contains(unticked, StringComparer.OrdinalIgnoreCase),
                     "an unticked remembered app must stay in the Remembered list");
+
+                // Delete on the Remembered list (issue #26): removing forgets the app machine-wide and
+                // the list re-renders without it. Drives the real removal path the Delete key uses.
+                mf.RemoveRememberedApplication(unticked);
+                var (_, _, afterDelete) = mf.SnapshotAppListsForTest();
+                Check(!afterDelete.Contains(unticked, StringComparer.OrdinalIgnoreCase),
+                    "a deleted remembered app must leave the Remembered list");
+                Check(!store.LoadRememberedApplications().Contains(unticked, StringComparer.OrdinalIgnoreCase),
+                    "a deleted remembered app must leave the machine-wide remembered set");
             }
-            return "ticked app: in Active (not running) + out of Remembered; unticked app: stays in Remembered";
+            return "ticked app: in Active + out of Remembered; unticked stays; Delete forgets machine-wide";
         }
         finally { store.SaveRememberedApplications(original); }
     }
