@@ -54,7 +54,17 @@ public sealed class PeerDiscoveryService : IDisposable
     private int broadcastCacheDirty = 1;  // 1 = needs rebuild, 0 = current. Int for Interlocked.
     private NetworkAddressChangedEventHandler? networkChangeHandler;
 
+    // The name announced to other peers. Defaults to the machine name (what the desktop app has always
+    // shown); a headless sender can pass a friendly override so it shows up in peer lists under a
+    // meaningful name rather than its hostname.
+    private readonly string displayName;
+
     public event Action? PeersChanged;
+
+    /// <summary>Create a discovery service. <paramref name="displayName"/> is what other peers see in
+    /// their list; null/blank falls back to the machine name (the app's long-standing behaviour).</summary>
+    public PeerDiscoveryService(string? displayName = null)
+        => this.displayName = string.IsNullOrWhiteSpace(displayName) ? Environment.MachineName : displayName.Trim();
 
     public IReadOnlyList<PeerAnnouncement> Peers
     {
@@ -229,7 +239,7 @@ public sealed class PeerDiscoveryService : IDisposable
         var currentAnnouncer = announcer;
         if (currentAnnouncer is null || !announceEnabled) return;
 
-        var message = new DiscoveryMessage(instanceId, Environment.MachineName, audioPort, canSend, canReceive);
+        var message = new DiscoveryMessage(instanceId, displayName, audioPort, canSend, canReceive);
         var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
 
         // Broadcast to LAN — instant discovery on the same physical/wifi network. Each connected
