@@ -65,6 +65,8 @@ internal static class SelfTest
         RunStep(results, "Receiver allow-list gate (stranger rejected, no session)", ReceiverAllowGate);
         RunStep(results, "Receiver decryptor: wrong key yields silence, not noise", DecryptorWrongKey);
         RunStep(results, "Heartbeat wire round-trip + ping→pong echo", HeartbeatEcho);
+        RunStep(results, "Profile persistence tripwire (every field wired or declared)", ProfileDriftTripwire);
+        RunStep(results, "Cue variant resolution (dedupe, order, chosen-default fallback)", CueVariantResolution);
         RunStep(results, "App settings save and reload", SettingsRoundTrip);
         RunStep(results, "Per-peer shaping DSP", PeerShapingDsp);
         RunStep(results, "Multi-output fan-out (both lanes)", FanOutToBothOutputs);
@@ -113,6 +115,11 @@ internal static class SelfTest
         var passed = results.Count(r => r.Status == "PASS");
 
         Console.WriteLine();
+        // Skips must be LOUD: a skipped step is coverage that did not run, and a gate that quietly
+        // passes with steps skipped reads as "everything was checked" when it wasn't. Name them so
+        // run-tests.ps1 (and a human reading the log) can see exactly what went unexercised.
+        if (skipped > 0)
+            Console.WriteLine($"SKIPPED STEPS ({skipped}): {string.Join(", ", results.Where(r => r.Status == "SKIP").Select(r => r.Name))}");
         if (failed == 0)
         {
             Console.WriteLine($"RESULT: PASS - {passed} passed{(skipped > 0 ? $", {skipped} skipped" : "")} of {results.Count}.");
@@ -955,6 +962,166 @@ internal static class SelfTest
         return "follower flagged + sentinel shared with the app; service resolves it to the live default render endpoint";
     }
 
+    /// <summary>Cue variant resolution feeds the Preferences sound picker AND which WAV actually plays.
+    /// Wrong resolution = the wrong sound (or a duplicate 'Sound 1' row NVDA can't disambiguate). Pins:
+    /// numbered ordering, the drop-bare-when-numbered-exists dedupe, the 'Sound N' labels, and the
+    /// chosen-default falling back to the first variant when the chosen file is gone.</summary>
+    private static string? CueVariantResolution()
+    {
+        // Label mapping is pure string logic — pin it with literals first.
+        Check(CueSounds.VariantLabel("connect.wav", "connect 2.wav") == "Sound 2", "'connect 2.wav' must label as Sound 2");
+        Check(CueSounds.VariantLabel("connect.wav", "connect.wav") == "Sound 1", "the bare legacy name must label as Sound 1");
+        Check(CueSounds.VariantLabel("connect.wav", "connect 11.wav") == "Sound 11", "double-digit variants must label correctly");
+
+        // Resolution against the real shipped sounds folder.
+        var variants = CueSounds.Variants("connect.wav");
+        if (variants.Count == 0) return Skip("no connect cue variants on disk (sounds not seeded in this environment)");
+        var hasNumbered = variants.Any(v => !v.Equals("connect.wav", StringComparison.OrdinalIgnoreCase));
+        if (hasNumbered)
+        {
+            Check(!variants.Any(v => v.Equals("connect.wav", StringComparison.OrdinalIgnoreCase)),
+                "when numbered variants exist the bare file must be dropped (it would duplicate 'Sound 1')");
+        }
+        var numbers = variants.Select(v => int.TryParse(
+            Path.GetFileNameWithoutExtension(v).Split(' ').Last(), out var n) ? n : 0).ToList();
+        Check(numbers.SequenceEqual(numbers.OrderBy(n => n)), "variants must be ordered by their number");
+
+        var cfg = new AppConfig(); // scratch, never saved
+        Check(CueSounds.ResolveDefaultFileName("connect", "connect.wav", cfg) == variants[0],
+            "with no machine-wide pick, the FIRST variant must resolve");
+        cfg.DefaultCueSounds["connect"] = variants[^1];
+        Check(CueSounds.ResolveDefaultFileName("connect", "connect.wav", cfg) == variants[^1],
+            "a valid machine-wide pick must be honoured");
+        cfg.DefaultCueSounds["connect"] = "connect 999.wav";
+        Check(CueSounds.ResolveDefaultFileName("connect", "connect.wav", cfg) == variants[0],
+            "a pick whose file is GONE must fall back to the first variant, not silence");
+        return $"labels exact; {variants.Count} variants ordered + deduped; chosen-default honoured with fallback";
+    }
+
+    /// <summary>THE PERSISTENCE TRIPWIRE. A profile setting only survives save/load if it's wired through
+    /// the settings cache (ApplyProfile + CopyTo) or read straight off a control by BuildCurrentProfile —
+    /// three parallel lists that have silently drifted before. This test sets a distinctive value on EVERY
+    /// public writable Profile property via reflection, pushes it through ApplyProfile → CopyTo, and
+    /// requires each property to either round-trip or appear on the DECLARED list below with a reason.
+    /// Add a Profile field without wiring it and this fails, naming the field. When that happens: wire it
+    /// into RemSoundSettingsStore.ApplyProfile + CopyTo (and BuildCurrentProfile if control-driven), or
+    /// consciously add it to the declared list with a reason. Do not just add it to the list to go green.</summary>
+    private static string? ProfileDriftTripwire()
+    {
+        // Properties the STORE layer legitimately does not round-trip, each with why. Two kinds:
+        // control-owned (BuildCurrentProfile reads the live control / form state instead — several of
+        // those are pinned by the MainWindowProfileRoundTrip step) and legacy/vestigial (kept only so
+        // old JSON deserialises; nothing should read them again).
+        var declared = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["Title"] = "profile identity — carried by ProfileStore/BuildCurrentProfile(title), not the cache",
+            ["ReadOnly"] = "control-owned: File → Lock profile state, applied outside the settings cache",
+            ["Password"] = "control-owned: held as plain text in the form, re-obfuscated on save",
+            ["ReceiveAudioOn"] = "control-owned: main-window checkbox (pinned by MainWindowProfileRoundTrip)",
+            ["SendAudioOn"] = "control-owned: main-window checkbox (pinned by MainWindowProfileRoundTrip)",
+            ["Volume"] = "control-owned: volume slider (pinned by MainWindowProfileRoundTrip)",
+            ["Muted"] = "control-owned: mute state (pinned by MainWindowProfileRoundTrip)",
+            ["SelectedWasapiReceiveOutputs"] = "control-owned: device tick list",
+            ["SelectedAsioReceiveOutputs"] = "control-owned: device tick list",
+            ["SelectedWasapiSendOutputs"] = "control-owned: device tick list",
+            ["SelectedWasapiSendInputs"] = "control-owned: device tick list",
+            ["SelectedAsioSendInputs"] = "control-owned: device tick list",
+            ["WasapiSendMode"] = "control-owned: send-mode listbox (pinned by MainWindowProfileRoundTrip)",
+            ["SelectedSendApplications"] = "control-owned: app tick list (pinned by MainWindowProfileRoundTrip)",
+            ["RememberedPeers"] = "control-owned: peers lists (global remembered store + ticks)",
+            ["SelectedConnectedPeers"] = "control-owned: peers lists",
+            ["PeerShaping"] = "control-owned: pan/EQ editor state (pinned by MainWindowProfileRoundTrip)",
+            ["EnableAllPeerShaping"] = "control-owned: shaping master switch (pinned by MainWindowProfileRoundTrip)",
+            ["AudioPort"] = "DEAD FIELD: nothing reads it (the live port is the RemPacket constant). Wiring a custom-port UI to it requires adding real persistence first",
+            ["SendAllApplications"] = "vestigial (send-all removed 2026-07-17); kept for old JSON only",
+            ["EnablePanForPeers"] = "legacy pre-collapse switch; one-way migrated into EnableAllPeerShaping",
+            ["EnableEqForPeers"] = "legacy pre-collapse switch; one-way migrated into EnableAllPeerShaping",
+        };
+        // The 14 per-profile hotkey fields: legacy since v4.4 (hotkeys are machine-wide in AppConfig now).
+        // They exist ONLY so old profile JSON deserialises for the one-time shortcut-import offer.
+        foreach (var legacyHotkey in new[]
+        {
+            "ReceiveMuteHotkey", "SendMuteHotkey", "TrayHotkey", "VolumeUpHotkey", "VolumeDownHotkey",
+            "ToggleRecordingHotkey", "RemoteVolumeUpHotkey", "RemoteVolumeDownHotkey", "RemoteMuteToggleHotkey",
+            "SystemVolumeUpHotkey", "SystemVolumeDownHotkey", "SystemMuteToggleHotkey",
+            "QuickProfileSwitchHotkey", "SpeakStatusLineHotkey",
+        })
+        {
+            declared[legacyHotkey] = "legacy v4.4 per-profile hotkey — kept only for the one-time import of old JSON";
+        }
+
+        var store = new RemSoundSettingsStore("RemSound");
+        var backup = new Profile();
+        store.CopyTo(backup); // the cache is process-wide — snapshot it so this test doesn't pollute later steps
+        try
+        {
+            var input = new Profile();
+            var defaults = new Profile();
+            var props = typeof(Profile).GetProperties()
+                .Where(p => p.CanRead && p.CanWrite && p.GetSetMethod() is not null)
+                .Where(p => !p.GetCustomAttributes(typeof(System.Text.Json.Serialization.JsonIgnoreAttribute), false).Any())
+                .ToArray();
+
+            foreach (var p in props) SetDistinctive(input, p);
+
+            store.ApplyProfile(input);
+            var output = new Profile();
+            store.CopyTo(output);
+
+            var opts = new System.Text.Json.JsonSerializerOptions();
+            var failures = new List<string>();
+            var roundTripped = 0;
+            foreach (var p in props)
+            {
+                var inJson = System.Text.Json.JsonSerializer.Serialize(p.GetValue(input), p.PropertyType, opts);
+                var outJson = System.Text.Json.JsonSerializer.Serialize(p.GetValue(output), p.PropertyType, opts);
+                var survives = string.Equals(inJson, outJson, StringComparison.Ordinal);
+                if (survives && p.GetValue(input) is not null
+                    && string.Equals(inJson, System.Text.Json.JsonSerializer.Serialize(p.GetValue(defaults), p.PropertyType, opts), StringComparison.Ordinal))
+                {
+                    // The distinctive setter failed to move it off the default — the comparison proves
+                    // nothing. Treat as a test bug, not coverage.
+                    failures.Add($"{p.Name} (test could not set a distinctive value)");
+                    continue;
+                }
+                if (survives) { roundTripped++; continue; }
+                if (!declared.ContainsKey(p.Name))
+                    failures.Add($"{p.Name} does NOT survive ApplyProfile→CopyTo and is not declared — wire it or declare it");
+            }
+            // The declared list must not rot either: every entry must name a real property.
+            foreach (var name in declared.Keys)
+                if (props.All(p => p.Name != name))
+                    failures.Add($"declared entry '{name}' no longer matches any Profile property — remove it");
+
+            Check(failures.Count == 0, string.Join("; ", failures));
+            return $"{roundTripped} fields round-trip the settings cache; {declared.Count} declared control-owned/legacy; none undeclared";
+        }
+        finally { store.ApplyProfile(backup); }
+
+        static void SetDistinctive(Profile target, System.Reflection.PropertyInfo p)
+        {
+            var t = p.PropertyType;
+            object? v =
+                p.Name == "WasapiSendMode" ? "applications" :
+                p.Name == "CodecRaw" ? (int)AudioTransportCodec.Opus :
+                p.Name == "OpusFrameSamplesPerChannel" ? 960 :
+                p.Name == "SendRateRaw" ? (int)SendRate.Tight :
+                t == typeof(bool) ? !(bool)p.GetValue(target)! :
+                t == typeof(bool?) ? ((bool?)p.GetValue(target) is true ? false : true) :
+                t == typeof(int) ? (int)p.GetValue(target)! + 3 :
+                t == typeof(string) ? ((string?)p.GetValue(target) ?? "") + "-drift" :
+                t == typeof(List<string>) ? new List<string> { "drift-a", "drift-b" } :
+                t == typeof(Dictionary<string, string>) ? new Dictionary<string, string> { ["connect"] = @"C:\drift.wav" } :
+                t == typeof(Dictionary<string, PeerShaping>) ? new Dictionary<string, PeerShaping> { ["drift-peer"] = new PeerShaping() } :
+                t == typeof(RecordingSettings) ? new RecordingSettings { Source = RecordingSource.SentOnly } :
+                t == typeof(HotkeyRecord) ? new HotkeyRecord { Key = "F9", Control = true } :
+                null;
+            if (v is not null) p.SetValue(target, v);
+            // A type with no rule here leaves the default in place; the caller then flags the
+            // property as "test could not set a distinctive value" so the gap is visible, not silent.
+        }
+    }
+
     /// <summary>Multi-part PCM reassembly: on a lossy network a mis-assembly means audible corruption
     /// while packets still flow. Pins byte-exact in-order assembly, rejection of out-of-order/oversize/
     /// zero-part input, discard-counting of half-finished frames, and recovery after every failure.</summary>
@@ -1615,6 +1782,8 @@ internal static class SelfTest
             ("Add EQ band", () => new AddBandDialog()),
             ("Rename peer", () => new RenamePeerDialog("TestMachine", null)),
             ("Keyboard shortcut import", () => new KeyboardShortcutImportDialog(Array.Empty<string>())),
+            ("Update install notice", () => new UpdateInstallNoticeDialog(
+                new UpdateInfo("v9.9", new Version(9, 9, 0), "https://example.invalid/x.zip", "notes", "https://example.invalid/rel"))),
             ("Profile selection", () => new ProfileSelectionDialog(new ProfileStore(
                 Path.Combine(Path.GetTempPath(), "remsound-selftest-picker-" + Guid.NewGuid().ToString("N"))))),
         };

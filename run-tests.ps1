@@ -122,6 +122,15 @@ foreach ($line in ($st.Text -split "`r?`n")) {
     if ($line -match '\[(PASS|FAIL|SKIP)\]|^RESULT:') { Write-Host "  $($line.Trim())" }
 }
 if ($st.Code -eq 0) { Pass "self-test passed (exit 0)" } else { Fail "self-test failed (exit $($st.Code))" }
+# Skipped steps are coverage that did NOT run. The gate still passes (some skips are legitimate on a
+# headless/agent box), but they must be impossible to miss in the output - a release verified with
+# steps skipped is only as verified as what actually ran.
+$skipLine = ($st.Text -split "`r?`n") | Where-Object { $_ -match '^SKIPPED STEPS' } | Select-Object -First 1
+if ($skipLine) {
+    Write-Host ""
+    Write-Host "  WARNING: $($skipLine.Trim())" -ForegroundColor Yellow
+    Write-Host "  These steps did not run on this machine - their coverage is NOT verified." -ForegroundColor Yellow
+}
 
 Write-Host "`nResource sanity (handle/memory leak check):" -ForegroundColor Cyan
 $pf = Invoke-RsCli @('--perftest', '--seconds', '12')
