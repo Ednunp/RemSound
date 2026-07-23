@@ -44,3 +44,6 @@ Thumbs.db
 # Tokens / secrets — these should never be checked in
 .gh-token.txt
 gh-token.txt
+
+# Personal side-projects that must never ship to GitHub (untracked by design)
+pi-sender/
