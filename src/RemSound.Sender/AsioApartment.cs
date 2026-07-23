@@ -46,15 +46,23 @@ internal sealed class AsioApartment : IDisposable
     /// <summary>Run <paramref name="action"/> on the apartment thread and block until it finishes,
     /// rethrowing anything it raised. If called from the apartment thread itself, or after Dispose, runs
     /// inline so a teardown path can never deadlock on itself.</summary>
-    public void Invoke(Action action)
+    public void Invoke(Action action) => Invoke(action, Timeout.Infinite);
+
+    /// <summary>Bounded variant: wait at most <paramref name="timeoutMs"/> for the work to finish.
+    /// Returns false on timeout — the work is NOT cancelled (it may still complete later on the
+    /// apartment thread); the caller just stops waiting. Used by the ASIO close path so a driver that
+    /// wedges on Stop/Dispose can no longer hang a live driver-switch or the resume path — the caller
+    /// abandons the driver (the old park semantics) and the OS reclaims it at process exit.</summary>
+    public bool Invoke(Action action, int timeoutMs)
     {
-        if (shutdown || Thread.CurrentThread == thread) { action(); return; }
+        if (shutdown || Thread.CurrentThread == thread) { action(); return true; }
         var item = new WorkItem { Action = action, Done = new ManualResetEventSlim(false) };
         lock (queueGate) queue.Enqueue(item);
         workAvailable.Set();
-        item.Done.Wait();
+        if (!item.Done.Wait(timeoutMs)) return false; // deliberately NOT disposing Done — the worker's finally will still Set it
         item.Done.Dispose();
         if (item.Error is not null) throw item.Error;
+        return true;
     }
 
     private void Run()

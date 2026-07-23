@@ -124,8 +124,10 @@ internal static class UpdateApplier
 
     /// <summary>Rename each existing target file aside into the backup folder, then copy the new
     /// one in. Throws if a file genuinely can't be replaced after the retry window — the caller
-    /// rolls back. Only writes files that exist in the new release, so user data is left untouched.</summary>
-    private static void SwapInNewFiles(string source, string target, string backupDir,
+    /// rolls back. Only writes files that exist in the new release, so user data is left untouched.
+    /// Internal (was private) so the self-test can pin the swap/rollback contract — a broken rollback
+    /// is the one failure mode of the updater that bricks an install.</summary>
+    internal static void SwapInNewFiles(string source, string target, string backupDir,
         List<(string backup, string dest)> moved, List<string> created, Action<string> log)
     {
         var srcFull = Path.GetFullPath(source);
@@ -154,8 +156,9 @@ internal static class UpdateApplier
         log($"swap complete: {copiedCount} files in, {moved.Count} replaced, {created.Count} new");
     }
 
-    /// <summary>Restore the old files (and remove the partial new ones) after a failed swap.</summary>
-    private static void RollBack(List<(string backup, string dest)> moved, List<string> created, Action<string> log)
+    /// <summary>Restore the old files (and remove the partial new ones) after a failed swap.
+    /// Internal for the self-test — see <see cref="SwapInNewFiles"/>.</summary>
+    internal static void RollBack(List<(string backup, string dest)> moved, List<string> created, Action<string> log)
     {
         foreach (var dest in created)
         {

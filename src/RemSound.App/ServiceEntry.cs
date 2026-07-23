@@ -38,6 +38,7 @@ internal static class ServiceEntry
             : Has(args, ServiceControl.UninstallVerb) ? "uninstall"
             : Has(args, ServiceControl.StartVerb) ? "start"
             : Has(args, ServiceControl.StopVerb) ? "stop"
+            : Has(args, ServiceControl.SelfUpdateVerb) ? "selfupdate"
             : null;
         if (verb is null) return 0;
 
@@ -54,6 +55,7 @@ internal static class ServiceEntry
                 "uninstall" => ServiceControl.DoUninstall(),
                 "start" => ServiceControl.DoStart(),
                 "stop" => ServiceControl.DoStop(),
+                "selfupdate" => ServiceControl.DoSelfUpdate(),
                 _ => 0,
             };
             ServiceStore.AppendServiceEvent($"elevated {verb}: finished with code {rc}");

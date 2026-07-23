@@ -237,6 +237,10 @@ internal sealed class RouterPortMapper : IDisposable
 
     private void OnDeviceFound(object? sender, DeviceEventArgs args)
     {
+        // A discovery callback can already be in flight when Stop()/Dispose() unsubscribes. Without this
+        // guard it would re-open the port map that Dispose just removed, leaving the router forwarding to
+        // us until the lease expires. Narrow race, cheap check (review sweep).
+        lock (gate) { if (disposed) return; }
         try
         {
             var found = args.Device;

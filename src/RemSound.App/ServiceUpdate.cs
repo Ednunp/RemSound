@@ -51,42 +51,31 @@ internal static class ServiceUpdate
 
     public static Version? RunningVersion() => Assembly.GetExecutingAssembly().GetName().Version;
 
-    /// <summary>Restart the service onto the new binary. Spawns a DETACHED PowerShell (as SYSTEM, inherited
-    /// from the service) that stops this service — which exits this process — then starts it again, so the
-    /// SCM launches the freshly-installed exe. The script LOGS its own stop/start outcome to the update log,
-    /// so even the part that runs after this process is gone (and any failed start) is recorded. Never
-    /// throws; worst case the service picks up the update on the next reboot.</summary>
+    /// <summary>Restart the service onto the new binary. Spawns a DETACHED helper — a copy of the NEW
+    /// RemSound.exe running the <see cref="ServiceControl.SelfUpdateVerb"/> verb, as SYSTEM (inherited
+    /// from the service) — which stops this service (exiting this process), copies the new build into the
+    /// service bin, and starts the service again. All managed code: the previous PowerShell restart
+    /// script silently died on machines where Group Policy enforces execution policy (Bypass is ignored
+    /// there), stranding the service on the old build. The helper logs every step to the update log, so
+    /// the part that runs after this process is gone is still recorded. Never throws; worst case the
+    /// service picks up the update on the next reboot.</summary>
     public static void RestartSelf()
     {
         try
         {
+            // Run the helper from the NEW build in the app-source folder — it must not execute from the
+            // bin it's about to overwrite. Falls back to the bin exe when no app source is recorded (the
+            // helper then just restarts the service without copying, so nothing conflicts).
             var appDir = ServiceStore.LoadAppSourcePath();
-            var binDir = ServiceStore.BinDirectory;
-            var dir = ServiceStore.Directory;
-            System.IO.Directory.CreateDirectory(dir);
-            var script = Path.Combine(dir, "restart.ps1");
-            var log = ServiceStore.UpdateLogPath;
-            var svc = ServiceControl.ServiceName;
-            // robocopy the new build into bin, minus user-state; exit codes 0-7 are success (8+ = failure).
-            var copyLine = string.IsNullOrEmpty(appDir)
-                ? "$rc = 0  # no app-source recorded; restart onto whatever is already in bin"
-                : $"robocopy \"{appDir}\" \"{binDir}\" /E /XD \"user settings and logs\" logs recordings profiles config /XF \"global config.json\" remsound.config.json /R:2 /W:1 | Out-Null; $rc = $LASTEXITCODE";
-            var content =
-                "$ts = { (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') }\r\n" +
-                $"Add-Content -LiteralPath '{log}' -Value \"$(& $ts)  restarter: stopping {svc}\"\r\n" +
-                $"Stop-Service -Name {svc} -Force -ErrorAction SilentlyContinue\r\n" +
-                copyLine + "\r\n" +
-                $"Add-Content -LiteralPath '{log}' -Value \"$(& $ts)  restarter: copied new build (robocopy code $rc)\"\r\n" +
-                $"if ($rc -ge 8) {{ Add-Content -LiteralPath '{log}' -Value \"$(& $ts)  restart: COPY FAILED (code $rc) - starting existing build\" }}\r\n" +
-                $"try {{ Start-Service -Name {svc} -ErrorAction Stop; $r = 'restart: service started' }} catch {{ $r = 'restart: START FAILED - ' + $_.Exception.Message }}\r\n" +
-                $"Add-Content -LiteralPath '{log}' -Value \"$(& $ts)  $r\"\r\n";
-            File.WriteAllText(script, content);
+            var appExe = string.IsNullOrEmpty(appDir) ? null : Path.Combine(appDir, "RemSound.exe");
+            var helperExe = appExe is not null && File.Exists(appExe) ? appExe : ServiceStore.BinExePath;
             var psi = new ProcessStartInfo
             {
-                FileName = "powershell.exe",
-                Arguments = $"-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{script}\"",
+                FileName = helperExe,
+                Arguments = ServiceControl.SelfUpdateVerb,
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                WorkingDirectory = Path.GetDirectoryName(helperExe)!,
             };
             Process.Start(psi);
         }

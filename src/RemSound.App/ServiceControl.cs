@@ -251,6 +251,66 @@ public static class ServiceControl
         return rc;
     }
 
+    /// <summary>Verb for the native self-update helper (see <see cref="DoSelfUpdate"/>). Spawned BY the
+    /// running service as SYSTEM, so no elevation is involved.</summary>
+    public const string SelfUpdateVerb = "--service-selfupdate";
+
+    /// <summary>The self-update worker: stop the service, copy the recorded app-source build into the
+    /// service's own bin, start the service again — all in managed code. Replaces the old PowerShell
+    /// restart script: where execution policy is enforced by Group Policy, the script's -ExecutionPolicy
+    /// Bypass is IGNORED and the self-update silently died, stranding the service on the old build.
+    /// Native code has no policy to fall foul of. Runs detached (spawned by the service just before the
+    /// stop kills it); logs every step to the update log so the after-death part is still recorded.</summary>
+    public static int DoSelfUpdate()
+    {
+        static void Log(string m)
+        {
+            try
+            {
+                Directory.CreateDirectory(ServiceStore.Directory);
+                File.AppendAllText(ServiceStore.UpdateLogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  selfupdate: {m}\r\n");
+            }
+            catch { /* logging is best-effort */ }
+        }
+        try
+        {
+            Log($"stopping {ServiceName}");
+            try
+            {
+                using var sc = new ServiceController(ServiceName);
+                if (sc.Status != ServiceControllerStatus.Stopped)
+                {
+                    sc.Stop();
+                    sc.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(30));
+                }
+            }
+            catch (Exception ex) { Log($"stop failed ({ex.GetType().Name}: {ex.Message}) — continuing"); }
+
+            var appDir = ServiceStore.LoadAppSourcePath();
+            if (!string.IsNullOrEmpty(appDir) && Directory.Exists(appDir))
+            {
+                // CopyProgramTo already excludes every user-state folder — same routine the installer uses.
+                try { CopyProgramTo(appDir, ServiceStore.BinDirectory); Log("copied the new build into bin"); }
+                catch (Exception ex) { Log($"COPY FAILED ({ex.GetType().Name}: {ex.Message}) — starting the existing build"); }
+            }
+            else
+            {
+                Log("no app-source recorded; restarting onto the existing bin");
+            }
+
+            try
+            {
+                using var sc = new ServiceController(ServiceName);
+                sc.Start();
+                sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(30));
+                Log("service started");
+                return 0;
+            }
+            catch (Exception ex) { Log($"START FAILED — {ex.GetType().Name}: {ex.Message}"); return 1; }
+        }
+        catch (Exception ex) { Log($"FATAL {ex.GetType().Name}: {ex.Message}"); return 2; }
+    }
+
     /// <summary>Restart the service WITHOUT elevation, using the start/stop rights the installer granted
     /// the installing user (the SDDL ACE from <see cref="GrantUserStartStop"/>). Returns true when the
     /// service ends up Running. No UAC prompt, no elevated helper — so it's safe to run from a background

@@ -67,6 +67,7 @@ internal static class SelfTest
         RunStep(results, "Heartbeat wire round-trip + ping→pong echo", HeartbeatEcho);
         RunStep(results, "Profile persistence tripwire (every field wired or declared)", ProfileDriftTripwire);
         RunStep(results, "Cue variant resolution (dedupe, order, chosen-default fallback)", CueVariantResolution);
+        RunStep(results, "Updater swap + rollback (a failed update restores exactly)", UpdaterSwapRollback);
         RunStep(results, "App settings save and reload", SettingsRoundTrip);
         RunStep(results, "Per-peer shaping DSP", PeerShapingDsp);
         RunStep(results, "Multi-output fan-out (both lanes)", FanOutToBothOutputs);
@@ -960,6 +961,51 @@ internal static class SelfTest
         Check(specs.Any(s => s.Kind == CaptureKind.Loopback && s.DeviceId == expected),
             "the follower must resolve to a loopback spec on the current Windows default output");
         return "follower flagged + sentinel shared with the app; service resolves it to the live default render endpoint";
+    }
+
+    /// <summary>The updater's back-up-and-swap is the one piece of code that can BRICK an install: a bad
+    /// rollback leaves a half-swapped folder that won't start. Pins, on real temp folders: the swap
+    /// replaces + adds exactly the release's files (user files untouched), the backup holds the originals,
+    /// and RollBack restores the target to its byte-exact pre-swap state including deleting new files.</summary>
+    private static string? UpdaterSwapRollback()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "remsound-selftest-swap-" + Guid.NewGuid().ToString("N"));
+        var source = Path.Combine(root, "source");
+        var target = Path.Combine(root, "target");
+        var backup = Path.Combine(target, "_update-backup");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(source, "sub"));
+            Directory.CreateDirectory(target);
+            File.WriteAllText(Path.Combine(source, "a.dll"), "A-NEW");
+            File.WriteAllText(Path.Combine(source, "b.dll"), "B-NEW");
+            File.WriteAllText(Path.Combine(source, "sub", "c.dll"), "C-NEW");
+            File.WriteAllText(Path.Combine(target, "a.dll"), "A-OLD");
+            File.WriteAllText(Path.Combine(target, "user.json"), "USER"); // not in the release — must survive everything
+
+            var moved = new List<(string backup, string dest)>();
+            var created = new List<string>();
+            UpdateApplier.SwapInNewFiles(source, target, backup, moved, created, _ => { });
+
+            Check(File.ReadAllText(Path.Combine(target, "a.dll")) == "A-NEW"
+                  && File.ReadAllText(Path.Combine(target, "b.dll")) == "B-NEW"
+                  && File.ReadAllText(Path.Combine(target, "sub", "c.dll")) == "C-NEW",
+                "the swap must land every release file, including subfolders");
+            Check(File.ReadAllText(Path.Combine(target, "user.json")) == "USER", "files not in the release must be untouched");
+            Check(moved.Count == 1 && created.Count == 2, $"bookkeeping must be exact (moved {moved.Count}, created {created.Count})");
+            Check(File.ReadAllText(Path.Combine(backup, "a.dll")) == "A-OLD", "the backup must hold the original bytes");
+
+            UpdateApplier.RollBack(moved, created, _ => { });
+            Check(File.ReadAllText(Path.Combine(target, "a.dll")) == "A-OLD", "rollback must restore the original file bytes");
+            Check(!File.Exists(Path.Combine(target, "b.dll")) && !File.Exists(Path.Combine(target, "sub", "c.dll")),
+                "rollback must DELETE files the failed update newly created");
+            Check(File.ReadAllText(Path.Combine(target, "user.json")) == "USER", "user files must survive the rollback too");
+            return "swap exact + user files untouched; rollback restores byte-exact incl. deleting new files";
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* temp cleanup is best-effort */ }
+        }
     }
 
     /// <summary>Cue variant resolution feeds the Preferences sound picker AND which WAV actually plays.
@@ -1958,7 +2004,7 @@ internal static class SelfTest
         foreach (var verb in new[]
                  {
                      ServiceControl.RunVerb, ServiceControl.InstallVerb, ServiceControl.UninstallVerb,
-                     ServiceControl.StartVerb, ServiceControl.StopVerb,
+                     ServiceControl.StartVerb, ServiceControl.StopVerb, ServiceControl.SelfUpdateVerb,
                  })
         {
             Check(Program.IsServiceInvocation(new[] { verb }), $"'{verb}' must be recognised as a service invocation");
@@ -1976,7 +2022,7 @@ internal static class SelfTest
         if (!loadedBefore)
             Check(!IsAssemblyLoaded(svcAsm), "deciding a normal launch must not load the Windows-service assembly");
 
-        return "normal launches stay load-safe; all five service verbs recognised (case-insensitive)";
+        return "normal launches stay load-safe; all six service verbs recognised (case-insensitive)";
     }
 
     /// <summary>The Service menu's "View service log" opens the newest diagnostic log — the log that says
@@ -2323,7 +2369,17 @@ internal static class SelfTest
         var ranAfter = false;
         apt.Invoke(() => ranAfter = true);
         Check(ranAfter, "the apartment must keep working after a work item threw");
-        return "runs work on one dedicated STA thread; exceptions propagate; survives a throw";
+
+        // Bounded invoke: a wedged work item must return false promptly instead of hanging the caller
+        // (this is what stops a wedged ASIO driver freezing a live driver-switch or the resume path).
+        using var release = new ManualResetEventSlim(false);
+        var sw = Stopwatch.StartNew();
+        var completed = apt.Invoke(() => release.Wait(3000), timeoutMs: 150);
+        sw.Stop();
+        Check(!completed, "a work item that overruns the timeout must report false, not block");
+        Check(sw.ElapsedMilliseconds < 1500, $"the bounded wait must return promptly (took {sw.ElapsedMilliseconds} ms)");
+        release.Set(); // free the apartment thread so Dispose joins cleanly
+        return "one dedicated STA thread; exceptions propagate; survives a throw; bounded invoke times out clean";
     }
 
     /// <summary>The instant capture-on-app-open watcher (AudioSessionStartWatcher) must construct, re-hook

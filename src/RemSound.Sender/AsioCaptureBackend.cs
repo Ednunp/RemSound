@@ -229,7 +229,12 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
             // blew past these try/catch blocks with no managed stack). Step-by-step logging still pinpoints
             // any native call that dies, and the callback is unhooked + drained before stop/dispose so the
             // close isn't racing a live buffer callback (a common trigger for the crash).
-            apartment.Invoke(() =>
+            //
+            // BOUNDED (review sweep): a driver that wedges inside Stop/Dispose used to hang the CALLER
+            // forever — and live driver-switches and the resume path close on the UI thread. 8 s is
+            // generous for a healthy close (Ed's Audient releases in ~5 ms); past that we abandon the
+            // driver (the old park semantics — the OS reclaims it at process exit) and move on.
+            var closed = apartment.Invoke(() =>
             {
                 onDiagnostic?.Invoke("asio close: unhooking callback");
                 try { toClose.AudioAvailable -= OnAudioAvailable; } catch { /* ignore */ }
@@ -239,7 +244,9 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
                 onDiagnostic?.Invoke("asio close: releasing driver (dispose)");
                 try { toClose.Dispose(); } catch (Exception ex) { onDiagnostic?.Invoke($"asio close: dispose threw {ex.GetType().Name}: {ex.Message}"); }
                 onDiagnostic?.Invoke("asio close: driver released cleanly");
-            });
+            }, timeoutMs: 8000);
+            if (!closed)
+                onDiagnostic?.Invoke("asio close: TIMED OUT after 8s — abandoning the driver (parked; reclaimed at process exit)");
             asio = null;
         }
         uptime.Stop();
