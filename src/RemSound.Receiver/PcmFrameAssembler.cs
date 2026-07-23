@@ -1,5 +1,9 @@
 using RemSound.Core;
 
+// Lets the in-app self-test (--selftest, in RemSound.exe) exercise the internal reassembly and
+// decryptor paths directly — same pattern as the Sender and Core assemblies.
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("RemSound")]
+
 namespace RemSound.Receiver;
 
 /// <summary>

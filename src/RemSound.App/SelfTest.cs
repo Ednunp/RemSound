@@ -61,6 +61,10 @@ internal static class SelfTest
         RunStep(results, "Updater tag filtering (client vs server releases, version order)", UpdaterTagFiltering);
         RunStep(results, "CGNAT range detection (RFC 6598)", CgnatDetection);
         RunStep(results, "Network QoS attach (no throw on a bound socket)", NetworkPrioritySmoke);
+        RunStep(results, "PCM frame reassembly (order, loss, discard counters)", PcmReassembly);
+        RunStep(results, "Receiver allow-list gate (stranger rejected, no session)", ReceiverAllowGate);
+        RunStep(results, "Receiver decryptor: wrong key yields silence, not noise", DecryptorWrongKey);
+        RunStep(results, "Heartbeat wire round-trip + ping→pong echo", HeartbeatEcho);
         RunStep(results, "App settings save and reload", SettingsRoundTrip);
         RunStep(results, "Per-peer shaping DSP", PeerShapingDsp);
         RunStep(results, "Multi-output fan-out (both lanes)", FanOutToBothOutputs);
@@ -949,6 +953,112 @@ internal static class SelfTest
         Check(specs.Any(s => s.Kind == CaptureKind.Loopback && s.DeviceId == expected),
             "the follower must resolve to a loopback spec on the current Windows default output");
         return "follower flagged + sentinel shared with the app; service resolves it to the live default render endpoint";
+    }
+
+    /// <summary>Multi-part PCM reassembly: on a lossy network a mis-assembly means audible corruption
+    /// while packets still flow. Pins byte-exact in-order assembly, rejection of out-of-order/oversize/
+    /// zero-part input, discard-counting of half-finished frames, and recovery after every failure.</summary>
+    private static string? PcmReassembly()
+    {
+        var asm = new RemSound.Receiver.PcmFrameAssembler();
+        var part0 = new byte[1440]; for (var i = 0; i < part0.Length; i++) part0[i] = (byte)i;
+        var part1 = new byte[1440]; for (var i = 0; i < part1.Length; i++) part1[i] = (byte)(i + 7);
+
+        Check(!asm.TryAssemble(part0, frameId: 1, partIndex: 0, totalParts: 2, out _), "part 0 alone must not complete a 2-part frame");
+        Check(asm.TryAssemble(part1, 1, 1, 2, out var assembled), "part 1 must complete it");
+        Check(assembled.Length == 2880 && assembled[..1440].SequenceEqual(part0) && assembled[1440..].SequenceEqual(part1),
+            "the assembled frame must be both parts, byte-exact, in order");
+
+        Check(!asm.TryAssemble(part1, 2, 1, 2, out _), "a part 1 whose part 0 was lost must be rejected");
+        Check(asm.RejectionCount == 1, $"the lost-start rejection must be counted (got {asm.RejectionCount})");
+
+        Check(!asm.TryAssemble(part0, 3, 0, 2, out _), "start frame 3");
+        Check(!asm.TryAssemble(part0, 4, 0, 2, out _), "frame 4 starting before frame 3 finished must begin fresh");
+        Check(asm.DiscardedPartialCount == 1, $"the half-finished frame 3 must be counted as discarded (got {asm.DiscardedPartialCount})");
+        Check(asm.TryAssemble(part1, 4, 1, 2, out var after) && after.Length == 2880, "frame 4 must still assemble cleanly after the discard");
+
+        Check(!asm.TryAssemble(part0, 5, 0, 0, out _), "totalParts=0 must be rejected");
+        var huge = new byte[5000];
+        Check(!asm.TryAssemble(huge, 6, 0, 2, out _), "start an oversize frame");
+        Check(!asm.TryAssemble(huge, 6, 1, 2, out _), "a frame overflowing the assembly buffer must be rejected, not overrun");
+        Check(asm.RejectionCount == 3, $"zero-part + overflow must be counted (got {asm.RejectionCount})");
+        return "in-order byte-exact; loss/oversize/zero-part rejected + counted; recovers after every failure";
+    }
+
+    /// <summary>The receiver's allow-list is a SECURITY gate: a Format packet from a sender the user
+    /// hasn't ticked must never open a session. Nothing previously asserted the gate end-to-end.</summary>
+    private static string? ReceiverAllowGate()
+    {
+        using var receiver = new RemSound.Receiver.AudioReceiver();
+        try { receiver.Start(FreeUdpPort()); }
+        catch (Exception ex) { return Skip($"could not start receiver: {ex.Message}"); }
+        receiver.SetOutputDevices(Array.Empty<string>()); // decode only — never render
+        receiver.SetPlaybackEnabled(true); // the gate sits behind the playback switch; enable it so the gate is what's tested
+        receiver.SetAllowedSenders(new[] { new IPEndPoint(IPAddress.Parse("10.9.8.7"), 47830) });
+
+        var fmt = new AudioFormatInfo(48000, 2, 24, 1, 6, 48000 * 6);
+        var packet = new byte[RemPacket.HeaderSize + 64];
+        RemPacket.WriteHeader(packet, RemPacketType.Format, 1, 1);
+        var payloadLen = RemPacket.WriteFormatPayload(packet.AsSpan(RemPacket.HeaderSize), fmt);
+        var len = RemPacket.HeaderSize + payloadLen;
+
+        receiver.InjectExternalPacket(packet, len, new IPEndPoint(IPAddress.Parse("10.1.2.3"), 5555));
+        Check(receiver.PacketsRejectedNotAllowed == 1,
+            "a Format packet from a non-allowed sender must be rejected and counted — never open a session");
+
+        // The allow-list matches by ADDRESS (source ports vary); an allowed sender must pass.
+        receiver.InjectExternalPacket(packet, len, new IPEndPoint(IPAddress.Parse("10.9.8.7"), 61234));
+        Check(receiver.PacketsRejectedNotAllowed == 1, "the allowed sender must not be counted as rejected");
+        return "stranger rejected + counted before any session; allowed address passes at any source port";
+    }
+
+    /// <summary>The receiver-side decrypt gate: audio encrypted with the WRONG password must come out as
+    /// nothing (empty span → silence), never as garbage bytes that would play as noise. Also pins the
+    /// no-key case (encryption is mandatory — keyless means everything drops).</summary>
+    private static string? DecryptorWrongKey()
+    {
+        var keyA = RemSoundCrypto.DeriveKey("password-a");
+        var keyB = RemSoundCrypto.DeriveKey("password-b");
+        var clear = new byte[480];
+        new Random(42).NextBytes(clear);
+        var cipher = RemSoundCrypto.Encrypt(keyA, clear);
+
+        using var dec = new RemSound.Receiver.AudioDecryptor();
+        Check(!dec.HasKey && dec.TryDecrypt(cipher).IsEmpty, "with no key set, everything must drop (encryption is mandatory)");
+        dec.EnsureKey(keyB);
+        Check(dec.TryDecrypt(cipher).IsEmpty, "wrong-password ciphertext must yield EMPTY (silence), never garbage");
+        dec.EnsureKey(keyA);
+        Check(dec.TryDecrypt(cipher).SequenceEqual(clear), "the right key must round-trip the audio exactly");
+        return "no key → drop; wrong key → silence not noise; right key → byte-exact";
+    }
+
+    /// <summary>The heartbeat is what decides Healthy/Unreachable for every peer — app AND service stop
+    /// sending to peers it calls dead. Pins the payload wire format and the ping→pong echo: the pong must
+    /// return to the SOURCE endpoint carrying the originator's tick unchanged (RTT is computed from it).</summary>
+    private static string? HeartbeatEcho()
+    {
+        Span<byte> pay = stackalloc byte[RemPacket.HeartbeatPayloadSize];
+        RemPacket.WriteHeartbeatPayload(pay, HeartbeatKind.Ping, 123_456_789L);
+        Check(RemPacket.TryReadHeartbeat(pay, out var k, out var t) && k == HeartbeatKind.Ping && t == 123_456_789L,
+            "the heartbeat payload must round-trip kind + originator tick");
+
+        using var hb = new HeartbeatService();
+        byte[]? sent = null;
+        IPEndPoint? sentTo = null;
+        hb.SendTransport = (buf, len, ep) => { sent = buf.AsSpan(0, len).ToArray(); sentTo = ep; return true; };
+
+        var ping = new byte[RemPacket.HeaderSize + RemPacket.HeartbeatPayloadSize];
+        RemPacket.WriteHeader(ping, RemPacketType.Heartbeat, 0xFFFF, 9);
+        RemPacket.WriteHeartbeatPayload(ping.AsSpan(RemPacket.HeaderSize), HeartbeatKind.Ping, 42_000L);
+        var from = new IPEndPoint(IPAddress.Loopback, 51515);
+        hb.HandleInjectedPacket(ping, ping.Length, from);
+
+        Check(sent is not null && Equals(sentTo, from), "a ping must produce a pong back to the SOURCE endpoint");
+        Check(RemPacket.TryReadHeader(sent, out var ht, out _, out _) && ht == RemPacketType.Heartbeat, "the reply must be a heartbeat packet");
+        Check(RemPacket.TryReadHeartbeat(sent.AsSpan(RemPacket.HeaderSize), out var hk, out var ot)
+              && hk == HeartbeatKind.Pong && ot == 42_000L,
+            "the pong must echo the originator's tick UNCHANGED — RTT (and so peer health) is computed from it");
+        return "payload round-trips; ping → pong to source with originator tick intact";
     }
 
     /// <summary>The SPSC ring buffer is the heart of every audio path (capture mix + playout), and until
