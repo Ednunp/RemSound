@@ -95,6 +95,11 @@ public sealed class Profile
     // the ACTIVE subset (SelectedSendApplications above) is per-profile.
 
     // === Connectivity & transport ===
+    /// <summary>DEAD FIELD — nothing reads it. The live port is the fixed <c>RemPacket.DefaultPort</c>
+    /// constant, and every save writes this back at its default (it isn't wired through the settings
+    /// cache or any control). TRAP: wiring a future "custom port" UI to this field without adding real
+    /// persistence would silently reset the user's choice to 47830 on every save — the persistence
+    /// tripwire self-test documents this and will flag any change in its behaviour.</summary>
     public int AudioPort { get; set; } = 47830;
     public int CodecRaw { get; set; } = (int)AudioTransportCodec.Pcm;
     /// <summary>Opus frame size in samples-per-channel at 48 kHz. 120 = 2.5 ms, 240 = 5 ms,

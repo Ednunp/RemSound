@@ -202,7 +202,8 @@ public sealed class AppConfig
     /// They now live here — one set shared by every profile, loaded/saved via
     /// <see cref="RemSoundSettingsStore"/>'s Load*/Save* hotkey methods. Null = use the built-in default
     /// for that action. The old per-profile <see cref="HotkeyRecord"/> fields on <see cref="Profile"/>
-    /// are kept only so old profile JSONs still deserialise; they are no longer read or written.</summary>
+    /// are kept so old profile JSONs still deserialise and are READ exactly once — by MainForm's one-time
+    /// shortcut-import offer for v4.4 upgraders — but are never written or otherwise consulted.</summary>
     public HotkeyRecord? ReceiveMuteHotkey { get; set; }
     public HotkeyRecord? SendMuteHotkey { get; set; }
     public HotkeyRecord? TrayHotkey { get; set; }

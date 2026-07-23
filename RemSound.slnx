@@ -3,7 +3,6 @@
     <Project Path="src/RemSound.Core/RemSound.Core.csproj" />
     <Project Path="src/RemSound.Sender/RemSound.Sender.csproj" />
     <Project Path="src/RemSound.Receiver/RemSound.Receiver.csproj" />
-    <Project Path="src/RemSound.Harness/RemSound.Harness.csproj" />
     <Project Path="src/RemSound.App/RemSound.App.csproj" />
   </Folder>
 </Solution>

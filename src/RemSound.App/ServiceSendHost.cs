@@ -325,22 +325,16 @@ public sealed class ServiceSendHost : IDisposable
             if (specs.Count == 0) { log?.Invoke("service: profile has no WASAPI send sources — nothing to stream"); return false; }
             if (endpoints.Count == 0) { log?.Invoke("service: profile has no reachable peers — nothing to stream to"); return false; }
 
-            // Encryption: derive BOTH the key AND the fingerprint from the plain password, exactly like
-            // MainForm.RecomputeAudioCrypto. The peer verifies the fingerprint before accepting a stream —
-            // sending the key without it would get the service's audio rejected at the far end.
+            // Encryption: key + fingerprint always together, through the ONE shared rule (the peer
+            // verifies the fingerprint before accepting a stream; a key alone gets silently rejected).
             var plainPassword = string.IsNullOrEmpty(profile.Password) ? "" : RemSoundCrypto.Deobfuscate(profile.Password);
-            sender.AudioKey = string.IsNullOrEmpty(plainPassword) ? null : RemSoundCrypto.DeriveKey(plainPassword);
-            sender.AudioFingerprint = string.IsNullOrEmpty(plainPassword) ? null : RemSoundCrypto.Fingerprint(plainPassword);
+            (sender.AudioKey, sender.AudioFingerprint) = RemSoundCrypto.ForPlainPassword(plainPassword);
             // The service's audio transport is FIXED to the known-good live-jamming config, regardless of
-            // what the profile carries (the config dialog no longer exposes these — Ed, 2026-07-17). Raw
-            // PCM sounded hideous over the service; Opus at the 2.5 ms live frame with Small packets and
-            // lock-to-clock is what sounds right. Forcing it here means a stale or hand-edited profile can
-            // never put the service back on a bad codec.
-            const AudioTransportCodec serviceCodec = AudioTransportCodec.Opus;
-            const int serviceOpusFrameSamples = 120; // 2.5 ms at 48 kHz
-            const SendRate serviceSendRate = SendRate.Tight; // "Small" packets
-            sender.ConfigureCodec(serviceCodec, MainForm.EffectiveOpusFrameSamples(serviceCodec, serviceOpusFrameSamples, serviceSendRate));
-            sender.SetSendRate(serviceSendRate);
+            // what the profile carries (the config dialog no longer exposes these — Ed, 2026-07-17).
+            // The numbers live in ServiceAudioDefaults, shared with the dialog that writes the profile.
+            sender.ConfigureCodec(ServiceAudioDefaults.Codec, AudioTransportRules.EffectiveOpusFrameSamples(
+                ServiceAudioDefaults.Codec, ServiceAudioDefaults.OpusFrameSamplesPerChannel, ServiceAudioDefaults.Rate));
+            sender.SetSendRate(ServiceAudioDefaults.Rate);
             sender.SetTightLatency(true); // lock to audio clock — always on
             // Arm the full set to begin with (nothing is known-dead yet); RefreshSendArming then prunes any
             // peer the heartbeat can't reach and re-arms it when it recovers.
@@ -613,17 +607,9 @@ public sealed class ServiceSendHost : IDisposable
         var seen = new HashSet<string>();
         foreach (var entry in entries.Where(e => !string.IsNullOrWhiteSpace(e)).Distinct())
         {
-            var (host, port) = SplitHostPort(entry);
-            IPAddress? addr;
-            if (!IPAddress.TryParse(host, out addr))
-            {
-                try
-                {
-                    var found = Dns.GetHostAddresses(host);
-                    addr = found.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork) ?? found.FirstOrDefault();
-                }
-                catch { addr = null; }
-            }
+            // Shared split + resolve (PeerAddress) — the app's peer paths use the same rules.
+            var (_, port) = PeerAddress.Split(entry);
+            var addr = PeerAddress.ResolveHost(entry);
             if (addr is null) continue;
             // Send to the peer's audio port: an explicit "host:port" wins, else the standard peer port —
             // the same default the main app's manual-peer path uses (NOT the local listen port).
@@ -631,17 +617,6 @@ public sealed class ServiceSendHost : IDisposable
             if (seen.Add($"{ep.Address}:{ep.Port}")) result.Add(ep);
         }
         return result;
-    }
-
-    // Minimal "host[:port]" parser (self-contained so the host doesn't depend on the WinForms UI).
-    internal static (string host, int? port) SplitHostPort(string text)
-    {
-        text = text.Trim();
-        var colon = text.LastIndexOf(':');
-        if (colon <= 0 || colon == text.Length - 1) return (text, null);
-        var host = text[..colon];
-        if (host.Contains(':')) return (text, null); // looks like an IPv6 literal — treat whole as host
-        return int.TryParse(text[(colon + 1)..], out var port) && port is >= 1 and <= 65535 ? (host, port) : (text, null);
     }
 
     public void Dispose()

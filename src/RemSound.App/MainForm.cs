@@ -591,9 +591,6 @@ public sealed class MainForm : Form
     // snapshot tick (~1 Hz) and triggers a forced gen2 + finalizer flush every 300 ticks
     // (~5 minutes). See the inline comment in SnapshotLogIfDue for the full rationale.
     private int nativeReaperTickCount;
-    // Counts status ticks (~1 Hz) so the heavier handle-TYPE probe runs on a slow cadence
-    // (~once a minute) rather than every diag line. 2026-06-07, for the receiver handle leak.
-    private int handleProbeTickCount;
 
     // Previous-tick values for the per-second deltas surfaced in the diag log line. Each is
     // the receiver-side cumulative counter snapshot at the previous SnapshotLogIfDue tick;
@@ -7295,45 +7292,11 @@ public sealed class MainForm : Form
             .ToArray();
     }
 
-    private async Task<IPAddress?> ResolvePeerAddressAsync(string text)
-    {
-        // Strip any host:port suffix before resolving; the port is parsed separately by the
-        // caller via TrySplitHostPort.
-        var (hostOnly, _) = TrySplitHostPort(text);
-        if (IPAddress.TryParse(hostOnly, out var direct)) return direct;
-        try
-        {
-            var addresses = await Dns.GetHostAddressesAsync(hostOnly);
-            return addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork) ?? addresses.FirstOrDefault();
-        }
-        catch
-        {
-            return null;
-        }
-    }
+    // Address split + resolve moved to Core (PeerAddress) so the app and the service share one
+    // implementation — these thin wrappers keep the existing call sites readable.
+    private static Task<IPAddress?> ResolvePeerAddressAsync(string text) => PeerAddress.ResolveHostAsync(text);
 
-    /// <summary>
-    /// Parse "host:port" or just "host" / "ipv4:port" / IPv4. Returns (host, port?) where port
-    /// is null when the user didn't include one. IPv6 literals are not supported in the manual
-    /// peer field today; if/when they are, they'll need bracket syntax. Bare numeric strings are
-    /// treated as hosts (no port).
-    /// </summary>
-    internal static (string host, int? port) TrySplitHostPort(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return (text ?? string.Empty, null);
-        text = text.Trim();
-        var colon = text.LastIndexOf(':');
-        if (colon <= 0 || colon == text.Length - 1) return (text, null);
-        var maybeHost = text[..colon];
-        var maybePort = text[(colon + 1)..];
-        // If there's another colon earlier, it's likely an IPv6 literal — leave the whole thing
-        // as the host. (Manual peer entry doesn't formally support IPv6 today, but don't
-        // misinterpret one as host:port and resolve garbage.)
-        if (maybeHost.Contains(':')) return (text, null);
-        if (!int.TryParse(maybePort, out var port)) return (text, null);
-        if (port < 1 || port > 65535) return (text, null);
-        return (maybeHost, port);
-    }
+    internal static (string host, int? port) TrySplitHostPort(string text) => PeerAddress.Split(text);
 
     private PeerAnnouncement CreateManualPeer(string entry, IPAddress address)
     {
@@ -7623,27 +7586,9 @@ public sealed class MainForm : Form
         // no-ops when logFile.Enabled is false, so we don't need to wrap individual writes.
         if (!DiagnosticsGate.Enabled) return;
 
-        // Handle-TYPE breakdown — names which kind of handle is leaking (Event / Section / Key /
-        // Thread / …), the piece the plain handles= count can't give us. It walks the whole
-        // system handle table, so it's far heavier than the per-tick meter: run it about once a
-        // minute, only when logging is actually on (the diag gate can be open for auto-tune with
-        // logging off), and off the UI thread. logFile.Event is thread-safe. 2026-06-07.
-        handleProbeTickCount++;
-        if (handleProbeTickCount >= 60 && logFile.Enabled)
-        {
-            handleProbeTickCount = 0;
-            Task.Run(() =>
-            {
-                try
-                {
-                    // Always log — Summarize returns a "probe-error …" string on failure rather
-                    // than empty, so a blank build vs a silently-failing probe can never again be
-                    // confused (that cost us a run on 2026-06-07).
-                    logFile.Event($"handle-types: {HandleTypeProbe.Summarize()}");
-                }
-                catch { /* probe is best-effort — never let it disturb the tick */ }
-            });
-        }
+        // (The per-minute HandleTypeProbe walk that lived here — added 2026-06-07 to name the leaking
+        // handle type in the Realtek/WASAPI investigation — was retired in the 2026-07-19 legacy sweep
+        // with that investigation closed. Git history has it if a handle hunt ever needs it back.)
 
         // SNAP latency columns: in classic modes the legacy MaxLatencyMs / TargetLatencyMs
         // pair holds the only route's value (Mixed). In BothIndependent we map them to the
@@ -8676,16 +8621,8 @@ public sealed class MainForm : Form
     {
         if (currentProfilePassword != lastDerivedPassword)
         {
-            if (string.IsNullOrEmpty(currentProfilePassword))
-            {
-                currentAudioKey = null;
-                currentAudioFingerprint = null;
-            }
-            else
-            {
-                currentAudioKey = RemSoundCrypto.DeriveKey(currentProfilePassword);
-                currentAudioFingerprint = RemSoundCrypto.Fingerprint(currentProfilePassword);
-            }
+            // Key + fingerprint always together, through the one shared rule (same as the service).
+            (currentAudioKey, currentAudioFingerprint) = RemSoundCrypto.ForPlainPassword(currentProfilePassword);
             lastDerivedPassword = currentProfilePassword;
         }
         sender.AudioKey = currentAudioKey;
@@ -9521,12 +9458,10 @@ public sealed class MainForm : Form
     /// Standard returns the codec's natural frame; Tight halves it (Opus 960 → 480 → 240 → 120
     /// floored). Floor is 120 samples = 2.5 ms = standard libopus's RESTRICTED_LOWDELAY minimum.
     /// </summary>
-    // internal so the send-only service host reuses the exact same frame-size rule as the main app.
-    internal static int EffectiveOpusFrameSamples(AudioTransportCodec codec, int opusFrameSamples, SendRate rate)
-    {
-        if (codec != AudioTransportCodec.Opus) return opusFrameSamples;
-        return rate == SendRate.Tight ? Math.Max(120, opusFrameSamples / 2) : opusFrameSamples;
-    }
+    // The rule itself lives in Core (AudioTransportRules) — shared with the service, which must never
+    // depend on this Form. Thin wrapper kept for the existing call sites.
+    internal static int EffectiveOpusFrameSamples(AudioTransportCodec codec, int opusFrameSamples, SendRate rate) =>
+        AudioTransportRules.EffectiveOpusFrameSamples(codec, opusFrameSamples, rate);
 
     /// <summary>
     /// Short codec label for the per-peer line in the connectivity dialog. e.g. "PCM",

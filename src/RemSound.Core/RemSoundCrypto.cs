@@ -66,6 +66,14 @@ public static class RemSoundCrypto
     private static readonly byte[] ObfuscationKey =
         Encoding.UTF8.GetBytes("RemSound-profile-password-scramble-v1");
 
+    /// <summary>The one rule for turning a PLAIN password into the audio credentials: null/empty →
+    /// (null, null) → no audio flows (encryption is mandatory); otherwise the key AND the fingerprint,
+    /// always together — the peer verifies the fingerprint before accepting a stream, so a key without
+    /// its fingerprint gets the audio silently rejected at the far end (a divergence that already bit
+    /// the service once). The app and the service both derive through THIS.</summary>
+    public static (byte[]? Key, byte[]? Fingerprint) ForPlainPassword(string? plainPassword) =>
+        string.IsNullOrEmpty(plainPassword) ? (null, null) : (DeriveKey(plainPassword), Fingerprint(plainPassword));
+
     /// <summary>Derive the 256-bit AES key for a password. Cache the result; never call per packet.</summary>
     public static byte[] DeriveKey(string? password) =>
         Rfc2898DeriveBytes.Pbkdf2(

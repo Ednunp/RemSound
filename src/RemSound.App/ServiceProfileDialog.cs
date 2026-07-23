@@ -34,13 +34,12 @@ internal sealed class ServiceProfileDialog : Form
     // specific apps) only — capturing a mic from an unattended, logged-out box isn't a use case (Ed).
     private MnemonicLabel? sendModeLabel, outputsLabel, appsLabel;
 
-    // No "Audio profile" tab: the service always sends Opus at the live-jamming frame (2.5 ms), Small
-    // packets, and locked to the audio clock — the settings Ed found sound good. They're forced in
-    // SaveToProfile below and again at runtime in ServiceSendHost, so there's nothing to misconfigure
-    // (Ed, 2026-07-17: removed the tab; nobody should be touching these).
-    private const AudioTransportCodec ServiceCodec = AudioTransportCodec.Opus;
-    private const int ServiceOpusFrameSamples = 120;      // 2.5 ms at 48 kHz — live latency
-    private const SendRate ServiceSendRate = SendRate.Tight; // "Small" packets
+    // No "Audio profile" tab: the service always sends the fixed live-jamming transport (see
+    // ServiceAudioDefaults in Core — ONE set of numbers shared with ServiceSendHost, which re-forces
+    // them at runtime, so the saved profile and the running stream can never disagree).
+    private const AudioTransportCodec ServiceCodec = ServiceAudioDefaults.Codec;
+    private const int ServiceOpusFrameSamples = ServiceAudioDefaults.OpusFrameSamplesPerChannel;
+    private const SendRate ServiceSendRate = ServiceAudioDefaults.Rate;
 
     // --- Button row ---
     private readonly Button saveButton = new() { Text = "&Save and Close", AutoSize = true, DialogResult = DialogResult.OK };
