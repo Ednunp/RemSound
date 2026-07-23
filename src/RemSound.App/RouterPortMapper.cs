@@ -321,7 +321,7 @@ internal sealed class RouterPortMapper : IDisposable
         }
     }
 
-    private static bool IsCgnatAddress(IPAddress addr)
+    internal static bool IsCgnatAddress(IPAddress addr) // internal for the self-test (RFC 6598 range pinning)
     {
         if (addr.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) return false;
         var b = addr.GetAddressBytes();

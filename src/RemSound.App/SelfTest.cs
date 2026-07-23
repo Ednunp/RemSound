@@ -56,6 +56,11 @@ internal static class SelfTest
         RunStep(results, "Encryption round-trip", Encryption);
         RunStep(results, "Packet framing and rejection", PacketFraming);
         RunStep(results, "Server wire-format compatibility", ServerWireCompat);
+        RunStep(results, "Audio ring buffer integrity (wrap, drop-oldest, underrun fill)", RingBufferIntegrity);
+        RunStep(results, "24-bit PCM pack/unpack (sign, clamp, 1-LSB accuracy)", Pcm24RoundTrip);
+        RunStep(results, "Updater tag filtering (client vs server releases, version order)", UpdaterTagFiltering);
+        RunStep(results, "CGNAT range detection (RFC 6598)", CgnatDetection);
+        RunStep(results, "Network QoS attach (no throw on a bound socket)", NetworkPrioritySmoke);
         RunStep(results, "App settings save and reload", SettingsRoundTrip);
         RunStep(results, "Per-peer shaping DSP", PeerShapingDsp);
         RunStep(results, "Multi-output fan-out (both lanes)", FanOutToBothOutputs);
@@ -944,6 +949,149 @@ internal static class SelfTest
         Check(specs.Any(s => s.Kind == CaptureKind.Loopback && s.DeviceId == expected),
             "the follower must resolve to a loopback spec on the current Windows default output");
         return "follower flagged + sentinel shared with the app; service resolves it to the live default render endpoint";
+    }
+
+    /// <summary>The SPSC ring buffer is the heart of every audio path (capture mix + playout), and until
+    /// now nothing asserted its BYTES were right — only that packets flowed. Pins: wrap-around
+    /// correctness, overflow dropping the OLDEST bytes, trim/drop semantics, silence-fill on underrun,
+    /// and exact drop/underrun counters.</summary>
+    private static string? RingBufferIntegrity()
+    {
+        var ring = new AudioRingBuffer(100);
+        Check(ring.CapacityBytes == 128, $"capacity must round up to a power of two (got {ring.CapacityBytes})");
+
+        // Two passes: the second crosses the physical wrap point of the 128-byte ring.
+        var src = new byte[100];
+        for (var i = 0; i < src.Length; i++) src[i] = (byte)i;
+        var dst = new byte[100];
+        for (var pass = 0; pass < 2; pass++)
+        {
+            ring.Write(src);
+            Check(ring.BufferedBytes == 100, "buffered count must match what was written");
+            var got = ring.Read(dst);
+            Check(got == 100 && dst.AsSpan().SequenceEqual(src), $"pass {pass}: bytes must read back exact and in order across the wrap");
+        }
+        Check(ring.DropCount == 0 && ring.UnderrunCount == 0, "clean traffic must not count drops or underruns");
+
+        // Overflow drops the OLDEST: fill with A, push 64 B — read must be the surviving A then the B.
+        var a = new byte[128]; Array.Fill(a, (byte)'A');
+        var b = new byte[64]; Array.Fill(b, (byte)'B');
+        ring.Write(a);
+        ring.Write(b);
+        var full = new byte[128];
+        ring.Read(full);
+        Check(full.AsSpan(0, 64).IndexOfAnyExcept((byte)'A') < 0 && full.AsSpan(64).IndexOfAnyExcept((byte)'B') < 0,
+            "overflow must drop the oldest bytes and keep arrival order");
+        Check(ring.DropCount == 64, $"the 64 displaced bytes must count as drops (got {ring.DropCount})");
+
+        // Underrun: shortfall is silence-filled and counted once; return value is only the real bytes.
+        var few = new byte[10]; Array.Fill(few, (byte)7);
+        ring.Write(few);
+        var want20 = new byte[20]; Array.Fill(want20, (byte)0xEE);
+        var read = ring.Read(want20);
+        Check(read == 10, "the return value must be only the real bytes");
+        Check(want20.AsSpan(0, 10).IndexOfAnyExcept((byte)7) < 0 && want20.AsSpan(10).IndexOfAnyExcept((byte)0) < 0,
+            "the shortfall must be filled with silence (zeros)");
+        Check(ring.UnderrunCount == 1, $"the shortfall must count exactly one underrun (got {ring.UnderrunCount})");
+
+        // DropOldest (consumer side) and TrimFromProducer (producer side) both discard the OLDEST bytes.
+        ring.Write(src);
+        ring.DropOldest(5);
+        var after = new byte[95];
+        ring.Read(after);
+        Check(after[0] == 5 && after[94] == 99, "DropOldest must discard from the head (oldest)");
+        ring.Write(src);
+        var trimmed = ring.TrimFromProducer(30);
+        Check(trimmed == 70 && ring.BufferedBytes == 30, "TrimFromProducer must report and keep exact counts");
+        var last30 = new byte[30];
+        ring.Read(last30);
+        Check(last30[0] == 70 && last30[29] == 99, "the trim must keep the NEWEST bytes");
+
+        // A write bigger than the whole ring keeps only the newest capacity's worth (documented degrade).
+        var big = new byte[300];
+        for (var i = 0; i < big.Length; i++) big[i] = (byte)(i & 0xFF);
+        ring.Write(big);
+        Check(ring.BufferedBytes == 128, "an oversized write must degrade to the newest capacity's worth");
+        var tail128 = new byte[128];
+        ring.Read(tail128);
+        Check(tail128.AsSpan().SequenceEqual(big.AsSpan(300 - 128)), "the oversized write must keep the NEWEST bytes");
+        return "wrap-correct; overflow/trim drop oldest; underrun silence-fills; counters exact";
+    }
+
+    /// <summary>The 24-bit wire codec: a sign-extension bug here distorts every PCM stream while packets
+    /// still flow, so the flow tests can't see it. Pins ±1-LSB round-trip accuracy including negatives,
+    /// sign preservation, and clamping (never wrapping) of over-range samples.</summary>
+    private static string? Pcm24RoundTrip()
+    {
+        var lsb = 1f / 8388607f;
+        var src = new[] { -1f, -0.5f, -0.001f, -2 * lsb, 0f, 2 * lsb, 0.001f, 0.25f, 0.5f, 0.99999f, 1f };
+        var bytes = new byte[src.Length * 3];
+        PcmPack.FloatToInt24LE(src, bytes);
+        var back = new float[src.Length];
+        PcmPack.Int24LEToFloat(bytes, back);
+        for (var i = 0; i < src.Length; i++)
+        {
+            var err = Math.Abs(back[i] - src[i]);
+            Check(err <= 1.5f * lsb, $"sample {src[i]} must round-trip within ~1 LSB (error {err})");
+            Check(Math.Sign(back[i]) == Math.Sign(src[i]) || Math.Abs(src[i]) <= lsb,
+                $"the SIGN of {src[i]} must survive the pack/unpack");
+        }
+        var loud = new[] { 2f, -2f };
+        var loudBytes = new byte[6];
+        PcmPack.FloatToInt24LE(loud, loudBytes);
+        var loudBack = new float[2];
+        PcmPack.Int24LEToFloat(loudBytes, loudBack);
+        Check(Math.Abs(loudBack[0] - 1f) < 1e-6f && Math.Abs(loudBack[1] + 1f) < 1e-6f,
+            "over-range samples must CLAMP to ±1, never wrap");
+        return "±1-LSB accuracy incl. negatives; sign preserved; over-range clamps";
+    }
+
+    /// <summary>The updater lists ALL GitHub releases in a repo that also hosts the relay's server-v*
+    /// releases. Tag filtering and NUMERIC version ordering are what stop a wrong-version (or downgrade)
+    /// auto-update; neither had a test.</summary>
+    private static string? UpdaterTagFiltering()
+    {
+        Check(!RemSoundUpdater.IsClientReleaseTag("server-v2.4"), "relay tags must be rejected (same repo)");
+        Check(!RemSoundUpdater.IsClientReleaseTag(null) && !RemSoundUpdater.IsClientReleaseTag("")
+              && !RemSoundUpdater.IsClientReleaseTag("latest"), "junk tags must be rejected");
+        Check(RemSoundUpdater.IsClientReleaseTag("v1.6") && RemSoundUpdater.IsClientReleaseTag("5.4")
+              && RemSoundUpdater.IsClientReleaseTag("V5.10.2"), "client tags must be accepted");
+        Check(RemSoundUpdater.ParseTag("v5.10") > RemSoundUpdater.ParseTag("v5.9"),
+            "v5.10 must order ABOVE v5.9 (numeric, not string, comparison)");
+        Check(RemSoundUpdater.ParseTag("v5.4") == new Version(5, 4, 0), "two-part tags must fill the third part with 0");
+        Check(RemSoundUpdater.ParseTag("v5.4.1-beta+x") == new Version(5, 4, 1), "suffixes must not break parsing");
+        Check(RemSoundUpdater.ParseTag("server-v2.3") == new Version(0, 0, 3),
+            "a relay tag mis-parses as 0.0.3 — pinned as documentation of WHY IsClientReleaseTag must filter first");
+        return "server-v* rejected, client tags accepted, v5.10 > v5.9, suffixes tolerated";
+    }
+
+    /// <summary>The CGNAT check decides whether UPnP success is reported as 'mapped' or 'mapped but
+    /// unreachable from the internet'. Pins the RFC 6598 boundaries exactly.</summary>
+    private static string? CgnatDetection()
+    {
+        Check(RouterPortMapper.IsCgnatAddress(IPAddress.Parse("100.64.0.1")), "bottom of 100.64.0.0/10 must detect");
+        Check(RouterPortMapper.IsCgnatAddress(IPAddress.Parse("100.127.255.254")), "top of the range must detect");
+        Check(!RouterPortMapper.IsCgnatAddress(IPAddress.Parse("100.63.255.255")), "just below the range must not");
+        Check(!RouterPortMapper.IsCgnatAddress(IPAddress.Parse("100.128.0.1")), "just above the range must not");
+        Check(!RouterPortMapper.IsCgnatAddress(IPAddress.Parse("192.168.1.1")), "private LAN space must not");
+        Check(!RouterPortMapper.IsCgnatAddress(IPAddress.Parse("2001:db8::1")), "IPv6 is out of scope");
+        return "RFC 6598 boundaries exact; private/IPv6 excluded";
+    }
+
+    /// <summary>QoS attach runs on every sender start; it must never throw on a healthy bound socket —
+    /// whether prioritisation is actually granted varies by machine and either answer is fine.</summary>
+    private static string? NetworkPrioritySmoke()
+    {
+        using var s = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork,
+            System.Net.Sockets.SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp);
+        s.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        var np = new NetworkPriority();
+        try
+        {
+            var attached = np.TryAttach(s, _ => { });
+            return $"no throw; attach reported {attached} (either is acceptable — qWave availability varies)";
+        }
+        finally { (np as IDisposable)?.Dispose(); }
     }
 
     /// <summary>The no-UAC restart used after a service-profile save (TryRestartNoAdmin) must FAIL SAFE:
