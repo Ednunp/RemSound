@@ -2367,12 +2367,42 @@ public sealed class MainForm : Form
             logFile.Event($"service: profile saved (service logging {(dlg.ServiceLoggingEnabled ? "on" : "off")})");
             // Remove any stray copy the old design left in the user's profiles folder.
             try { profileStore?.Delete(ServiceControl.ServiceProfileTitle); } catch { /* best-effort */ }
-            if (ServiceControl.Query() == ServiceState.Running)
+            var restartNeeded = ServiceControl.Query() == ServiceState.Running;
+            if (restartNeeded)
             {
-                ServiceControl.RunElevated(ServiceControl.StopVerb);
-                ServiceControl.RunElevated(ServiceControl.StartVerb);
+                // Restart OFF the UI thread — the old inline RunElevated stop+start pair here blocked the
+                // window (and its audio) through two UAC prompts; same bug class as the install hang.
+                // No-UAC first: the installer granted this account start/stop rights, so a plain SCM
+                // restart normally needs no elevation at all. Elevated verbs are the fallback (service
+                // installed by a different account, grant missing). Only a FAILURE is reported back;
+                // success needs no second popup.
+                ServiceStore.AppendServiceEvent("restart requested (service profile changed)");
+                Task.Run(() =>
+                {
+                    var ok = ServiceControl.TryRestartNoAdmin();
+                    if (!ok)
+                    {
+                        ServiceControl.RunElevated(ServiceControl.StopVerb);
+                        ok = ServiceControl.RunElevated(ServiceControl.StartVerb) == 0;
+                    }
+                    ServiceStore.AppendServiceEvent(ok
+                        ? "restart finished (new service profile is live)"
+                        : "restart FAILED after profile change");
+                    if (ok || IsDisposed) return;
+                    try
+                    {
+                        BeginInvoke(new Action(() => MessageBox.Show(this,
+                            "The service profile was saved, but the running service could not be restarted to pick it up. Use the Service menu to stop and start it.",
+                            AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning)));
+                    }
+                    catch { /* window closing */ }
+                });
             }
-            MessageBox.Show(this, "Service profile saved.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this,
+                restartNeeded
+                    ? "Service profile saved. The running service is restarting to pick it up."
+                    : "Service profile saved.",
+                AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex)
         {

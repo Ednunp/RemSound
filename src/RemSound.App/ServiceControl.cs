@@ -251,6 +251,33 @@ public static class ServiceControl
         return rc;
     }
 
+    /// <summary>Restart the service WITHOUT elevation, using the start/stop rights the installer granted
+    /// the installing user (the SDDL ACE from <see cref="GrantUserStartStop"/>). Returns true when the
+    /// service ends up Running. No UAC prompt, no elevated helper — so it's safe to run from a background
+    /// thread after a profile save. Returns false (never throws) when the caller lacks rights, the service
+    /// isn't installed, or a state wait times out; callers fall back to the elevated verbs then.
+    /// <paramref name="serviceNameOverride"/> exists for the self-test (probe a non-existent name).</summary>
+    public static bool TryRestartNoAdmin(string? serviceNameOverride = null)
+    {
+        try
+        {
+            using var sc = new ServiceController(serviceNameOverride ?? ServiceName);
+            if (sc.Status is not (ServiceControllerStatus.Stopped or ServiceControllerStatus.StopPending))
+            {
+                sc.Stop();
+                sc.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(15));
+            }
+            else
+            {
+                sc.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(15));
+            }
+            sc.Start();
+            sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(15));
+            return true;
+        }
+        catch { return false; }
+    }
+
     /// <summary>Starts the service. Must be run elevated. Returns 0 on success.</summary>
     public static int DoStart()
     {

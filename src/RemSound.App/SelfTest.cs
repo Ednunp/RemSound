@@ -65,6 +65,7 @@ internal static class SelfTest
         RunStep(results, "Service app-yield token", ServiceInteractivePresence);
         RunStep(results, "Service sender parity (crypto + Opus frame)", ServiceSenderParity);
         RunStep(results, "Elevated helper: no pipe deadlock on flooded output", ServiceProcessCaptureNoDeadlock);
+        RunStep(results, "No-admin service restart fails safe (missing service)", ServiceRestartNoAdminFailsSafe);
         RunStep(results, "Default-output follower (service follows Windows default)", DefaultOutputFollower);
         RunStep(results, "Default follower exclusivity (locks out specific cards)", DefaultFollowerExclusivity);
         RunStep(results, "Service profile isolation (location + hidden from pickers)", ServiceProfileIsolation);
@@ -943,6 +944,20 @@ internal static class SelfTest
         Check(specs.Any(s => s.Kind == CaptureKind.Loopback && s.DeviceId == expected),
             "the follower must resolve to a loopback spec on the current Windows default output");
         return "follower flagged + sentinel shared with the app; service resolves it to the live default render endpoint";
+    }
+
+    /// <summary>The no-UAC restart used after a service-profile save (TryRestartNoAdmin) must FAIL SAFE:
+    /// against a service that doesn't exist it returns false, promptly, and never throws — that false is
+    /// what routes the caller onto the elevated fallback. (The success path needs the real installed
+    /// service + granted rights, so it's covered by hand-testing, not the gate.)</summary>
+    private static string? ServiceRestartNoAdminFailsSafe()
+    {
+        var sw = Stopwatch.StartNew();
+        var ok = ServiceControl.TryRestartNoAdmin("RemSoundSelfTestNoSuchService");
+        sw.Stop();
+        Check(!ok, "restarting a non-existent service must report false, not throw");
+        Check(sw.ElapsedMilliseconds < 5000, $"the failure must be prompt (took {sw.ElapsedMilliseconds} ms)");
+        return $"missing service → false in {sw.ElapsedMilliseconds} ms, no throw";
     }
 
     /// <summary>Reproduces the install-hang condition and proves it's fixed: a child that floods BOTH

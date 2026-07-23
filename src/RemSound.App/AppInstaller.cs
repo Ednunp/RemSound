@@ -186,7 +186,7 @@ internal static class AppInstaller
                 if (wantService == DialogResult.Yes)
                 {
                     log?.Invoke("install: user opted to install the service too");
-                    var rc = ServiceControl.RunElevated(ServiceControl.InstallVerb);
+                    var rc = RunElevatedResponsive(owner, ServiceControl.InstallVerb, "Installing the RemSound service...");
                     if (rc == 0)
                     {
                         // Offer to start it now — otherwise it only comes up at the next boot, so a
@@ -199,7 +199,7 @@ internal static class AppInstaller
                         if (startNow == DialogResult.Yes)
                         {
                             log?.Invoke("install: user opted to start the service now");
-                            var startRc = ServiceControl.RunElevated(ServiceControl.StartVerb);
+                            var startRc = RunElevatedResponsive(owner, ServiceControl.StartVerb, "Starting the RemSound service...");
                             MessageBox.Show(owner,
                                 startRc == 0
                                     ? "The RemSound service is running."
@@ -224,6 +224,45 @@ internal static class AppInstaller
         // starts the installed copy. Then we exit decisively.
         try { StartRelaunchAfterExit(installedExe, target); } catch { /* fall through — worst case the user starts it from the shortcut */ }
         Environment.Exit(0);
+    }
+
+    /// <summary>Run an elevated service verb while keeping the UI thread ALIVE. The install flow is
+    /// sequential (offer → install → offer start → start → relaunch), so a fire-and-forget task doesn't
+    /// fit — but blocking the UI thread in WaitForExit froze the window and any live audio (the same
+    /// hang class as the service install-freeze). This runs the elevated helper on a worker while a tiny
+    /// modal "working…" shell pumps messages: the app stays responsive, the user can't double-trigger
+    /// anything, NVDA announces what's happening, and the call still returns the exit code in-line.</summary>
+    private static int RunElevatedResponsive(IWin32Window owner, string verb, string statusText)
+    {
+        var rc = -1;
+        using var wait = new Form
+        {
+            Text = "RemSound",
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            MinimizeBox = false,
+            MaximizeBox = false,
+            ControlBox = false,
+            ShowInTaskbar = false,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Padding = new Padding(24),
+            AccessibleName = statusText,
+        };
+        wait.Controls.Add(new Label
+        {
+            Text = statusText + Environment.NewLine + "Windows may ask for administrator permission.",
+            AutoSize = true,
+            AccessibleName = statusText,
+        });
+        wait.Shown += (_, _) => Task.Run(() =>
+        {
+            try { rc = ServiceControl.RunElevated(verb); }
+            catch { rc = -1; }
+            try { wait.BeginInvoke(new Action(wait.Close)); } catch { /* already closed */ }
+        });
+        wait.ShowDialog(owner);
+        return rc;
     }
 
     // ---------------- uninstall ----------------
