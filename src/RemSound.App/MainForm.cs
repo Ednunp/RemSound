@@ -3475,9 +3475,11 @@ public sealed class MainForm : Form
             if (args.KeyCode == Keys.Delete)
             {
                 var prevIndex = rememberedPeersList.SelectedIndex;
+                var deletedLabel = (rememberedPeersList.SelectedItem as RememberedPeerItem)?.ToString();
                 RemoveSelectedRememberedPeer(rememberedPeersList);
                 SyncAllPeerLists();
-                FocusListItemAfterDelete(rememberedPeersList, prevIndex);
+                if (deletedLabel is not null) FocusAndAnnounceAfterDelete(rememberedPeersList, deletedLabel, prevIndex);
+                else FocusListItemAfterDelete(rememberedPeersList, prevIndex);
                 args.Handled = true;
                 args.SuppressKeyPress = true;
             }
@@ -3750,8 +3752,9 @@ public sealed class MainForm : Form
             args.SuppressKeyPress = true;
             if (rememberedAppsList.SelectedItem is not AudioAppChoice choice) return;
             var prevIndex = rememberedAppsList.SelectedIndex;
+            var deletedLabel = choice.ToString() ?? choice.ProcessName; // announce what the row read as
             RemoveRememberedApplication(choice.ProcessName);
-            FocusListItemAfterDelete(rememberedAppsList, prevIndex);
+            FocusAndAnnounceAfterDelete(rememberedAppsList, deletedLabel, prevIndex);
         };
 
         // Reconcile the app list on a slow timer so entries appear/disappear as apps open and close,
@@ -7502,6 +7505,20 @@ public sealed class MainForm : Form
         });
     }
 
+
+    /// <summary>After a Delete in a remembered list: focus the next item AND speak the outcome through
+    /// the screen reader. The speech is load-bearing, not decoration: the next item usually lands on the
+    /// SAME index the deleted one had, and the list already has focus — so no focus or selection event
+    /// fires and NVDA would otherwise say nothing at all (Ed, 2026-07-26: deleting foobar gave silence).
+    /// Speaks "«deleted» removed." plus the row now under focus, or that the list is empty.</summary>
+    private static void FocusAndAnnounceAfterDelete(CheckedListBox list, string deletedLabel, int prevIndex)
+    {
+        FocusListItemAfterDelete(list, prevIndex);
+        var now = list.SelectedItem?.ToString();
+        ScreenReader.Speak(string.IsNullOrWhiteSpace(now)
+            ? $"{deletedLabel} removed. The list is empty."
+            : $"{deletedLabel} removed. {now}.");
+    }
 
     /// <summary>
     /// After deleting an item from a CheckedListBox, focus the next sensible item so NVDA
