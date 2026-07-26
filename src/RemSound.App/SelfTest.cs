@@ -115,6 +115,7 @@ internal static class SelfTest
         RunStep(results, "Sealed remote control (auth + replay + skew) + nonce discipline", SealedRemoteControl);
         RunStep(results, "Service folder lockdown args (cross-user LPE hardening)", ServiceDirHardeningArgs);
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);
+        RunStep(results, "Service startup volume (boot-once decision + settings round-trip)", ServiceStartupVolume);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");
@@ -2372,6 +2373,46 @@ internal static class SelfTest
         Check(n2[4] == 1 && n1[4] == 0, "the counter half must advance arithmetically (uniqueness by construction)");
 
         return "sealed + replay/stale/wrong-key/plaintext all rejected; skew tolerated; nonces counter-based";
+    }
+
+    /// <summary>The service's startup-volume option (2026-07-26 feature): the boot-once decision
+    /// core (apply on the FIRST start after each boot, or every start), and the machine-wide
+    /// settings round-trip — including that saving the volume option never clobbers the logging
+    /// flag sharing its file (load-modify-save).</summary>
+    private static string? ServiceStartupVolume()
+    {
+        // Decision core. Boot instants within the tolerance are the SAME boot.
+        var boot = new DateTime(2026, 7, 26, 6, 0, 0, DateTimeKind.Utc);
+        Check(!StartupVolume.ShouldApply(false, true, null, boot), "disabled → never applies");
+        Check(StartupVolume.ShouldApply(true, true, null, boot), "boot-only with no marker yet → applies (first ever start)");
+        Check(!StartupVolume.ShouldApply(true, true, boot.AddSeconds(-30), boot), "boot-only, marker from THIS boot → skipped (a same-boot service restart must not re-blast the volume)");
+        Check(StartupVolume.ShouldApply(true, true, boot.AddHours(-9), boot), "boot-only, marker from a PREVIOUS boot → applies again");
+        Check(StartupVolume.ShouldApply(true, false, boot.AddSeconds(-30), boot), "every-start mode ignores the marker entirely");
+
+        // Settings round-trip in a throwaway store; the volume save must preserve the logging flag.
+        var savedOverride = ServiceStore.TestDirectoryOverride;
+        var tmp = Path.Combine(Path.GetTempPath(), "remsound-selftest-vol-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            ServiceStore.TestDirectoryOverride = tmp;
+            var defaults = ServiceStore.LoadStartupVolume();
+            Check(!defaults.Enabled && defaults.BootOnly, "defaults: off (house rule) and boot-only");
+            ServiceStore.SaveLoggingEnabled(true);
+            ServiceStore.SaveStartupVolume(enabled: true, percent: 140, bootOnly: false);
+            var v = ServiceStore.LoadStartupVolume();
+            Check(v.Enabled && v.Percent == 100 && !v.BootOnly, "volume settings round-trip, percent clamped to 100");
+            Check(ServiceStore.LoadLoggingEnabled(), "saving the volume option must NOT clobber the logging flag in the shared file");
+            ServiceStore.SaveLoggingEnabled(false);
+            Check(ServiceStore.LoadStartupVolume().Enabled, "saving the logging flag must NOT clobber the volume settings either");
+
+            // Boot marker round-trip.
+            Check(ServiceStore.LoadStartupVolumeBootMarker() is null, "no marker yet → null");
+            ServiceStore.SaveStartupVolumeBootMarker(boot);
+            Check(ServiceStore.LoadStartupVolumeBootMarker() == boot, "the boot marker must round-trip exactly");
+        }
+        finally { ServiceStore.TestDirectoryOverride = savedOverride; try { Directory.Delete(tmp, recursive: true); } catch { } }
+
+        return "boot-once semantics exact; settings + marker round-trip; shared file never clobbered";
     }
 
     /// <summary>2026-07-26 resource audit trio: (1) the diagnostic log rolls to a fresh file at its

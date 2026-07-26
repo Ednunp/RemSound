@@ -64,6 +64,16 @@ internal static class SystemVolumeHelper
         }
     }
 
+    /// <summary>Sets the default render device's master volume to <paramref name="percent"/> and
+    /// unmutes it, in one call. The service's startup-volume option uses this so a machine that
+    /// booted muted (or was left turned down) is audible again without anyone at the keyboard.
+    /// Master endpoint volume is device-global, so this works from session 0 too.</summary>
+    public static bool TrySetVolumeAndUnmute(int percent) => TryDo(v =>
+    {
+        v.MasterVolumeLevelScalar = Math.Clamp(percent, 0, 100) / 100f;
+        v.Mute = false;
+    });
+
     private static bool TryDo(Action<AudioEndpointVolume> action)
     {
         lock (cacheLock)

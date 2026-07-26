@@ -48,6 +48,10 @@ public sealed class RemSoundService : ServiceBase
         try { ServiceStore.SaveStatus(new ServiceStore.ServiceStatus { Version = versionText, StartedUtc = DateTime.UtcNow }); } catch { }
         // If this start is the completion of a self-update restart, close the loop in the update log.
         try { if (ServiceStore.ConsumeUpdatePending()) ServiceStore.AppendUpdateLog($"update complete: now running version {versionText}"); } catch { }
+        // Startup volume (Additional service options): unmute + set the default output's level,
+        // either on the first start after each boot or on every start. Before the host spins up so
+        // the machine is audible by the time audio flows.
+        StartupVolume.ApplyIfConfigured(msg => log?.Event(msg));
         host = ServiceSendHost.FromConfig(msg => log?.Event(msg));
         worker = new Thread(() =>
         {

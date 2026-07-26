@@ -334,12 +334,17 @@ internal sealed class ServiceProfileDialog : Form
 
     private void ShowAdditionalOptions()
     {
-        var (dlg, logging) = BuildAdditionalOptions(ServiceLoggingEnabled);
+        var saved = ServiceStore.LoadStartupVolume();
+        var (dlg, logging, volume) = BuildAdditionalOptions(ServiceLoggingEnabled, saved.Enabled, saved.Percent, saved.BootOnly);
         using (dlg)
         {
             if (ForegroundDialog.Show(owner => dlg.ShowDialog(owner)) == DialogResult.OK)
             {
                 ServiceLoggingEnabled = logging.Checked;
+                // Startup volume persists straight to the machine-wide store (like the logging flag
+                // it sits beside, it's service behaviour, not part of the audio profile). The
+                // service reads it fresh on every start, so it takes effect from the next start.
+                ServiceStore.SaveStartupVolume(volume.Enabled.Checked, (int)volume.Percent.Value, volume.When.SelectedIndex == 0);
             }
         }
     }
@@ -347,8 +352,12 @@ internal sealed class ServiceProfileDialog : Form
     /// <summary>Construction split from ShowDialog so the accessibility audit can inspect this inner
     /// dialog too. No connect/disconnect cue checkboxes here (removed 2026-07-19, review sweep): the
     /// headless service NEVER plays cues — nothing in the service host touches CuePlayer, and a
-    /// logged-out session couldn't render them anyway. The cue fields stay on Profile for the app.</summary>
-    internal static (Form Dialog, AccessibleCheckBox Logging) BuildAdditionalOptions(bool loggingEnabled)
+    /// logged-out session couldn't render them anyway. The cue fields stay on Profile for the app.
+    /// Startup volume (2026-07-26 feature): unmute + set the default output's level when the service
+    /// starts — the WHEN list picks "first start after each boot" (default) or "every start".</summary>
+    internal static (Form Dialog, AccessibleCheckBox Logging,
+        (AccessibleCheckBox Enabled, NumericUpDown Percent, ComboBox When) Volume)
+        BuildAdditionalOptions(bool loggingEnabled, bool volumeEnabled = false, int volumePercent = 50, bool volumeBootOnly = true)
     {
         var dlg = new Form
         {
@@ -358,17 +367,63 @@ internal sealed class ServiceProfileDialog : Form
             MaximizeBox = false,
             ShowInTaskbar = false,
             StartPosition = FormStartPosition.CenterParent,
-            ClientSize = new Size(460, 110),
+            ClientSize = new Size(560, 240),
             AccessibleName = "Additional service options",
         };
         var logging = new AccessibleCheckBox { Text = "Enable service &logging (Alt+L)", AccessibleName = "Enable service logging", AutoSize = true, Checked = loggingEnabled };
+
+        var volEnabled = new AccessibleCheckBox
+        {
+            Text = "Set the machine's &volume when the service starts",
+            AccessibleName = "Set the machine's volume when the service starts",
+            AutoSize = true,
+            Checked = volumeEnabled,
+        };
+        var volPercent = new NumericUpDown
+        {
+            Minimum = 0,
+            Maximum = 100,
+            Value = Math.Clamp(volumePercent, 0, 100),
+            Width = 70,
+            AccessibleName = "Volume percent",
+        };
+        var volPercentLabel = new MnemonicLabel { Text = "Volume &percent (also unmutes):", MnemonicTarget = volPercent, AutoSize = true };
+        var volWhen = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280, AccessibleName = "When to set the volume" };
+        volWhen.Items.Add("Only the first start after each boot");
+        volWhen.Items.Add("Every time the service starts");
+        volWhen.SelectedIndex = volumeBootOnly ? 0 : 1;
+        var volWhenLabel = new MnemonicLabel { Text = "&When:", MnemonicTarget = volWhen, AutoSize = true };
+        void SyncVolumeEnabled()
+        {
+            volPercent.Enabled = volEnabled.Checked;
+            volWhen.Enabled = volEnabled.Checked;
+        }
+        volEnabled.CheckedChanged += (_, _) => SyncVolumeEnabled();
+        SyncVolumeEnabled();
+
         var ok = new Button { Text = "&OK", AutoSize = true, DialogResult = DialogResult.OK };
 
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(12), AutoSize = true };
-        foreach (var c in new Control[] { logging, ok }) { var w = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill }; w.Controls.Add(c); layout.Controls.Add(w); }
+        foreach (var single in new Control[] { logging, volEnabled })
+        {
+            var w = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+            w.Controls.Add(single);
+            layout.Controls.Add(w);
+        }
+        var percentRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        percentRow.Controls.Add(volPercentLabel);
+        percentRow.Controls.Add(volPercent);
+        layout.Controls.Add(percentRow);
+        var whenRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        whenRow.Controls.Add(volWhenLabel);
+        whenRow.Controls.Add(volWhen);
+        layout.Controls.Add(whenRow);
+        var okRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        okRow.Controls.Add(ok);
+        layout.Controls.Add(okRow);
         dlg.Controls.Add(layout);
         dlg.AcceptButton = ok;
-        return (dlg, logging);
+        return (dlg, logging, (volEnabled, volPercent, volWhen));
     }
 
     private static Profile CloneProfile(Profile p) =>

@@ -57,20 +57,13 @@ public static class ServiceStore
 
     /// <summary>Whether the service writes its own log. Machine-wide (the service can't read the user's
     /// per-account setting). Off by default.</summary>
-    public static bool LoadLoggingEnabled()
-    {
-        try
-        {
-            if (!File.Exists(SettingsPath)) return false;
-            return (JsonSerializer.Deserialize<ServiceSettings>(File.ReadAllText(SettingsPath))?.LoggingEnabled) ?? false;
-        }
-        catch { return false; }
-    }
+    public static bool LoadLoggingEnabled() => LoadSettings().LoggingEnabled;
 
     public static void SaveLoggingEnabled(bool enabled)
     {
-        System.IO.Directory.CreateDirectory(Directory);
-        File.WriteAllText(SettingsPath, JsonSerializer.Serialize(new ServiceSettings { LoggingEnabled = enabled }));
+        var s = LoadSettings(); // load-modify-save: the file also carries the startup-volume option
+        s.LoggingEnabled = enabled;
+        SaveSettings(s);
     }
 
     /// <summary>True once a service profile has been configured.</summary>
@@ -218,5 +211,72 @@ public static class ServiceStore
         return false;
     }
 
-    private sealed class ServiceSettings { public bool LoggingEnabled { get; set; } }
+    private sealed class ServiceSettings
+    {
+        public bool LoggingEnabled { get; set; }
+        // Startup volume (Additional service options): unmute the machine and set the default
+        // output's volume when the service starts. Off by default (house rule: persistence
+        // defaults off); boot-only by default so a mid-day manual service restart doesn't blast
+        // the volume back up while someone's using the machine.
+        public bool StartupVolumeEnabled { get; set; }
+        public int StartupVolumePercent { get; set; } = 50;
+        public bool StartupVolumeBootOnly { get; set; } = true;
+    }
+
+    private static ServiceSettings LoadSettings()
+    {
+        try
+        {
+            return File.Exists(SettingsPath)
+                ? JsonSerializer.Deserialize<ServiceSettings>(File.ReadAllText(SettingsPath)) ?? new ServiceSettings()
+                : new ServiceSettings();
+        }
+        catch { return new ServiceSettings(); }
+    }
+
+    private static void SaveSettings(ServiceSettings s)
+    {
+        System.IO.Directory.CreateDirectory(Directory);
+        File.WriteAllText(SettingsPath, JsonSerializer.Serialize(s));
+    }
+
+    /// <summary>The startup-volume option: (enabled, percent 0-100, boot-only vs every start).</summary>
+    public static (bool Enabled, int Percent, bool BootOnly) LoadStartupVolume()
+    {
+        var s = LoadSettings();
+        return (s.StartupVolumeEnabled, Math.Clamp(s.StartupVolumePercent, 0, 100), s.StartupVolumeBootOnly);
+    }
+
+    public static void SaveStartupVolume(bool enabled, int percent, bool bootOnly)
+    {
+        var s = LoadSettings(); // load-modify-save: never clobber the other settings in the file
+        s.StartupVolumeEnabled = enabled;
+        s.StartupVolumePercent = Math.Clamp(percent, 0, 100);
+        s.StartupVolumeBootOnly = bootOnly;
+        SaveSettings(s);
+    }
+
+    // === Startup-volume boot marker ===
+    // Records WHICH boot the volume was last applied in, so "only the first start after boot"
+    // survives service restarts within the same boot (a plain "did I run already" flag would
+    // reset on every restart and a boot-time crash-restart would re-apply forever).
+    private static string StartupVolumeMarkerPath => Path.Combine(Directory, "startup-volume-boot.txt");
+
+    public static void SaveStartupVolumeBootMarker(DateTime bootUtc)
+    {
+        try { System.IO.Directory.CreateDirectory(Directory); File.WriteAllText(StartupVolumeMarkerPath, bootUtc.ToString("o")); }
+        catch { /* best-effort */ }
+    }
+
+    public static DateTime? LoadStartupVolumeBootMarker()
+    {
+        try
+        {
+            return File.Exists(StartupVolumeMarkerPath)
+                   && DateTime.TryParse(File.ReadAllText(StartupVolumeMarkerPath).Trim(), null,
+                       System.Globalization.DateTimeStyles.RoundtripKind, out var t)
+                ? t : null;
+        }
+        catch { return null; }
+    }
 }
