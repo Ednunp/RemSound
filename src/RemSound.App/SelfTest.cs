@@ -68,6 +68,7 @@ internal static class SelfTest
         RunStep(results, "Profile persistence tripwire (every field wired or declared)", ProfileDriftTripwire);
         RunStep(results, "Cue variant resolution (dedupe, order, chosen-default fallback)", CueVariantResolution);
         RunStep(results, "Updater swap + rollback (a failed update restores exactly)", UpdaterSwapRollback);
+        RunStep(results, "ASIO per-driver tick memory (snapshot/restore round-trip)", AsioTickMemory);
         RunStep(results, "App settings save and reload", SettingsRoundTrip);
         RunStep(results, "Per-peer shaping DSP", PeerShapingDsp);
         RunStep(results, "Multi-output fan-out (both lanes)", FanOutToBothOutputs);
@@ -961,6 +962,41 @@ internal static class SelfTest
         Check(specs.Any(s => s.Kind == CaptureKind.Loopback && s.DeviceId == expected),
             "the follower must resolve to a loopback spec on the current Windows default output");
         return "follower flagged + sentinel shared with the app; service resolves it to the live default render endpoint";
+    }
+
+    /// <summary>Per-driver ASIO tick memory (Ed's EVO→ReaRoute→EVO silence): switching drivers clears
+    /// the pair ticks by design (pair N is a different physical channel on a different card), and the
+    /// memory restores each driver's OWN ticks on return. Pins the snapshot/restore round-trip, that a
+    /// smaller driver silently skips pairs it doesn't have, and that unticked lists snapshot empty.</summary>
+    private static string? AsioTickMemory()
+    {
+        using var list = new CheckedListBox();
+        list.Items.Add(new AudioDeviceChoice("Pair 1", AsioDeviceId.Format(0), CaptureKind.Loopback));
+        list.Items.Add(new AudioDeviceChoice("Pair 2", AsioDeviceId.Format(1), CaptureKind.Loopback));
+        list.Items.Add(new AudioDeviceChoice("Pair 3", AsioDeviceId.Format(2), CaptureKind.Loopback));
+        list.SetItemChecked(2, true); // Ed's Loop-back pair
+
+        var snap = MainForm.SnapshotAsioTicks(list);
+        Check(snap.SequenceEqual(new[] { 2 }), $"the ticked pair index must snapshot exactly (got [{string.Join(",", snap)}])");
+
+        // Simulate the swap: rebuild for a 16-channel driver (more pairs), nothing ticked, then return.
+        list.Items.Clear();
+        for (var i = 0; i < 8; i++) list.Items.Add(new AudioDeviceChoice($"RR Pair {i + 1}", AsioDeviceId.Format(i), CaptureKind.Loopback));
+        Check(MainForm.SnapshotAsioTicks(list).Length == 0, "a freshly rebuilt, unticked list must snapshot empty");
+
+        // Return to the original driver: rebuild its 3 pairs and restore — Pair 3 must come back ticked.
+        list.Items.Clear();
+        for (var i = 0; i < 3; i++) list.Items.Add(new AudioDeviceChoice($"Pair {i + 1}", AsioDeviceId.Format(i), CaptureKind.Loopback));
+        MainForm.RestoreAsioTicks(list, snap);
+        Check(!list.GetItemChecked(0) && !list.GetItemChecked(1) && list.GetItemChecked(2),
+            "restore must re-tick exactly the remembered pair");
+
+        // A remembered pair beyond a smaller driver's range is skipped, never thrown on.
+        list.Items.Clear();
+        list.Items.Add(new AudioDeviceChoice("Only pair", AsioDeviceId.Format(0), CaptureKind.Loopback));
+        MainForm.RestoreAsioTicks(list, snap);
+        Check(!list.GetItemChecked(0), "a pair the smaller driver doesn't have must be silently skipped");
+        return "snapshot exact; restore re-ticks the remembered pair; out-of-range pairs skipped";
     }
 
     /// <summary>The updater's back-up-and-swap is the one piece of code that can BRICK an install: a bad

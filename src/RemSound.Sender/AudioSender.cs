@@ -367,8 +367,7 @@ public sealed class AudioSender : IDisposable
             // disposes this instance, so disposing it here can't pull the rug from a live engine.
             if (persistentAsio is not null)
             {
-                try { persistentAsio.Dispose(); }
-                catch (Exception ex) { diagnostic?.Invoke($"asio: release-on-idle dispose threw {ex.GetType().Name}: {ex.Message}"); }
+                ReleaseAsioBackendInBackground(persistentAsio, "release-on-deselect");
                 persistentAsio = null;
                 persistentAsioDriverName = null;
             }
@@ -381,7 +380,7 @@ public sealed class AudioSender : IDisposable
         {
             if (persistentAsio is not null)
             {
-                try { persistentAsio.Dispose(); } catch { /* ignore */ }
+                ReleaseAsioBackendInBackground(persistentAsio, "driver-switch");
             }
             persistentAsio = new AsioCaptureBackend(
                 currentAsioDriverName!,
@@ -399,6 +398,25 @@ public sealed class AudioSender : IDisposable
             currentAudioMode == AudioMode.BothIndependent
                 ? asioLane.OnMixedSamples
                 : defaultLane.OnMixedSamples);
+    }
+
+    /// <summary>Close an outgoing ASIO backend WITHOUT making the caller wait. The caller here is the
+    /// UI thread (driver switch / deselect), and a slow driver close — Ed's EVO once took 5+ seconds
+    /// inside its own Stop — froze the window for the duration even with the close on the apartment
+    /// thread, because the caller still blocked on it. Now: the callback is unhooked IMMEDIATELY (a
+    /// volatile write, no driver call — so the old driver stops feeding the lanes before the new one
+    /// starts), and the actual Stop/Dispose runs on a worker, where the apartment's 8 s bound still
+    /// backstops a wedged driver. Known edge, accepted: re-selecting the SAME driver within the close
+    /// window can find the card still held and fail to open — the capture-start failure is logged, and
+    /// picking the driver again once the close finishes recovers it.</summary>
+    private void ReleaseAsioBackendInBackground(AsioCaptureBackend backend, string why)
+    {
+        backend.SetCallback(_ => { });
+        Task.Run(() =>
+        {
+            try { backend.Dispose(); }
+            catch (Exception ex) { diagnostic?.Invoke($"asio: background {why} release threw {ex.GetType().Name}: {ex.Message}"); }
+        });
     }
 
     /// <summary>
@@ -566,13 +584,23 @@ public sealed class AudioSender : IDisposable
         StartEngineWithCurrentSources();
     }
 
+    // Transition-only guard for the no-sources line: the UI's periodic re-apply retries every second
+    // while nothing is ticked, and logging it every time buried the useful lines (Ed's 2026-07-26 log
+    // had 18 identical lines in a row). Log the first occurrence, then stay quiet until sources return.
+    private bool loggedNoSources;
+
     private void StartEngineWithCurrentSources()
     {
         if (pendingSources.Count == 0)
         {
-            diagnostic?.Invoke("sender: start requested but no sources configured");
+            if (!loggedNoSources)
+            {
+                loggedNoSources = true;
+                diagnostic?.Invoke("sender: start requested but no sources configured (repeats suppressed until sources appear)");
+            }
             return;
         }
+        loggedNoSources = false;
 
         defaultLane.ResetForStart();
         asioLane.ResetForStart();

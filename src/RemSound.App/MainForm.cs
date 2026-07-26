@@ -545,6 +545,14 @@ public sealed class MainForm : Form
     // (NVDA users typically press a few keys in quick succession to scan through items),
     // short enough that a deliberate selection feels responsive. Auto-stop on Tick.
     private readonly System.Windows.Forms.Timer asioDriverChangeDebounce = new() { Interval = 300 };
+
+    // Session memory of which ASIO channel pairs were ticked, PER DRIVER NAME (send + receive).
+    // Ticks are deliberately cleared on a driver swap — pair N is a different physical channel on a
+    // different card, so raw ticks must never survive the swap (see the clear in the debounce handler).
+    // But clearing alone meant switching AWAY and BACK left you silent until you re-ticked by hand
+    // (Ed, 2026-07-26: EVO → ReaRoute → EVO = no audio). This map restores each driver's OWN ticks
+    // when you return to it, so audio resumes by itself — safety and convenience both.
+    private readonly Dictionary<string, (int[] Send, int[] Recv)> asioTicksByDriver = new(StringComparer.OrdinalIgnoreCase);
     private string sendOutputDevicesSignature = string.Empty;
     private string sendInputDevicesSignature = string.Empty;
     private string receiveOutputDevicesSignature = string.Empty;
@@ -1045,8 +1053,17 @@ public sealed class MainForm : Form
             // driver is loaded; pair 2 of the Audient is a different physical channel from
             // pair 2 of the Komplete. If we let the old ticks survive a driver swap, the
             // wrong channels would be captured/rendered until the user noticed and re-ticked.
+            // Before clearing, remember the OUTGOING driver's ticks so returning to it can
+            // restore them (see asioTicksByDriver) — per-driver memory keeps the safety
+            // property while making "switch away and back" resume audio on its own.
             if (driverActuallyChanged)
             {
+                if (!string.IsNullOrWhiteSpace(previousDriver))
+                {
+                    asioTicksByDriver[previousDriver!] = (
+                        SnapshotAsioTicks(asioSendDevicesList),
+                        SnapshotAsioTicks(asioReceiveOutputDevicesList));
+                }
                 try
                 {
                     suppressDeviceCheckChange = true;
@@ -1063,6 +1080,25 @@ public sealed class MainForm : Form
             UpdateBothIndependentVisibility();
             ApplyContinuousTuneTimer();
             ApplyAsioMode();
+
+            // Returning to a driver we remember: re-tick ITS pairs (the lists were just rebuilt for it)
+            // and re-apply, so audio resumes without the user re-ticking by hand. A driver we've not
+            // seen this session restores nothing — same as before.
+            if (driverActuallyChanged && !string.IsNullOrWhiteSpace(newDriver)
+                && asioTicksByDriver.TryGetValue(newDriver!, out var remembered)
+                && (remembered.Send.Length > 0 || remembered.Recv.Length > 0))
+            {
+                try
+                {
+                    suppressDeviceCheckChange = true;
+                    RestoreAsioTicks(asioSendDevicesList, remembered.Send);
+                    RestoreAsioTicks(asioReceiveOutputDevicesList, remembered.Recv);
+                }
+                finally { suppressDeviceCheckChange = false; }
+                logFile.Event($"asio ticks restored for \"{newDriver}\": send pairs=[{string.Join(",", remembered.Send)}], receive pairs=[{string.Join(",", remembered.Recv)}]");
+                ApplyAudioRuntime();
+                ApplyReceiveDevices();
+            }
         };
         healthLabel.AccessibleName = "Connection health";
         statusLabel.AccessibleName = "Status";
@@ -7290,6 +7326,38 @@ public sealed class MainForm : Form
             .GroupBy(ep => $"{ep.Address}:{ep.Port}")
             .Select(g => g.First())
             .ToArray();
+    }
+
+    /// <summary>The ticked ASIO channel-pair indices in a list (parsed from the synthetic "asio:N"
+    /// ids). Internal + static so the self-test can pin the per-driver tick memory round-trip.</summary>
+    internal static int[] SnapshotAsioTicks(CheckedListBox list)
+    {
+        var pairs = new List<int>();
+        for (var i = 0; i < list.Items.Count; i++)
+        {
+            if (list.GetItemChecked(i) && list.Items[i] is AudioDeviceChoice { DeviceId: { } id }
+                && AsioDeviceId.TryParse(id, out var pair))
+            {
+                pairs.Add(pair);
+            }
+        }
+        return pairs.ToArray();
+    }
+
+    /// <summary>Re-tick the given pair indices in a freshly rebuilt ASIO list. Pairs the new driver
+    /// doesn't have (fewer channels) are silently skipped. Caller must hold suppressDeviceCheckChange.</summary>
+    internal static void RestoreAsioTicks(CheckedListBox list, int[] pairs)
+    {
+        if (pairs.Length == 0) return;
+        var wanted = new HashSet<int>(pairs);
+        for (var i = 0; i < list.Items.Count; i++)
+        {
+            if (list.Items[i] is AudioDeviceChoice { DeviceId: { } id }
+                && AsioDeviceId.TryParse(id, out var pair) && wanted.Contains(pair))
+            {
+                list.SetItemChecked(i, true);
+            }
+        }
     }
 
     // Address split + resolve moved to Core (PeerAddress) so the app and the service share one
