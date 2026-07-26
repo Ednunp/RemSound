@@ -23,7 +23,38 @@ internal static class ProfileSaveAsPrompt
         string dialogTitle = "Save profile as",
         string promptLabel = "Profile name:")
     {
-        using var dialog = new Form
+        var (dialog, textBox) = Build(defaultName, dialogTitle, promptLabel);
+        using (dialog)
+        {
+            while (true)
+            {
+                if (dialog.ShowDialog(owner) != DialogResult.OK) return null;
+                var name = textBox.Text.Trim();
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    MessageBox.Show(owner, "Please enter a profile name.", "RemSound", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    continue;
+                }
+                if (store is not null && store.Exists(name))
+                {
+                    var overwrite = MessageBox.Show(owner,
+                        $"A profile named \"{name}\" already exists. Overwrite?",
+                        "Confirm overwrite", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+                    if (overwrite != DialogResult.Yes) continue;
+                }
+                return name;
+            }
+        }
+    }
+
+    /// <summary>Construction split from ShowDialog so the accessibility audit can inspect the real
+    /// dialog (inline-built dialogs used to be invisible to the audit).</summary>
+    internal static (Form Dialog, TextBox Input) Build(
+        string? defaultName = null,
+        string dialogTitle = "Save profile as",
+        string promptLabel = "Profile name:")
+    {
+        var dialog = new Form
         {
             Text = dialogTitle,
             StartPosition = FormStartPosition.CenterParent,
@@ -40,7 +71,7 @@ internal static class ProfileSaveAsPrompt
             AccessibleName = promptLabel.TrimEnd(':', ' '),
         };
         var okButton = new Button { Text = "&OK", AutoSize = true, DialogResult = DialogResult.OK };
-        var cancelButton = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
+        var cancelButton = new Button { Text = "&Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
         textBox.KeyDown += (_, args) =>
         {
             if (args.KeyCode == Keys.Enter)
@@ -72,24 +103,6 @@ internal static class ProfileSaveAsPrompt
         dialog.Controls.Add(panel);
         dialog.AcceptButton = okButton;
         dialog.CancelButton = cancelButton;
-
-        while (true)
-        {
-            if (dialog.ShowDialog(owner) != DialogResult.OK) return null;
-            var name = textBox.Text.Trim();
-            if (string.IsNullOrWhiteSpace(name))
-            {
-                MessageBox.Show(owner, "Please enter a profile name.", "RemSound", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                continue;
-            }
-            if (store is not null && store.Exists(name))
-            {
-                var overwrite = MessageBox.Show(owner,
-                    $"A profile named \"{name}\" already exists. Overwrite?",
-                    "Confirm overwrite", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
-                if (overwrite != DialogResult.Yes) continue;
-            }
-            return name;
-        }
+        return (dialog, textBox);
     }
 }

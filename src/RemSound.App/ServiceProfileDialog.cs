@@ -334,7 +334,23 @@ internal sealed class ServiceProfileDialog : Form
 
     private void ShowAdditionalOptions()
     {
-        using var dlg = new Form
+        var (dlg, logging) = BuildAdditionalOptions(ServiceLoggingEnabled);
+        using (dlg)
+        {
+            if (ForegroundDialog.Show(owner => dlg.ShowDialog(owner)) == DialogResult.OK)
+            {
+                ServiceLoggingEnabled = logging.Checked;
+            }
+        }
+    }
+
+    /// <summary>Construction split from ShowDialog so the accessibility audit can inspect this inner
+    /// dialog too. No connect/disconnect cue checkboxes here (removed 2026-07-19, review sweep): the
+    /// headless service NEVER plays cues — nothing in the service host touches CuePlayer, and a
+    /// logged-out session couldn't render them anyway. The cue fields stay on Profile for the app.</summary>
+    internal static (Form Dialog, AccessibleCheckBox Logging) BuildAdditionalOptions(bool loggingEnabled)
+    {
+        var dlg = new Form
         {
             Text = "Additional service options",
             FormBorderStyle = FormBorderStyle.FixedDialog,
@@ -345,22 +361,14 @@ internal sealed class ServiceProfileDialog : Form
             ClientSize = new Size(460, 110),
             AccessibleName = "Additional service options",
         };
-        // No connect/disconnect cue checkboxes here (removed 2026-07-19, review sweep): the dialog used
-        // to offer them, but the headless service NEVER plays cues — nothing in the service host touches
-        // CuePlayer, and a logged-out session couldn't render them anyway. Offering a switch that does
-        // nothing is worse than not offering it. The cue fields stay on Profile for the app's own use.
-        var logging = new AccessibleCheckBox { Text = "Enable service &logging (Alt+L)", AccessibleName = "Enable service logging", AutoSize = true, Checked = ServiceLoggingEnabled };
+        var logging = new AccessibleCheckBox { Text = "Enable service &logging (Alt+L)", AccessibleName = "Enable service logging", AutoSize = true, Checked = loggingEnabled };
         var ok = new Button { Text = "&OK", AutoSize = true, DialogResult = DialogResult.OK };
 
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(12), AutoSize = true };
         foreach (var c in new Control[] { logging, ok }) { var w = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill }; w.Controls.Add(c); layout.Controls.Add(w); }
         dlg.Controls.Add(layout);
         dlg.AcceptButton = ok;
-
-        if (ForegroundDialog.Show(owner => dlg.ShowDialog(owner)) == DialogResult.OK)
-        {
-            ServiceLoggingEnabled = logging.Checked;
-        }
+        return (dlg, logging);
     }
 
     private static Profile CloneProfile(Profile p) =>

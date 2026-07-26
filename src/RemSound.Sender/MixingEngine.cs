@@ -382,14 +382,8 @@ internal sealed class MixingEngine : ICaptureBackend
                 }
 
                 // Hard-clamp mixed sum to [-1, 1] to prevent encoder clipping when multiple loud
-                // sources sum past unity. Counts clipped samples for diagnostics.
-                long clipped = 0;
-                for (var i = 0; i < read; i++)
-                {
-                    var v = mixScratch[i];
-                    if (v > 1f) { mixScratch[i] = 1f; clipped++; }
-                    else if (v < -1f) { mixScratch[i] = -1f; clipped++; }
-                }
+                // sources sum past unity. Shared rule (SampleClamp); one batched counter add.
+                var clipped = SampleClamp.ClampBuffer(mixScratch.AsSpan(0, read));
                 if (clipped > 0) Interlocked.Add(ref clippedSampleCount, clipped);
                 Interlocked.Increment(ref mixTickCount);
 

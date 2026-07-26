@@ -19,8 +19,25 @@ internal sealed class QuickProfileSwitchDialog
     public static string? Show(IReadOnlyList<ProfileEntry> profiles)
     {
         if (profiles.Count == 0) return null;
+        var (dialog, list, chosenPath) = Build(profiles);
+        using (dialog)
+        {
+            dialog.Shown += (_, _) =>
+            {
+                BringToForeground(dialog);
+                list.Focus();
+            };
+            return dialog.ShowDialog() == DialogResult.OK ? chosenPath() : null;
+        }
+    }
 
-        using var dialog = new Form
+    /// <summary>Audit seam: the real dialog, built with a placeholder profile, never shown. Inline-built
+    /// dialogs used to be invisible to the accessibility audit — how missing mnemonics slipped through.</summary>
+    internal static Form BuildForAudit() => Build(new[] { new ProfileEntry("Audit profile", "audit", true) }).Dialog;
+
+    private static (Form Dialog, ListBox List, Func<string?> ChosenPath) Build(IReadOnlyList<ProfileEntry> profiles)
+    {
+        var dialog = new Form
         {
             Text = "Quick profile switch",
             AccessibleName = "Quick profile switch",
@@ -123,14 +140,7 @@ internal sealed class QuickProfileSwitchDialog
             }
         };
 
-        dialog.Shown += (_, _) =>
-        {
-            BringToForeground(dialog);
-            list.Focus();
-        };
-
-        var result = dialog.ShowDialog();
-        return result == DialogResult.OK ? chosenPath : null;
+        return (dialog, list, () => chosenPath);
     }
 
     private static void BringToForeground(Form form)

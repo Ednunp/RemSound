@@ -15,7 +15,24 @@ internal static class ProfilePasswordDialog
 {
     public static string? Show(string profileTitle, string currentPassword, bool requireNonEmpty = false)
     {
-        using var dialog = new Form
+        var (dialog, textBox) = Build(profileTitle, currentPassword, requireNonEmpty);
+        using (dialog)
+        {
+            // Run with a foreground 1×1 owner so the prompt jumps to the front even when RemSound is
+            // sitting minimised in the tray — e.g. a quick profile switch to a passwordless-but-
+            // streaming profile trips the password gate mid-switch, and the user must be able to read
+            // and answer it there and then. Centres on screen, forces focus, then closes.
+            return ForegroundDialog.Show(owner => dialog.ShowDialog(owner)) == DialogResult.OK
+                ? textBox.Text.Trim()
+                : null;
+        }
+    }
+
+    /// <summary>Construction split from ShowDialog so the accessibility audit can inspect the real
+    /// dialog (inline-built dialogs used to be invisible to the audit).</summary>
+    internal static (Form Dialog, TextBox Input) Build(string profileTitle, string currentPassword, bool requireNonEmpty = false)
+    {
+        var dialog = new Form
         {
             Text = "Change profile password",
             StartPosition = FormStartPosition.CenterParent,
@@ -100,13 +117,6 @@ internal static class ProfilePasswordDialog
         dialog.Controls.Add(panel);
         dialog.AcceptButton = okButton;
         dialog.CancelButton = cancelButton;
-
-        // Run with a foreground 1×1 owner so the prompt jumps to the front even when RemSound is
-        // sitting minimised in the tray — e.g. a quick profile switch to a passwordless-but-
-        // streaming profile trips the password gate mid-switch, and the user must be able to read
-        // and answer it there and then. Centres on screen, forces focus, then closes.
-        return ForegroundDialog.Show(owner => dialog.ShowDialog(owner)) == DialogResult.OK
-            ? textBox.Text.Trim()
-            : null;
+        return (dialog, textBox);
     }
 }

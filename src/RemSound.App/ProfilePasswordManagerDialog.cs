@@ -15,9 +15,21 @@ internal static class ProfilePasswordManagerDialog
 {
     public static bool Show(IWin32Window owner, ProfileStore store)
     {
+        var (dialog, rows) = Build(store);
+        using (dialog)
+        {
+            if (dialog.ShowDialog(owner) != DialogResult.OK) return false;
+            return SaveChanges(store, rows);
+        }
+    }
+
+    /// <summary>Construction split from ShowDialog so the accessibility audit can inspect the real
+    /// dialog (inline-built dialogs used to be invisible to the audit).</summary>
+    internal static (Form Dialog, List<(string Title, string Original, TextBox Box)> Rows) Build(ProfileStore store)
+    {
         var titles = store.ListProfileTitles();
 
-        using var dialog = new Form
+        var dialog = new Form
         {
             Text = "Profile passwords",
             StartPosition = FormStartPosition.CenterParent,
@@ -77,9 +89,11 @@ internal static class ProfilePasswordManagerDialog
         dialog.Controls.Add(intro);
         dialog.AcceptButton = okButton;
         dialog.CancelButton = cancelButton;
+        return (dialog, rows);
+    }
 
-        if (dialog.ShowDialog(owner) != DialogResult.OK) return false;
-
+    private static bool SaveChanges(ProfileStore store, List<(string Title, string Original, TextBox Box)> rows)
+    {
         var changedAny = false;
         foreach (var (title, original, box) in rows)
         {

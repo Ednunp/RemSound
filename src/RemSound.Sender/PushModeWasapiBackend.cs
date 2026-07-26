@@ -369,14 +369,10 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
                 stereo = stereoScratch;
             }
 
-            // 4. Soft clamp at the encoder boundary (matches MixingEngine / AsioCaptureBackend).
+            // 4. Encoder-boundary clamp — the shared rule (SampleClamp), one batched counter add.
             var stereoFloatCount = workingFrames * MixChannels;
-            for (var i = 0; i < stereoFloatCount; i++)
-            {
-                var v = stereo[i];
-                if (v > 1f) { stereo[i] = 1f; Interlocked.Increment(ref clippedSampleCount); }
-                else if (v < -1f) { stereo[i] = -1f; Interlocked.Increment(ref clippedSampleCount); }
-            }
+            var clipped = SampleClamp.ClampBuffer(stereo.AsSpan(0, stereoFloatCount));
+            if (clipped > 0) Interlocked.Add(ref clippedSampleCount, clipped);
 
             // 5. Hand off to the encoder/UDP-send pipeline. Synchronous on the capture thread.
             onMixedSamples(new ReadOnlyMemory<float>(stereo, 0, stereoFloatCount));

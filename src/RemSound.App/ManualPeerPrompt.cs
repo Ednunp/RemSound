@@ -4,7 +4,19 @@ internal static class ManualPeerPrompt
 {
     public static string? Show(IWin32Window owner)
     {
-        using var dialog = new Form
+        var (dialog, textBox) = Build();
+        using (dialog)
+        {
+            return dialog.ShowDialog(owner) == DialogResult.OK ? textBox.Text.Trim() : null;
+        }
+    }
+
+    /// <summary>Construction split from ShowDialog so the accessibility audit can inspect the real
+    /// dialog (inline-built dialogs used to be invisible to the audit — which is exactly how missing
+    /// mnemonics slipped through).</summary>
+    internal static (Form Dialog, TextBox Input) Build()
+    {
+        var dialog = new Form
         {
             Text = "Add manual peer",
             StartPosition = FormStartPosition.CenterParent,
@@ -24,8 +36,8 @@ internal static class ManualPeerPrompt
             Width = 380,
             AccessibleName = "Peer IP address or hostname",
         };
-        var okButton = new Button { Text = "OK", AutoSize = true, DialogResult = DialogResult.OK };
-        var cancelButton = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
+        var okButton = new Button { Text = "&OK", AutoSize = true, DialogResult = DialogResult.OK };
+        var cancelButton = new Button { Text = "&Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
         textBox.KeyDown += (_, args) =>
         {
             if (args.KeyCode == Keys.Enter)
@@ -46,6 +58,6 @@ internal static class ManualPeerPrompt
         dialog.Controls.Add(panel);
         dialog.AcceptButton = okButton;
         dialog.CancelButton = cancelButton;
-        return dialog.ShowDialog(owner) == DialogResult.OK ? textBox.Text.Trim() : null;
+        return (dialog, textBox);
     }
 }

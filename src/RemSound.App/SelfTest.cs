@@ -69,6 +69,7 @@ internal static class SelfTest
         RunStep(results, "Cue variant resolution (dedupe, order, chosen-default fallback)", CueVariantResolution);
         RunStep(results, "Updater swap + rollback (a failed update restores exactly)", UpdaterSwapRollback);
         RunStep(results, "ASIO per-driver tick memory (snapshot/restore round-trip)", AsioTickMemory);
+        RunStep(results, "Encoder-boundary sample clamp (shared rule, exact count)", SampleClampRule);
         RunStep(results, "App settings save and reload", SettingsRoundTrip);
         RunStep(results, "Per-peer shaping DSP", PeerShapingDsp);
         RunStep(results, "Multi-output fan-out (both lanes)", FanOutToBothOutputs);
@@ -962,6 +963,22 @@ internal static class SelfTest
         Check(specs.Any(s => s.Kind == CaptureKind.Loopback && s.DeviceId == expected),
             "the follower must resolve to a loopback spec on the current Windows default output");
         return "follower flagged + sentinel shared with the app; service resolves it to the live default render endpoint";
+    }
+
+    /// <summary>The encoder-boundary clamp is now ONE shared rule (SampleClamp) used by all three
+    /// capture paths — mix engine, ASIO backend, push-mode backend. A clamp bug here means encoder
+    /// overflow when loud sources sum past unity, while packets still flow. Pins: over-range clamps to
+    /// exactly ±1, in-range (including exactly ±1) is untouched and uncounted, count is exact.</summary>
+    private static string? SampleClampRule()
+    {
+        var buf = new[] { 0.5f, 1f, 1.5f, -1f, -2.5f, 0f, -0.999f };
+        var clipped = SampleClamp.ClampBuffer(buf);
+        Check(clipped == 2, $"exactly the two over-range samples must count as clipped (got {clipped})");
+        Check(buf[2] == 1f && buf[4] == -1f, "over-range samples must clamp to exactly ±1");
+        Check(buf[0] == 0.5f && buf[1] == 1f && buf[3] == -1f && buf[5] == 0f && buf[6] == -0.999f,
+            "in-range samples — including exactly ±1 — must pass through untouched");
+        Check(SampleClamp.ClampBuffer(buf) == 0, "a clean buffer must count zero");
+        return "over-range → ±1 and counted; ±1 exactly and below untouched; count exact";
     }
 
     /// <summary>Per-driver ASIO tick memory (Ed's EVO→ReaRoute→EVO silence): switching drivers clears
@@ -1866,6 +1883,15 @@ internal static class SelfTest
             ("Keyboard shortcut import", () => new KeyboardShortcutImportDialog(Array.Empty<string>())),
             ("Update install notice", () => new UpdateInstallNoticeDialog(
                 new UpdateInfo("v9.9", new Version(9, 9, 0), "https://example.invalid/x.zip", "notes", "https://example.invalid/rel"))),
+            // The inline-built dialogs, via their Build seams — previously invisible to this audit,
+            // which is exactly how mnemonic-less buttons slipped through (single-instance, manual peer).
+            ("Manual peer prompt", () => ManualPeerPrompt.Build().Dialog),
+            ("Quick profile switch", QuickProfileSwitchDialog.BuildForAudit),
+            ("Change profile password", () => ProfilePasswordDialog.Build("Audit", "pw").Dialog),
+            ("Profile passwords manager", () => ProfilePasswordManagerDialog.Build(new ProfileStore(
+                Path.Combine(Path.GetTempPath(), "remsound-selftest-pwmgr-" + Guid.NewGuid().ToString("N")))).Dialog),
+            ("Profile name prompt", () => ProfileSaveAsPrompt.Build("Audit").Dialog),
+            ("Service additional options", () => ServiceProfileDialog.BuildAdditionalOptions(false).Dialog),
             ("Profile selection", () => new ProfileSelectionDialog(new ProfileStore(
                 Path.Combine(Path.GetTempPath(), "remsound-selftest-picker-" + Guid.NewGuid().ToString("N"))))),
         };

@@ -350,14 +350,14 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
                 if (lCh < recordChannelCount) l += interleaved[srcBase + lCh];
                 if (rCh < recordChannelCount) r += interleaved[srcBase + rCh];
             }
-            // Soft-limit-ish clamp at the encoder boundary; matches MixingEngine.
-            if (l > 1f) { l = 1f; Interlocked.Increment(ref clippedSampleCount); }
-            else if (l < -1f) { l = -1f; Interlocked.Increment(ref clippedSampleCount); }
-            if (r > 1f) { r = 1f; Interlocked.Increment(ref clippedSampleCount); }
-            else if (r < -1f) { r = -1f; Interlocked.Increment(ref clippedSampleCount); }
             mixScratch[dstBase] = l;
             mixScratch[dstBase + 1] = r;
         }
+
+        // Encoder-boundary clamp — the shared rule (SampleClamp), with ONE batched counter add per
+        // buffer instead of the old up-to-four interlocked increments per frame on this RT thread.
+        var clipped = SampleClamp.ClampBuffer(mixScratch.AsSpan(0, stereoFloats));
+        if (clipped > 0) Interlocked.Add(ref clippedSampleCount, clipped);
 
         onMixedSamples(new ReadOnlyMemory<float>(mixScratch, 0, stereoFloats));
         // Capture-thread CPU instrumentation (item 2 of RemSoundefficiency.md). Records
