@@ -8881,16 +8881,24 @@ public sealed partial class MainForm : Form
     private void SendRemoteControl(RemoteControlKind kind, sbyte delta)
     {
         if (!connected) return;
+        // No password → no key → no remote control, same mandatory-encryption rule as audio. The
+        // command is SEALED with the audio key (2026-07-26 security audit): only a password-holder
+        // can drive a peer's volume — a forged source IP is no longer enough.
+        if (currentAudioKey is not { } key)
+        {
+            logFile.Event($"remote-control NOT sent (no profile password set) kind={kind}");
+            return;
+        }
         var endpoints = SelectedSendEndpoints();
         if (endpoints.Length == 0) return;
 
-        Span<byte> packet = stackalloc byte[RemPacket.HeaderSize + RemPacket.ControlPayloadSize];
+        var sealedPayload = ControlSealing.Seal(key, kind, delta, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        var bytes = new byte[RemPacket.HeaderSize + sealedPayload.Length];
         // streamId 0xFFFE for control packets (heartbeat already uses 0xFFFF). Distinct value
         // makes diag logs easier to read; the receiver doesn't actually filter on it.
         var seq = unchecked((uint)Interlocked.Increment(ref remoteControlSequence));
-        RemPacket.WriteHeader(packet, RemPacketType.Control, 0xFFFE, seq);
-        RemPacket.WriteControlPayload(packet[RemPacket.HeaderSize..], kind, delta);
-        var bytes = packet.ToArray();
+        RemPacket.WriteHeader(bytes, RemPacketType.Control, 0xFFFE, seq);
+        sealedPayload.CopyTo(bytes, RemPacket.HeaderSize);
 
         var sentTo = 0;
         foreach (var ep in endpoints)
@@ -8908,6 +8916,9 @@ public sealed partial class MainForm : Form
     }
 
     private int remoteControlSequence;
+    // Receiver-side gate for sealed control commands: authenticates against the profile key, bounds
+    // clock skew, and blocks replays of captured packets. UI-thread only (see the BeginInvoke above).
+    private readonly ControlReceiveGuard remoteControlGuard = new();
 
     /// <summary>
     /// Handler for incoming Control packets. Runs on the network thread — marshal to UI before
@@ -8917,16 +8928,18 @@ public sealed partial class MainForm : Form
     /// even when playback is currently off, because the next time the user enables receive
     /// they'll hear it at the right level.
     /// </summary>
-    private void HandleRemoteControlPacket(RemoteControlKind kind, sbyte delta, IPEndPoint remote)
+    private void HandleRemoteControlPacket(byte[] sealedPayload, IPEndPoint remote)
     {
         // Marshal to the UI thread FIRST. The allow-list scan reads selectedPeerEndpoints — a plain
         // Dictionary owned and mutated by the UI thread — so enumerating it here on the receiver's
         // network thread races a concurrent peer tick/untick (a caught "collection was modified" that
-        // silently drops the remote command). Running the whole check on the UI thread removes the race.
+        // silently drops the remote command). Running the whole check on the UI thread removes the race
+        // (and gives the replay guard single-threaded access).
         BeginInvoke(() =>
         {
             // Allow-list match by IP only — the sender's source port is their ephemeral outbound,
-            // not their announced audio port.
+            // not their announced audio port. This is a coarse first gate; the REAL authentication
+            // is the seal check below (source IPs are forgeable, the audio key is not).
             var allowed = false;
             foreach (var ep in selectedPeerEndpoints.Values)
             {
@@ -8934,12 +8947,26 @@ public sealed partial class MainForm : Form
             }
             if (!allowed)
             {
-                logFile.Event($"remote-control IGNORED (not in allow-list) kind={kind} delta={delta} from={remote}");
+                logFile.Event($"remote-control IGNORED (not in allow-list) from={remote}");
                 return;
             }
             if (!settings.LoadAcceptRemoteVolumeCommands())
             {
-                logFile.Event($"remote-control IGNORED (Accept remote volume commands is off) kind={kind} delta={delta} from={remote}");
+                logFile.Event($"remote-control IGNORED (Accept remote volume commands is off) from={remote}");
+                return;
+            }
+            // Authenticate: the command must decrypt with OUR profile key (proves the sender knows
+            // the password), be fresh, and not be a replayed capture. 2026-07-26 security audit —
+            // spoofing an allowed IP was previously enough to drive system volume/mute, and muting
+            // a blind user's machine mutes their screen reader.
+            if (currentAudioKey is not { } key)
+            {
+                logFile.Event($"remote-control IGNORED (no profile password set) from={remote}");
+                return;
+            }
+            if (!remoteControlGuard.TryAccept(key, sealedPayload, DateTime.UtcNow, out var kind, out var delta, out var why))
+            {
+                logFile.Event($"remote-control REJECTED ({why}) from={remote}");
                 return;
             }
 

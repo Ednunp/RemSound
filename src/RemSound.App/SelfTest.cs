@@ -112,6 +112,8 @@ internal static class SelfTest
         RunStep(results, "Main window builds where process-loopback is unsupported (Win7 launch, issue #22)", Win7SendModeConstruction);
         RunStep(results, "Menu shortcuts don't clash with controls", MenuShortcutsDontClashWithControls);
         RunStep(results, "Service log discovery (newest activity log)", ServiceLogDiscovery);
+        RunStep(results, "Sealed remote control (auth + replay + skew) + nonce discipline", SealedRemoteControl);
+        RunStep(results, "Service folder lockdown args (cross-user LPE hardening)", ServiceDirHardeningArgs);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");
@@ -2320,6 +2322,84 @@ internal static class SelfTest
             "the armed-set signature must be order-independent");
 
         return "reachable armed; long-unreachable dropped; grace kept; carve-out honoured; signature order-free";
+    }
+
+    /// <summary>2026-07-26 security audit: remote-control commands are SEALED with the audio key —
+    /// a forged source IP is no longer enough to drive a peer's system volume/mute (which, for our
+    /// users, mutes the screen reader). Pins: seal/accept round-trip, wrong-key reject, tampered
+    /// reject, legacy-plaintext reject, replay reject, stale reject — and the counter-based nonce
+    /// discipline that removes the random-nonce birthday bound on long-lived audio keys.</summary>
+    private static string? SealedRemoteControl()
+    {
+        var key = RemSoundCrypto.DeriveKey("test-password");
+        var wrongKey = RemSoundCrypto.DeriveKey("other-password");
+        var now = new DateTime(2026, 7, 26, 3, 0, 0, DateTimeKind.Utc);
+        var nowSecs = new DateTimeOffset(now).ToUnixTimeSeconds();
+
+        var guard = new ControlReceiveGuard();
+        var sealedOk = ControlSealing.Seal(key, RemoteControlKind.SystemMuteToggle, 0, nowSecs);
+        Check(sealedOk.Length == ControlSealing.SealedPayloadBytes, "sealed payload must be the documented wire size");
+        Check(guard.TryAccept(key, sealedOk, now, out var kind, out _, out _) && kind == RemoteControlKind.SystemMuteToggle,
+            "a genuine sealed command must authenticate and round-trip its kind");
+        Check(!guard.TryAccept(key, sealedOk, now, out _, out _, out var whyReplay) && whyReplay.StartsWith("replay"),
+            "the SAME packet accepted twice is a replay and must be rejected");
+
+        Check(!new ControlReceiveGuard().TryAccept(wrongKey, ControlSealing.Seal(key, RemoteControlKind.VolumeUp, 5, nowSecs), now, out _, out _, out _),
+            "a command sealed with a different password must not authenticate");
+        var tampered = ControlSealing.Seal(key, RemoteControlKind.VolumeUp, 5, nowSecs);
+        tampered[^1] ^= 0x01;
+        Check(!new ControlReceiveGuard().TryAccept(key, tampered, now, out _, out _, out _), "a tampered payload must fail the auth tag");
+
+        Span<byte> legacy = stackalloc byte[RemPacket.ControlPayloadSize];
+        RemPacket.WriteControlPayload(legacy, RemoteControlKind.SystemVolumeUp, 5);
+        Check(!new ControlReceiveGuard().TryAccept(key, legacy, now, out _, out _, out _),
+            "a legacy plaintext control payload must be rejected, never acted on");
+
+        var stale = ControlSealing.Seal(key, RemoteControlKind.VolumeDown, 5, nowSecs - 3600);
+        Check(!new ControlReceiveGuard().TryAccept(key, stale, now, out _, out _, out var whyStale) && whyStale.StartsWith("stale"),
+            "a captured command replayed an hour later must be rejected as stale");
+        var skewed = ControlSealing.Seal(key, RemoteControlKind.VolumeDown, 5, nowSecs - 300);
+        Check(new ControlReceiveGuard().TryAccept(key, skewed, now, out _, out _, out _),
+            "a command from a peer whose clock is 5 minutes off must still be accepted");
+
+        // Nonce discipline: prefix constant per sequence, counter strictly advancing, instances differ.
+        var seqA = new RemSoundCrypto.NonceSequence();
+        var n1 = new byte[12]; var n2 = new byte[12];
+        seqA.FillNext(n1); seqA.FillNext(n2);
+        Check(!n1.AsSpan().SequenceEqual(n2), "consecutive nonces from one sequence must differ");
+        Check(n1.AsSpan(0, 4).SequenceEqual(n2.AsSpan(0, 4)), "the 4-byte prefix must stay constant within a sequence");
+        Check(n2[4] == 1 && n1[4] == 0, "the counter half must advance arithmetically (uniqueness by construction)");
+
+        return "sealed + replay/stale/wrong-key/plaintext all rejected; skew tolerated; nonces counter-based";
+    }
+
+    /// <summary>The icacls contract for the service-folder lockdown (cross-user LPE fix): inheritance
+    /// stripped (kills the CREATOR OWNER hole), exactly SYSTEM + Administrators + the installing user
+    /// granted, recursive. And the SID recording round-trips with garbage rejected.</summary>
+    private static string? ServiceDirHardeningArgs()
+    {
+        var args = ServiceControl.BuildServiceDirAclArgs(@"C:\ProgramData\RemSound\service", "S-1-5-21-111-222-333-1001");
+        Check(args.Contains("/inheritance:r"), "must strip inherited ACEs — the CREATOR OWNER grant is the hole");
+        Check(args.Contains("*S-1-5-18:(OI)(CI)F"), "SYSTEM keeps Full (the service runs here)");
+        Check(args.Contains("*S-1-5-32-544:(OI)(CI)F"), "Administrators keep Full");
+        Check(args.Contains("*S-1-5-21-111-222-333-1001:(OI)(CI)(M)"), "the installing user keeps Modify (profile saves + test builds)");
+        Check(args.Contains("/T"), "must re-stamp existing files (app-source.txt is the target of the attack)");
+        Check(args.Split("/grant").Length == 4, "exactly three grants — nobody else survives the reset");
+
+        var savedOverride = ServiceStore.TestDirectoryOverride;
+        var tmp = Path.Combine(Path.GetTempPath(), "remsound-selftest-sid-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            ServiceStore.TestDirectoryOverride = tmp;
+            Check(ServiceStore.LoadInstallingUserSid() is null, "no recorded SID must read back null");
+            ServiceStore.SaveInstallingUserSid("S-1-5-21-111-222-333-1001");
+            Check(ServiceStore.LoadInstallingUserSid() == "S-1-5-21-111-222-333-1001", "the recorded SID must round-trip");
+            ServiceStore.SaveInstallingUserSid("not-a-sid \"quotes\"");
+            Check(ServiceStore.LoadInstallingUserSid() is null, "garbage in the SID file must be ignored, never fed to icacls");
+        }
+        finally { ServiceStore.TestDirectoryOverride = savedOverride; try { Directory.Delete(tmp, recursive: true); } catch { } }
+
+        return "inheritance stripped; SYSTEM/Admins/installing-user only; SID recorded + garbage-proofed";
     }
 
     /// <summary>Issue #23 boot self-heal decision core. Scenario: at the boot lock screen the machine's

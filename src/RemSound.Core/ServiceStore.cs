@@ -143,6 +143,31 @@ public static class ServiceStore
         catch { return null; }
     }
 
+    // === Installing user's SID (for the service-folder ACL hardening) ===
+    // Recorded at elevated install time — the account that owns the no-admin stop/update workflow.
+    // The SYSTEM-side self-update re-asserts the folder lockdown and must grant THIS user, not
+    // "whoever I currently am" (which under the service is SYSTEM itself).
+    private static string InstallingUserSidFile => Path.Combine(Directory, "installing-user.txt");
+
+    /// <summary>Record the installing user's SID. Elevated install path only. Never throws.</summary>
+    public static void SaveInstallingUserSid(string sid)
+    {
+        try { System.IO.Directory.CreateDirectory(Directory); File.WriteAllText(InstallingUserSidFile, sid); }
+        catch { /* best-effort */ }
+    }
+
+    /// <summary>The recorded installing-user SID, or null if none / unreadable.</summary>
+    public static string? LoadInstallingUserSid()
+    {
+        try
+        {
+            var sid = File.Exists(InstallingUserSidFile) ? File.ReadAllText(InstallingUserSidFile).Trim() : null;
+            // A SID is S-1-... only; anything else (tampered/corrupt) is ignored rather than fed to icacls.
+            return sid is not null && sid.StartsWith("S-1-", StringComparison.Ordinal) && sid.Length < 200 ? sid : null;
+        }
+        catch { return null; }
+    }
+
     // === Update log (ALWAYS written, not gated on the service-logging toggle) ===
     // Updates are rare but important, so we always keep a small trail of them where the user can find it.
     public static string UpdateLogPath => Path.Combine(Directory, "update.log");

@@ -46,6 +46,7 @@ internal sealed class SenderLane
     // cipherScratch holds the per-frame ciphertext (plaintext + 28 bytes overhead); 4096 covers
     // the largest single frame (Opus 20 ms or PCM 5 ms) with room to spare.
     private AesGcm? cryptoGcm;
+    private RemSoundCrypto.NonceSequence? cryptoNonces;
     private byte[]? cryptoKeyCached;
     private readonly byte[] cipherScratch = new byte[4096];
 
@@ -317,7 +318,7 @@ internal sealed class SenderLane
         // Encrypt the whole PCM frame, then split the ciphertext across as many parts as the
         // Ethernet payload budget needs (the +28-byte crypto overhead can push a 5 ms frame over
         // a single datagram). The receiver reassembles the parts and then decrypts.
-        var ctLen = RemSoundCrypto.EncryptInto(cryptoGcm, int24, cipherScratch);
+        var ctLen = RemSoundCrypto.EncryptInto(cryptoGcm, cryptoNonces!, int24, cipherScratch);
         var maxPart = RemPacket.MaxAudioPayloadBytes;
         var totalParts = (byte)((ctLen + maxPart - 1) / maxPart);
         pcmFrameId++;
@@ -353,7 +354,7 @@ internal sealed class SenderLane
         }
         EnsureCrypto();
         if (cryptoGcm is null) return; // no password yet → never send audio in the clear
-        var ctLen = RemSoundCrypto.EncryptInto(cryptoGcm, opusPlainScratch.AsSpan(0, encLen), cipherScratch);
+        var ctLen = RemSoundCrypto.EncryptInto(cryptoGcm, cryptoNonces!, opusPlainScratch.AsSpan(0, encLen), cipherScratch);
         Interlocked.Increment(ref audioFramesSent);
         SendAudio(cipherScratch.AsSpan(0, ctLen));
     }
@@ -403,6 +404,9 @@ internal sealed class SenderLane
         if (ReferenceEquals(key, cryptoKeyCached)) return;
         cryptoGcm?.Dispose();
         cryptoGcm = key is null ? null : RemSoundCrypto.CreateGcm(key);
+        // Fresh nonce sequence with the fresh cipher: new random prefix, counter from zero —
+        // a rebuilt key never continues an old counter, and an old key never sees a reused one.
+        cryptoNonces = key is null ? null : new RemSoundCrypto.NonceSequence();
         cryptoKeyCached = key;
     }
 

@@ -109,7 +109,7 @@ public static class ServiceControl
     /// reports success.</summary>
     public static int DoInstall()
     {
-        if (IsInstalled()) return 0;
+        if (IsInstalled()) { HardenServiceDirectory(); return 0; } // re-harden pre-audit installs
         var exe = Environment.ProcessPath;
         if (string.IsNullOrEmpty(exe)) return 2;
         var sourceDir = Path.GetDirectoryName(exe);
@@ -120,8 +120,10 @@ public static class ServiceControl
         try { CopyProgramTo(sourceDir, ServiceStore.BinDirectory); }
         catch (Exception ex) { ServiceStore.AppendServiceEvent($"install: copy program failed: {ex.GetType().Name}: {ex.Message}"); return 5; }
         // Remember where the app lives, so the SYSTEM service can watch it and auto-update itself when the
-        // app's auto-updater drops a newer build there (no UAC — see ServiceUpdate).
+        // app's auto-updater drops a newer build there (no UAC — see ServiceUpdate). Record the installing
+        // user's SID alongside it, so the SYSTEM-side re-hardening grants the right account.
         ServiceStore.SaveAppSourcePath(sourceDir);
+        ServiceStore.SaveInstallingUserSid(InstallingUserSid());
 
         var rc = RunSc(BuildCreateArgs(ServiceStore.BinExePath));
         if (rc != 0) return rc;
@@ -138,8 +140,60 @@ public static class ServiceControl
         // with no UAC. (Trust note: a user-writable folder whose contents run as SYSTEM is the same posture
         // as the auto-update copy; fine for this app, a hardened build would code-sign instead.)
         GrantUsersWriteToBin();
+        // Close the cross-user escalation the 2026-07-26 security audit found: the SYSTEM service
+        // trusts app-source.txt (which folder to self-update FROM), and if ANOTHER local user had
+        // pre-created ProgramData\RemSound\service (e.g. by saving the service config dialog before
+        // the install), Windows made them its owner with inheritable Full Control — letting them
+        // repoint the file at a folder of theirs and get their code run as SYSTEM. Reset ownership
+        // and the ACL here, while elevated, so only SYSTEM, Administrators and the installing user
+        // remain. Must run AFTER the grants above (inheritance reset re-derives file ACLs).
+        HardenServiceDirectory();
         return 0;
     }
+
+    /// <summary>Take ownership of the service's ProgramData folder for Administrators and reset its
+    /// ACL to exactly SYSTEM + Administrators (Full) + the recorded installing user (Modify — they
+    /// save the service profile from the non-elevated dialog and drop test builds in bin). Removes
+    /// any ACE another account picked up by creating the folder first; ownership must move too,
+    /// because an owner can always rewrite the ACL back. Runs elevated (install) or as SYSTEM
+    /// (self-update) — both hold take-ownership rights. When called as SYSTEM with no recorded
+    /// installing-user SID (an install predating this), it SKIPS rather than lock the user out of
+    /// their own no-admin workflow; the next elevated service action records the SID and hardens.
+    /// Best-effort with loud logging.</summary>
+    internal static void HardenServiceDirectory()
+    {
+        var sid = ServiceStore.LoadInstallingUserSid();
+        if (sid is null)
+        {
+            var current = InstallingUserSid();
+            if (current == "S-1-5-18")
+            {
+                ServiceStore.AppendServiceEvent("harden: no installing-user SID recorded and running as SYSTEM — deferred to the next elevated install/update");
+                return;
+            }
+            sid = current;
+            ServiceStore.SaveInstallingUserSid(sid);
+        }
+        var dir = ServiceStore.Directory;
+        try { Directory.CreateDirectory(dir); } catch { /* the icacls below will report */ }
+        // takeown /a → owner becomes the Administrators GROUP (not the current user); /r /d y recurses.
+        var own = RunProcessCaptured("takeown.exe", $"/f \"{dir}\" /a /r /d y", 30000);
+        if (!own.Started || !own.Exited || own.ExitCode != 0)
+            ServiceStore.AppendServiceEvent($"harden: takeown on service dir returned {(own.Exited ? own.ExitCode : -1)}: {own.StdErr}");
+        var acl = RunProcessCaptured("icacls.exe", BuildServiceDirAclArgs(dir, sid), 30000);
+        if (!acl.Started || !acl.Exited || acl.ExitCode != 0)
+            ServiceStore.AppendServiceEvent($"harden: icacls reset on service dir returned {(acl.Exited ? acl.ExitCode : -1)}: {acl.StdErr}{acl.StdOut}");
+        else
+            ServiceStore.AppendServiceEvent("harden: service folder ownership + ACL locked to SYSTEM/Administrators/installing user");
+    }
+
+    /// <summary>Pure, testable: the icacls arguments that lock the service folder down.
+    /// /inheritance:r strips inherited ACEs (ProgramData grants CREATOR OWNER full control —
+    /// the exact hole); explicit grants only: SYSTEM + Administrators Full, installing user
+    /// Modify. /T re-stamps existing files (app-source.txt included), /C continues past
+    /// per-file errors.</summary>
+    internal static string BuildServiceDirAclArgs(string dir, string installingUserSid) =>
+        $"\"{dir}\" /inheritance:r /grant \"*S-1-5-18:(OI)(CI)F\" /grant \"*S-1-5-32-544:(OI)(CI)F\" /grant \"*{installingUserSid}:(OI)(CI)(M)\" /T /C";
 
     /// <summary>The SID to grant the no-admin service rights to: the account that installed it (the
     /// elevated install runs as the same interactive user with an elevated token, so its SID is that user).
@@ -292,6 +346,10 @@ public static class ServiceControl
                 // CopyProgramTo already excludes every user-state folder — same routine the installer uses.
                 try { CopyProgramTo(appDir, ServiceStore.BinDirectory); Log("copied the new build into bin"); }
                 catch (Exception ex) { Log($"COPY FAILED ({ex.GetType().Name}: {ex.Message}) — starting the existing build"); }
+                // Re-assert the service-folder lockdown on every self-update (we're SYSTEM here, which
+                // can take ownership too). This is how installs that predate the 2026-07-26 hardening
+                // pick it up without a reinstall.
+                try { HardenServiceDirectory(); } catch { /* logged inside; never block the update */ }
             }
             else
             {

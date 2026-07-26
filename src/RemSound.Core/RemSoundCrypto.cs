@@ -141,15 +141,38 @@ public static class RemSoundCrypto
     /// <summary>Low-allocation encrypt straight into a destination span. Layout written:
     /// nonce(12) || tag(16) || ciphertext. Returns the number of bytes written
     /// (= plaintext.Length + <see cref="EncryptionOverheadBytes"/>). <paramref name="dst"/> must
-    /// be at least that big. Generates a fresh random nonce per call (safe at our packet rates).</summary>
-    public static int EncryptInto(AesGcm gcm, ReadOnlySpan<byte> plaintext, Span<byte> dst)
+    /// be at least that big. The nonce comes from <paramref name="nonces"/> — counter-based, so
+    /// it CANNOT repeat on a long-lived key (see <see cref="NonceSequence"/>; 2026-07-26 audit:
+    /// per-packet random nonces carry a birthday-collision bound a multi-day stream can reach).</summary>
+    public static int EncryptInto(AesGcm gcm, NonceSequence nonces, ReadOnlySpan<byte> plaintext, Span<byte> dst)
     {
         var total = plaintext.Length + EncryptionOverheadBytes;
         if (dst.Length < total) throw new ArgumentException("Encrypt destination too small", nameof(dst));
-        var nonce = dst[..NonceBytes];
-        RandomNumberGenerator.Fill(nonce);
-        gcm.Encrypt(nonce, plaintext, dst.Slice(NonceBytes + TagBytes, plaintext.Length), dst.Slice(NonceBytes, TagBytes));
+        nonces.FillNext(dst[..NonceBytes]);
+        gcm.Encrypt(dst[..NonceBytes], plaintext, dst.Slice(NonceBytes + TagBytes, plaintext.Length), dst.Slice(NonceBytes, TagBytes));
         return total;
+    }
+
+    /// <summary>The nonce generator for a hot-path encryptor: a random 4-byte prefix chosen at
+    /// construction plus a 64-bit counter — the textbook fix the old per-packet-random comment
+    /// pointed at. Uniqueness within one instance is arithmetic (the counter), not probabilistic;
+    /// across instances (each sender lane, each session) the random prefix keeps streams apart.
+    /// The receiver just reads the nonce from the packet, so this changes nothing on the wire.
+    /// NOT thread-safe — one per encryptor, same ownership rule as the AesGcm itself.</summary>
+    public sealed class NonceSequence
+    {
+        private readonly byte[] prefix = new byte[4];
+        private ulong counter;
+
+        public NonceSequence() => RandomNumberGenerator.Fill(prefix);
+
+        /// <summary>Write the next 12-byte nonce: prefix(4) || counter(8), then advance.</summary>
+        public void FillNext(Span<byte> nonce12)
+        {
+            prefix.CopyTo(nonce12);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(nonce12[4..], counter);
+            counter++;
+        }
     }
 
     /// <summary>Low-allocation decrypt of an <see cref="EncryptInto"/> packet into a destination

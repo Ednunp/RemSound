@@ -935,13 +935,13 @@ public sealed class AudioReceiver : IDisposable
     /// socket on either end any more.</summary>
     public Action<byte[], int, IPEndPoint>? OnHeartbeatReceived { get; set; }
 
-    /// <summary>Hook for Control packets that arrive on the audio receiver's socket. The
-    /// App wires this to a handler that validates the source against the allow-list (the
-    /// peer must be in the user's selected-peers set), checks the user's "accept remote
-    /// volume commands" preference, and applies the requested change to the local volume
-    /// slider. Set this BEFORE starting the receiver; null = packet is silently dropped.
+    /// <summary>Hook for Control packets that arrive on the audio receiver's socket. Since 5.6 the
+    /// payload is SEALED with the profile's audio key (ControlSealing), so this hands the RAW payload
+    /// up — the App authenticates it (key + replay guard), validates the source against the
+    /// allow-list, checks the user's "accept remote volume commands" preference, and applies the
+    /// change. Set this BEFORE starting the receiver; null = packet is silently dropped.
     /// Travels on the same UDP socket as audio + heartbeat (single-port model 2026-05-07).</summary>
-    public Action<RemoteControlKind, sbyte, IPEndPoint>? OnRemoteControlReceived { get; set; }
+    public Action<byte[], IPEndPoint>? OnRemoteControlReceived { get; set; }
 
     private void HandleRawPacket(byte[] packet, int length, IPEndPoint remote)
     {
@@ -975,12 +975,15 @@ public sealed class AudioReceiver : IDisposable
                 OnHeartbeatReceived?.Invoke(packet, length, remote);
                 break;
             case RemPacketType.Control:
-                // Remote-control message (volume up/down, mute toggle). Parse the payload
-                // here so the handler doesn't need to know about RemPacket layout. Caller
-                // is expected to gate on allow-list AND the user's opt-in preference.
-                if (RemPacket.TryReadControl(payload, out var ctrlKind, out var ctrlDelta))
+                // Remote-control message (volume up/down, mute toggle). Since 5.6 the payload is
+                // SEALED with the profile's audio key (ControlSealing) — the receiver stays
+                // crypto-dumb and hands the raw payload up; the App authenticates it against its
+                // key + replay guard, then gates on allow-list AND the user's opt-in preference.
+                // A legacy 2-byte plaintext payload (pre-5.6 peer) fails the size check here and
+                // is dropped — an unauthenticated command must never reach the handler.
+                if (payload.Length == ControlSealing.SealedPayloadBytes)
                 {
-                    OnRemoteControlReceived?.Invoke(ctrlKind, ctrlDelta, remote);
+                    OnRemoteControlReceived?.Invoke(payload.ToArray(), remote);
                 }
                 else
                 {
