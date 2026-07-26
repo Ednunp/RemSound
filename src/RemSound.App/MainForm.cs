@@ -5942,44 +5942,17 @@ public sealed class MainForm : Form
         // Build the unified spec list from all three send-side lists. The CompositeCaptureBackend
         // splits this set internally into WASAPI specs (sent to MixingEngine) and ASIO specs
         // (sent to AsioCaptureBackend). Both run in parallel and their outputs are summed.
-        var specs = new List<CaptureSourceSpec>();
-        var addedLoopbackIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        string? followedDefaultLoopback = null;
+        // The WASAPI outputs-or-apps portion is the SHARED builder (CaptureSpecBuilder) — the same code
+        // the service assembles its specs with, so the two can no longer drift apart.
         var appsMode = ProcessLoopbackCapture.IsSupported && sendModeList.SelectedIndex == SendModeApplicationsIndex;
-        if (!appsMode)
-        {
-            // Devices mode (classic): loopback-capture whole output devices from the ticked list.
-            foreach (var item in sendOutputDevicesList.CheckedItems.OfType<AudioDeviceChoice>())
-            {
-                if (item.IsDefaultFollower)
-                {
-                    // Loopback-capture whatever Windows currently uses as the default OUTPUT, and follow it.
-                    followedDefaultLoopback = ResolveDefaultDeviceId(NAudio.CoreAudioApi.DataFlow.Render);
-                    if (!string.IsNullOrEmpty(followedDefaultLoopback) && addedLoopbackIds.Add(followedDefaultLoopback))
-                    {
-                        specs.Add(new CaptureSourceSpec(followedDefaultLoopback, CaptureKind.Loopback, "Windows default audio device"));
-                    }
-                }
-                else if (item.DeviceId is { } id && addedLoopbackIds.Add(id))
-                {
-                    specs.Add(new CaptureSourceSpec(id, CaptureKind.Loopback, item.Name));
-                }
-            }
-        }
-        else
-        {
-            // Applications mode: one process-loopback spec per running process of each ticked app name.
-            // Apps not currently running contribute nothing until they reappear (the reconcile timer and
-            // the session-start watcher keep the list fresh and re-apply). Child processes are captured
-            // too (the process-loopback include-tree mode), so a browser's audio renderers are covered.
-            foreach (var name in CheckedSendApplicationNames())
-            {
-                foreach (var pid in AudioAppEnumerator.PidsForProcessName(name))
-                {
-                    specs.Add(new CaptureSourceSpec(ProcessLoopbackId.Format(pid), CaptureKind.ProcessLoopback, name));
-                }
-            }
-        }
+        string? followedDefaultLoopback = null;
+        var specs = appsMode
+            ? CaptureSpecBuilder.BuildApplicationSpecs(CheckedSendApplicationNames())
+            : CaptureSpecBuilder.BuildOutputSpecs(
+                sendOutputDevicesList.CheckedItems.OfType<AudioDeviceChoice>()
+                    .Where(c => c.DeviceId is not null)
+                    .Select(c => (c.DeviceId!, c.Name)),
+                out followedDefaultLoopback);
         lastFollowedDefaultLoopbackId = followedDefaultLoopback;
         var addedInputIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         string? followedDefaultInput = null;

@@ -557,35 +557,14 @@ public sealed class ServiceSendHost : IDisposable
         var specs = new List<CaptureSourceSpec>();
         var appsMode = ProcessLoopbackCapture.IsSupported
             && string.Equals(p.WasapiSendMode, "applications", StringComparison.OrdinalIgnoreCase);
-        if (appsMode)
-        {
-            // Specific applications only — matches the main app. The old "send all applications"
-            // path (SendAllApplications) was removed from both the app and the service; the profile
-            // flag is ignored here so a stale profile can't resurrect whole-system capture.
-            foreach (var name in p.SelectedSendApplications.Distinct(StringComparer.OrdinalIgnoreCase))
-                foreach (var pid in AudioAppEnumerator.PidsForProcessName(name))
-                    specs.Add(new CaptureSourceSpec(ProcessLoopbackId.Format(pid), CaptureKind.ProcessLoopback, name));
-        }
-        else
-        {
-            var addedOutputs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var id in p.SelectedWasapiSendOutputs.Distinct())
-            {
-                if (AudioDefaultFollower.IsLoopbackSend(id))
-                {
-                    // "Use Windows default output" — resolve to the live default render endpoint. Re-run
-                    // on every ApplyProfile (which a default-device change triggers via the notifier), so
-                    // the service FOLLOWS the default. Same sentinel + resolver the main app uses.
-                    var def = AudioDefaultFollower.ResolveDefaultRenderId();
-                    if (def is not null && addedOutputs.Add(def))
-                        specs.Add(new CaptureSourceSpec(def, CaptureKind.Loopback, "Windows default audio device"));
-                }
-                else if (addedOutputs.Add(id))
-                {
-                    specs.Add(new CaptureSourceSpec(id, CaptureKind.Loopback, id));
-                }
-            }
-        }
+        // Both branches are the SHARED builder (CaptureSpecBuilder) — the same code the main window
+        // assembles its specs with, so the two can no longer drift apart. Apps mode = specific apps
+        // only (the "send all" path was removed from both sides; the stale profile flag is ignored);
+        // devices mode resolves the "Use Windows default" sentinel to the live default on every
+        // ApplyProfile, which a default-device change re-triggers via the notifier — so it FOLLOWS.
+        specs.AddRange(appsMode
+            ? CaptureSpecBuilder.BuildApplicationSpecs(p.SelectedSendApplications)
+            : CaptureSpecBuilder.BuildOutputSpecs(p.SelectedWasapiSendOutputs.Distinct().Select(id => (id, id)), out _));
         // The service never sends WASAPI inputs (mics/line-ins) — outputs and specific apps only. Any
         // SelectedWasapiSendInputs left in an old profile is deliberately ignored here.
         return specs;

@@ -962,7 +962,16 @@ internal static class SelfTest
         if (expected is null) return Skip("no Windows default output device on this box to resolve the follower against");
         Check(specs.Any(s => s.Kind == CaptureKind.Loopback && s.DeviceId == expected),
             "the follower must resolve to a loopback spec on the current Windows default output");
-        return "follower flagged + sentinel shared with the app; service resolves it to the live default render endpoint";
+
+        // Shared-builder details: the resolved default reports via the out param (drives the app's
+        // re-route detection), and a follower + the SAME device ticked explicitly collapse to one spec.
+        var built = CaptureSpecBuilder.BuildOutputSpecs(
+            new[] { (AudioDefaultFollower.LoopbackSendId, "follow"), (expected, "explicit") }, out var followed);
+        Check(followed == expected, "the resolved default must be reported via the out param");
+        Check(built.Count == 1, "the follower and the same explicit device must collapse to ONE spec");
+        Check(CaptureSpecBuilder.BuildApplicationSpecs(new[] { "zzremsound_no_such_process" }).Count == 0,
+            "an app that isn't running must contribute no specs (it's caught on open by the watcher)");
+        return "sentinel shared + resolved to the live default; builder dedups and reports the followed id";
     }
 
     /// <summary>The encoder-boundary clamp is now ONE shared rule (SampleClamp) used by all three
