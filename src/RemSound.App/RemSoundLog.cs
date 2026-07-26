@@ -30,6 +30,17 @@ internal sealed class RemSoundLog : IDisposable
 
     private StreamWriter? writer;
     private bool fileCreationFailed;
+    // Bytes written to the CURRENT file, tracked so a multi-day session with logging on can't
+    // grow one file without bound (2026-07-26 resource audit: ~25-60 MB/day while streaming,
+    // startup-only pruning never touches the live file). At the cap the file is closed with a
+    // "continued in next file" line and a fresh timestamped file starts — the startup pruning
+    // then ages out the closed ones like any other log. Internal seam so the self-test can
+    // roll at a tiny size instead of writing 50 MB.
+    private long bytesWrittenToCurrentFile;
+    private int fileOrdinal;
+    internal long RollAfterBytes { get; set; } = 50L * 1024 * 1024;
+    /// <summary>How many times the log has rolled to a fresh file this session (test seam).</summary>
+    internal int RollCount { get; private set; }
     /// <summary>Serialises all writes. StreamWriter is documented as non-thread-safe and
     /// concurrent WriteLine calls from the mix loop, heartbeat thread, network listener,
     /// UI thread and ASIO callback can interleave bytes into a single line in the output
@@ -70,12 +81,17 @@ internal sealed class RemSoundLog : IDisposable
         {
             var dir = RemSound.Core.AppConfig.LogsDirectory;
             Directory.CreateDirectory(dir);
-            var name = $"RemSound-{Sanitize(Environment.MachineName)}-{Environment.ProcessId}-{DateTime.Now:yyyyMMdd-HHmmss}.log";
+            // The file ordinal makes a rolled file's name unique even when rolls land within the
+            // same timestamp tick (tiny caps in the self-test roll several times per millisecond);
+            // pid keeps concurrent instances apart as before.
+            fileOrdinal++;
+            var name = $"RemSound-{Sanitize(Environment.MachineName)}-{Environment.ProcessId}-{DateTime.Now:yyyyMMdd-HHmmss}-{fileOrdinal}.log";
             Path = System.IO.Path.Combine(dir, name);
             writer = new StreamWriter(new FileStream(Path, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite))
             {
                 AutoFlush = true,
             };
+            bytesWrittenToCurrentFile = 0;
             writer.WriteLine(SnapHeader);
             writer.WriteLine($"EVT\t{DateTime.Now:o}\tlog started");
             return true;
@@ -120,7 +136,7 @@ internal sealed class RemSoundLog : IDisposable
             if (!EnsureFileOpenLocked()) return;
             try
             {
-                writer!.WriteLine(string.Join('\t',
+                var line = string.Join('\t',
                     "SNAP",
                     DateTime.Now.ToString("o"),
                     Environment.MachineName,
@@ -143,7 +159,9 @@ internal sealed class RemSoundLog : IDisposable
                     opusFecRecoveries,
                     opusUnrecoveredGaps,
                     maxLatencyMsAsio,
-                    targetLatencyMsAsio));
+                    targetLatencyMsAsio);
+                writer!.WriteLine(line);
+                AccountAndMaybeRollLocked(line.Length);
             }
             catch { /* swallow — log is best-effort */ }
         }
@@ -157,10 +175,32 @@ internal sealed class RemSoundLog : IDisposable
             if (!EnsureFileOpenLocked()) return;
             try
             {
-                writer!.WriteLine($"EVT\t{DateTime.Now:o}\t{message.Replace('\t', ' ').Replace('\n', ' ')}");
+                var line = $"EVT\t{DateTime.Now:o}\t{message.Replace('\t', ' ').Replace('\n', ' ')}";
+                writer!.WriteLine(line);
+                AccountAndMaybeRollLocked(line.Length);
             }
             catch { /* swallow */ }
         }
+    }
+
+    /// <summary>Account a just-written line and roll to a fresh file at the size cap. Must be
+    /// called holding <see cref="writeGate"/>. Rolling closes the current file with a pointer
+    /// line and clears <see cref="writer"/>, so the next write lazily creates the successor —
+    /// a failed re-open then degrades to the existing best-effort behaviour. The cap bounds a
+    /// multi-day always-logging session to a chain of capped files (which the startup pruning
+    /// ages out) instead of one unbounded giant.</summary>
+    private void AccountAndMaybeRollLocked(int lineChars)
+    {
+        bytesWrittenToCurrentFile += lineChars + 2; // + newline
+        if (bytesWrittenToCurrentFile < RollAfterBytes) return;
+        try
+        {
+            writer?.WriteLine($"EVT\t{DateTime.Now:o}\tlog reached its size cap — continuing in a fresh file");
+            writer?.Dispose();
+        }
+        catch { /* swallow */ }
+        writer = null;
+        RollCount++;
     }
 
     public void Dispose()

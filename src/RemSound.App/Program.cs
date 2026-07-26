@@ -252,6 +252,10 @@ internal static class Program
         // Best-effort: clear leftover update temp stages (and any relics of the old batch updater).
         // We hold the single-instance lock here, so only the live copy does this — no sibling race.
         RemSoundUpdater.CleanUpUpdateStages();
+        // Cap the crash-report pile (keep the newest 10) — the *.log pruning never matched
+        // crash-*.txt, so an unlucky install accumulated them forever. Unconditional, unlike the
+        // opt-in log pruning: ten reports diagnose a pattern as well as a hundred.
+        LogMaintenance.PruneCrashReports(AppConfig.LogsDirectory);
 
         // F1 anywhere = open the bundled manual. Installed *before* the first ShowDialog so
         // it works on the profile picker (the very first thing the user sees). The filter

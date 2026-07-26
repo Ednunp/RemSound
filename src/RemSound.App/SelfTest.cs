@@ -114,6 +114,7 @@ internal static class SelfTest
         RunStep(results, "Service log discovery (newest activity log)", ServiceLogDiscovery);
         RunStep(results, "Sealed remote control (auth + replay + skew) + nonce discipline", SealedRemoteControl);
         RunStep(results, "Service folder lockdown args (cross-user LPE hardening)", ServiceDirHardeningArgs);
+        RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");
@@ -2371,6 +2372,61 @@ internal static class SelfTest
         Check(n2[4] == 1 && n1[4] == 0, "the counter half must advance arithmetically (uniqueness by construction)");
 
         return "sealed + replay/stale/wrong-key/plaintext all rejected; skew tolerated; nonces counter-based";
+    }
+
+    /// <summary>2026-07-26 resource audit trio: (1) the diagnostic log rolls to a fresh file at its
+    /// size cap, so a multi-day always-logging session can never grow one unbounded file; (2) crash
+    /// reports are capped at the newest N (nothing ever pruned crash-*.txt before); (3) the
+    /// priority-mode scope decision — levers only while streaming, released after the hold-down.</summary>
+    private static string? LongRunHygiene()
+    {
+        // 1. Log rotation at the cap. Tiny cap via the internal seam; verify multiple real files.
+        var createdLogs = new List<string>();
+        var log = new RemSoundLog { Enabled = true, RollAfterBytes = 400 };
+        try
+        {
+            for (var i = 0; i < 30; i++)
+            {
+                log.Event($"rotation self-test line {i} — padding padding padding padding");
+                if (log.Path is { } p && !createdLogs.Contains(p)) createdLogs.Add(p);
+            }
+            Check(log.RollCount >= 2, $"a 400-byte cap over 30 writes must roll at least twice (rolled {log.RollCount})");
+            Check(createdLogs.Count >= 3, "each roll must continue into a NEW timestamped file");
+            Check(createdLogs.All(File.Exists), "every rolled file must exist on disk (the chain, not one giant)");
+        }
+        finally
+        {
+            log.Dispose();
+            foreach (var f in createdLogs) { try { File.Delete(f); } catch { } }
+        }
+
+        // 2. Crash-report cap: 14 fake reports → newest 10 survive.
+        var tmp = Path.Combine(Path.GetTempPath(), "remsound-selftest-crash-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(tmp);
+            for (var i = 0; i < 14; i++)
+            {
+                var f = Path.Combine(tmp, $"crash-2026072{i % 10}-{i:D6}.txt");
+                File.WriteAllText(f, "fake");
+                File.SetLastWriteTimeUtc(f, DateTime.UtcNow.AddDays(-14 + i));
+            }
+            var deleted = LogMaintenance.PruneCrashReports(tmp, keep: 10);
+            var left = Directory.GetFiles(tmp, "crash-*.txt");
+            Check(deleted == 4 && left.Length == 10, $"14 crash files pruned to the newest 10 (deleted {deleted}, left {left.Length})");
+            var oldest = left.Select(f => File.GetLastWriteTimeUtc(f)).Min();
+            Check(oldest > DateTime.UtcNow.AddDays(-11), "the OLDEST files must be the ones pruned");
+        }
+        finally { try { Directory.Delete(tmp, recursive: true); } catch { } }
+
+        // 3. Priority-mode scope decision (the pure core the 1 Hz tick drives).
+        var now = new DateTime(2026, 7, 26, 4, 0, 0, DateTimeKind.Utc);
+        Check(MainForm.PriorityModeShouldEngage(true, now.AddSeconds(-1), now), "streaming + toggle on → engaged");
+        Check(MainForm.PriorityModeShouldEngage(true, now.AddSeconds(-20), now), "a quiet spell inside the hold-down must NOT release (no lever flapping)");
+        Check(!MainForm.PriorityModeShouldEngage(true, now.AddMinutes(-5), now), "idle past the hold-down → released (idle-in-tray no longer holds the machine awake)");
+        Check(!MainForm.PriorityModeShouldEngage(false, now.AddSeconds(-1), now), "toggle off → never engaged, even while streaming");
+
+        return "log rolls at cap into a file chain; crash pile capped at newest 10; levers scoped to streaming";
     }
 
     /// <summary>The icacls contract for the service-folder lockdown (cross-user LPE fix): inheritance

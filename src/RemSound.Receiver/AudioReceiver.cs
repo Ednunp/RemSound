@@ -125,6 +125,22 @@ public sealed class AudioReceiver : IDisposable
     /// so a heartbeat blip while audio keeps flowing never fires a false "disconnect" cue, and
     /// the connect cue can fire the moment audio starts. Returns false when not receiving (no
     /// sessions), so the caller falls back to the heartbeat for send-only setups. 2026-05-31.</summary>
+    /// <summary>True when audio from ANY peer has hit a live session within the window. The app's
+    /// Priority-mode scoping reads this as its "receiving right now" signal (2026-07-26 resource
+    /// audit — the power levers now engage only while audio actually moves).</summary>
+    public bool AnyRecentAudio(TimeSpan within)
+    {
+        var cutoff = DateTime.UtcNow - within;
+        lock (sessionsLock)
+        {
+            foreach (var session in sessions.Values)
+            {
+                if (session.LastWriteUtc >= cutoff) return true;
+            }
+        }
+        return false;
+    }
+
     public bool IsAudioFlowingFrom(IPAddress address, TimeSpan within)
     {
         var cutoff = DateTime.UtcNow - within;
@@ -300,6 +316,16 @@ public sealed class AudioReceiver : IDisposable
         }
         lock (securityLock)
         {
+            // Ceiling (2026-07-26 resource audit): keyed by source IP with no eviction, this was
+            // the one table that could creep over a very long run if the receiver sits unfiltered
+            // (null allow-list) on a WAN-exposed port collecting one entry per distinct sender.
+            // It's a status cache, so the cheap fix is honest: at the cap, drop entries for
+            // strangers rather than grow. Normal use (allow-listed peers) never gets near 256.
+            if (peerSecurity.Count >= 256 && !peerSecurity.ContainsKey(address))
+            {
+                peerSecurity.Clear();
+                diagnosticSink?.Invoke("peer-security cache hit its ceiling (256 distinct senders) — cleared; statuses repopulate from live format packets");
+            }
             peerSecurity[address] = status;
         }
     }

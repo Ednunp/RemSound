@@ -1123,11 +1123,11 @@ public sealed partial class MainForm : Form
         sender.SetTightLatency(true);
         logFile.Event($"tight latency at startup: on (always) (audio mode={settings.LoadAudioMode()})");
 
-        // Priority mode (per-profile). Applies every PerformanceMode lever on first launch
-        // under this profile so the OS doesn't start coasting before the user has tabbed
-        // onto the Audio profile tab. The Audio-profile tab's checkbox handler re-applies
-        // on every toggle.
-        PerformanceMode.Apply(settings.LoadPriorityMode(), msg => logFile.Event(msg));
+        // Priority mode (per-profile) is SCOPED to actual streaming now — see
+        // EvaluatePriorityModeScope on the 1 Hz status tick. Nothing to engage at construction:
+        // the levers come up within a tick of audio moving and drop after the quiet hold-down.
+        // (Pre-2026-07-26 this applied every lever here and held them for the whole app
+        // lifetime, keeping an idle-in-tray machine awake and off deep power states.)
         // Native-rate passthrough is automatic now (driven by codec, not a user setting):
         // PCM+single-source-WASAPI-push = pass capture-device rate through to the wire;
         // Opus = always pre-resample to 48 kHz (encoder is locked at 48 k); MixingEngine /
@@ -1370,6 +1370,7 @@ public sealed partial class MainForm : Form
             // recovers. The individual Sync* methods are also hardened (see SafeSelectedItem).
             try
             {
+                EvaluatePriorityModeScope();
                 UpdateStatus();
                 SnapshotLogIfDue();
                 EnsureRequestedAudioRunning();
@@ -4074,7 +4075,10 @@ public sealed partial class MainForm : Form
         priorityModeBox.CheckedChanged += (_, _) =>
         {
             settings.SavePriorityMode(priorityModeBox.Checked);
-            PerformanceMode.Apply(priorityModeBox.Checked, msg => logFile.Event(msg));
+            // Re-evaluate the streaming-scoped levers right away: unticking releases them
+            // immediately; ticking engages them now if audio is moving (else on the next tick
+            // once it is). See EvaluatePriorityModeScope.
+            EvaluatePriorityModeScope();
             MarkProfileDirty();
         };
 
@@ -5717,6 +5721,39 @@ public sealed partial class MainForm : Form
         RefreshKnownPeers();
         ApplyAudioRuntime();
         UpdateStatus();
+    }
+
+    // --- Priority-mode scoping (2026-07-26 resource audit) -------------------------------------
+    // The opt-in Priority mode's levers (keep-awake, High priority, EcoQoS opt-out, fine timer,
+    // working-set lock) used to engage at profile load and hold for the WHOLE app lifetime — a
+    // machine with RemSound idle in the tray was kept awake and off deep power states for
+    // nothing. They now engage only while audio is actually moving (send armed to at least one
+    // peer, or received audio hitting a live session) and release after a quiet hold-down, so
+    // brief silences and re-arms never flap the levers. The service already scoped this way; the
+    // app now matches. The audio loops' own fine-timer scopes (SystemTimerResolution — the
+    // overnight-lag fix) are independent of Priority mode and deliberately untouched.
+    internal static readonly TimeSpan PriorityModeHoldDown = TimeSpan.FromSeconds(30);
+    private DateTime lastStreamActivityUtc = DateTime.MinValue;
+    private bool priorityModeEngaged;
+
+    /// <summary>Pure decision core, pinned by the self-test: engage while the toggle is on AND
+    /// stream activity happened within the hold-down; everything else releases.</summary>
+    internal static bool PriorityModeShouldEngage(bool priorityModeOn, DateTime lastActivityUtc, DateTime nowUtc) =>
+        priorityModeOn && nowUtc - lastActivityUtc < PriorityModeHoldDown;
+
+    private void EvaluatePriorityModeScope()
+    {
+        var sendActive = connected && sender.IsRunning && !string.IsNullOrEmpty(activeAudioReceiverSignature);
+        var receiveActive = connected && receiver.AnyRecentAudio(TimeSpan.FromSeconds(3));
+        if (sendActive || receiveActive) lastStreamActivityUtc = DateTime.UtcNow;
+
+        var want = PriorityModeShouldEngage(settings.LoadPriorityMode(), lastStreamActivityUtc, DateTime.UtcNow);
+        if (want == priorityModeEngaged) return;
+        priorityModeEngaged = want;
+        logFile.Event(want
+            ? "priority mode engaging (streaming active)"
+            : "priority mode releasing (no stream activity for the hold-down)");
+        PerformanceMode.Apply(want, msg => logFile.Event(msg));
     }
 
     private void HandleCapabilityChange()

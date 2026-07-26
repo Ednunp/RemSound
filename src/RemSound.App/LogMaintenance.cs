@@ -79,6 +79,31 @@ internal static class LogMaintenance
         return deleted;
     }
 
+    /// <summary>Keep only the newest <paramref name="keep"/> crash reports (<c>crash-*.txt</c>) in
+    /// <paramref name="dir"/>, deleting older ones. Crash files were the one log-folder artefact
+    /// nothing ever cleaned (2026-07-26 resource audit — the *.log pruning never matched them), so
+    /// they accumulated forever. Runs unconditionally at startup: unlike log pruning this is not
+    /// opt-in, because ten reports diagnose a crash pattern just as well as a hundred. Returns how
+    /// many were deleted. Best-effort throughout.</summary>
+    public static int PruneCrashReports(string dir, int keep = 10)
+    {
+        var deleted = 0;
+        try
+        {
+            if (!Directory.Exists(dir)) return 0;
+            var crashes = Directory.EnumerateFiles(dir, "crash-*.txt")
+                .Select(f => new FileInfo(f))
+                .OrderByDescending(f => f.LastWriteTimeUtc)
+                .Skip(keep);
+            foreach (var old in crashes)
+            {
+                try { old.Delete(); deleted++; } catch { /* locked — leave it */ }
+            }
+        }
+        catch { /* give up quietly */ }
+        return deleted;
+    }
+
     private static bool IsSamePath(string a, string? b) =>
         !string.IsNullOrEmpty(b)
         && string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase);
