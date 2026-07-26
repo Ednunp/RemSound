@@ -1333,7 +1333,21 @@ internal static class SelfTest
         Check(RemPacket.TryReadHeartbeat(sent.AsSpan(RemPacket.HeaderSize), out var hk, out var ot)
               && hk == HeartbeatKind.Pong && ot == 42_000L,
             "the pong must echo the originator's tick UNCHANGED — RTT (and so peer health) is computed from it");
-        return "payload round-trips; ping → pong to source with originator tick intact";
+
+        // The Healthy → Stale → Unreachable windows, against a CONTROLLED clock (the real derivation via
+        // the seam). These are the numbers every peer's armed/pruned state hangs off — app and service.
+        var ep = new IPEndPoint(IPAddress.Parse("10.5.5.5"), 47830);
+        var now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        PeerHealthState At(double secondsSincePong) =>
+            HeartbeatService.SnapshotHealthForTest(ep, now.AddSeconds(-secondsSincePong), now.AddSeconds(-60), 5, now).State;
+        Check(At(1) == PeerHealthState.Healthy, "a pong 1s ago must read Healthy (window 2s)");
+        Check(At(3) == PeerHealthState.Stale, "a pong 3s ago must read Stale (2s–5s)");
+        Check(At(6) == PeerHealthState.Unreachable, "a pong 6s ago must read Unreachable (>5s)");
+        Check(HeartbeatService.SnapshotHealthForTest(ep, null, now.AddSeconds(-1), null, now).State == PeerHealthState.Unknown,
+            "never-answered but only just pinged must read Unknown (pending), not dead");
+        Check(HeartbeatService.SnapshotHealthForTest(ep, null, now.AddSeconds(-10), null, now).State == PeerHealthState.Unreachable,
+            "never-answered after sustained pinging must read Unreachable");
+        return "payload round-trips; pong echoes tick to source; health windows exact (2s/5s, pending honoured)";
     }
 
     /// <summary>The SPSC ring buffer is the heart of every audio path (capture mix + playout), and until

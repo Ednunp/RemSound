@@ -180,7 +180,7 @@ public sealed class HeartbeatService : IDisposable
 
     private static string KeyFor(IPEndPoint ep) => $"{ep.Address}:{ep.Port}";
 
-    private PeerHealth SnapshotHealthLocked(PeerState p, DateTime nowUtc)
+    private static PeerHealth SnapshotHealthLocked(PeerState p, DateTime nowUtc)
     {
         if (p.LastPongUtc is null)
         {
@@ -326,6 +326,19 @@ public sealed class HeartbeatService : IDisposable
         // track (suspicious — possible loopback / echo), >0 is the normal case.
         onDiagnostic?.Invoke($"recv pong from={remote} rtt={rttMs}ms matched={matchedCount} origTickMs={originatorTickMs} nowMs={nowMs}");
     }
+
+    /// <summary>Test seam: run the REAL health-state derivation (SnapshotHealthLocked) against a
+    /// CONTROLLED clock, so the Healthy → Stale → Unreachable windows — the numbers every peer's armed
+    /// state hangs off — are pinned without waiting real seconds in a test.</summary>
+    internal static PeerHealth SnapshotHealthForTest(
+        IPEndPoint endpoint, DateTime? lastPongUtc, DateTime? firstPingSentUtc, int? rttEwmaMs, DateTime nowUtc) =>
+        SnapshotHealthLocked(new PeerState
+        {
+            AudioEndpoint = endpoint,
+            LastPongUtc = lastPongUtc,
+            FirstPingSentUtc = firstPingSentUtc,
+            RttEwmaMs = rttEwmaMs,
+        }, nowUtc);
 
     private sealed class PeerState
     {
