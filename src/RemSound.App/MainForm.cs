@@ -1425,6 +1425,7 @@ public sealed partial class MainForm : Form
             deviceRefreshTimer.Stop(); deviceRefreshTimer.Dispose();
             continuousTuneTimer.Stop(); continuousTuneTimer.Dispose();
             updateCheckTimer.Stop(); updateCheckTimer.Dispose();
+            deferredUpdateTimer.Stop(); deferredUpdateTimer.Dispose();
             asioDriverChangeDebounce.Stop(); asioDriverChangeDebounce.Dispose();
             try { sendAppsReconcileTimer?.Stop(); sendAppsReconcileTimer?.Dispose(); } catch { }
             DisposeSessionStartWatcher();
@@ -3138,6 +3139,7 @@ public sealed partial class MainForm : Form
         // via the updater's Log callback.
         if (result is not UpdateAvailable available) return;
         var info = available.Info;
+        if (AutoInstallDeferredByWindow(info.Tag, "background poll")) return;
         if (AppConfig.Load().SilentlyInstallUpdates)
         {
             // Notice the user before the app vanishes and the helper takes over. Hidden from
@@ -3198,6 +3200,7 @@ public sealed partial class MainForm : Form
         if (result is not UpdateAvailable available) return;
         var info = available.Info;
         logFile.Event($"updater: startup check found {info.Tag}");
+        if (AutoInstallDeferredByWindow(info.Tag, "startup check")) return;
         if (AppConfig.Load().SilentlyInstallUpdates)
         {
             // Heads-up the user before we exit and the helper takes over. The notice is its
@@ -3292,6 +3295,43 @@ public sealed partial class MainForm : Form
         const int max = 600;
         if (s.Length <= max) return s;
         return s[..max] + "\n…";
+    }
+
+    // One-shot retry for an update found OUTSIDE the install window: without it, a 24-hourly
+    // poll could keep landing outside the window and defer the same update for days. Armed by
+    // AutoInstallDeferredByWindow to fire shortly after the window next opens.
+    private readonly System.Windows.Forms.Timer deferredUpdateTimer = new();
+    private bool deferredUpdateTimerWired;
+
+    /// <summary>The "only install updates within this time range" gate (Preferences). Applies to
+    /// AUTOMATIC installs only — the background poll and the startup check; a manual "Check for
+    /// updates now" is the user asking by hand and is never gated. When the window is closed,
+    /// logs, arms the retry for when it opens, and returns true (caller bails out).</summary>
+    private bool AutoInstallDeferredByWindow(string tag, string source)
+    {
+        var cfg = AppConfig.Load();
+        if (!cfg.UpdateWindowEnabled) return false;
+        var now = DateTime.Now.TimeOfDay;
+        if (UpdateWindow.IsWithin(now, cfg.UpdateWindowStartMinutes, cfg.UpdateWindowEndMinutes)) return false;
+
+        var wait = UpdateWindow.UntilNextStart(now, cfg.UpdateWindowStartMinutes) + TimeSpan.FromMinutes(1);
+        if (!deferredUpdateTimerWired)
+        {
+            deferredUpdateTimerWired = true;
+            deferredUpdateTimer.Tick += (_, _) =>
+            {
+                deferredUpdateTimer.Stop();
+                logFile.Event("updater: install window opened — re-running the deferred update check");
+                CheckForUpdatesInBackground();
+            };
+        }
+        deferredUpdateTimer.Stop();
+        deferredUpdateTimer.Interval = (int)Math.Clamp(wait.TotalMilliseconds, 60_000, int.MaxValue);
+        deferredUpdateTimer.Start();
+        logFile.Event($"updater: {source} found {tag}, but it's outside the install window "
+            + $"({UpdateWindow.FormatMinutes(cfg.UpdateWindowStartMinutes)}–{UpdateWindow.FormatMinutes(cfg.UpdateWindowEndMinutes)}) "
+            + $"— deferred; retrying in {wait.TotalMinutes:0} min when the window opens");
+        return true;
     }
 
     /// <summary>Apply (or stop) the background update-poll timer based on

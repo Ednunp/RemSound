@@ -291,6 +291,28 @@ internal sealed class PreferencesDialog : Form
         AutoSize = true,
     };
 
+    // "Only install updates within this time range" (2026-07-26 feature): automatic installs are
+    // deferred to a daily window — e.g. overnight — so an update never kills the sound while
+    // someone's mid-session. Ticking enables the two time lists (hours in 15-minute steps).
+    private readonly AccessibleCheckBox updateWindowBox = new()
+    {
+        Text = "Only install updates within this &time range",
+        AccessibleName = "Only install updates within this time range",
+        AutoSize = true,
+    };
+    private readonly ComboBox updateWindowStartBox = new()
+    {
+        DropDownStyle = ComboBoxStyle.DropDownList,
+        Width = 100,
+        AccessibleName = "Update window start time",
+    };
+    private readonly ComboBox updateWindowEndBox = new()
+    {
+        DropDownStyle = ComboBoxStyle.DropDownList,
+        Width = 100,
+        AccessibleName = "Update window end time",
+    };
+
     // After an update installs and RemSound restarts, opening the About box once lets the user
     // see what changed. Off by default (opt-in). 'h' mnemonic — 'w' is taken by "Write logs now".
     private readonly AccessibleCheckBox showWhatsNewAfterUpdateBox = new()
@@ -719,6 +741,36 @@ internal sealed class PreferencesDialog : Form
             cfg.SilentlyInstallUpdates = silentlyInstallUpdatesBox.Checked;
             try { cfg.Save(); } catch { /* harmless */ }
         };
+
+        // Update install window: 96 quarter-hour slots in each list ("00:00" … "23:45"). The lists
+        // only light up when the range is enabled; every change persists immediately like the
+        // neighbouring update options. End at-or-before start wraps past midnight (22:00–06:00).
+        for (var slot = 0; slot < UpdateWindow.SlotsPerDay; slot++)
+        {
+            var text = UpdateWindow.FormatMinutes(slot * UpdateWindow.SlotMinutes);
+            updateWindowStartBox.Items.Add(text);
+            updateWindowEndBox.Items.Add(text);
+        }
+        updateWindowBox.Checked = cfgForLoad.UpdateWindowEnabled;
+        updateWindowStartBox.SelectedIndex = Math.Clamp(cfgForLoad.UpdateWindowStartMinutes / UpdateWindow.SlotMinutes, 0, UpdateWindow.SlotsPerDay - 1);
+        updateWindowEndBox.SelectedIndex = Math.Clamp(cfgForLoad.UpdateWindowEndMinutes / UpdateWindow.SlotMinutes, 0, UpdateWindow.SlotsPerDay - 1);
+        void SyncUpdateWindowEnabled()
+        {
+            updateWindowStartBox.Enabled = updateWindowBox.Checked;
+            updateWindowEndBox.Enabled = updateWindowBox.Checked;
+        }
+        SyncUpdateWindowEnabled();
+        void SaveUpdateWindow()
+        {
+            var cfg = AppConfig.Load();
+            cfg.UpdateWindowEnabled = updateWindowBox.Checked;
+            cfg.UpdateWindowStartMinutes = Math.Max(0, updateWindowStartBox.SelectedIndex) * UpdateWindow.SlotMinutes;
+            cfg.UpdateWindowEndMinutes = Math.Max(0, updateWindowEndBox.SelectedIndex) * UpdateWindow.SlotMinutes;
+            try { cfg.Save(); } catch { /* harmless */ }
+        }
+        updateWindowBox.CheckedChanged += (_, _) => { SyncUpdateWindowEnabled(); SaveUpdateWindow(); };
+        updateWindowStartBox.SelectedIndexChanged += (_, _) => SaveUpdateWindow();
+        updateWindowEndBox.SelectedIndexChanged += (_, _) => SaveUpdateWindow();
         showWhatsNewAfterUpdateBox.Checked = cfgForLoad.ShowWhatsNewAfterUpdate;
         showWhatsNewAfterUpdateBox.CheckedChanged += (_, _) =>
         {
@@ -937,6 +989,23 @@ internal sealed class PreferencesDialog : Form
         freqRow.Controls.Add(updateFrequencyLabel);
         freqRow.Controls.Add(updateFrequencyBox);
 
+        // The install-window time range: start + end lists on one row, under the checkbox that
+        // enables them. Labels carry the mnemonics and focus their list.
+        var updateWindowRangeRow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Padding = new Padding(0, 4, 0, 0),
+        };
+        var updateWindowStartLabel = new MnemonicLabel { Text = "St&art time:", MnemonicTarget = updateWindowStartBox, AutoSize = true, Padding = new Padding(0, 6, 8, 0) };
+        var updateWindowEndLabel = new MnemonicLabel { Text = "En&d time:", MnemonicTarget = updateWindowEndBox, AutoSize = true, Padding = new Padding(12, 6, 8, 0) };
+        updateWindowRangeRow.Controls.Add(updateWindowStartLabel);
+        updateWindowRangeRow.Controls.Add(updateWindowStartBox);
+        updateWindowRangeRow.Controls.Add(updateWindowEndLabel);
+        updateWindowRangeRow.Controls.Add(updateWindowEndBox);
+
         // Group the cue label + list + the two action buttons into a single panel that
         // occupies one row in the outer layout. The action buttons sit side-by-side under
         // the list so they read as "buttons that act on the list above" without taking up
@@ -1035,7 +1104,7 @@ internal sealed class PreferencesDialog : Form
         tabs.TabPages.Add(MakeTab("Startup behaviour",
             startMinimisedBox, startWithUserBox, startWithProfileBox, startupListPanel));
         tabs.TabPages.Add(MakeTab("Update settings",
-            checkForUpdatesOnStartupBox, freqRow, checkForUpdatesNowButton, silentlyInstallUpdatesBox, showWhatsNewAfterUpdateBox));
+            checkForUpdatesOnStartupBox, freqRow, checkForUpdatesNowButton, silentlyInstallUpdatesBox, updateWindowBox, updateWindowRangeRow, showWhatsNewAfterUpdateBox));
         tabs.TabPages.Add(MakeTab("Logging",
             loggingBox, writeLogsNowButton,
             warnIfLogsExceedBox, logsSizeRow,

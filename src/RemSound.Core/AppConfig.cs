@@ -278,6 +278,19 @@ public sealed class AppConfig
     /// RemSound. Default false — the user gets a confirmation dialog before each install.</summary>
     public bool SilentlyInstallUpdates { get; set; }
 
+    /// <summary>If true, AUTOMATIC update installs (background poll + startup check) only happen
+    /// inside the daily local-time window below — so an update never kills someone's sound while
+    /// they're using the machine; it lands overnight instead. Manual "Check for updates now" is
+    /// not gated. Default false (house rule: persistence defaults off). See UpdateWindow (Core)
+    /// for the semantics (start inclusive, end exclusive, wraps past midnight).</summary>
+    public bool UpdateWindowEnabled { get; set; }
+
+    /// <summary>Window start, minutes-of-day local time, 15-minute granularity. Default 01:00.</summary>
+    public int UpdateWindowStartMinutes { get; set; } = 60;
+
+    /// <summary>Window end, minutes-of-day local time, 15-minute granularity. Default 06:00.</summary>
+    public int UpdateWindowEndMinutes { get; set; } = 360;
+
     /// <summary>If true (the default), RemSound runs an update check shortly after launch in
     /// addition to whatever <see cref="UpdateCheckFrequency"/> drives in the background. The
     /// startup check is what catches users who quit and re-open the app within the polling

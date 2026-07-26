@@ -116,6 +116,7 @@ internal static class SelfTest
         RunStep(results, "Service folder lockdown args (cross-user LPE hardening)", ServiceDirHardeningArgs);
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);
         RunStep(results, "Service startup volume (boot-once decision + settings round-trip)", ServiceStartupVolume);
+        RunStep(results, "Update install window (same-day, wraparound, retry timing)", UpdateInstallWindow);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");
@@ -2373,6 +2374,39 @@ internal static class SelfTest
         Check(n2[4] == 1 && n1[4] == 0, "the counter half must advance arithmetically (uniqueness by construction)");
 
         return "sealed + replay/stale/wrong-key/plaintext all rejected; skew tolerated; nonces counter-based";
+    }
+
+    /// <summary>The "only install updates within this time range" gate (2026-07-26 feature):
+    /// same-day windows, past-midnight wraparound, boundary semantics (start in, end out),
+    /// the empty-selection rule, the deferred-retry arithmetic, and the list text format.</summary>
+    private static string? UpdateInstallWindow()
+    {
+        static TimeSpan At(int h, int m) => new(h, m, 0);
+        const int t0100 = 60, t0600 = 360, t2200 = 1320;
+
+        // Same-day window 01:00–06:00.
+        Check(UpdateWindow.IsWithin(At(3, 0), t0100, t0600), "03:00 is inside 01:00-06:00");
+        Check(UpdateWindow.IsWithin(At(1, 0), t0100, t0600), "the start minute is INSIDE (inclusive)");
+        Check(!UpdateWindow.IsWithin(At(6, 0), t0100, t0600), "the end minute is OUTSIDE (exclusive)");
+        Check(!UpdateWindow.IsWithin(At(14, 30), t0100, t0600), "mid-afternoon is outside an overnight window");
+
+        // Wraparound 22:00–06:00 (end before start = spans midnight).
+        Check(UpdateWindow.IsWithin(At(23, 30), t2200, t0600), "23:30 is inside 22:00-06:00 (wraps midnight)");
+        Check(UpdateWindow.IsWithin(At(2, 0), t2200, t0600), "02:00 is inside 22:00-06:00 (the morning side)");
+        Check(!UpdateWindow.IsWithin(At(12, 0), t2200, t0600), "noon is outside 22:00-06:00");
+
+        // start == end → no restriction, never a silent 'updates can never install' trap.
+        Check(UpdateWindow.IsWithin(At(12, 0), t0100, t0100), "an empty range must mean unrestricted, not never");
+
+        // Deferred-retry arithmetic: at 14:30 the 01:00 window opens in 10.5 hours; at 00:30 in 30 min.
+        Check(UpdateWindow.UntilNextStart(At(14, 30), t0100) == TimeSpan.FromMinutes(630), "14:30 → 01:00 is 10.5 h away");
+        Check(UpdateWindow.UntilNextStart(At(0, 30), t0100) == TimeSpan.FromMinutes(30), "00:30 → 01:00 is 30 min away");
+
+        Check(UpdateWindow.FormatMinutes(0) == "00:00" && UpdateWindow.FormatMinutes(1425) == "23:45",
+            "slot text runs 00:00 through 23:45");
+        Check(UpdateWindow.SlotsPerDay == 96, "24 hours in 15-minute steps = 96 list entries");
+
+        return "same-day + wraparound exact; start in, end out; empty = unrestricted; retry timing right";
     }
 
     /// <summary>The service's startup-volume option (2026-07-26 feature): the boot-once decision
