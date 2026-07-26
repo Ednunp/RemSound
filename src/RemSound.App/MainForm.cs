@@ -5888,25 +5888,12 @@ public sealed class MainForm : Form
         // Carve-out: a peer we are actively RECEIVING audio from stays armed even if its heartbeat
         // reads Unreachable — that covers an asymmetric path where audio flows but the heartbeat
         // round-trip doesn't, so a working stream is never cut.
-        HashSet<string>? dead = null;
-        if (all.Length > 0 && heartbeatService is { } hb)
-        {
-            foreach (var ph in hb.GetAllPeerHealth())
-            {
-                if (ph.State == PeerHealthState.Unreachable
-                    && ph.AgeOfLastPong is { } age
-                    && age > AudioPruneUnreachableAfter
-                    && !receiver.IsAudioFlowingFrom(ph.AudioEndpoint.Address, TimeSpan.FromSeconds(3)))
-                {
-                    (dead ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase))
-                        .Add($"{ph.AudioEndpoint.Address}:{ph.AudioEndpoint.Port}");
-                }
-            }
-        }
-
-        var armed = dead is null
-            ? all
-            : all.Where(ep => !dead.Contains($"{ep.Address}:{ep.Port}")).ToArray();
+        // The prune itself is the shared Core rule (PeerArming) — same code the service arms with. The
+        // app's receiving-carve-out rides in as the keepAnyway predicate.
+        var armed = all.Length > 0 && heartbeatService is { } hb
+            ? PeerArming.ComputeArmedEndpoints(all, hb.GetAllPeerHealth(), AudioPruneUnreachableAfter,
+                keepAnyway: addr => receiver.IsAudioFlowingFrom(addr, TimeSpan.FromSeconds(3)))
+            : all;
 
         // There used to be a "never silence EVERY peer" safety net here that re-armed the whole
         // set when pruning would leave nobody. Removed 2026-06-12: when NO peer is reachable we
@@ -5916,7 +5903,7 @@ public sealed class MainForm : Form
         // after the only receiver was switched off hours earlier). The heartbeat still probes all
         // peers, so the moment one answers again it is re-armed and audio resumes on its own.
 
-        var signature = string.Join("|", armed.Select(ep => $"{ep.Address}:{ep.Port}").OrderBy(s => s, StringComparer.OrdinalIgnoreCase));
+        var signature = PeerArming.Signature(armed);
         if (signature == activeAudioReceiverSignature) return;
         activeAudioReceiverSignature = signature;
         sender.SetReceivers(armed);

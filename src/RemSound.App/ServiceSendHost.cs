@@ -417,19 +417,11 @@ public sealed class ServiceSendHost : IDisposable
         return ApplyProfile(profile);
     }
 
-    /// <summary>Pure, testable: which endpoints to actively stream to — the full set minus any peer the
-    /// heartbeat reports as continuously unreachable for longer than <paramref name="pruneAfter"/>. A peer
-    /// that's reachable, or still within the grace window, stays armed. Mirrors the app's RefreshAudioReceivers.</summary>
-    internal static IPEndPoint[] ComputeArmedEndpoints(IReadOnlyList<IPEndPoint> all, IReadOnlyList<PeerHealth> health, TimeSpan pruneAfter)
-    {
-        HashSet<string>? dead = null;
-        foreach (var ph in health)
-        {
-            if (ph.State == PeerHealthState.Unreachable && ph.AgeOfLastPong is { } age && age > pruneAfter)
-                (dead ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase)).Add($"{ph.AudioEndpoint.Address}:{ph.AudioEndpoint.Port}");
-        }
-        return dead is null ? all.ToArray() : all.Where(ep => !dead.Contains($"{ep.Address}:{ep.Port}")).ToArray();
-    }
+    /// <summary>Which endpoints to actively stream to. The logic lives in Core (PeerArming) — shared
+    /// with the app's RefreshAudioReceivers, which adds a receiving-carve-out predicate the send-only
+    /// service has no use for. Thin wrapper kept for the existing self-test and call site.</summary>
+    internal static IPEndPoint[] ComputeArmedEndpoints(IReadOnlyList<IPEndPoint> all, IReadOnlyList<PeerHealth> health, TimeSpan pruneAfter) =>
+        PeerArming.ComputeArmedEndpoints(all, health, pruneAfter);
 
     /// <summary>Re-arm the sender to only the reachable peers, using the heartbeat health. Cheap and
     /// idempotent — only touches the sender when the armed set actually changes. Called on the service's
@@ -440,7 +432,7 @@ public sealed class ServiceSendHost : IDisposable
         {
             if (!running || allEndpoints.Length == 0) return;
             var armed = ComputeArmedEndpoints(allEndpoints, presence.PeerHealthSnapshot(), PruneUnreachableAfter);
-            var sig = string.Join("|", armed.Select(ep => $"{ep.Address}:{ep.Port}").OrderBy(s => s, StringComparer.OrdinalIgnoreCase));
+            var sig = PeerArming.Signature(armed);
             if (sig == armedSignature) return;
             armedSignature = sig;
             sender.SetReceivers(armed);

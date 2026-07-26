@@ -2284,7 +2284,19 @@ internal static class SelfTest
 
         Check(ServiceSendHost.ComputeArmedEndpoints(all, new List<PeerHealth>(), prune).Length == 2, "with no heartbeat data yet, arm the full set");
 
-        return "reachable armed; long-unreachable dropped; grace-window kept; recovery re-arms (issues #8/#15)";
+        // The app's receiving carve-out, now shared in PeerArming: a peer that's long-unreachable by
+        // heartbeat but that we're actively RECEIVING audio from must STAY armed (asymmetric path —
+        // a working stream is never cut). A false predicate must not save it.
+        var keptByCarveOut = PeerArming.ComputeArmedEndpoints(all, bDeadLong, prune, keepAnyway: addr => addr.Equals(b.Address));
+        Check(keptByCarveOut.Length == 2, "an unreachable peer we're receiving audio from must stay armed (carve-out)");
+        var carveOutMiss = PeerArming.ComputeArmedEndpoints(all, bDeadLong, prune, keepAnyway: _ => false);
+        Check(carveOutMiss.Length == 1, "a false carve-out predicate must not rescue a dead peer");
+
+        // The shared signature: order-independent, so list-order churn never causes a pointless re-arm.
+        Check(PeerArming.Signature(new[] { b, a }) == PeerArming.Signature(new[] { a, b }),
+            "the armed-set signature must be order-independent");
+
+        return "reachable armed; long-unreachable dropped; grace kept; carve-out honoured; signature order-free";
     }
 
     /// <summary>Issue #23 boot self-heal decision core. Scenario: at the boot lock screen the machine's
