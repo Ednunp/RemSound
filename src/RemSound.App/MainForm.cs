@@ -8276,52 +8276,108 @@ public sealed partial class MainForm : Form
         }
     }
 
-    /// <summary>Derive the audio key + fingerprint from the current profile password (cached so
-    /// the slow derivation only runs when the password actually changes) and push them down to
-    /// the sender and receiver. No password → null key → no audio flows (encryption is
+    /// <summary>Derive the audio key + fingerprint from the current profile password and push them
+    /// to the sender and receiver. No/weak password → null key → no audio flows (encryption is
     /// mandatory). Called on password change, when audio is (re)configured, and on the streaming
-    /// gate. 2026-05-31.</summary>
+    /// gate. 2026-05-31.
+    ///
+    /// The 5.6 PBKDF2 raise (600k, run twice) costs up to ~1 s on old hardware, so the FIRST use of
+    /// a strong password this session is derived OFF the UI thread — otherwise a blind user gets a
+    /// full NVDA freeze on profile load / first connect (2026-07-27 review). The key is held null
+    /// until it lands (audio simply waits — mandatory encryption means it never streams keyless), a
+    /// generation guard drops a stale result if the password changed again meanwhile, and the fast
+    /// cases (unchanged / cached / empty / weak — no PBKDF2) still apply synchronously so nothing
+    /// races on the common path.</summary>
     private void RecomputeAudioCrypto()
     {
-        if (currentProfilePassword != lastDerivedPassword)
+        var pw = currentProfilePassword;
+        if (pw == lastDerivedPassword)
         {
-            // Key + fingerprint always together, through the one shared rule (same as the service).
-            (currentAudioKey, currentAudioFingerprint) = RemSoundCrypto.ForPlainPassword(currentProfilePassword);
-            lastDerivedPassword = currentProfilePassword;
-            // Since 5.6 that rule also refuses a WEAK password (key comes back null), so a profile
-            // that auto-connects at startup with an old guessable password must not just sit
-            // silently dead — say why, once, and point at the fix. The interactive tick path has
-            // its own guided flow (EnsureStreamingPassword); this catches every other route in.
-            if (!string.IsNullOrEmpty(currentProfilePassword) && currentAudioKey is null && !weakPasswordExplained)
+            PushAudioCrypto();   // no change — re-push the cached key/fp (or null)
+            return;
+        }
+        lastDerivedPassword = pw;
+        var gen = ++cryptoGeneration;
+        // The password genuinely changed — re-arm the one-shot weak-password explanation so a SECOND
+        // weak-password profile switched to in the same session is still explained (not just the first).
+        weakPasswordExplained = false;
+
+        // Fast path: null/empty/weak (resolves to (null,null) with no PBKDF2), or an already-cached
+        // strong password. Apply synchronously — no freeze possible. Also covers the pre-window
+        // case where the form has no handle yet (BeginInvoke would throw), so startup stays correct.
+        if (RemSoundCrypto.IsCached(pw) || !IsHandleCreated)
+        {
+            (currentAudioKey, currentAudioFingerprint) = RemSoundCrypto.ForPlainPassword(pw);
+            PushAudioCrypto();
+            ExplainWeakPasswordIfNeeded(pw);
+            return;
+        }
+
+        // Slow path: a strong password not yet derived this session. Hold the key null (audio waits)
+        // and do the PBKDF2 on a worker; apply on the UI thread when it lands, unless superseded.
+        currentAudioKey = null;
+        currentAudioFingerprint = null;
+        PushAudioCrypto();
+        logFile.Event("audio crypto: deriving key off-thread (strong password, first use this session)");
+        var pwLocal = pw;
+        Task.Run(() =>
+        {
+            RemSoundCrypto.Prewarm(pwLocal); // the ~1 s PBKDF2, off the UI thread
+            try
             {
-                weakPasswordExplained = true;
-                logFile.Event("audio crypto: profile password fails the 5.6 strength rule — no audio until it's changed");
-                var advice = PasswordStrength.Critique(currentProfilePassword) ?? "";
                 BeginInvoke(() =>
                 {
-                    var page = new TaskDialogPage
-                    {
-                        Caption = "Password needs strengthening",
-                        Heading = "No audio until this profile's password is stronger",
-                        Text = "From this version, RemSound refuses to stream on a password that's easy to guess. "
-                             + advice + " Change it via the File menu, “Change this profile's password” — on every machine that uses it.",
-                        Icon = TaskDialogIcon.Warning,
-                        Buttons = { TaskDialogButton.OK },
-                        DefaultButton = TaskDialogButton.OK,
-                        AllowCancel = true,
-                    };
-                    ForegroundDialog.Show(owner => TaskDialog.ShowDialog(owner, page));
+                    if (gen != cryptoGeneration) return; // a newer password change won; drop this result
+                    (currentAudioKey, currentAudioFingerprint) = RemSoundCrypto.ForPlainPassword(pwLocal); // now a cache hit
+                    PushAudioCrypto();
+                    logFile.Event("audio crypto: key ready");
                 });
             }
-        }
+            catch { /* form closed / no handle — nothing to apply to */ }
+        });
+    }
+
+    private void PushAudioCrypto()
+    {
         sender.AudioKey = currentAudioKey;
         sender.AudioFingerprint = currentAudioFingerprint;
         receiver.AudioKey = currentAudioKey;
         receiver.AudioFingerprint = currentAudioFingerprint;
     }
 
-    // One-shot flag for the weak-password explanation above — the dialog must not re-fire on every
-    // profile reapply within a session (the log line still records each derivation refusal).
+    /// <summary>Since 5.6 the derivation rule refuses a WEAK password (key comes back null), so a
+    /// profile that auto-connects at startup with an old guessable password must not just sit
+    /// silently dead — say why, once, and point at the fix. The interactive tick path has its own
+    /// guided flow (EnsureStreamingPassword); this catches every other route in.</summary>
+    private void ExplainWeakPasswordIfNeeded(string? pw)
+    {
+        if (string.IsNullOrEmpty(pw) || currentAudioKey is not null || weakPasswordExplained) return;
+        weakPasswordExplained = true;
+        logFile.Event("audio crypto: profile password fails the 5.6 strength rule — no audio until it's changed");
+        var advice = PasswordStrength.Critique(pw) ?? "";
+        BeginInvoke(() =>
+        {
+            var page = new TaskDialogPage
+            {
+                Caption = "Password needs strengthening",
+                Heading = "No audio until this profile's password is stronger",
+                Text = "From this version, RemSound refuses to stream on a password that's easy to guess. "
+                     + advice + " Change it via the File menu, “Change this profile's password” — on every machine that uses it.",
+                Icon = TaskDialogIcon.Warning,
+                Buttons = { TaskDialogButton.OK },
+                DefaultButton = TaskDialogButton.OK,
+                AllowCancel = true,
+            };
+            ForegroundDialog.Show(owner => TaskDialog.ShowDialog(owner, page));
+        });
+    }
+
+    // Bumped on every password change so a slow background derive that finishes AFTER a newer change
+    // knows to discard its now-stale result (see RecomputeAudioCrypto).
+    private int cryptoGeneration;
+    // One-shot flag for the weak-password explanation — the dialog must not re-fire on every profile
+    // reapply within a session (the log line still records each derivation refusal). Reset on a
+    // profile switch so a SECOND weak-password profile in one session is still explained.
     private bool weakPasswordExplained;
 
     /// <summary>The "you need a password before any audio can flow" gate. Called when the user

@@ -2474,7 +2474,21 @@ internal static class SelfTest
         var (goodKey, goodFp) = RemSoundCrypto.ForPlainPassword("kettle9tiger42moon");
         Check(goodKey is { Length: 32 } && goodFp is { Length: 8 }, "a strong password must derive the full key + fingerprint");
 
-        return "weak + common refused with concrete advice; derivation choke-point refuses weak on every path";
+        // Session cache (the NVDA-hang fix): a distinct strong password is a cache MISS until derived
+        // or prewarmed, then a HIT — so the ~1s PBKDF2 runs once per password per process and the
+        // UI-thread path can stay synchronous only when it's a hit. A second derive returns the SAME
+        // arrays (proof it wasn't recomputed). Empty/weak always count as "no work" (never block).
+        Check(RemSoundCrypto.IsCached("kettle9tiger42moon"), "a password just derived must read back as cached");
+        var again = RemSoundCrypto.ForPlainPassword("kettle9tiger42moon");
+        Check(ReferenceEquals(again.Key, goodKey), "a cached derive must return the same key instance, not recompute it");
+        var fresh = "prewarm7melon42anchor";
+        Check(!RemSoundCrypto.IsCached(fresh), "an unused strong password must read as a cache miss (would block the UI thread)");
+        RemSoundCrypto.Prewarm(fresh);
+        Check(RemSoundCrypto.IsCached(fresh), "Prewarm must derive off-thread so the later UI-thread lookup is an instant hit");
+        Check(RemSoundCrypto.IsCached("") && RemSoundCrypto.IsCached("Games"),
+            "empty and weak passwords must count as 'no work' (they never trigger a blocking derive)");
+
+        return "weak+common refused with advice; derivation refuses weak everywhere; results cached (no repeat PBKDF2)";
     }
 
     /// <summary>The relay address-proof (2026-07-27): an AddrCheck cookie arriving at the receiver

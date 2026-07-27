@@ -71,6 +71,14 @@ public static class RemSoundCrypto
     private static readonly byte[] ObfuscationKey =
         Encoding.UTF8.GetBytes("RemSound-profile-password-scramble-v1");
 
+    // Session cache of derived credentials, keyed by plaintext password. The 600k-iteration PBKDF2
+    // (run TWICE per derive, for key + fingerprint) costs up to ~1 s on old hardware; caching means
+    // a given password pays that ONCE per process, so a profile SWITCH back to a used password — or
+    // the service re-deriving on an audio-device hot-plug — is instant. The derived key already lives
+    // in process memory (currentAudioKey), so this doesn't widen exposure; it's cleared on exit like
+    // everything else. Bounded: a user has a handful of distinct passwords, not thousands.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (byte[] Key, byte[] Fingerprint)> derivedCache = new(StringComparer.Ordinal);
+
     /// <summary>The one rule for turning a PLAIN password into the audio credentials: null/empty →
     /// (null, null) → no audio flows (encryption is mandatory); since 5.6 a password that fails
     /// <see cref="PasswordStrength.Critique"/> ALSO yields (null, null) — enforced here, at the single
@@ -79,11 +87,34 @@ public static class RemSoundCrypto
     /// explains and walks the user to a stronger one). Otherwise the key AND the fingerprint, always
     /// together — the peer verifies the fingerprint before accepting a stream, so a key without its
     /// fingerprint gets the audio silently rejected at the far end (a divergence that already bit
-    /// the service once).</summary>
-    public static (byte[]? Key, byte[]? Fingerprint) ForPlainPassword(string? plainPassword) =>
-        string.IsNullOrEmpty(plainPassword) || PasswordStrength.Critique(plainPassword) is not null
-            ? (null, null)
-            : (DeriveKey(plainPassword), Fingerprint(plainPassword));
+    /// the service once). Result is cached per password (see <see cref="derivedCache"/>); the slow
+    /// PBKDF2 runs once per distinct password per process. Callers that must not stall the UI thread
+    /// should <see cref="Prewarm"/> off-thread first (the app does).</summary>
+    public static (byte[]? Key, byte[]? Fingerprint) ForPlainPassword(string? plainPassword)
+    {
+        if (string.IsNullOrEmpty(plainPassword) || PasswordStrength.Critique(plainPassword) is not null)
+            return (null, null);
+        var (k, f) = derivedCache.GetOrAdd(plainPassword, static pw => (DeriveKey(pw), Fingerprint(pw)));
+        return (k, f);
+    }
+
+    /// <summary>Derive-and-cache a password's credentials WITHOUT returning them — for calling on a
+    /// background thread so the subsequent <see cref="ForPlainPassword"/> on the UI thread is a cache
+    /// hit and never blocks on PBKDF2. Null/empty/weak passwords are a no-op (nothing to warm).</summary>
+    public static void Prewarm(string? plainPassword)
+    {
+        if (!string.IsNullOrEmpty(plainPassword) && PasswordStrength.Critique(plainPassword) is null)
+            derivedCache.GetOrAdd(plainPassword, static pw => (DeriveKey(pw), Fingerprint(pw)));
+    }
+
+    /// <summary>True when <paramref name="plainPassword"/>'s credentials are already cached, so
+    /// <see cref="ForPlainPassword"/> will return instantly without running PBKDF2. Lets the caller
+    /// decide whether it can derive on the UI thread (cached / weak / empty = fast) or must go
+    /// off-thread (a strong password's first use this session). Empty/weak count as "no work".</summary>
+    public static bool IsCached(string? plainPassword) =>
+        string.IsNullOrEmpty(plainPassword)
+        || PasswordStrength.Critique(plainPassword) is not null
+        || derivedCache.ContainsKey(plainPassword);
 
     /// <summary>Derive the 256-bit AES key for a password. Cache the result; never call per packet.</summary>
     public static byte[] DeriveKey(string? password) =>
