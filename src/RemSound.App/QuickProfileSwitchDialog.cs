@@ -22,12 +22,13 @@ internal sealed class QuickProfileSwitchDialog
         var (dialog, list, chosenPath) = Build(profiles);
         using (dialog)
         {
-            dialog.Shown += (_, _) =>
-            {
-                BringToForeground(dialog);
-                list.Focus();
-            };
-            return dialog.ShowDialog() == DialogResult.OK ? chosenPath() : null;
+            dialog.Shown += (_, _) => list.Focus();
+            // Via ForegroundDialog: this is opened by a GLOBAL hotkey, so RemSound is usually
+            // minimised in the tray when it fires — the old ad-hoc SetForegroundWindow only flashed
+            // the taskbar there (Windows blocks foreground from a background process), leaving a blind
+            // user Alt-Tabbing for it. ForegroundDialog's 1×1-owner + foreground-lock dance actually
+            // surfaces it with focus wherever RemSound is sitting (Ed, 2026-07-27 dialog-focus sweep).
+            return ForegroundDialog.Show(owner => dialog.ShowDialog(owner)) == DialogResult.OK ? chosenPath() : null;
         }
     }
 
@@ -142,20 +143,4 @@ internal sealed class QuickProfileSwitchDialog
 
         return (dialog, list, () => chosenPath);
     }
-
-    private static void BringToForeground(Form form)
-    {
-        try
-        {
-            form.Activate();
-            // The hotkey press is recent user input, so the foreground lock lets us call this
-            // (same handshake the tray "restore" uses).
-            SetForegroundWindow(form.Handle);
-        }
-        catch { /* foreground-lock race — best effort, the window is still TopMost */ }
-    }
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetForegroundWindow(IntPtr hWnd);
 }

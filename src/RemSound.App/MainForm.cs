@@ -9911,13 +9911,16 @@ public sealed partial class MainForm : Form
             // hook (false-NEGATIVE — user changes something via an unhooked path, no prompt
             // on close) is acceptable; the previous false-POSITIVE behaviour was nagging.
             {
-                var result = MessageBox.Show(this,
+                // Via ForegroundDialog: OnFormClosing fires from tray → Exit (RemSound minimised) and
+                // OS shutdown, so a plain MessageBox(this) would open behind everything and a blind
+                // user couldn't reach it to answer (Ed, 2026-07-27 dialog-focus sweep).
+                var result = ForegroundDialog.Show(owner => MessageBox.Show(owner,
                     "You have unsaved changes to your profile. Save them before exiting?\n\n" +
                     "Yes — save and exit.\nNo — exit without saving.\nCancel — keep RemSound open.",
                     "RemSound — unsaved changes",
                     MessageBoxButtons.YesNoCancel,
                     MessageBoxIcon.Question,
-                    MessageBoxDefaultButton.Button3);
+                    MessageBoxDefaultButton.Button3));
 
                 if (result == DialogResult.Cancel)
                 {
