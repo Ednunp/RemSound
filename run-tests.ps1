@@ -93,6 +93,40 @@ if ($packet -match 'DefaultPort\s*=\s*(\d+)') { if ($Matches[1] -ne '47830') { F
 if ($relay -notmatch '47830') { Fail "relay no longer references port 47830"; $wireOk = $false }
 if ($wireOk) { Pass "relay magic / version / port still match the client header - no server change needed" }
 
+# Relay logic unit tests (server\test_relay.py). The relay's address-proof, per-IP cap, NAT-rebind
+# reset and forged-BYE rejection are pure Python guarding an internet-facing attack surface, and the
+# relay auto-updates every user - a regression there would sail past the C# gate. Run them here so
+# a server change can't ship un-tested. Needs a Python interpreter; if none is found we SKIP loudly
+# rather than fail (the C# gate doesn't depend on Python being installed on the build box).
+Write-Host "`nRelay logic tests (server\test_relay.py):" -ForegroundColor Cyan
+$py = $null
+foreach ($cand in @('py', 'python', 'python3')) {
+    $cmd = Get-Command $cand -ErrorAction SilentlyContinue
+    if ($cmd) { $py = $cmd.Source; break }
+}
+if (-not $py) {
+    Write-Host "  [SKIP] no Python interpreter found (py/python/python3) - relay logic tests did not run" -ForegroundColor Yellow
+    Write-Host "  WARNING: the relay's address-proof / cap / eviction logic is NOT verified on this machine." -ForegroundColor Yellow
+}
+else {
+    # Start-Process (not the call operator) so unittest's stderr can't trip $ErrorActionPreference=Stop,
+    # and so it runs FROM server\ where the test's relative import of remsound-relay.py resolves.
+    $serverDir = Join-Path $repo 'server'
+    $rtOut = Join-Path $env:TEMP ("rs-relay-" + [guid]::NewGuid().ToString('N') + ".txt")
+    $rtErr = Join-Path $env:TEMP ("rs-relay-" + [guid]::NewGuid().ToString('N') + ".err.txt")
+    $rp = Start-Process -FilePath $py -ArgumentList @('-m', 'unittest', 'test_relay') -WorkingDirectory $serverDir `
+        -Wait -NoNewWindow -PassThru -RedirectStandardOutput $rtOut -RedirectStandardError $rtErr
+    $rtText = ((Get-Content -LiteralPath $rtOut -Raw -ErrorAction SilentlyContinue) + "`n" + (Get-Content -LiteralPath $rtErr -Raw -ErrorAction SilentlyContinue))
+    Remove-Item $rtOut, $rtErr -Force -ErrorAction SilentlyContinue
+    if ($rp.ExitCode -eq 0) {
+        $ran = if ($rtText -match 'Ran (\d+) test') { $Matches[1] } else { '?' }
+        Pass "relay logic tests passed ($ran tests: addr-proof, enforce/watch, IP cap, rebind, forged-BYE, header gate)"
+    }
+    else {
+        Fail "relay logic tests FAILED:`n$rtText"
+    }
+}
+
 # ---- 4. CLI SURFACE + IN-APP SELF-TEST (these launch the app, which consolidates sounds away;
 #         that's why the package checks ran first) ----
 function Invoke-RsCli([string[]]$cliArgs) {

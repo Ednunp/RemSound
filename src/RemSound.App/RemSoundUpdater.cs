@@ -217,27 +217,19 @@ internal sealed class RemSoundUpdater
                 await src.CopyToAsync(dst, token).ConfigureAwait(false);
             }
 
-            // Signature enforcement (2026-07-27): the zip must carry a valid signature by the
-            // embedded release key, or it is NOT installed — this is what stops a compromised
-            // release stream (e.g. a hijacked GitHub account) from silently shipping code to
-            // every user. Missing signature = refused too: every genuine release from 5.6 on is
-            // signed by build-release.ps1, so "no .sig asset" is itself a red flag, not a legacy
-            // case (older releases are BELOW this version and the updater never downgrades).
-            if (string.IsNullOrEmpty(info.SignatureUrl))
-            {
-                Log?.Invoke("updater: REFUSED — release has no signature file; a genuine RemSound release always ships one. Install left untouched.");
-                TryDeleteDirectory(stageRoot);
-                return false;
-            }
-            var signatureBase64 = await http.GetStringAsync(info.SignatureUrl, token).ConfigureAwait(false);
+            // Signature enforcement (2026-07-27) — the release must carry a valid signature by the
+            // embedded key or it is NOT installed. The decision is a pure gate (VerifyStagedRelease)
+            // so a test can pin the control flow — the thing ReleaseSigning's crypto test can't see —
+            // independently of the HTTP/Process machinery around it.
+            var signatureBase64 = string.IsNullOrEmpty(info.SignatureUrl)
+                ? null
+                : await http.GetStringAsync(info.SignatureUrl, token).ConfigureAwait(false);
             var zipBytes = await File.ReadAllBytesAsync(zipPath, token).ConfigureAwait(false);
-            if (!UpdateSignature.Verify(zipBytes, signatureBase64))
+            if (!VerifyStagedRelease(zipBytes, info.SignatureUrl, signatureBase64, Log))
             {
-                Log?.Invoke("updater: REFUSED — the release signature does not verify (tampered download or not signed by the RemSound release key). Install left untouched.");
-                TryDeleteDirectory(stageRoot);
+                TryDeleteDirectory(stageRoot);   // refused → leave the install untouched
                 return false;
             }
-            Log?.Invoke("updater: release signature verified");
 
             Log?.Invoke($"updater: extracting to {appDir}");
             System.IO.Compression.ZipFile.ExtractToDirectory(zipPath, appDir, overwriteFiles: true);
@@ -289,6 +281,30 @@ internal sealed class RemSoundUpdater
             Log?.Invoke($"updater: install failed: {ex.GetType().Name}: {ex.Message}");
             return false;
         }
+    }
+
+    /// <summary>The pure signature gate: may this downloaded release be installed? False (refuse,
+    /// install left untouched) when there is no signature asset, or the signature doesn't verify
+    /// against the embedded release key — the two branches that stop a hijacked release stream from
+    /// shipping code to every user. Extracted from <see cref="DownloadAndStageInstallAsync"/> so the
+    /// control flow is unit-testable apart from the HTTP/extract/Process machinery (the crypto alone
+    /// is covered elsewhere; this pins that the updater actually REFUSES). A missing signature is
+    /// refused, not tolerated: every genuine release from 5.6 on is signed, and the updater never
+    /// downgrades, so "no .sig" is a red flag, not a legacy case.</summary>
+    internal static bool VerifyStagedRelease(byte[] zipBytes, string? signatureUrl, string? signatureBase64, Action<string>? log)
+    {
+        if (string.IsNullOrEmpty(signatureUrl) || string.IsNullOrEmpty(signatureBase64))
+        {
+            log?.Invoke("updater: REFUSED — release has no signature file; a genuine RemSound release always ships one. Install left untouched.");
+            return false;
+        }
+        if (!UpdateSignature.Verify(zipBytes, signatureBase64))
+        {
+            log?.Invoke("updater: REFUSED — the release signature does not verify (tampered download or not signed by the RemSound release key). Install left untouched.");
+            return false;
+        }
+        log?.Invoke("updater: release signature verified");
+        return true;
     }
 
     /// <summary>If the zip extracted to a single subfolder (typical when GitHub zips a tag),

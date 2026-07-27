@@ -129,6 +129,8 @@ internal static class SelfTest
         RunStep(results, "Service startup volume (boot-once decision + settings round-trip)", ServiceStartupVolume);
         RunStep(results, "Update install window (same-day, wraparound, retry timing)", UpdateInstallWindow);
         RunStep(results, "Release signing (verify, tamper, key-embed match)", ReleaseSigning);
+        RunStep(results, "Updater refuses an unsigned or badly-signed release (enforcement flow)", UpdaterRefusesUnsignedRelease);
+        RunStep(results, "Streaming password strengthening (existing weak password forced up)", StreamingPasswordStrengthening);
         RunStep(results, "Password strength rules (gate + derivation refusal)", PasswordRules);
         RunStep(results, "Relay address-proof echo (AddrCheck round-trip)", RelayAddrCheckEcho);
 
@@ -2453,6 +2455,76 @@ internal static class SelfTest
         Check(UpdateSignature.Verify(data, realSig),
             "the on-disk private key MUST match the embedded public key — a mismatch ships a release every updater refuses");
         return "round-trip + tamper + wrong-key + garbage all correct; on-disk private key matches the embedded public key";
+    }
+
+    /// <summary>The updater's signature ENFORCEMENT control flow (2026-07-27) — the piece
+    /// ReleaseSigning's crypto test can't see: that the updater actually REFUSES a release with no
+    /// signature and one whose signature doesn't verify, and only proceeds on a genuine one. Guards
+    /// the hijacked-release-stream threat the signing was built for.</summary>
+    private static string? UpdaterRefusesUnsignedRelease()
+    {
+        var zip = new byte[8192];
+        new Random(99).NextBytes(zip);
+
+        // No signature asset at all → refused (a genuine 5.6+ release always ships one).
+        Check(!RemSoundUpdater.VerifyStagedRelease(zip, signatureUrl: null, signatureBase64: null, log: null),
+            "a release with NO signature asset must be refused");
+        Check(!RemSoundUpdater.VerifyStagedRelease(zip, signatureUrl: "https://x/RemSound-v9.9.zip.sig", signatureBase64: null, log: null),
+            "a signature URL that fetched nothing must be refused");
+
+        // A signature by a DIFFERENT key (an attacker's, or a tampered download) → refused.
+        using (var attacker = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256))
+        {
+            var forged = UpdateSignature.SignWithKey(zip, attacker.ExportECPrivateKeyPem());
+            Check(!RemSoundUpdater.VerifyStagedRelease(zip, "https://x/z.sig", forged, null),
+                "a release signed by a NON-release key must be refused (the hijack case)");
+        }
+        Check(!RemSoundUpdater.VerifyStagedRelease(zip, "https://x/z.sig", "not-valid-base64", null),
+            "a garbage signature must be refused, not throw");
+
+        // A genuine signature by the embedded release key → accepted. Only producible with the
+        // on-disk private key (Ed's box / this session); elsewhere the accept branch is noted skipped.
+        var realKeyPath = Environment.GetEnvironmentVariable("REMSOUND_SIGNING_KEY") ?? @"D:\Dropbox\proj\rsound key\remsound-signing-key.pem";
+        if (!File.Exists(realKeyPath))
+            return "no-sig + wrong-key + garbage all refused (genuine-accept branch needs the publisher key — noted)";
+        var good = UpdateSignature.SignWithKey(zip, File.ReadAllText(realKeyPath));
+        Check(RemSoundUpdater.VerifyStagedRelease(zip, "https://x/RemSound-v9.9.zip.sig", good, null),
+            "a release genuinely signed by the release key must be accepted");
+        // And the SAME good signature over TAMPERED bytes must be refused (integrity, end to end).
+        var tamperedZip = (byte[])zip.Clone();
+        tamperedZip[0] ^= 0xFF;
+        Check(!RemSoundUpdater.VerifyStagedRelease(tamperedZip, "https://x/z.sig", good, null),
+            "a valid signature over DIFFERENT bytes must be refused (download tamper)");
+        return "no-sig + wrong-key + garbage + tamper all refused; a genuine release accepted";
+    }
+
+    /// <summary>The streaming password-strengthening walk-through (2026-07-27): an EXISTING weak
+    /// password must be forced up before audio flows — the load-bearing bit is that the streaming
+    /// prompt runs with requireStrong, which DISABLES the "unchanged password is exempt" rule, so
+    /// re-entering the same weak password is refused. Pins the dialog decision the pure Critique
+    /// test can't see.</summary>
+    private static string? StreamingPasswordStrengthening()
+    {
+        // Streaming mode (requireStrong: true) — the exemption is DISABLED, so re-entering the same
+        // weak password is refused and only a strong replacement is accepted. This is the bit that,
+        // if it regressed to the casual rule, would let "Games" keep streaming and defeat the whole
+        // 5.6 password raise.
+        Check(ProfilePasswordDialog.RejectionAdviceFor("Games", current: "Games", requireStrong: true) is not null,
+            "streaming mode must REFUSE re-entering the same weak password (no unchanged-exemption)");
+        Check(ProfilePasswordDialog.RejectionAdviceFor("kettle9tiger42moon", current: "Games", requireStrong: true) is null,
+            "a strong replacement must be accepted in streaming mode");
+
+        // Casual mode (requireStrong: false) — an UNCHANGED existing password is grandfathered (a
+        // visit that doesn't touch it must not trap the user behind the new rule)...
+        Check(ProfilePasswordDialog.RejectionAdviceFor("Games", current: "Games", requireStrong: false) is null,
+            "casual mode must let an UNCHANGED existing password through");
+        // ...but a NEW weak password is still refused, and trailing whitespace doesn't fool the
+        // unchanged comparison (both sides trimmed — the App-review inconsistency is gone).
+        Check(ProfilePasswordDialog.RejectionAdviceFor("Games", current: "kettle9tiger42moon", requireStrong: false) is not null,
+            "casual mode must still block a NEW weak password");
+        Check(ProfilePasswordDialog.RejectionAdviceFor("  Games  ", current: "Games", requireStrong: false) is null,
+            "the unchanged-exemption must compare trimmed (whitespace-only edit is still 'unchanged')");
+        return "requireStrong refuses an unchanged weak password; casual grandfathers unchanged but blocks new-weak; trim-safe";
     }
 
     /// <summary>The 5.6 password rules: the strength critique (what the dialogs enforce and

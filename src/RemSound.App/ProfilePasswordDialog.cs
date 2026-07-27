@@ -13,6 +13,21 @@ namespace RemSound.App;
 /// </summary>
 internal static class ProfilePasswordDialog
 {
+    /// <summary>The pure "should this password entry be rejected, and why" decision, shared by both
+    /// password dialogs and unit-testable without any UI (2026-07-27). Returns the plain-English
+    /// advice to show, or null to accept. Rules: an empty entry is not judged here (the
+    /// requireNonEmpty gate owns that); a CHANGED entry is always judged; an UNCHANGED entry is
+    /// exempt UNLESS <paramref name="requireStrong"/> — the streaming gate's mode, where the whole
+    /// point is that the current password already failed the rule, so re-entering it must be
+    /// refused. Both sides are compared trimmed (fixes the App-review trim inconsistency).</summary>
+    internal static string? RejectionAdviceFor(string entered, string current, bool requireStrong)
+    {
+        entered = entered.Trim();
+        if (entered.Length == 0) return null;
+        if (!requireStrong && string.Equals(entered, current.Trim(), StringComparison.Ordinal)) return null;
+        return RemSound.Core.PasswordStrength.Critique(entered);
+    }
+
     public static string? Show(string profileTitle, string currentPassword, bool requireNonEmpty = false, bool requireStrong = false)
     {
         var (dialog, textBox) = Build(profileTitle, currentPassword, requireNonEmpty, requireStrong);
@@ -92,15 +107,9 @@ internal static class ProfilePasswordDialog
                 textBox.SelectAll();
                 return;
             }
-            // Strength gate (2026-07-27, with the derivation-cost raise). Normally NEW or CHANGED
-            // passwords only — re-accepting the existing password unchanged passes, so an old weak
-            // password never traps the user inside a casual visit to this dialog. requireStrong is
-            // the STREAMING gate's mode: there the whole point is that the current password failed
-            // the rule, so the unchanged exemption is off and a stronger one must be entered before
-            // audio can flow (Ed, 2026-07-27). The critique text says exactly what to do instead.
-            if (entered.Length > 0
-                && (requireStrong || !string.Equals(entered, currentPassword.Trim(), StringComparison.Ordinal))
-                && RemSound.Core.PasswordStrength.Critique(entered) is { } advice)
+            // Strength gate (2026-07-27) — the decision lives in the pure RejectionAdviceFor so a
+            // test can pin it without a modal dialog (and both password dialogs share one rule).
+            if (RejectionAdviceFor(entered, currentPassword, requireStrong) is { } advice)
             {
                 var page = new TaskDialogPage
                 {

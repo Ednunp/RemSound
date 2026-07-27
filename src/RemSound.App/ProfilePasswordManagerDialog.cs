@@ -86,10 +86,9 @@ internal static class ProfilePasswordManagerDialog
         {
             foreach (var (title, original, box) in rows)
             {
-                var entered = box.Text.Trim();
-                if (entered.Length > 0
-                    && !string.Equals(entered, original, StringComparison.Ordinal)
-                    && PasswordStrength.Critique(entered) is { } advice)
+                // Same shared decision as the single-password dialog (casual mode: unchanged is
+                // exempt, changed-and-weak is refused) — one rule at every door, compared trimmed.
+                if (ProfilePasswordDialog.RejectionAdviceFor(box.Text, original, requireStrong: false) is { } advice)
                 {
                     var page = new TaskDialogPage
                     {
