@@ -102,7 +102,11 @@ Write-Host "`nRelay logic tests (server\test_relay.py):" -ForegroundColor Cyan
 $py = $null
 foreach ($cand in @('py', 'python', 'python3')) {
     $cmd = Get-Command $cand -ErrorAction SilentlyContinue
-    if ($cmd) { $py = $cmd.Source; break }
+    # Skip the Windows Store execution-alias stubs (…\Microsoft\WindowsApps\py.exe|python.exe) —
+    # they don't run Python, they print "Python was not found" and exit non-zero, which would fail
+    # the relay-test step instead of running it. The real launcher (C:\Windows\py.exe) and a real
+    # install (…\Programs\Python\…) are never under WindowsApps.
+    if ($cmd -and $cmd.Source -notmatch 'WindowsApps') { $py = $cmd.Source; break }
 }
 if (-not $py) {
     Write-Host "  [SKIP] no Python interpreter found (py/python/python3) - relay logic tests did not run" -ForegroundColor Yellow
