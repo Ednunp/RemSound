@@ -1666,6 +1666,34 @@ public sealed partial class MainForm : Form
         MaybeWarnAboutRealtekAsio();
         if (IsDisposed) return;
         MaybeWarnMicBlockedOnStartup();
+        if (IsDisposed) return;
+        MaybeWarnWeakPassword();
+    }
+
+    /// <summary>Startup warning for a profile whose password is too weak to stream under the 5.6 rule.
+    /// Runs from the SETTLED post-launch notice sequence — after the window is fully shown and
+    /// activated, one dialog at a time — NOT from the mid-connect crypto path where an earlier version
+    /// fired it and left a blind user trapped behind a dialog NVDA couldn't reach (Ed, 2026-07-27).
+    /// From here <see cref="ForegroundDialog"/> pulls it to the front (even from the tray) with clean
+    /// focus, exactly like the mic-blocked and Realtek warnings that already work with NVDA. Only fires
+    /// when the profile is actually set up to stream (send or receive on) — otherwise there's no audio
+    /// to block and the guided prompt on the first streaming tick is enough. The status line carries a
+    /// standing reminder after this is dismissed.</summary>
+    private void MaybeWarnWeakPassword()
+    {
+        if (IsDisposed || CuePlayer.GloballyMuted) return; // never on a --silent/automated launch
+        if (!WeakPasswordBlocksAudio(currentProfilePassword, currentAudioKey is not null)) return;
+        if (!IsSendEnabled && !IsReceiveEnabled) return;   // not trying to stream → nothing blocked yet
+        var advice = PasswordStrength.Critique(currentProfilePassword) ?? "";
+        ForegroundDialog.Show(owner => MessageBox.Show(owner,
+            "The password on this profile — the one that protects your audio — is too easy to guess, so "
+                + "from this version RemSound won't stream with it. Until it's changed, the people you "
+                + "connect to will hear nothing.\n\n"
+                + advice + "\n\n"
+                + "To fix it: open the File menu and choose “Change this profile's password”, then set "
+                + "the SAME new password on every machine you connect with.",
+            "RemSound — password too weak to stream",
+            MessageBoxButtons.OK, MessageBoxIcon.Warning));
     }
 
     /// <summary>Startup log-folder housekeeping driven by the Logging-tab preferences. Both steps are
