@@ -1684,15 +1684,13 @@ public sealed partial class MainForm : Form
         if (IsDisposed || CuePlayer.GloballyMuted) return; // never on a --silent/automated launch
         if (!WeakPasswordBlocksAudio(currentProfilePassword, currentAudioKey is not null)) return;
         if (!IsSendEnabled && !IsReceiveEnabled) return;   // not trying to stream → nothing blocked yet
-        var advice = PasswordStrength.Critique(currentProfilePassword) ?? "";
         ForegroundDialog.Show(owner => MessageBox.Show(owner,
-            "The password on this profile — the one that protects your audio — is too easy to guess, so "
-                + "from this version RemSound won't stream with it. Until it's changed, the people you "
-                + "connect to will hear nothing.\n\n"
-                + advice + "\n\n"
-                + "To fix it: open the File menu and choose “Change this profile's password”, then set "
-                + "the SAME new password on every machine you connect with.",
-            "RemSound — password too weak to stream",
+            "RemSound has increased its security level, so this profile's password must be strengthened "
+                + "to meet the new password rules. Until it is, no audio will pass.\n\n"
+                + "Use at least 8 characters — three unrelated words with a number, like kettle9tiger42moon, works well.\n\n"
+                + "To change it: open the File menu and choose “Change this profile's password”. Use the "
+                + "same new password on every machine you connect with.",
+            "RemSound — password needs strengthening",
             MessageBoxButtons.OK, MessageBoxIcon.Warning));
     }
 
@@ -8429,9 +8427,10 @@ public sealed partial class MainForm : Form
             // it — a bare dialog would read as a bug to someone whose password worked yesterday.
             var page = new TaskDialogPage
             {
-                Caption = "Password needs strengthening",
-                Heading = "Your profile password is too easy to guess",
-                Text = $"From this version, audio won't flow until the password is stronger. {weakAdvice}",
+                Caption = "RemSound — password needs strengthening",
+                Heading = "Your password must be strengthened",
+                Text = "RemSound has increased its security level, so this profile's password must be "
+                     + $"strengthened before audio can flow. {weakAdvice}",
                 Icon = TaskDialogIcon.Warning,
                 Buttons = { TaskDialogButton.OK },
                 DefaultButton = TaskDialogButton.OK,

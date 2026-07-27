@@ -28,20 +28,14 @@ public static class PasswordStrength
     public static string? Critique(string password)
     {
         if (string.IsNullOrEmpty(password)) return null;
+        // Kept short on purpose (Ed, 2026-07-27): one line — the rule and a concrete example to copy
+        // the shape of. The surrounding dialogs add the "why" and the "how to change it".
         if (password.Length < MinLength)
-        {
-            return $"This password is too short to protect your audio — anyone who records your stream can try millions of guesses against it. "
-                 + $"Use at least {MinLength} characters; longer is stronger. Three unrelated words with a number — like kettle9tiger42moon — "
-                 + "is easy to type and remember, and very hard to guess. Remember: every machine you connect with must be given the same new password.";
-        }
+            return $"Use at least {MinLength} characters — three unrelated words with a number, like kettle9tiger42moon, works well.";
         foreach (var common in CommonPasswords)
         {
             if (string.Equals(password, common, StringComparison.OrdinalIgnoreCase))
-            {
-                return "That password is one of the most commonly guessed passwords in the world, so it offers almost no protection. "
-                     + "Pick something personal and longer — three unrelated words with a number, like kettle9tiger42moon, works well. "
-                     + "Remember: every machine you connect with must be given the same new password.";
-            }
+                return $"That's one of the most common passwords in the world. Use at least {MinLength} characters — three unrelated words with a number, like kettle9tiger42moon, works well.";
         }
         return null;
     }
