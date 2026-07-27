@@ -115,13 +115,18 @@ internal sealed class RemSoundUpdater
                 Log?.Invoke($"updater: latest release has no asset named '{expectedAsset}'");
                 return new UpdateCheckFailed(FailureKind.HttpError, $"The latest release page is missing the expected file '{expectedAsset}'.");
             }
+            // The detached signature over the zip (2026-07-27 release signing — see UpdateSignature).
+            // Recorded here, ENFORCED at install time: a release without a valid signature is refused.
+            var sigAsset = release.Assets?.FirstOrDefault(a =>
+                string.Equals(a.Name, expectedAsset + UpdateSignature.SignatureAssetSuffix, StringComparison.OrdinalIgnoreCase));
 
             return new UpdateAvailable(new UpdateInfo(
                 Tag: release.TagName,
                 Version: latest,
                 DownloadUrl: asset.BrowserDownloadUrl,
                 ReleaseNotes: release.Body ?? "",
-                ReleaseUrl: release.HtmlUrl ?? ""));
+                ReleaseUrl: release.HtmlUrl ?? "",
+                SignatureUrl: sigAsset?.BrowserDownloadUrl));
         }
         catch (Exception ex)
         {
@@ -211,6 +216,28 @@ internal sealed class RemSoundUpdater
             {
                 await src.CopyToAsync(dst, token).ConfigureAwait(false);
             }
+
+            // Signature enforcement (2026-07-27): the zip must carry a valid signature by the
+            // embedded release key, or it is NOT installed — this is what stops a compromised
+            // release stream (e.g. a hijacked GitHub account) from silently shipping code to
+            // every user. Missing signature = refused too: every genuine release from 5.6 on is
+            // signed by build-release.ps1, so "no .sig asset" is itself a red flag, not a legacy
+            // case (older releases are BELOW this version and the updater never downgrades).
+            if (string.IsNullOrEmpty(info.SignatureUrl))
+            {
+                Log?.Invoke("updater: REFUSED — release has no signature file; a genuine RemSound release always ships one. Install left untouched.");
+                TryDeleteDirectory(stageRoot);
+                return false;
+            }
+            var signatureBase64 = await http.GetStringAsync(info.SignatureUrl, token).ConfigureAwait(false);
+            var zipBytes = await File.ReadAllBytesAsync(zipPath, token).ConfigureAwait(false);
+            if (!UpdateSignature.Verify(zipBytes, signatureBase64))
+            {
+                Log?.Invoke("updater: REFUSED — the release signature does not verify (tampered download or not signed by the RemSound release key). Install left untouched.");
+                TryDeleteDirectory(stageRoot);
+                return false;
+            }
+            Log?.Invoke("updater: release signature verified");
 
             Log?.Invoke($"updater: extracting to {appDir}");
             System.IO.Compression.ZipFile.ExtractToDirectory(zipPath, appDir, overwriteFiles: true);
@@ -388,7 +415,8 @@ internal sealed record UpdateInfo(
     Version Version,
     string DownloadUrl,
     string ReleaseNotes,
-    string ReleaseUrl);
+    string ReleaseUrl,
+    string? SignatureUrl = null);
 
 /// <summary>Discriminated result of an update check. Replaces the v3.1.x-and-earlier
 /// "UpdateInfo?" return type, which conflated "no newer version available" with "couldn't

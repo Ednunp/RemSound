@@ -204,6 +204,7 @@ if ($bad.Count -gt 0) {
 # 4. Zip it. Keep dist/ to a single artefact — drop any prior versioned zip.
 New-Item -ItemType Directory -Path $distDir -Force | Out-Null
 Get-ChildItem -Path $distDir -Filter 'RemSound-v*.zip' -ErrorAction SilentlyContinue | Remove-Item -Force
+Get-ChildItem -Path $distDir -Filter 'RemSound-v*.zip.sig' -ErrorAction SilentlyContinue | Remove-Item -Force
 Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zipPath -CompressionLevel Optimal -Force
 
 # 5. SAFETY CHECK again, on the finished zip itself — belt and braces.
@@ -225,10 +226,23 @@ if ($leaked.Count -gt 0) {
 }
 
 Remove-Item $staging -Recurse -Force
+
+# 6. SIGN the zip (2026-07-27). The updater REFUSES any release without a valid signature, so an
+#    unsigned zip would be rejected by every 5.6+ install - failing the pipeline here is the kind
+#    failure. --sign-update signs with the private key (outside the repo) and self-checks against
+#    the public key embedded in this very build, so a key/embed mismatch also stops the release.
+$sigPath = "$zipPath.sig"
+& (Join-Path $repo 'publish\RemSound.exe') --sign-update $zipPath | Write-Host
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $sigPath)) {
+    Write-Host "RELEASE ABORTED - could not sign the zip (see message above). Nothing published." -ForegroundColor Red
+    exit 1
+}
+Write-Host "Signed: $sigPath" -ForegroundColor Green
+
 $size = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
 Write-Host ""
 Write-Host "OK - clean release zip verified: $zipPath ($size MB, $entryCount entries)" -ForegroundColor Green
 Write-Host "     No logs / profiles / recordings / config present." -ForegroundColor Green
 Write-Host ""
-Write-Host "Next:" -ForegroundColor Cyan
-Write-Host "  gh release create $Tag `"$zipPath`" --title `"RemSound $Tag`" --notes-file RELEASE_NOTES.md"
+Write-Host "Next (the .sig asset MUST ship with the zip - updaters refuse a release without it):" -ForegroundColor Cyan
+Write-Host "  gh release create $Tag `"$zipPath`" `"$sigPath`" --title `"RemSound $Tag`" --notes-file RELEASE_NOTES.md"

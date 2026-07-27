@@ -117,6 +117,9 @@ internal static class SelfTest
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);
         RunStep(results, "Service startup volume (boot-once decision + settings round-trip)", ServiceStartupVolume);
         RunStep(results, "Update install window (same-day, wraparound, retry timing)", UpdateInstallWindow);
+        RunStep(results, "Release signing (verify, tamper, key-embed match)", ReleaseSigning);
+        RunStep(results, "Password strength rules (gate + derivation refusal)", PasswordRules);
+        RunStep(results, "Relay address-proof echo (AddrCheck round-trip)", RelayAddrCheckEcho);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");
@@ -1541,7 +1544,7 @@ internal static class SelfTest
         };
         profile.SelectedWasapiSendOutputs.Add("fake-device-id");     // a source so ApplyProfile proceeds
         profile.SelectedConnectedPeers.Add("127.0.0.1:47999");
-        const string pw = "hunter2";
+        const string pw = "hunter2horse42stable"; // must pass the 5.6 strength rule or ForPlainPassword refuses it
         profile.Password = RemSoundCrypto.Obfuscate(pw);
 
         using var host = new ServiceSendHost(() => profile);
@@ -2374,6 +2377,95 @@ internal static class SelfTest
         Check(n2[4] == 1 && n1[4] == 0, "the counter half must advance arithmetically (uniqueness by construction)");
 
         return "sealed + replay/stale/wrong-key/plaintext all rejected; skew tolerated; nonces counter-based";
+    }
+
+    /// <summary>Release signing (2026-07-27): the updater refuses any release zip whose detached
+    /// signature is missing or wrong. Mechanics proven with an ephemeral keypair (round-trip,
+    /// tamper, wrong key); the embedded public key must parse; and when the REAL private key is
+    /// present on this machine (the publisher's), a signature it produces must verify against the
+    /// embedded key — the mismatch that would make every updater refuse a genuine release.</summary>
+    private static string? ReleaseSigning()
+    {
+        var data = new byte[4096];
+        new Random(42).NextBytes(data);
+
+        using var ephemeral = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
+        var ephemeralPriv = ephemeral.ExportECPrivateKeyPem();
+        var ephemeralPub = ephemeral.ExportSubjectPublicKeyInfoPem();
+
+        var sig = UpdateSignature.SignWithKey(data, ephemeralPriv);
+        Check(UpdateSignature.VerifyWithKey(data, sig, ephemeralPub), "a genuine signature must verify");
+        var tampered = (byte[])data.Clone();
+        tampered[100] ^= 0x01;
+        Check(!UpdateSignature.VerifyWithKey(tampered, sig, ephemeralPub), "one flipped byte in the zip must fail verification");
+        Check(!UpdateSignature.Verify(data, sig), "a signature by a DIFFERENT key must fail against the embedded release key");
+        Check(!UpdateSignature.VerifyWithKey(data, "not-base64!!", ephemeralPub), "garbage signature text must fail, not throw");
+
+        using (var embedded = System.Security.Cryptography.ECDsa.Create())
+        {
+            embedded.ImportFromPem(UpdateSignature.PublicKeyPem); // throws (= test fails) if the constant is mangled
+        }
+
+        var realKeyPath = Environment.GetEnvironmentVariable("REMSOUND_SIGNING_KEY") ?? @"D:\Dropbox\proj\rsound key\remsound-signing-key.pem";
+        if (!File.Exists(realKeyPath))
+            return "mechanics proven with ephemeral key; embedded key parses (publisher key not on this machine — embed-match check skipped)";
+        var realSig = UpdateSignature.SignWithKey(data, File.ReadAllText(realKeyPath));
+        Check(UpdateSignature.Verify(data, realSig),
+            "the on-disk private key MUST match the embedded public key — a mismatch ships a release every updater refuses");
+        return "round-trip + tamper + wrong-key + garbage all correct; on-disk private key matches the embedded public key";
+    }
+
+    /// <summary>The 5.6 password rules: the strength critique (what the dialogs enforce and
+    /// explain) and the derivation choke-point refusing weak passwords outright, so NO path —
+    /// tick, startup auto-connect, headless service — streams on a guessable password.</summary>
+    private static string? PasswordRules()
+    {
+        Check(PasswordStrength.Critique("") is null, "empty is not critiqued here (clearing has its own gate)");
+        Check(PasswordStrength.Critique("Games") is not null, "a 5-character password must be rejected (the exact case that prompted this)");
+        Check(PasswordStrength.Critique("Password1") is not null, "a world's-most-common password must be rejected regardless of case");
+        Check(PasswordStrength.Critique("kettle9tiger42moon") is null, "a three-words-and-numbers passphrase must pass");
+        Check(PasswordStrength.Critique("hunter2horse42stable") is null, "the test-suite passphrase must pass");
+        var advice = PasswordStrength.Critique("short") ?? "";
+        Check(advice.Contains("at least 8", StringComparison.OrdinalIgnoreCase) && advice.Contains("kettle9tiger42moon"),
+            "the critique must say the rule AND give a concrete example to copy the shape of");
+
+        var (weakKey, weakFp) = RemSoundCrypto.ForPlainPassword("Games");
+        Check(weakKey is null && weakFp is null, "the shared derivation rule must refuse a weak password — no key, no audio, on every path");
+        var (goodKey, goodFp) = RemSoundCrypto.ForPlainPassword("kettle9tiger42moon");
+        Check(goodKey is { Length: 32 } && goodFp is { Length: 8 }, "a strong password must derive the full key + fingerprint");
+
+        return "weak + common refused with concrete advice; derivation choke-point refuses weak on every path";
+    }
+
+    /// <summary>The relay address-proof (2026-07-27): an AddrCheck cookie arriving at the receiver
+    /// must be handed up VERBATIM for the app to echo — that echo is what proves our address to
+    /// the relay once it enforces. Also pins the wire type value the relay and client agreed on.</summary>
+    private static string? RelayAddrCheckEcho()
+    {
+        Check((byte)RemPacketType.AddrCheck == 10, "AddrCheck must stay type 10 — the relay builds this byte");
+
+        using var receiver = new RemSound.Receiver.AudioReceiver();
+        try { receiver.Start(FreeUdpPort()); }
+        catch (Exception ex) { return Skip($"could not start receiver: {ex.Message}"); }
+        receiver.SetOutputDevices(Array.Empty<string>());
+
+        byte[]? echoed = null;
+        IPEndPoint? echoedTo = null;
+        receiver.OnAddrCheckReceived = (packet, length, remote) => { echoed = packet.AsSpan(0, length).ToArray(); echoedTo = remote; };
+
+        // A relay-shaped challenge: v1 header, type AddrCheck, 16-byte cookie.
+        var cookie = new byte[16];
+        new Random(7).NextBytes(cookie);
+        var challenge = new byte[RemPacket.HeaderSize + cookie.Length];
+        RemPacket.WriteHeader(challenge, RemPacketType.AddrCheck, 1, 1);
+        cookie.CopyTo(challenge, RemPacket.HeaderSize);
+        var relayEp = new IPEndPoint(IPAddress.Parse("203.0.113.5"), 47830);
+        receiver.InjectExternalPacket(challenge, challenge.Length, relayEp);
+
+        Check(echoed is not null && echoed.AsSpan().SequenceEqual(challenge),
+            "the challenge must reach the app hook VERBATIM (the echo must carry the exact cookie back)");
+        Check(Equals(echoedTo, relayEp), "the hook must carry the source address (that's where the echo goes)");
+        return "type pinned at 10; challenge handed up verbatim with its source, ready to echo";
     }
 
     /// <summary>The "only install updates within this time range" gate (2026-07-26 feature):

@@ -17,6 +17,15 @@ public enum RemPacketType : byte
     /// Old peers see "unknown packet type" and silently drop, so adding this is wire-safe.
     /// </summary>
     Control = 5,
+    // 6-9 are the relay's lobby types (hello / roster / full / bye) — relay-side, not modelled here.
+    /// <summary>Relay address-proof challenge (2026-07-27): the relay sends a random cookie to a
+    /// newly seen client address and only counts that address as VERIFIED once the same packet
+    /// comes back from it. A forged source address can never echo, which kills the reflection
+    /// attack (registering a victim's spoofed address so the relay bounces audio at them). The
+    /// client's only job is to echo the packet verbatim to wherever it came from; pre-5.6 clients
+    /// drop it as an unknown type, which the relay's watch-only mode tolerates until the
+    /// enforcement flip.</summary>
+    AddrCheck = 10,
 }
 
 public enum HeartbeatKind : byte

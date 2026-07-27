@@ -1,32 +1,31 @@
-# RemSound v5.5
+# RemSound v5.6
 
-A close-hang fix and a keyboard-accessibility sweep.
+**IMPORTANT: everyone must update.** This version strengthens the encryption maths, so a 5.6 machine **cannot exchange audio with any older RemSound** — until both sides are on 5.6, you'll hear nothing between them. Update every machine you connect with, including any running the background service (it updates itself from the app). Remote volume commands also need both ends on 5.6.
 
-## Fixed: a hang on close when UPnP is on
+## Stronger passwords, enforced
 
-With the "open my router's port automatically" (UPnP) option turned on, closing RemSound could **hang instead of shutting**. On the way out RemSound asks the router to close the port again, and that request waits for the router to answer — a slow or fussy router (or a double-NAT setup) left the window stuck.
+The profile password is what protects your audio, so from this version RemSound refuses to stream on one that's easy to guess. Passwords must be at least 8 characters and not a common word — if yours is shorter, RemSound tells you the moment you try to stream and walks you through choosing a better one. Three unrelated words with a number, like `kettle9tiger42moon`, is easy to type and very hard to guess. Remember to set the **same** new password on every machine you connect with.
 
-Closing now **never waits on the router**: the tidy-up runs in the background with a short time limit, so RemSound shuts straight away and lets the router expire the port on its own if it's being slow. (Under the hood the app also logs each router step now, so if anything ever does stall we can see exactly which call was slow.)
+## Signed updates
 
-## Keyboard shortcuts on every dialog
+Every release is now digitally signed, and the updater refuses anything that isn't genuinely from us — so even if the download page were ever tampered with, a fake update could not install itself on your machine. (This release ships the checking code; it protects every release from here on.)
 
-Every button in every pop-up dialog now has an **Alt-key shortcut** — including the "RemSound is already running" dialog, which previously had none at all. So you can always pick an option straight from the keyboard rather than tabbing to it. (Where a dialog's Cancel would clash with another shortcut, Cancel stays on Escape, as before.)
+## Remote volume, now password-locked
 
-## Compatibility
+The remote volume and mute commands are sealed with your profile password, so only someone who knows it can adjust your machine — nobody on the network can fake a command and mute your screen reader. A captured command can't be replayed later either.
 
-Nothing about the over-the-network format changed, so **v5.5 talks to v3.3 through v5.4** with no trouble — you don't have to update both ends at once. (Everyone still needs **v3.3 or newer**, where end-to-end encryption came in.)
+## Set the machine's volume when the service starts
 
-## Install
+In the service's **Additional options** you can have an unattended machine unmute itself and set its Windows volume to a level you choose — on the first start after each boot, or on every service start.
 
-1. Download `RemSound-v5.5.zip` from this release.
-2. Close RemSound.
-3. Extract the zip **over your existing RemSound folder**, overwriting program files when prompted. The zip is program files only — it won't touch your settings, profiles, logs or recordings.
-4. Run `RemSound.exe`.
+## Updates on your schedule
 
-## Upgrading
+In Preferences you can restrict automatic updates to a daily time range — say 01:00 to 06:00 — so an update never closes RemSound and kills your sound mid-session. Found outside the range, it quietly waits and installs the moment the range opens. The manual "Check for updates now" button is never restricted.
 
-**From v3.6 or newer:** Help → Check for updates installs v5.5 with the in-app updater — and if it can't finish, it puts your old version back exactly as it was.
+## Also in this release
 
-**From v1.9–v3.5:** Check for updates works, but uses your current version's older updater for this one hop. If auto-update has been failing on your machine, install by hand using the steps above.
-
-**v1.8 and earlier:** the auto-updater in those versions can't install updates — install by hand using the steps above.
+- The app releases its high-priority and keep-awake settings when you're not actually streaming — kinder to laptops left idling in the tray.
+- Diagnostic logs cap their own size on long sessions, and old crash reports are tidied automatically.
+- The remembered-applications list explains itself when empty (apps join it the moment you tick them).
+- The public relay gained anti-abuse protections; a later relay update will require 5.6, which answers its address checks automatically.
+- A large amount of security hardening from a full audit: service-folder lockdown, replay protection, counter-based encryption nonces, and more.

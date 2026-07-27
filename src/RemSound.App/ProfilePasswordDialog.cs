@@ -13,9 +13,9 @@ namespace RemSound.App;
 /// </summary>
 internal static class ProfilePasswordDialog
 {
-    public static string? Show(string profileTitle, string currentPassword, bool requireNonEmpty = false)
+    public static string? Show(string profileTitle, string currentPassword, bool requireNonEmpty = false, bool requireStrong = false)
     {
-        var (dialog, textBox) = Build(profileTitle, currentPassword, requireNonEmpty);
+        var (dialog, textBox) = Build(profileTitle, currentPassword, requireNonEmpty, requireStrong);
         using (dialog)
         {
             // Run with a foreground 1×1 owner so the prompt jumps to the front even when RemSound is
@@ -30,7 +30,7 @@ internal static class ProfilePasswordDialog
 
     /// <summary>Construction split from ShowDialog so the accessibility audit can inspect the real
     /// dialog (inline-built dialogs used to be invisible to the audit).</summary>
-    internal static (Form Dialog, TextBox Input) Build(string profileTitle, string currentPassword, bool requireNonEmpty = false)
+    internal static (Form Dialog, TextBox Input) Build(string profileTitle, string currentPassword, bool requireNonEmpty = false, bool requireStrong = false)
     {
         var dialog = new Form
         {
@@ -74,13 +74,39 @@ internal static class ProfilePasswordDialog
         // entered nothing, pressed OK", which used to silently leave audio dead.
         void TryAccept()
         {
-            if (requireNonEmpty && textBox.Text.Trim().Length == 0)
+            var entered = textBox.Text.Trim();
+            if (requireNonEmpty && entered.Length == 0)
             {
                 var page = new TaskDialogPage
                 {
                     Caption = "Password required",
                     Heading = "Enter a password",
                     Text = "A password is required before audio can flow. You and the person you're connecting to must use the same one.",
+                    Icon = TaskDialogIcon.Warning,
+                    Buttons = { TaskDialogButton.OK },
+                    DefaultButton = TaskDialogButton.OK,
+                    AllowCancel = true,
+                };
+                TaskDialog.ShowDialog(dialog, page);
+                textBox.Focus();
+                textBox.SelectAll();
+                return;
+            }
+            // Strength gate (2026-07-27, with the derivation-cost raise). Normally NEW or CHANGED
+            // passwords only — re-accepting the existing password unchanged passes, so an old weak
+            // password never traps the user inside a casual visit to this dialog. requireStrong is
+            // the STREAMING gate's mode: there the whole point is that the current password failed
+            // the rule, so the unchanged exemption is off and a stronger one must be entered before
+            // audio can flow (Ed, 2026-07-27). The critique text says exactly what to do instead.
+            if (entered.Length > 0
+                && (requireStrong || !string.Equals(entered, currentPassword.Trim(), StringComparison.Ordinal))
+                && RemSound.Core.PasswordStrength.Critique(entered) is { } advice)
+            {
+                var page = new TaskDialogPage
+                {
+                    Caption = "Choose a stronger password",
+                    Heading = "That password is too easy to guess",
+                    Text = advice,
                     Icon = TaskDialogIcon.Warning,
                     Buttons = { TaskDialogButton.OK },
                     DefaultButton = TaskDialogButton.OK,

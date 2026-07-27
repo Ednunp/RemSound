@@ -961,6 +961,10 @@ public sealed class AudioReceiver : IDisposable
     /// socket on either end any more.</summary>
     public Action<byte[], int, IPEndPoint>? OnHeartbeatReceived { get; set; }
 
+    /// <summary>Hook for relay address-proof cookies (AddrCheck, 2026-07-27). The App echoes the
+    /// packet back to its source via the sender's socket — same single-port model as heartbeats.</summary>
+    public Action<byte[], int, IPEndPoint>? OnAddrCheckReceived { get; set; }
+
     /// <summary>Hook for Control packets that arrive on the audio receiver's socket. Since 5.6 the
     /// payload is SEALED with the profile's audio key (ControlSealing), so this hands the RAW payload
     /// up — the App authenticates it (key + replay guard), validates the source against the
@@ -999,6 +1003,12 @@ public sealed class AudioReceiver : IDisposable
                 // no longer binds its own socket). The hook MUST be wired before Start();
                 // otherwise heartbeats are dropped and peer health stays "unreachable".
                 OnHeartbeatReceived?.Invoke(packet, length, remote);
+                break;
+            case RemPacketType.AddrCheck:
+                // Relay address-proof cookie (2026-07-27): hand the raw packet up so the app can
+                // echo it back to the relay verbatim — proving this address really receives, which
+                // is what unlocks relay forwarding once the relay enforces. No parsing needed here.
+                OnAddrCheckReceived?.Invoke(packet, length, remote);
                 break;
             case RemPacketType.Control:
                 // Remote-control message (volume up/down, mute toggle). Since 5.6 the payload is

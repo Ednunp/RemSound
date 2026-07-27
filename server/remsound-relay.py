@@ -71,9 +71,22 @@ TYPE_LOBBY_HELLO = 6
 TYPE_LOBBY_ROSTER = 7
 TYPE_LOBBY_FULL = 8
 TYPE_LOBBY_BYE = 9
+# Address-proof challenge (2026-07-27): a random cookie sent to every newly seen client address;
+# the client echoes the packet back verbatim, proving the address actually RECEIVES — a forged
+# (spoofed) source address can never echo. This is what stops the reflection attack (register a
+# victim's spoofed address, then have the relay bounce audio at them). 5.6+ clients echo it;
+# older clients drop it as an unknown type, so enforcement (--require-addr-check) stays OFF
+# until the fleet has updated — watch-only mode logs who WOULD have been blocked meanwhile.
+TYPE_ADDR_CHECK = 10
+ADDR_CHECK_COOKIE_LEN = 16
+ADDR_CHECK_RESEND_SECONDS = 2.0
 V2_FORWARDABLE_TYPES = {
     TYPE_FORMAT, TYPE_AUDIO, TYPE_KEEPALIVE, TYPE_HEARTBEAT, TYPE_CONTROL,
 }
+# Cap on how many lobby/pair entries one source IP may hold at once. Legitimate households behind
+# one NAT show a handful of machines (distinct ports, same IP); a lobby-occupation attacker shows
+# ten. Enforced immediately — it breaks no working setup.
+MAX_ENTRIES_PER_IP = 4
 
 # A zero UUID identifies the server in outbound v2 packets that we originate
 # (LobbyRoster, LobbyFull, LobbyBye-from-server). Clients can recognise this
@@ -88,6 +101,11 @@ class PeerSlot:
     last_seen: float
     rx_packets: int = 0
     tx_packets: int = 0
+    # Address-proof state (see TYPE_ADDR_CHECK).
+    verified: bool = False
+    cookie: bytes = b""
+    cookie_sent: float = 0.0
+    would_block_logged: bool = False
 
 
 @dataclass
@@ -98,6 +116,11 @@ class ClientEntry:
     last_seen: float
     rx_packets: int = 0
     tx_packets: int = 0
+    # Address-proof state (see TYPE_ADDR_CHECK).
+    verified: bool = False
+    cookie: bytes = b""
+    cookie_sent: float = 0.0
+    would_block_logged: bool = False
 
 
 @dataclass
@@ -108,6 +131,10 @@ class RelayStats:
     rejected_bad_header: int = 0
     pair_changes: int = 0              # v1 slot joins/leaves/replacements
     lobby_changes: int = 0             # v2 joins/leaves/expiries
+    addr_checks_verified: int = 0      # cookies echoed back correctly
+    blocked_unverified: int = 0        # forwards withheld (enforce mode only)
+    would_block_unverified: int = 0    # forwards that WOULD be withheld (watch-only)
+    rejected_ip_cap: int = 0           # admissions refused by MAX_ENTRIES_PER_IP
 
 
 def setup_logger(log_path: str) -> logging.Logger:
@@ -174,10 +201,16 @@ def _encode_lobby_name(name: str) -> bytes:
 class Relay:
     """Dispatcher that owns both the v1 pair state and the v2 lobby state."""
 
-    def __init__(self, sock: socket.socket, log: logging.Logger, max_clients: int):
+    def __init__(self, sock: socket.socket, log: logging.Logger, max_clients: int,
+                 require_addr_check: bool = False):
         self.sock = sock
         self.log = log
         self.max_clients = max_clients
+        # Enforcement switch for the address-proof: False = watch-only (log who WOULD be blocked,
+        # forward anyway — safe while pre-5.6 clients that can't echo are still around); True =
+        # withhold all forwarded traffic from unverified addresses. Flipped by --require-addr-check
+        # in a later server release once the 5.6 auto-update has rolled through.
+        self.require_addr_check = require_addr_check
         # v1 state
         self.v1_peers: list[PeerSlot] = []
         # v2 state
@@ -187,6 +220,62 @@ class Relay:
         # shared
         self.stats = RelayStats()
         self.last_stats_log = time.monotonic()
+
+    # ------- address-proof (shared by v1 + v2) -----------------------------
+
+    def _addr_check_packet(self, cookie: bytes) -> bytes:
+        """A v1-framed AddrCheck: 12-byte RemSound header + the cookie. v1 framing on purpose —
+        every client (v1 pair or v2 lobby) parses it, and the echo comes back the same way."""
+        header = bytearray(V1_HEADER_LEN)
+        header[0:4] = MAGIC
+        header[4] = V1_VERSION
+        header[5] = TYPE_ADDR_CHECK
+        return bytes(header) + cookie
+
+    def _send_addr_check(self, entry, addr: tuple[str, int], now: float) -> None:
+        """Issue (or re-issue) the cookie challenge for an entry. Throttled; keeps the same cookie
+        until verified so a slow echo still matches."""
+        if entry.verified or (now - entry.cookie_sent) < ADDR_CHECK_RESEND_SECONDS:
+            return
+        if not entry.cookie:
+            entry.cookie = os.urandom(ADDR_CHECK_COOKIE_LEN)
+        entry.cookie_sent = now
+        try:
+            self.sock.sendto(self._addr_check_packet(entry.cookie), addr)
+        except OSError as e:
+            self.log.warning("event=addr_check_send_failed to=%s err=%s", _fmt_addr(addr), e)
+
+    def _try_verify(self, entry, data: bytes, addr: tuple[str, int], header_len: int) -> None:
+        """An AddrCheck came back from a registered endpoint — verify its cookie. The echo may
+        arrive v1-framed (as sent) even from a v2 client, so callers pass their header length."""
+        cookie = data[header_len:header_len + ADDR_CHECK_COOKIE_LEN]
+        if entry.cookie and cookie == entry.cookie and not entry.verified:
+            entry.verified = True
+            self.stats.addr_checks_verified += 1
+            self.log.info("event=addr_verified addr=%s", _fmt_addr(addr))
+
+    def _ip_at_cap(self, ip: str) -> bool:
+        """True when this source IP already holds MAX_ENTRIES_PER_IP lobby/pair entries."""
+        count = sum(1 for p in self.v1_peers if p.addr[0] == ip)
+        count += sum(1 for e in self.v2_clients.values() if e.addr[0] == ip)
+        return count >= MAX_ENTRIES_PER_IP
+
+    def _may_forward_to(self, entry, proto: str) -> bool:
+        """The enforcement point: may forwarded traffic be delivered to this entry's address?
+        Watch-only mode always says yes but logs (once per entry) who WOULD have been blocked."""
+        if entry.verified:
+            return True
+        if self.require_addr_check:
+            self.stats.blocked_unverified += 1
+            return False
+        self.stats.would_block_unverified += 1
+        if not entry.would_block_logged:
+            entry.would_block_logged = True
+            self.log.info(
+                "event=would_block_unverified proto=%s addr=%s (watch-only; enforcement would withhold traffic)",
+                proto, _fmt_addr(entry.addr),
+            )
+        return True
 
     # ------- v1 (pairwise) -------------------------------------------------
 
@@ -243,12 +332,29 @@ class Relay:
         return -1
 
     def _handle_v1(self, data: bytes, addr: tuple[str, int]) -> None:
-        if parse_header_v1(data) is None:
+        parsed = parse_header_v1(data)
+        if parsed is None:
             self.stats.rejected_bad_header += 1
             return
+        pkt_type = parsed[0]
         now = time.monotonic()
+        if pkt_type == TYPE_ADDR_CHECK:
+            # A cookie coming home. Echoes come back v1-framed regardless of the client's protocol
+            # (clients echo our framing verbatim), so match by ADDRESS across BOTH protocol states
+            # — and never ADMIT anyone off one: an AddrCheck is proof, not a join request.
+            for e in self.v2_clients.values():
+                if e.addr == addr:
+                    self._try_verify(e, data, addr, V1_HEADER_LEN)
+                    return
+            found = self._v1_find_slot(addr)
+            if found is not None:
+                self._try_verify(self.v1_peers[found], data, addr, V1_HEADER_LEN)
+            return
         idx = self._v1_find_slot(addr)
         if idx is None:
+            if self._ip_at_cap(addr[0]):
+                self.stats.rejected_ip_cap += 1
+                return
             self._v1_expire_idle(now)
             idx = self._v1_admit_or_replace(addr, now)
             if idx < 0:
@@ -257,8 +363,11 @@ class Relay:
         peer = self.v1_peers[idx]
         peer.last_seen = now
         peer.rx_packets += 1
+        self._send_addr_check(peer, addr, now)
         if len(self.v1_peers) == 2:
             other = self.v1_peers[1 - idx]
+            if not self._may_forward_to(other, "v1"):
+                return
             try:
                 self.sock.sendto(data, other.addr)
                 other.tx_packets += 1
@@ -298,6 +407,10 @@ class Relay:
             return
         packet = self._v2_build_roster_packet()
         for entry in self.v2_clients.values():
+            # Under enforcement even the roster stays away from unverified addresses — it's
+            # relay-originated traffic too, and it grows with the lobby. (Watch-only: send.)
+            if self.require_addr_check and not entry.verified:
+                continue
             try:
                 self.sock.sendto(packet, entry.addr)
             except OSError as e:
@@ -370,6 +483,12 @@ class Relay:
         from_registered_endpoint = entry is not None and entry.addr == addr
         if entry is None:
             # Admit attempt.
+            if self._ip_at_cap(addr[0]):
+                self.stats.rejected_ip_cap += 1
+                self.log.warning(
+                    "event=join_rejected reason=ip_cap client_id=%s addr=%s", client_id, _fmt_addr(addr),
+                )
+                return
             if len(self.v2_clients) >= self.max_clients:
                 self._v2_send_lobby_full(client_id, addr)
                 return
@@ -382,15 +501,28 @@ class Relay:
             self.stats.lobby_changes += 1
             self.v2_roster_dirty = True
         else:
-            # Refresh endpoint (handles NAT rebind) and last-seen.
+            # Refresh endpoint (handles NAT rebind) and last-seen. A MOVED endpoint must re-prove
+            # itself — the new address hasn't echoed anything yet, and "rebind" is also exactly
+            # what a spoofed takeover of a known client_id looks like.
             if entry.addr != addr:
                 self.log.info(
                     "event=client_endpoint_update client_id=%s old=%s new=%s",
                     client_id, _fmt_addr(entry.addr), _fmt_addr(addr),
                 )
                 entry.addr = addr
+                entry.verified = False
+                entry.cookie = b""
+                entry.cookie_sent = 0.0
+                entry.would_block_logged = False
             entry.last_seen = now
         entry.rx_packets += 1
+        if pkt_type == TYPE_ADDR_CHECK:
+            # The cookie coming home (the client echoes our v1-framed challenge, so it can land in
+            # the v2 handler only if the client wrapped it v2 — accept both framings). Never forward.
+            header_len = V2_HEADER_LEN if len(data) >= V2_HEADER_LEN + ADDR_CHECK_COOKIE_LEN else V1_HEADER_LEN
+            self._try_verify(entry, data, addr, header_len)
+            return
+        self._send_addr_check(entry, addr, now)
 
         # Type-specific handling.
         if pkt_type == TYPE_LOBBY_HELLO:
@@ -424,9 +556,11 @@ class Relay:
             # Unknown / server-originated type from a client. Ignore quietly.
             return
 
-        # Fan-out forwarding to every OTHER client.
+        # Fan-out forwarding to every OTHER client (verified addresses only, once enforcing).
         for other_id, other in self.v2_clients.items():
             if other_id == client_id:
+                continue
+            if not self._may_forward_to(other, "v2"):
                 continue
             try:
                 self.sock.sendto(data, other.addr)
@@ -506,6 +640,14 @@ def main() -> int:
         help=f"v2 lobby capacity (default {DEFAULT_MAX_CLIENTS}, "
              "overridable via REMSOUND_MAX_CLIENTS env var)",
     )
+    parser.add_argument(
+        "--require-addr-check",
+        action="store_true",
+        default=os.environ.get("REMSOUND_REQUIRE_ADDR_CHECK", "") == "1",
+        help="enforce the address-proof cookie: forwarded traffic is withheld from addresses that "
+             "have not echoed their cookie (default off = watch-only, which only logs). Flip on "
+             "once the 5.6+ client rollout is complete - pre-5.6 clients cannot echo.",
+    )
     args = parser.parse_args()
     if args.max_clients < 2:
         sys.stderr.write("remsound-relay: --max-clients must be >= 2\n")
@@ -513,8 +655,9 @@ def main() -> int:
 
     log = setup_logger(args.log_path)
     log.info(
-        "event=startup version_supported=v1,v2 listen=%s:%d max_clients=%d",
+        "event=startup version_supported=v1,v2 listen=%s:%d max_clients=%d addr_check=%s",
         args.host, args.port, args.max_clients,
+        "ENFORCED" if args.require_addr_check else "watch-only",
     )
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -525,7 +668,7 @@ def main() -> int:
         log.error("event=bind_failed err=%s", e)
         return 1
 
-    relay = Relay(sock, log, args.max_clients)
+    relay = Relay(sock, log, args.max_clients, require_addr_check=args.require_addr_check)
     stop_flag = {"stop": False}
 
     def _stop_signal(_signum, _frame):

@@ -94,6 +94,10 @@ internal static class CommandLine
                     return WithConsole(() => SetLogging(ValueAfter(args, raw)));
                 case "--close": case "--quit":
                     return WithConsole(CloseRunning);
+                case "--sign-update":
+                    // Publish-pipeline verb (build-release.ps1): sign a release zip with the private
+                    // key so the updater's signature enforcement accepts it. Not a user command.
+                    return WithConsole(() => SignUpdate(ValueAfter(args, raw)));
             }
         }
 
@@ -115,6 +119,50 @@ internal static class CommandLine
         }
         overrides.ForceBlankProfile = overrides.ConnectPeers.Count > 0 && overrides.ProfileName is null;
         return null;
+    }
+
+    /// <summary>Where the release-signing PRIVATE key lives on the publisher's machine (chosen by
+    /// Ed, 2026-07-27). Overridable via REMSOUND_SIGNING_KEY for a future move. The key is never
+    /// in the repo or a release; the matching public key is embedded (UpdateSignature).</summary>
+    private static string SigningKeyPath =>
+        Environment.GetEnvironmentVariable("REMSOUND_SIGNING_KEY")
+        ?? @"D:\Dropbox\proj\rsound key\remsound-signing-key.pem";
+
+    /// <summary>--sign-update &lt;zip&gt;: write &lt;zip&gt;.sig (base64 ECDSA P-256 / SHA-256 over the
+    /// zip bytes) and self-check it against the EMBEDDED public key before reporting success — so a
+    /// key/embed mismatch fails the publish pipeline loudly instead of shipping a release every
+    /// updater would refuse.</summary>
+    private static int SignUpdate(string? zipPath)
+    {
+        if (string.IsNullOrWhiteSpace(zipPath) || !File.Exists(zipPath))
+        {
+            Console.WriteLine($"sign-update: zip not found: [{zipPath}]");
+            return 2;
+        }
+        if (!File.Exists(SigningKeyPath))
+        {
+            Console.WriteLine($"sign-update: signing key not found at [{SigningKeyPath}] (set REMSOUND_SIGNING_KEY to override)");
+            return 3;
+        }
+        try
+        {
+            var bytes = File.ReadAllBytes(zipPath);
+            var signature = UpdateSignature.SignWithKey(bytes, File.ReadAllText(SigningKeyPath));
+            if (!UpdateSignature.Verify(bytes, signature))
+            {
+                Console.WriteLine("sign-update: FAILED self-check — the private key does not match the public key embedded in this build. Update UpdateSignature.PublicKeyPem or restore the right key file.");
+                return 4;
+            }
+            var sigPath = zipPath + UpdateSignature.SignatureAssetSuffix;
+            File.WriteAllText(sigPath, signature);
+            Console.WriteLine($"sign-update: OK — wrote {sigPath} (verified against the embedded public key)");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"sign-update: FAILED — {ex.GetType().Name}: {ex.Message}");
+            return 5;
+        }
     }
 
     // ---------------- console plumbing ----------------

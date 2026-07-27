@@ -466,7 +466,7 @@ ul, ol { padding-left: 1.4em; }
 <table>
 <tr><th>List</th><th>What it holds</th></tr>
 <tr><td><strong>Currently active applications (Alt+8)</strong></td><td>Every program making sound right now. Tick one and only that program's audio is captured and sent &mdash; its own private stream, separate from everything else on the machine. Tick several to send several. A program you've ticked that isn't running at the moment still shows here marked <em>(not running)</em>, so you can always find it and untick it; it starts being sent again the instant it reopens.</td></tr>
-<tr><td><strong>Remembered applications (Alt+9)</strong></td><td>Your saved &ldquo;apps I send&rdquo; address book &mdash; shared across all your profiles, like the remembered peers list. Tick a program here and it moves up to the active list the moment it's running (and is captured from its very first sound). Untick a program in either list and it drops back here. Press <strong>Delete</strong> on an entry to forget it, just like the remembered peers list.</td></tr>
+<tr><td><strong>Remembered applications (Alt+9)</strong></td><td>Your saved &ldquo;apps I send&rdquo; address book &mdash; shared across all your profiles, like the remembered peers list. A program joins this book the moment you first <em>tick</em> it in either list &mdash; that's the only way in, so after clearing the book it simply refills as you tick apps again. Tick a program here and it moves up to the active list the moment it's running (and is captured from its very first sound). Untick a program in either list and it drops back here. Press <strong>Delete</strong> on an entry to forget it, just like the remembered peers list.</td></tr>
 </table>
 
 <p>Because sending is by program <em>name</em>, your choice survives that program being closed and reopened, or even the computer restarting. There is deliberately no &ldquo;send everything&rdquo; option in applications mode &mdash; if you want the whole machine's sound, that's what <em>Send whole audio devices</em> is for.</p>
@@ -741,6 +741,8 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 </table>
 
 <p>If you try to start sending or receiving on a profile that has no password yet, RemSound asks you to set one first (and offers to remember it on the profile so you don't type it again next time). Audio can't flow without a password &mdash; encryption is always on, there's no &ldquo;off&rdquo; switch.</p>
+
+<p><strong>Passwords must be reasonably strong (new in 5.6).</strong> The password is the only thing protecting your audio from someone who records your network traffic, so RemSound now refuses to stream on one that's easy to guess: at least 8 characters, and not a famously common password. If your existing password doesn't meet the rule, RemSound tells you the moment you try to stream and walks you through picking a better one &mdash; three unrelated words with a number, like <code>kettle9tiger42moon</code>, is easy to type and remember and very hard to guess. Set the <em>same</em> new password on every machine you connect with. One honest note: the password is stored in the profile file in a recoverable form (so profiles can sync between your own machines) &mdash; anyone who can read your profiles folder can read the passwords, so treat that folder accordingly.</p>
 
 <h3>When passwords don't match</h3>
 

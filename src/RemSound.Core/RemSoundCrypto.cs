@@ -52,9 +52,14 @@ public static class RemSoundCrypto
     private const int NonceBytes = 12;      // AES-GCM standard nonce
     private const int TagBytes = 16;        // AES-GCM auth tag
 
-    // PBKDF2 cost. High enough to make brute-forcing a captured fingerprint expensive, low
-    // enough not to stall a connect on older (Win7-era) hardware. Run once per password, cached.
-    private const int Pbkdf2Iterations = 100_000;
+    // PBKDF2 cost. Raised 100k → 600k for v5.6 (2026-07-27, per the security audit — 100k was
+    // well below current OWASP guidance and the fingerprint travels in cleartext, so offline
+    // guessing cost is the whole defence). BREAKING: both peers must derive the SAME key from
+    // the same password, so a 5.6 machine cannot exchange audio with a pre-5.6 machine AT ALL —
+    // the release notes lead with "everyone must update". Runs once per password and is cached
+    // (never per packet); ~a few hundred ms even on old hardware, felt only when a password is
+    // set or a profile loads.
+    private const int Pbkdf2Iterations = 600_000;
 
     // Fixed salts. A per-connection random salt would be stronger, but both peers must derive
     // the SAME key from the SAME password with no key-exchange round, so the salt has to be
@@ -67,12 +72,18 @@ public static class RemSoundCrypto
         Encoding.UTF8.GetBytes("RemSound-profile-password-scramble-v1");
 
     /// <summary>The one rule for turning a PLAIN password into the audio credentials: null/empty →
-    /// (null, null) → no audio flows (encryption is mandatory); otherwise the key AND the fingerprint,
-    /// always together — the peer verifies the fingerprint before accepting a stream, so a key without
-    /// its fingerprint gets the audio silently rejected at the far end (a divergence that already bit
-    /// the service once). The app and the service both derive through THIS.</summary>
+    /// (null, null) → no audio flows (encryption is mandatory); since 5.6 a password that fails
+    /// <see cref="PasswordStrength.Critique"/> ALSO yields (null, null) — enforced here, at the single
+    /// choke-point the app AND the service both derive through, so no path (tick, startup auto-connect,
+    /// profile switch, headless service) can stream on a guessable password (Ed, 2026-07-27; the UI
+    /// explains and walks the user to a stronger one). Otherwise the key AND the fingerprint, always
+    /// together — the peer verifies the fingerprint before accepting a stream, so a key without its
+    /// fingerprint gets the audio silently rejected at the far end (a divergence that already bit
+    /// the service once).</summary>
     public static (byte[]? Key, byte[]? Fingerprint) ForPlainPassword(string? plainPassword) =>
-        string.IsNullOrEmpty(plainPassword) ? (null, null) : (DeriveKey(plainPassword), Fingerprint(plainPassword));
+        string.IsNullOrEmpty(plainPassword) || PasswordStrength.Critique(plainPassword) is not null
+            ? (null, null)
+            : (DeriveKey(plainPassword), Fingerprint(plainPassword));
 
     /// <summary>Derive the 256-bit AES key for a password. Cache the result; never call per packet.</summary>
     public static byte[] DeriveKey(string? password) =>

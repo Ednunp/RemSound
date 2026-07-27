@@ -5733,6 +5733,15 @@ public sealed partial class MainForm : Form
             // sees the Control packet, parses it, and fires this delegate. We marshal back
             // onto the UI thread to mutate volumeBar / mute state.
             receiver.OnRemoteControlReceived = HandleRemoteControlPacket;
+            // Relay address-proof (2026-07-27): echo the relay's cookie back verbatim so it can
+            // verify this address really receives — the proof that keeps us forwardable once the
+            // relay enforces. Echo-to-source is self-limiting (one small reply per challenge,
+            // never larger than what arrived), so answering unconditionally is safe.
+            receiver.OnAddrCheckReceived = (packet, length, remote) =>
+            {
+                try { sender.SendVia(packet, length, remote); }
+                catch (Exception ex) { logFile.Event($"addr-check echo to {remote} failed: {ex.GetType().Name}: {ex.Message}"); }
+            };
             heartbeatService.Start();
         }
         catch (Exception ex)
@@ -8279,6 +8288,31 @@ public sealed partial class MainForm : Form
             // Key + fingerprint always together, through the one shared rule (same as the service).
             (currentAudioKey, currentAudioFingerprint) = RemSoundCrypto.ForPlainPassword(currentProfilePassword);
             lastDerivedPassword = currentProfilePassword;
+            // Since 5.6 that rule also refuses a WEAK password (key comes back null), so a profile
+            // that auto-connects at startup with an old guessable password must not just sit
+            // silently dead — say why, once, and point at the fix. The interactive tick path has
+            // its own guided flow (EnsureStreamingPassword); this catches every other route in.
+            if (!string.IsNullOrEmpty(currentProfilePassword) && currentAudioKey is null && !weakPasswordExplained)
+            {
+                weakPasswordExplained = true;
+                logFile.Event("audio crypto: profile password fails the 5.6 strength rule — no audio until it's changed");
+                var advice = PasswordStrength.Critique(currentProfilePassword) ?? "";
+                BeginInvoke(() =>
+                {
+                    var page = new TaskDialogPage
+                    {
+                        Caption = "Password needs strengthening",
+                        Heading = "No audio until this profile's password is stronger",
+                        Text = "From this version, RemSound refuses to stream on a password that's easy to guess. "
+                             + advice + " Change it via the File menu, “Change this profile's password” — on every machine that uses it.",
+                        Icon = TaskDialogIcon.Warning,
+                        Buttons = { TaskDialogButton.OK },
+                        DefaultButton = TaskDialogButton.OK,
+                        AllowCancel = true,
+                    };
+                    ForegroundDialog.Show(owner => TaskDialog.ShowDialog(owner, page));
+                });
+            }
         }
         sender.AudioKey = currentAudioKey;
         sender.AudioFingerprint = currentAudioFingerprint;
@@ -8286,20 +8320,45 @@ public sealed partial class MainForm : Form
         receiver.AudioFingerprint = currentAudioFingerprint;
     }
 
+    // One-shot flag for the weak-password explanation above — the dialog must not re-fire on every
+    // profile reapply within a session (the log line still records each derivation refusal).
+    private bool weakPasswordExplained;
+
     /// <summary>The "you need a password before any audio can flow" gate. Called when the user
     /// ticks Send my audio or Receive audio. If the active profile has no password, prompt for
-    /// one; if they give one, set it (and offer to save it to the profile); if they cancel,
-    /// un-tick the box. Returns true if streaming may proceed.</summary>
+    /// one. Since 5.6 (Ed, 2026-07-27) an EXISTING password that fails the strength rule is gated
+    /// the same way: the user is told why, in plain words, and audio waits until a stronger one is
+    /// set — grandfathering weak passwords forever would have made the derivation-cost raise
+    /// theatre, and everyone is already coordinating a password-compatible update in this release.
+    /// If they give an acceptable password, set it (and offer to save it to the profile); if they
+    /// cancel, un-tick the box. Returns true if streaming may proceed.</summary>
     private bool EnsureStreamingPassword(AccessibleCheckBox box)
     {
         if (!box.Checked) return true;                           // turning OFF never needs a password
-        if (!string.IsNullOrEmpty(currentProfilePassword)) return true; // already have one
+        var weakAdvice = PasswordStrength.Critique(currentProfilePassword ?? "");
+        if (!string.IsNullOrEmpty(currentProfilePassword) && weakAdvice is null) return true; // have one and it passes
 
         var label = string.IsNullOrEmpty(currentProfileTitle) ? "this session" : currentProfileTitle;
-        var entered = ProfilePasswordDialog.Show(label, "", requireNonEmpty: true);
+        if (weakAdvice is not null && !string.IsNullOrEmpty(currentProfilePassword))
+        {
+            // Tell the user WHY the password prompt is about to appear with their old password in
+            // it — a bare dialog would read as a bug to someone whose password worked yesterday.
+            var page = new TaskDialogPage
+            {
+                Caption = "Password needs strengthening",
+                Heading = "Your profile password is too easy to guess",
+                Text = $"From this version, audio won't flow until the password is stronger. {weakAdvice}",
+                Icon = TaskDialogIcon.Warning,
+                Buttons = { TaskDialogButton.OK },
+                DefaultButton = TaskDialogButton.OK,
+                AllowCancel = true,
+            };
+            ForegroundDialog.Show(owner => TaskDialog.ShowDialog(owner, page));
+        }
+        var entered = ProfilePasswordDialog.Show(label, currentProfilePassword ?? "", requireNonEmpty: true, requireStrong: true);
         if (string.IsNullOrEmpty(entered))
         {
-            // No password → can't stream. Put the box back without re-firing this gate.
+            // No acceptable password → can't stream. Put the box back without re-firing this gate.
             suppressStreamingPasswordGate = true;
             try { box.Checked = false; }
             finally { suppressStreamingPasswordGate = false; } // a throw must not disable the gate for good
@@ -9593,7 +9652,12 @@ public sealed partial class MainForm : Form
     {
         if (list.Items.Count == 0)
         {
-            var emptyText = $"No {itemKind}s available.";
+            // The remembered-apps list teaches its own lifecycle when empty (Ed, 2026-07-27: after
+            // clearing it he had no way to know how entries come back — they arrive when you TICK
+            // an app, so the empty state says exactly that, right where the question arises).
+            var emptyText = itemKind == "remembered application"
+                ? "No remembered application. Tick an application in the list above and it will be remembered here."
+                : $"No {itemKind}s available.";
             statusLabel.Text = emptyText;
             list.AccessibleDescription = emptyText;
             return;
