@@ -43,6 +43,17 @@ internal static class SelfTest
 
     private static string Skip(string why) => throw new StepSkipped(why);
 
+    /// <summary>Non-overlapping count of <paramref name="needle"/> in <paramref name="haystack"/> —
+    /// used by the log-rotation integrity checks to prove each line survives exactly once.</summary>
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        if (string.IsNullOrEmpty(needle)) return 0;
+        var count = 0;
+        for (var i = haystack.IndexOf(needle, StringComparison.Ordinal); i >= 0; i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+            count++;
+        return count;
+    }
+
     public static int Run(string[] args)
     {
         var seconds = int.TryParse(ValueAfter(args, "--seconds"), out var s) && s is > 0 and <= 30 ? s : 3;
@@ -2367,16 +2378,40 @@ internal static class SelfTest
         var skewed = ControlSealing.Seal(key, RemoteControlKind.VolumeDown, 5, nowSecs - 300);
         Check(new ControlReceiveGuard().TryAccept(key, skewed, now, out _, out _, out _),
             "a command from a peer whose clock is 5 minutes off must still be accepted");
+        // A FUTURE-dated command (sender clock ahead, or a crafted timestamp) beyond the skew window
+        // must also be rejected — the guard bounds skew in BOTH directions, not just the past.
+        var future = ControlSealing.Seal(key, RemoteControlKind.VolumeUp, 5, nowSecs + 3600);
+        Check(!new ControlReceiveGuard().TryAccept(key, future, now, out _, out _, out var whyFuture) && whyFuture.StartsWith("stale"),
+            "a command dated an hour in the FUTURE must be rejected (skew is bounded both ways)");
+        // Replay cache under a sustained burst: 300 distinct genuine commands (> the 256 prune
+        // threshold) must all be accepted once and the dict must not reject a fresh nonce as a
+        // false replay — i.e. pruning must never evict an entry still inside the skew window.
+        var burstGuard = new ControlReceiveGuard();
+        var accepted = 0;
+        for (var i = 0; i < 300; i++)
+        {
+            // Vary the timestamp by a second each so every packet has a distinct nonce+content.
+            var cmd = ControlSealing.Seal(key, RemoteControlKind.VolumeUp, 1, nowSecs - (i % 60));
+            if (burstGuard.TryAccept(key, cmd, now, out _, out _, out _)) accepted++;
+        }
+        Check(accepted == 300, $"every one of 300 distinct genuine commands must be accepted across the prune threshold (got {accepted})");
 
-        // Nonce discipline: prefix constant per sequence, counter strictly advancing, instances differ.
+        // Nonce discipline: 48-bit random prefix (bytes 0-5) constant within a sequence, 48-bit
+        // little-endian counter (bytes 6-11) advancing, and — the cross-session safety that matters
+        // — two independent instances draw DIFFERENT prefixes so their counter-0 nonces can't collide
+        // under the same long-lived key.
         var seqA = new RemSoundCrypto.NonceSequence();
         var n1 = new byte[12]; var n2 = new byte[12];
         seqA.FillNext(n1); seqA.FillNext(n2);
         Check(!n1.AsSpan().SequenceEqual(n2), "consecutive nonces from one sequence must differ");
-        Check(n1.AsSpan(0, 4).SequenceEqual(n2.AsSpan(0, 4)), "the 4-byte prefix must stay constant within a sequence");
-        Check(n2[4] == 1 && n1[4] == 0, "the counter half must advance arithmetically (uniqueness by construction)");
+        Check(n1.AsSpan(0, 6).SequenceEqual(n2.AsSpan(0, 6)), "the 6-byte prefix must stay constant within a sequence");
+        Check(n1[6] == 0 && n2[6] == 1, "the counter (byte 6, little-endian) must advance arithmetically");
+        var seqB = new RemSoundCrypto.NonceSequence();
+        var m1 = new byte[12]; seqB.FillNext(m1);
+        Check(!n1.AsSpan(0, 6).SequenceEqual(m1.AsSpan(0, 6)),
+            "two independent NonceSequence instances must draw different prefixes (else same-key counter-0 nonces collide)");
 
-        return "sealed + replay/stale/wrong-key/plaintext all rejected; skew tolerated; nonces counter-based";
+        return "sealed + replay/stale/wrong-key/plaintext all rejected; skew tolerated; nonce prefix 48-bit + per-instance-distinct";
     }
 
     /// <summary>Release signing (2026-07-27): the updater refuses any release zip whose detached
@@ -2408,7 +2443,12 @@ internal static class SelfTest
 
         var realKeyPath = Environment.GetEnvironmentVariable("REMSOUND_SIGNING_KEY") ?? @"D:\Dropbox\proj\rsound key\remsound-signing-key.pem";
         if (!File.Exists(realKeyPath))
-            return "mechanics proven with ephemeral key; embedded key parses (publisher key not on this machine — embed-match check skipped)";
+            // Honest SKIP, not a caveat-PASS: the crypto mechanics above passed, but this step's
+            // headline job — proving the on-disk private key matches the EMBEDDED public key — did
+            // not run without the publisher key, and must show in the SKIPPED line rather than read
+            // as "verified". (The real safety net is build-release.ps1's --sign-update self-check,
+            // which aborts the publish on a mismatch; this step is the early-warning on the dev box.)
+            return Skip("publisher signing key not on this machine — embed-match check did not run (mechanics passed; publish pipeline self-checks regardless)");
         var realSig = UpdateSignature.SignWithKey(data, File.ReadAllText(realKeyPath));
         Check(UpdateSignature.Verify(data, realSig),
             "the on-disk private key MUST match the embedded public key — a mismatch ships a release every updater refuses");
@@ -2547,24 +2587,64 @@ internal static class SelfTest
     /// priority-mode scope decision — levers only while streaming, released after the hold-down.</summary>
     private static string? LongRunHygiene()
     {
-        // 1. Log rotation at the cap. Tiny cap via the internal seam; verify multiple real files.
+        // 1. Log rotation at the cap. Tiny cap via the internal seam; verify multiple real files,
+        //    that NO line is lost or duplicated across the rolls (integrity — a dropped last-buffered
+        //    line would slip past a count-only check), and that concurrent writers can't interleave
+        //    (the entire documented reason for writeGate — a single-threaded test never exercises it).
         var createdLogs = new List<string>();
         var log = new RemSoundLog { Enabled = true, RollAfterBytes = 400 };
         try
         {
-            for (var i = 0; i < 30; i++)
+            const int lineCount = 120;
+            for (var i = 0; i < lineCount; i++)
             {
-                log.Event($"rotation self-test line {i} — padding padding padding padding");
+                log.Event($"ROTLINE#{i}# padding padding padding padding padding");
                 if (log.Path is { } p && !createdLogs.Contains(p)) createdLogs.Add(p);
             }
-            Check(log.RollCount >= 2, $"a 400-byte cap over 30 writes must roll at least twice (rolled {log.RollCount})");
+            Check(log.RollCount >= 2, $"a 400-byte cap over {lineCount} writes must roll several times (rolled {log.RollCount})");
             Check(createdLogs.Count >= 3, "each roll must continue into a NEW timestamped file");
             Check(createdLogs.All(File.Exists), "every rolled file must exist on disk (the chain, not one giant)");
+            // Integrity: read the whole chain back and confirm every ROTLINE#i# appears exactly once.
+            log.Dispose(); // flush + close so the last file is fully readable
+            var body = string.Concat(createdLogs.Where(File.Exists).Select(File.ReadAllText));
+            var missing = Enumerable.Range(0, lineCount).Where(i => CountOccurrences(body, $"ROTLINE#{i}#") != 1).ToList();
+            Check(missing.Count == 0, $"every logged line must survive rotation exactly once — {missing.Count} lost/duplicated across the roll");
         }
         finally
         {
             log.Dispose();
             foreach (var f in createdLogs) { try { File.Delete(f); } catch { } }
+        }
+
+        // 1b. Concurrency: many threads writing through ONE log must never interleave a line (the
+        //     writeGate guarantee). Delete the lock and this is what fails — a count-only test wouldn't.
+        var concLogs = new List<string>();
+        // Cap high enough that 800 short lines never roll — this case is about the writeGate
+        // interleave guarantee, not rotation, so keep it to one file and capture every path anyway.
+        var clog = new RemSoundLog { Enabled = true, RollAfterBytes = 4 * 1024 * 1024 };
+        try
+        {
+            const int threads = 4, perThread = 200;
+            Parallel.For(0, threads, t =>
+            {
+                for (var i = 0; i < perThread; i++)
+                {
+                    clog.Event($"T{t}L{i}-nointerleave-nointerleave-nointerleave");
+                    if (clog.Path is { } p && !concLogs.Contains(p)) concLogs.Add(p);
+                }
+            });
+            clog.Dispose();
+            var lines = concLogs.Where(File.Exists).SelectMany(File.ReadAllLines).ToList();
+            var payload = lines.Where(l => l.Contains("-nointerleave")).ToList();
+            Check(payload.Count == threads * perThread,
+                $"every concurrent write must be its own intact line ({threads * perThread} expected, got {payload.Count} — interleave = torn lines)");
+            Check(payload.All(l => CountOccurrences(l, "-nointerleave") == 3),
+                "no line may contain a fragment of another (torn/interleaved write detector)");
+        }
+        finally
+        {
+            clog.Dispose();
+            foreach (var f in concLogs) { try { File.Delete(f); } catch { } }
         }
 
         // 2. Crash-report cap: 14 fake reports → newest 10 survive.

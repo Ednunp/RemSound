@@ -164,25 +164,39 @@ public static class RemSoundCrypto
         return total;
     }
 
-    /// <summary>The nonce generator for a hot-path encryptor: a random 4-byte prefix chosen at
-    /// construction plus a 64-bit counter — the textbook fix the old per-packet-random comment
-    /// pointed at. Uniqueness within one instance is arithmetic (the counter), not probabilistic;
-    /// across instances (each sender lane, each session) the random prefix keeps streams apart.
-    /// The receiver just reads the nonce from the packet, so this changes nothing on the wire.
-    /// NOT thread-safe — one per encryptor, same ownership rule as the AesGcm itself.</summary>
+    /// <summary>The nonce generator for a hot-path encryptor: a random 48-bit prefix chosen at
+    /// construction plus a 48-bit counter, filling the 96-bit nonce. Two independent guarantees:
+    /// WITHIN one instance uniqueness is arithmetic (the counter, 2^48 packets ≈ tens of thousands
+    /// of years at our rates — effectively unlimited per session); ACROSS instances (every launch,
+    /// profile reload, and the two BothIndependent lanes all rebuild the sequence under the SAME
+    /// long-lived audio key) the random prefix keeps their counter ranges apart, with a birthday
+    /// bound at ~2^24 instances — negligible for any realistic number of app launches on one
+    /// password.
+    ///
+    /// Why 48/48 and not the interim 32/64: a fresh instance restarts the counter at 0, so two
+    /// instances that drew the SAME prefix would reuse nonce=prefix‖0,‖1,… under the same key —
+    /// catastrophic for AES-GCM. A 32-bit prefix collides at only ~2^16 instances (a real risk
+    /// over a multi-year, one-password lifetime); widening the prefix to 48 bits pushes that to
+    /// ~2^24 while 48 counter bits stay far beyond any session's packet count. This is strictly
+    /// safer than BOTH the interim scheme and the original per-packet 96-bit-random nonce (whose
+    /// birthday bound a heavy multi-day streamer could actually approach). The receiver just reads
+    /// the nonce off the packet, so the wire is unchanged. NOT thread-safe — one per encryptor,
+    /// same ownership rule as the AesGcm itself.</summary>
     public sealed class NonceSequence
     {
-        private readonly byte[] prefix = new byte[4];
-        private ulong counter;
+        private const int PrefixBytes = 6;   // 48-bit per-instance random prefix
+        private const int CounterBytes = NonceBytes - PrefixBytes; // 6 → 48-bit counter
+        private readonly byte[] prefix = new byte[PrefixBytes];
+        private ulong counter; // only the low 48 bits are used (see CounterBytes)
 
         public NonceSequence() => RandomNumberGenerator.Fill(prefix);
 
-        /// <summary>Write the next 12-byte nonce: prefix(4) || counter(8), then advance.</summary>
+        /// <summary>Write the next 12-byte nonce: prefix(6) ‖ counter(6, little-endian), then advance.</summary>
         public void FillNext(Span<byte> nonce12)
         {
             prefix.CopyTo(nonce12);
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(nonce12[4..], counter);
-            counter++;
+            var c = counter++;
+            for (var i = 0; i < CounterBytes; i++) nonce12[PrefixBytes + i] = (byte)(c >> (8 * i));
         }
     }
 

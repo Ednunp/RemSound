@@ -9648,31 +9648,12 @@ public sealed partial class MainForm : Form
         else Restore();
     }
 
+    // Delegates to the ONE shared builder (CheckedListAccessibility.ApplyStatus) so the main
+    // window and the dialogs speak word-for-word identical status text — including the
+    // remembered-apps empty-state lifecycle line. (These used to be two hand-kept copies that
+    // drifted, 2026-07-27.)
     private static void UpdateCheckedListStatus(CheckedListBox list, Label statusLabel, string itemKind, int? overrideIndex = null, bool? overrideChecked = null)
-    {
-        if (list.Items.Count == 0)
-        {
-            // The remembered-apps list teaches its own lifecycle when empty (Ed, 2026-07-27: after
-            // clearing it he had no way to know how entries come back — they arrive when you TICK
-            // an app, so the empty state says exactly that, right where the question arises).
-            var emptyText = itemKind == "remembered application"
-                ? "No remembered application. Tick an application in the list above and it will be remembered here."
-                : $"No {itemKind}s available.";
-            statusLabel.Text = emptyText;
-            list.AccessibleDescription = emptyText;
-            return;
-        }
-
-        var index = overrideIndex ?? (list.SelectedIndex >= 0 ? list.SelectedIndex : 0);
-        index = Math.Clamp(index, 0, list.Items.Count - 1);
-        var isChecked = overrideChecked ?? list.GetItemChecked(index);
-        var checkedText = isChecked ? "checked" : "not checked";
-        var itemText = list.Items[index]?.ToString() ?? itemKind;
-        var text = $"{checkedText}, {itemText}. Item {index + 1} of {list.Items.Count}. Press Space to toggle.";
-        statusLabel.Text = text;
-        list.AccessibleDescription = text;
-        statusLabel.AccessibleDescription = text;
-    }
+        => CheckedListAccessibility.ApplyStatus(list, statusLabel, itemKind, overrideIndex, overrideChecked);
 
     /// <summary>
     /// Makes a NumericUpDown's text content fully selected whenever the control receives focus,

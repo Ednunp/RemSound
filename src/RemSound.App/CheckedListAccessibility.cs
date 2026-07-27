@@ -17,7 +17,7 @@ internal static class CheckedListAccessibility
         var lastIndex = 0;
 
         void Update(int? overrideIndex = null, bool? overrideChecked = null)
-            => SetStatus(list, statusLabel, itemKind, overrideIndex, overrideChecked);
+            => ApplyStatus(list, statusLabel, itemKind, overrideIndex, overrideChecked);
 
         void RestoreFocus()
         {
@@ -67,12 +67,26 @@ internal static class CheckedListAccessibility
         Update();
     }
 
-    // Exact copy of MainForm.UpdateCheckedListStatus so the spoken text is word-for-word identical.
-    private static void SetStatus(CheckedListBox list, Label statusLabel, string itemKind, int? overrideIndex, bool? overrideChecked)
+    /// <summary>The empty-list spoken text for a given item kind. The remembered-applications list
+    /// teaches its own lifecycle here (entries arrive when you TICK an app), since after clearing it
+    /// there is otherwise no cue how it refills; every other list is the plain "none available".
+    /// One home so the main window and the dialogs can never drift (they did once — a MainForm-only
+    /// copy of this branch, 2026-07-27).</summary>
+    public static string EmptyTextFor(string itemKind) =>
+        itemKind == "remembered application"
+            ? "No remembered application. Tick an application in the list above and it will be remembered here."
+            : $"No {itemKind}s available.";
+
+    /// <summary>THE single builder+applier for a CheckedListBox's spoken status. MainForm delegates
+    /// here too, so the wording is word-for-word identical in the main window and every dialog by
+    /// construction — not by a comment promising it. Writes the text into the status label and the
+    /// list's AccessibleDescription (and the label's, for a focused non-empty item) so NVDA reads
+    /// the item AND its checked state.</summary>
+    public static void ApplyStatus(CheckedListBox list, Label statusLabel, string itemKind, int? overrideIndex = null, bool? overrideChecked = null)
     {
         if (list.Items.Count == 0)
         {
-            var emptyText = $"No {itemKind}s available.";
+            var emptyText = EmptyTextFor(itemKind);
             statusLabel.Text = emptyText;
             list.AccessibleDescription = emptyText;
             return;

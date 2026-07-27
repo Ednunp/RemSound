@@ -12,9 +12,11 @@ public enum RemPacketType : byte
     /// Remote-control message from one connected peer to another. Currently used to let a
     /// peer adjust the receiver-side volume slider on a peer it's connected to (so a user
     /// who's NVDA-Remote'd into another machine can still nudge the listening volume on
-    /// the machine they're physically at). Wire format: 1 byte <see cref="RemoteControlKind"/>
-    /// + 1 byte signed delta (interpreted as signed sbyte; range -128..127, percent points).
-    /// Old peers see "unknown packet type" and silently drop, so adding this is wire-safe.
+    /// the machine they're physically at). Since 5.6 the payload is SEALED (<see cref="RemSound"/>
+    /// .Core ControlSealing): on the wire it is the 12-byte header + a GCM blob of
+    /// ControlSealing.SealedPayloadBytes. The 1-byte kind + 1-byte signed delta
+    /// (<see cref="ControlPayloadSize"/>) is now only the INNER plaintext inside that blob, never
+    /// travelling in the clear. Old peers see "unknown packet type" and silently drop.
     /// </summary>
     Control = 5,
     // 6-9 are the relay's lobby types (hello / roster / full / bye) — relay-side, not modelled here.
@@ -112,9 +114,10 @@ public static class RemPacket
     /// </summary>
     public const int HeartbeatPayloadSize = 9;
     /// <summary>
-    /// Control payload: 1 byte <see cref="RemoteControlKind"/> + 1 signed byte delta. Total
-    /// 2 bytes, plus the 12-byte header = 14 bytes on the wire. See <see cref="RemPacketType.Control"/>
-    /// for the rationale.
+    /// Control INNER plaintext: 1 byte <see cref="RemoteControlKind"/> + 1 signed byte delta = 2 bytes.
+    /// Since 5.6 this does NOT travel on the wire on its own — it's sealed by ControlSealing, and the
+    /// on-wire Control payload is ControlSealing.SealedPayloadBytes (nonce+tag over this plaintext plus
+    /// a timestamp). See <see cref="RemPacketType.Control"/>.
     /// </summary>
     public const int ControlPayloadSize = 2;
     /// <summary>
