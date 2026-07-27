@@ -2437,7 +2437,11 @@ public sealed partial class MainForm : Form
         current ??= Profile.NewBlank();
 
         using var dlg = new ServiceProfileDialog(current, ServiceStore.LoadLoggingEnabled());
-        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        // Via ForegroundDialog so it opens front-and-centre with focus even when the main window is
+        // minimised in the tray — this dialog is now reachable from the weak-service-password nag,
+        // which can fire while RemSound is minimised (Ed, 2026-07-27: "clicked Yes but had to Alt-Tab
+        // to find it"). The nested "Set password" dialog inherits the foreground once its parent is up.
+        if (ForegroundDialog.Show(owner => dlg.ShowDialog(owner)) != DialogResult.OK) return;
         try
         {
             ServiceStore.SaveProfile(dlg.Result);
