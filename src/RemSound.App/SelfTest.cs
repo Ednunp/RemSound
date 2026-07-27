@@ -2633,13 +2633,27 @@ internal static class SelfTest
     /// flag sharing its file (load-modify-save).</summary>
     private static string? ServiceStartupVolume()
     {
-        // Decision core. Boot instants within the tolerance are the SAME boot.
+        // Decision core. Boot instants within the tolerance are the SAME boot. now is well past any
+        // cooldown from lastApplied unless a test sets lastApplied recent.
         var boot = new DateTime(2026, 7, 26, 6, 0, 0, DateTimeKind.Utc);
-        Check(!StartupVolume.ShouldApply(false, true, null, boot), "disabled → never applies");
-        Check(StartupVolume.ShouldApply(true, true, null, boot), "boot-only with no marker yet → applies (first ever start)");
-        Check(!StartupVolume.ShouldApply(true, true, boot.AddSeconds(-30), boot), "boot-only, marker from THIS boot → skipped (a same-boot service restart must not re-blast the volume)");
-        Check(StartupVolume.ShouldApply(true, true, boot.AddHours(-9), boot), "boot-only, marker from a PREVIOUS boot → applies again");
-        Check(StartupVolume.ShouldApply(true, false, boot.AddSeconds(-30), boot), "every-start mode ignores the marker entirely");
+        var now = new DateTime(2026, 7, 26, 12, 0, 0, DateTimeKind.Utc);
+        DateTime? noLast = null;
+        Check(!StartupVolume.ShouldApply(false, true, null, boot, noLast, now), "disabled → never applies");
+        Check(StartupVolume.ShouldApply(true, true, null, boot, noLast, now), "boot-only with no marker yet → applies (first ever start)");
+        Check(!StartupVolume.ShouldApply(true, true, boot.AddSeconds(-30), boot, noLast, now), "boot-only, marker from THIS boot → skipped (a same-boot service restart must not re-blast the volume)");
+        Check(StartupVolume.ShouldApply(true, true, boot.AddHours(-9), boot, noLast, now), "boot-only, marker from a PREVIOUS boot → applies again");
+        Check(StartupVolume.ShouldApply(true, false, boot.AddSeconds(-30), boot, noLast, now), "every-start mode past the cooldown ignores the boot marker");
+
+        // Re-apply burst guard (the fix for the volume-machine-gunning). A fresh apply within the
+        // cooldown of the last one is skipped in BOTH modes; past the cooldown it applies again.
+        Check(!StartupVolume.ShouldApply(true, false, null, boot, now.AddMinutes(-1), now),
+            "every-restart: a restart 1 min after the last apply must be SKIPPED (burst guard — self-update/deploy/handover churn)");
+        Check(StartupVolume.ShouldApply(true, false, null, boot, now.AddMinutes(-10), now),
+            "every-restart: a restart 10 min later (past the 5-min cooldown) applies again");
+        Check(!StartupVolume.ShouldApply(true, true, boot.AddHours(-9), boot, now.AddMinutes(-1), now),
+            "boot-only: even a genuine new boot is held off if the volume was applied seconds ago (double-apply guard — the 14s self-update case)");
+        Check(StartupVolume.ShouldApply(true, false, null, boot, now.AddMinutes(5), now),
+            "a last-applied stamp in the FUTURE (clock moved back) must not wedge — it still applies");
 
         // Settings round-trip in a throwaway store; the volume save must preserve the logging flag.
         var savedOverride = ServiceStore.TestDirectoryOverride;

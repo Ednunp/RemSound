@@ -391,8 +391,11 @@ public sealed class ServiceSendHost : IDisposable
         }
     }
 
-    /// <summary>Stops sending and releases capture. Safe to call when already stopped.</summary>
-    public void Suspend()
+    /// <summary>Stops sending and releases capture. Safe to call when already stopped. <paramref
+    /// name="reason"/> is logged so the diagnostic trail distinguishes a real yield-to-the-app from a
+    /// plain shutdown — the old hard-coded "interactive app present" was printed on BOTH, which sent a
+    /// bug hunt chasing phantom app-handovers (2026-07-27).</summary>
+    public void Suspend(string reason = "interactive app present")
     {
         lock (gate)
         {
@@ -406,7 +409,7 @@ public sealed class ServiceSendHost : IDisposable
             sessionKick = null;
             try { PerformanceMode.Apply(false, msg => log?.Invoke($"service: {msg}")); } catch { /* best-effort */ }
             running = false;
-            log?.Invoke("service: suspended (interactive app present)");
+            log?.Invoke($"service: suspended ({reason})");
         }
     }
 
@@ -513,7 +516,7 @@ public sealed class ServiceSendHost : IDisposable
             ct.WaitHandle.WaitOne(pollMs);
         }
         wantSending = false;
-        Suspend();
+        Suspend("run loop ending — service stopping");
     }
 
     /// <summary>Force a re-open of capture if we intend to send — called after a power resume, when the

@@ -279,4 +279,26 @@ public static class ServiceStore
         }
         catch { return null; }
     }
+
+    // Wall-clock UTC of the last SUCCESSFUL startup-volume apply — drives the re-apply burst guard
+    // (StartupVolume.ReapplyCooldown), so a flurry of restarts can't machine-gun the volume down.
+    private static string StartupVolumeLastAppliedPath => Path.Combine(Directory, "startup-volume-last.txt");
+
+    public static void SaveStartupVolumeLastAppliedUtc(DateTime whenUtc)
+    {
+        try { System.IO.Directory.CreateDirectory(Directory); File.WriteAllText(StartupVolumeLastAppliedPath, whenUtc.ToString("o")); }
+        catch { /* best-effort */ }
+    }
+
+    public static DateTime? LoadStartupVolumeLastAppliedUtc()
+    {
+        try
+        {
+            return File.Exists(StartupVolumeLastAppliedPath)
+                   && DateTime.TryParse(File.ReadAllText(StartupVolumeLastAppliedPath).Trim(), null,
+                       System.Globalization.DateTimeStyles.RoundtripKind, out var t)
+                ? t : null;
+        }
+        catch { return null; }
+    }
 }
