@@ -13,24 +13,9 @@ namespace RemSound.App;
 /// </summary>
 internal static class ProfilePasswordDialog
 {
-    /// <summary>The pure "should this password entry be rejected, and why" decision, shared by both
-    /// password dialogs and unit-testable without any UI (2026-07-27). Returns the plain-English
-    /// advice to show, or null to accept. Rules: an empty entry is not judged here (the
-    /// requireNonEmpty gate owns that); a CHANGED entry is always judged; an UNCHANGED entry is
-    /// exempt UNLESS <paramref name="requireStrong"/> — the streaming gate's mode, where the whole
-    /// point is that the current password already failed the rule, so re-entering it must be
-    /// refused. Both sides are compared trimmed (fixes the App-review trim inconsistency).</summary>
-    internal static string? RejectionAdviceFor(string entered, string current, bool requireStrong)
+    public static string? Show(string profileTitle, string currentPassword, bool requireNonEmpty = false)
     {
-        entered = entered.Trim();
-        if (entered.Length == 0) return null;
-        if (!requireStrong && string.Equals(entered, current.Trim(), StringComparison.Ordinal)) return null;
-        return RemSound.Core.PasswordStrength.Critique(entered);
-    }
-
-    public static string? Show(string profileTitle, string currentPassword, bool requireNonEmpty = false, bool requireStrong = false)
-    {
-        var (dialog, textBox) = Build(profileTitle, currentPassword, requireNonEmpty, requireStrong);
+        var (dialog, textBox) = Build(profileTitle, currentPassword, requireNonEmpty);
         using (dialog)
         {
             // Run with a foreground 1×1 owner so the prompt jumps to the front even when RemSound is
@@ -45,7 +30,7 @@ internal static class ProfilePasswordDialog
 
     /// <summary>Construction split from ShowDialog so the accessibility audit can inspect the real
     /// dialog (inline-built dialogs used to be invisible to the audit).</summary>
-    internal static (Form Dialog, TextBox Input) Build(string profileTitle, string currentPassword, bool requireNonEmpty = false, bool requireStrong = false)
+    internal static (Form Dialog, TextBox Input) Build(string profileTitle, string currentPassword, bool requireNonEmpty = false)
     {
         var dialog = new Form
         {
@@ -75,7 +60,9 @@ internal static class ProfilePasswordDialog
         };
         var hint = new Label
         {
-            Text = "Both you and the person you're connecting to must use the same password.",
+            // Suggest a strong password, but never enforce it (v5.7 backed out the block).
+            Text = "Both you and the person you're connecting to must use the same password. "
+                 + "A longer one — three unrelated words with a number, like kettle9tiger42moon — is best.",
             AutoSize = true,
         };
 
@@ -107,25 +94,8 @@ internal static class ProfilePasswordDialog
                 textBox.SelectAll();
                 return;
             }
-            // Strength gate (2026-07-27) — the decision lives in the pure RejectionAdviceFor so a
-            // test can pin it without a modal dialog (and both password dialogs share one rule).
-            if (RejectionAdviceFor(entered, currentPassword, requireStrong) is { } advice)
-            {
-                var page = new TaskDialogPage
-                {
-                    Caption = "Choose a stronger password",
-                    Heading = "That password is too easy to guess",
-                    Text = advice,
-                    Icon = TaskDialogIcon.Warning,
-                    Buttons = { TaskDialogButton.OK },
-                    DefaultButton = TaskDialogButton.OK,
-                    AllowCancel = true,
-                };
-                TaskDialog.ShowDialog(dialog, page);
-                textBox.Focus();
-                textBox.SelectAll();
-                return;
-            }
+            // Any non-empty password is accepted — strength is only suggested (in the hint), never
+            // enforced (v5.7 backed out the 5.6 block so the other ports work again).
             dialog.DialogResult = DialogResult.OK;
             dialog.Close();
         }

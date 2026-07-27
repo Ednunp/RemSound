@@ -42,9 +42,7 @@ internal sealed class ServiceProfileDialog : Form
     private const SendRate ServiceSendRate = ServiceAudioDefaults.Rate;
 
     // --- Button row ---
-    // No auto-close DialogResult: the Click handler validates the password strength first (a weak
-    // service password means the headless service silently won't stream), then closes explicitly.
-    private readonly Button saveButton = new() { Text = "&Save and Close", AutoSize = true };
+    private readonly Button saveButton = new() { Text = "&Save and Close", AutoSize = true, DialogResult = DialogResult.OK };
     private readonly Button cancelButton = new() { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
     private readonly Button additionalButton = new() { Text = "Additional &options...", AutoSize = true, AccessibleName = "Additional options" };
 
@@ -82,13 +80,7 @@ internal sealed class ServiceProfileDialog : Form
 
         AcceptButton = saveButton;
         CancelButton = cancelButton;
-        saveButton.Click += (_, _) =>
-        {
-            if (!ConfirmOrFixWeakPassword()) return; // user chose to keep editing / cancel the fix
-            SaveToProfile();
-            DialogResult = DialogResult.OK;
-            Close();
-        };
+        saveButton.Click += (_, _) => SaveToProfile();
         additionalButton.Click += (_, _) => ShowAdditionalOptions();
     }
 
@@ -335,32 +327,6 @@ internal sealed class ServiceProfileDialog : Form
         if (result is null) return;
         working.Password = string.IsNullOrEmpty(result) ? null : RemSoundCrypto.Obfuscate(result);
         UpdatePasswordStatus();
-    }
-
-    /// <summary>On Save: if the service password is too weak the headless service will silently not
-    /// stream, so warn and offer to strengthen it right now. Returns true to proceed with the save
-    /// (either the password is fine, was just strengthened, or the user chose to save anyway), false
-    /// to stay in the dialog. Empty is left alone — that's an un-configured profile, not a regression.</summary>
-    private bool ConfirmOrFixWeakPassword()
-    {
-        var current = string.IsNullOrEmpty(working.Password) ? "" : RemSoundCrypto.Deobfuscate(working.Password);
-        if (string.IsNullOrEmpty(current) || PasswordStrength.Critique(current) is null) return true;
-
-        var choice = ForegroundDialog.Show(owner => MessageBox.Show(owner,
-            "This service password is too weak to meet the new security rules, so the service won't "
-                + "stream until it's strengthened.\n\n"
-                + "Use at least 8 characters — three unrelated words with a number, like kettle9tiger42moon, works well.\n\n"
-                + "Set a stronger password now?",
-            "RemSound — service password needs strengthening",
-            MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning));
-        if (choice == DialogResult.Cancel) return false;   // back to the dialog, nothing saved
-        if (choice == DialogResult.No) return true;         // save the weak one anyway (warned)
-        // Yes → enter a stronger one now (requireStrong disables the unchanged-exemption).
-        var stronger = ProfilePasswordDialog.Show(ServiceControl.ServiceProfileTitle, current, requireNonEmpty: true, requireStrong: true);
-        if (string.IsNullOrEmpty(stronger)) return false;   // cancelled the change — stay put
-        working.Password = RemSoundCrypto.Obfuscate(stronger);
-        UpdatePasswordStatus();
-        return true;
     }
 
     private void UpdatePasswordStatus()

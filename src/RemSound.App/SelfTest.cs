@@ -130,8 +130,7 @@ internal static class SelfTest
         RunStep(results, "Update install window (same-day, wraparound, retry timing)", UpdateInstallWindow);
         RunStep(results, "Release signing (verify, tamper, key-embed match)", ReleaseSigning);
         RunStep(results, "Updater refuses an unsigned or badly-signed release (enforcement flow)", UpdaterRefusesUnsignedRelease);
-        RunStep(results, "Streaming password strengthening (existing weak password forced up)", StreamingPasswordStrengthening);
-        RunStep(results, "Password strength rules (gate + derivation refusal)", PasswordRules);
+        RunStep(results, "Password derivation (any password derives a key; cached; 100k for cross-port compat)", PasswordDerivation);
         RunStep(results, "Relay address-proof echo (AddrCheck round-trip)", RelayAddrCheckEcho);
 
         var failed = results.Count(r => r.Status == "FAIL");
@@ -2498,85 +2497,38 @@ internal static class SelfTest
         return "no-sig + wrong-key + garbage + tamper all refused; a genuine release accepted";
     }
 
-    /// <summary>The streaming password-strengthening walk-through (2026-07-27): an EXISTING weak
-    /// password must be forced up before audio flows — the load-bearing bit is that the streaming
-    /// prompt runs with requireStrong, which DISABLES the "unchanged password is exempt" rule, so
-    /// re-entering the same weak password is refused. Pins the dialog decision the pure Critique
-    /// test can't see.</summary>
-    private static string? StreamingPasswordStrengthening()
+    /// <summary>Password → key derivation after the v5.7 back-out. Encryption stays mandatory (a
+    /// password is required — empty derives nothing), but strength is NOT enforced: ANY non-empty
+    /// password derives its key + fingerprint, weak OR strong, so the other ports (iOS / older
+    /// desktops on the same 100k derivation) can exchange audio again. The session cache still
+    /// returns the same instances on a repeat derive. Pins the 100k iteration count via a known
+    /// answer test, so a future accidental change (which would silently break cross-port compat)
+    /// fails the gate.</summary>
+    private static string? PasswordDerivation()
     {
-        // Streaming mode (requireStrong: true) — the exemption is DISABLED, so re-entering the same
-        // weak password is refused and only a strong replacement is accepted. This is the bit that,
-        // if it regressed to the casual rule, would let "Games" keep streaming and defeat the whole
-        // 5.6 password raise.
-        Check(ProfilePasswordDialog.RejectionAdviceFor("Games", current: "Games", requireStrong: true) is not null,
-            "streaming mode must REFUSE re-entering the same weak password (no unchanged-exemption)");
-        Check(ProfilePasswordDialog.RejectionAdviceFor("kettle9tiger42moon", current: "Games", requireStrong: true) is null,
-            "a strong replacement must be accepted in streaming mode");
-
-        // Casual mode (requireStrong: false) — an UNCHANGED existing password is grandfathered (a
-        // visit that doesn't touch it must not trap the user behind the new rule)...
-        Check(ProfilePasswordDialog.RejectionAdviceFor("Games", current: "Games", requireStrong: false) is null,
-            "casual mode must let an UNCHANGED existing password through");
-        // ...but a NEW weak password is still refused, and trailing whitespace doesn't fool the
-        // unchanged comparison (both sides trimmed — the App-review inconsistency is gone).
-        Check(ProfilePasswordDialog.RejectionAdviceFor("Games", current: "kettle9tiger42moon", requireStrong: false) is not null,
-            "casual mode must still block a NEW weak password");
-        Check(ProfilePasswordDialog.RejectionAdviceFor("  Games  ", current: "Games", requireStrong: false) is null,
-            "the unchanged-exemption must compare trimmed (whitespace-only edit is still 'unchanged')");
-        return "requireStrong refuses an unchanged weak password; casual grandfathers unchanged but blocks new-weak; trim-safe";
-    }
-
-    /// <summary>The 5.6 password rules: the strength critique (what the dialogs enforce and
-    /// explain) and the derivation choke-point refusing weak passwords outright, so NO path —
-    /// tick, startup auto-connect, headless service — streams on a guessable password.</summary>
-    private static string? PasswordRules()
-    {
-        Check(PasswordStrength.Critique("") is null, "empty is not critiqued here (clearing has its own gate)");
-        Check(PasswordStrength.Critique("Games") is not null, "a 5-character password must be rejected (the exact case that prompted this)");
-        Check(PasswordStrength.Critique("Password1") is not null, "a world's-most-common password must be rejected regardless of case");
-        Check(PasswordStrength.Critique("kettle9tiger42moon") is null, "a three-words-and-numbers passphrase must pass");
-        Check(PasswordStrength.Critique("hunter2horse42stable") is null, "the test-suite passphrase must pass");
-        var advice = PasswordStrength.Critique("short") ?? "";
-        Check(advice.Contains("at least 8", StringComparison.OrdinalIgnoreCase) && advice.Contains("kettle9tiger42moon"),
-            "the critique must say the rule AND give a concrete example to copy the shape of");
-
+        // Mandatory encryption: no password → no key. Any non-empty password → a full key + fingerprint.
+        Check(RemSoundCrypto.ForPlainPassword("") is (null, null), "no password must derive no key (encryption is mandatory)");
         var (weakKey, weakFp) = RemSoundCrypto.ForPlainPassword("Games");
-        Check(weakKey is null && weakFp is null, "the shared derivation rule must refuse a weak password — no key, no audio, on every path");
-        var (goodKey, goodFp) = RemSoundCrypto.ForPlainPassword("kettle9tiger42moon");
-        Check(goodKey is { Length: 32 } && goodFp is { Length: 8 }, "a strong password must derive the full key + fingerprint");
+        Check(weakKey is { Length: 32 } && weakFp is { Length: 8 }, "a WEAK password must still derive a key now (strength is not enforced — v5.7 back-out)");
+        var (strongKey, strongFp) = RemSoundCrypto.ForPlainPassword("kettle9tiger42moon");
+        Check(strongKey is { Length: 32 } && strongFp is { Length: 8 }, "a strong password derives a key too");
+        Check(!weakKey.AsSpan().SequenceEqual(strongKey), "different passwords must derive different keys");
 
-        // Session cache (the NVDA-hang fix): a distinct strong password is a cache MISS until derived
-        // or prewarmed, then a HIT — so the ~1s PBKDF2 runs once per password per process and the
-        // UI-thread path can stay synchronous only when it's a hit. A second derive returns the SAME
-        // arrays (proof it wasn't recomputed). Empty/weak always count as "no work" (never block).
-        Check(RemSoundCrypto.IsCached("kettle9tiger42moon"), "a password just derived must read back as cached");
+        // Session cache: a repeat derive returns the SAME arrays (not recomputed).
         var again = RemSoundCrypto.ForPlainPassword("kettle9tiger42moon");
-        Check(ReferenceEquals(again.Key, goodKey), "a cached derive must return the same key instance, not recompute it");
-        var fresh = "prewarm7melon42anchor";
-        Check(!RemSoundCrypto.IsCached(fresh), "an unused strong password must read as a cache miss (would block the UI thread)");
+        Check(ReferenceEquals(again.Key, strongKey), "a cached derive must return the same key instance, not recompute it");
+        var fresh = "melon42anchor";
+        Check(!RemSoundCrypto.IsCached(fresh), "an unused password must read as a cache miss");
         RemSoundCrypto.Prewarm(fresh);
-        Check(RemSoundCrypto.IsCached(fresh), "Prewarm must derive off-thread so the later UI-thread lookup is an instant hit");
-        Check(RemSoundCrypto.IsCached("") && RemSoundCrypto.IsCached("Games"),
-            "empty and weak passwords must count as 'no work' (they never trigger a blocking derive)");
+        Check(RemSoundCrypto.IsCached(fresh), "Prewarm must populate the cache");
 
-        // The weak-password state must surface NON-modally at startup (no focus-trapping dialog that
-        // NVDA can't reach — the 2026-07-27 launch bug). WeakPasswordBlocksAudio drives the status line:
-        // true only for a genuinely weak password with no key; NOT for empty, NOT for a strong password
-        // still deriving off-thread (key null but Critique null), NOT once the key is present.
-        Check(MainForm.WeakPasswordBlocksAudio("Games", haveKey: false), "a weak password with no key must flag the status warning");
-        Check(!MainForm.WeakPasswordBlocksAudio("", haveKey: false), "no password is not a 'weak password' block");
-        Check(!MainForm.WeakPasswordBlocksAudio("kettle9tiger42moon", haveKey: false), "a STRONG password still deriving (key null, Critique null) must NOT show the weak warning");
-        Check(!MainForm.WeakPasswordBlocksAudio("Games", haveKey: true), "once a key exists the warning clears");
+        // The iteration count is part of the key recipe and MUST stay 100k or the other ports (iOS /
+        // older desktops) derive a different key from the same password. Pin it directly so an
+        // accidental change fails the gate loudly instead of silently breaking cross-port compat.
+        Check(RemSoundCrypto.Pbkdf2Iterations == 100_000,
+            $"PBKDF2 iterations must stay 100k for cross-port compatibility — got {RemSoundCrypto.Pbkdf2Iterations}");
 
-        // The headless service can't ask for a password, so the app nags on launch when an INSTALLED
-        // service has a set-but-weak password (the silent-death-after-auto-update case, Ed 2026-07-27).
-        Check(MainForm.ServicePasswordNeedsStrengthening(serviceInstalled: true, "Games"), "installed service + weak password → the app must warn");
-        Check(!MainForm.ServicePasswordNeedsStrengthening(serviceInstalled: false, "Games"), "no service installed → nothing to warn about");
-        Check(!MainForm.ServicePasswordNeedsStrengthening(serviceInstalled: true, ""), "an unset service password is 'not configured', not a weak-password regression");
-        Check(!MainForm.ServicePasswordNeedsStrengthening(serviceInstalled: true, "kettle9tiger42moon"), "a strong service password needs no nag");
-
-        return "weak+common refused with advice; derivation refuses weak everywhere; cached; app+service weak surfaced";
+        return "empty→no key; any non-empty (weak or strong)→key; cache reuses instances; 100k iteration count pinned";
     }
 
     /// <summary>The relay address-proof (2026-07-27): an AddrCheck cookie arriving at the receiver

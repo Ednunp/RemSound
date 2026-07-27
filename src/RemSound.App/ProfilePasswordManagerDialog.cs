@@ -78,37 +78,7 @@ internal static class ProfilePasswordManagerDialog
             rows.Add((title, current, box));
         }
 
-        var okButton = new Button { Text = "&OK", AutoSize = true };
-        // OK validates by hand (no auto-close DialogResult): every CHANGED, non-empty entry passes
-        // the same strength gate as the single-password dialog — one rule at every door. Unchanged
-        // entries always pass (an old weak password is grandfathered until the day it's changed).
-        okButton.Click += (_, _) =>
-        {
-            foreach (var (title, original, box) in rows)
-            {
-                // Same shared decision as the single-password dialog (casual mode: unchanged is
-                // exempt, changed-and-weak is refused) — one rule at every door, compared trimmed.
-                if (ProfilePasswordDialog.RejectionAdviceFor(box.Text, original, requireStrong: false) is { } advice)
-                {
-                    var page = new TaskDialogPage
-                    {
-                        Caption = "Choose a stronger password",
-                        Heading = $"The new password for “{title}” is too easy to guess",
-                        Text = advice,
-                        Icon = TaskDialogIcon.Warning,
-                        Buttons = { TaskDialogButton.OK },
-                        DefaultButton = TaskDialogButton.OK,
-                        AllowCancel = true,
-                    };
-                    TaskDialog.ShowDialog(dialog, page);
-                    box.Focus();
-                    box.SelectAll();
-                    return;
-                }
-            }
-            dialog.DialogResult = DialogResult.OK;
-            dialog.Close();
-        };
+        var okButton = new Button { Text = "&OK", AutoSize = true, DialogResult = DialogResult.OK };
         var cancelButton = new Button { Text = "&Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Padding = new Padding(8) };
         buttons.Controls.Add(okButton);

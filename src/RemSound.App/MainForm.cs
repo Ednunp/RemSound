@@ -1373,10 +1373,6 @@ public sealed partial class MainForm : Form
                 EvaluatePriorityModeScope();
                 UpdateStatus();
                 SnapshotLogIfDue();
-                // Catch a weak SERVICE password even while the app is ALREADY open (e.g. the service
-                // auto-updated to 5.6 underneath us) — self-throttled + one-shot, so it costs nothing
-                // once handled. The service can't warn the user itself (headless, session 0).
-                MaybeWarnWeakServicePassword();
                 EnsureRequestedAudioRunning();
                 // Refresh the Connectivity tab's peer lists from the same 1 Hz tick — replaces
                 // the dialog's old 1.5 s dedicated refresh timer. Each Sync* helper short-circuits
@@ -1670,83 +1666,8 @@ public sealed partial class MainForm : Form
         MaybeWarnAboutRealtekAsio();
         if (IsDisposed) return;
         MaybeWarnMicBlockedOnStartup();
-        if (IsDisposed) return;
-        MaybeWarnWeakPassword();
-        if (IsDisposed) return;
-        MaybeWarnWeakServicePassword();
     }
 
-    /// <summary>The send-only service is headless — it CANNOT ask for a password. So when it
-    /// auto-updates to 5.6 with a pre-existing weak service-profile password, it silently stops
-    /// streaming and only a log line explains why (nobody watches a service log). This closes that
-    /// gap from the one place a user WILL see: the interactive app's launch. If a service is installed
-    /// and its profile password is too weak, warn here (readable, focus-clean, via the same settled
-    /// notice sequence as the other startup warnings) and offer to open the service settings to fix it
-    /// (Ed, 2026-07-27 — "people won't know to change the service password"). Self-resolving: once the
-    /// service password is strengthened, this never fires again.</summary>
-    // Warn at most ONCE per app session (launch OR the live poll below), and re-check no more than
-    // every 15 s when driven from the 1 Hz status tick so we're not reading the service state every
-    // second. Cleared only by a new app session — once fixed, ServicePasswordNeedsStrengthening goes
-    // false and it never fires again anyway.
-    private bool serviceWeakPasswordWarned;
-    private long lastServicePwCheckTick;
-
-    private void MaybeWarnWeakServicePassword()
-    {
-        if (IsDisposed || CuePlayer.GloballyMuted || serviceWeakPasswordWarned) return;
-        var now = Environment.TickCount64;
-        if (lastServicePwCheckTick != 0 && now - lastServicePwCheckTick < 15_000) return;
-        lastServicePwCheckTick = now;
-        try
-        {
-            var installed = ServiceControl.Query() is not (ServiceState.NotInstalled or ServiceState.Unknown);
-            var sp = ServiceStore.LoadProfile();
-            var pw = string.IsNullOrEmpty(sp?.Password) ? "" : RemSoundCrypto.Deobfuscate(sp!.Password);
-            if (!ServicePasswordNeedsStrengthening(installed, pw)) return;
-        }
-        catch { return; } // service state unreadable (e.g. Win7 without the feature) — nothing to warn about
-        serviceWeakPasswordWarned = true; // set BEFORE the modal so a re-entrant tick can't stack it
-        var open = ForegroundDialog.Show(owner => MessageBox.Show(owner,
-            "Your RemSound background service is using a password that's too weak to meet the new "
-                + "security rules, so the service won't stream until the password is changed. (The "
-                + "service can't ask you itself, because it runs in the background with no window.)\n\n"
-                + "Use at least 8 characters — three unrelated words with a number, like kettle9tiger42moon, works well.\n\n"
-                + "Would you like to open the service settings now to change it?",
-            "RemSound — service password needs strengthening",
-            MessageBoxButtons.YesNo, MessageBoxIcon.Warning));
-        if (open == DialogResult.Yes && !IsDisposed) ConfigureServiceProfile();
-    }
-
-    /// <summary>Pure, testable: should the app nag about the SERVICE profile's password? Only when a
-    /// service is installed AND its password is set-but-weak — the regression case (a service that
-    /// used to stream goes silent after the 5.6 auto-update). An unset password is a never-configured
-    /// service, not a regression, so it's left alone here.</summary>
-    internal static bool ServicePasswordNeedsStrengthening(bool serviceInstalled, string? servicePlainPassword) =>
-        serviceInstalled && !string.IsNullOrEmpty(servicePlainPassword) && PasswordStrength.Critique(servicePlainPassword) is not null;
-
-    /// <summary>Startup warning for a profile whose password is too weak to stream under the 5.6 rule.
-    /// Runs from the SETTLED post-launch notice sequence — after the window is fully shown and
-    /// activated, one dialog at a time — NOT from the mid-connect crypto path where an earlier version
-    /// fired it and left a blind user trapped behind a dialog NVDA couldn't reach (Ed, 2026-07-27).
-    /// From here <see cref="ForegroundDialog"/> pulls it to the front (even from the tray) with clean
-    /// focus, exactly like the mic-blocked and Realtek warnings that already work with NVDA. Only fires
-    /// when the profile is actually set up to stream (send or receive on) — otherwise there's no audio
-    /// to block and the guided prompt on the first streaming tick is enough. The status line carries a
-    /// standing reminder after this is dismissed.</summary>
-    private void MaybeWarnWeakPassword()
-    {
-        if (IsDisposed || CuePlayer.GloballyMuted) return; // never on a --silent/automated launch
-        if (!WeakPasswordBlocksAudio(currentProfilePassword, currentAudioKey is not null)) return;
-        if (!IsSendEnabled && !IsReceiveEnabled) return;   // not trying to stream → nothing blocked yet
-        ForegroundDialog.Show(owner => MessageBox.Show(owner,
-            "RemSound has increased its security level, so this profile's password must be strengthened "
-                + "to meet the new password rules. Until it is, no audio will pass.\n\n"
-                + "Use at least 8 characters — three unrelated words with a number, like kettle9tiger42moon, works well.\n\n"
-                + "To change it: open the File menu and choose “Change this profile's password”. Use the "
-                + "same new password on every machine you connect with.",
-            "RemSound — password needs strengthening",
-            MessageBoxButtons.OK, MessageBoxIcon.Warning));
-    }
 
     /// <summary>Startup log-folder housekeeping driven by the Logging-tab preferences. Both steps are
     /// opt-in (off by default): first prune logs older than the configured age, then warn if the
@@ -7272,12 +7193,7 @@ public sealed partial class MainForm : Form
             : "not receiving";
         var peerCount = knownPeers.Count;
         var hbSummary = heartbeatService?.GetHealthSummary() ?? "no peers";
-        // Weak-password block surfaced here, NON-modally, so NVDA reads it without a startup dialog
-        // trap (2026-07-27). Leads the status line so it's the first thing spoken.
-        var weakPrefix = WeakPasswordBlocksAudio(currentProfilePassword, currentAudioKey is not null)
-            ? "No audio: this profile's password is too weak to protect it — change it in the File menu, “Change this profile's password”, on every machine you connect with. "
-            : "";
-        statusLabel.Text = $"{weakPrefix}Connected for {since}. {peerCount} peer(s) known. {sendText}. {receiveText}. Heartbeat: {hbSummary}.";
+        statusLabel.Text = $"Connected for {since}. {peerCount} peer(s) known. {sendText}. {receiveText}. Heartbeat: {hbSummary}.";
         bool streaming = connected && (sender.IsRunning || receiver.IsRunning);
         healthLabel.Text = connected
             ? streaming ? "Health: streaming" : "Health: idle"
@@ -8365,18 +8281,13 @@ public sealed partial class MainForm : Form
         }
     }
 
-    /// <summary>Derive the audio key + fingerprint from the current profile password and push them
-    /// to the sender and receiver. No/weak password → null key → no audio flows (encryption is
-    /// mandatory). Called on password change, when audio is (re)configured, and on the streaming
-    /// gate. 2026-05-31.
-    ///
-    /// The 5.6 PBKDF2 raise (600k, run twice) costs up to ~1 s on old hardware, so the FIRST use of
-    /// a strong password this session is derived OFF the UI thread — otherwise a blind user gets a
-    /// full NVDA freeze on profile load / first connect (2026-07-27 review). The key is held null
-    /// until it lands (audio simply waits — mandatory encryption means it never streams keyless), a
-    /// generation guard drops a stale result if the password changed again meanwhile, and the fast
-    /// cases (unchanged / cached / empty / weak — no PBKDF2) still apply synchronously so nothing
-    /// races on the common path.</summary>
+    /// <summary>Derive the audio key + fingerprint from the current profile password and push them to
+    /// the sender and receiver. No password → null key → no audio (encryption is mandatory — a
+    /// password is still required). ANY non-empty password derives a key; strength is not enforced
+    /// (v5.7 backed out the 5.6 block so the other ports work again). The FIRST use of a password this
+    /// session is derived OFF the UI thread so the key derivation never freezes NVDA on profile load /
+    /// first connect; the key is held null until it lands (audio just waits — never streams keyless),
+    /// and a generation guard drops a stale result if the password changed again meanwhile.</summary>
     private void RecomputeAudioCrypto()
     {
         var pw = currentProfilePassword;
@@ -8387,31 +8298,27 @@ public sealed partial class MainForm : Form
         }
         lastDerivedPassword = pw;
         var gen = ++cryptoGeneration;
-        // The password genuinely changed — re-arm the one-shot weak-password explanation so a SECOND
-        // weak-password profile switched to in the same session is still explained (not just the first).
-        weakPasswordExplained = false;
 
-        // Fast path: null/empty/weak (resolves to (null,null) with no PBKDF2), or an already-cached
-        // strong password. Apply synchronously — no freeze possible. Also covers the pre-window
-        // case where the form has no handle yet (BeginInvoke would throw), so startup stays correct.
+        // Fast path: empty (no key, no PBKDF2) or an already-cached password. Apply synchronously —
+        // no freeze possible. Also covers the pre-window case where the form has no handle yet
+        // (BeginInvoke would throw), so startup stays correct.
         if (RemSoundCrypto.IsCached(pw) || !IsHandleCreated)
         {
             (currentAudioKey, currentAudioFingerprint) = RemSoundCrypto.ForPlainPassword(pw);
             PushAudioCrypto();
-            ExplainWeakPasswordIfNeeded(pw);
             return;
         }
 
-        // Slow path: a strong password not yet derived this session. Hold the key null (audio waits)
-        // and do the PBKDF2 on a worker; apply on the UI thread when it lands, unless superseded.
+        // Slow path: a password not yet derived this session. Hold the key null (audio waits) and do
+        // the PBKDF2 on a worker; apply on the UI thread when it lands, unless superseded.
         currentAudioKey = null;
         currentAudioFingerprint = null;
         PushAudioCrypto();
-        logFile.Event("audio crypto: deriving key off-thread (strong password, first use this session)");
+        logFile.Event("audio crypto: deriving key off-thread (first use this session)");
         var pwLocal = pw;
         Task.Run(() =>
         {
-            RemSoundCrypto.Prewarm(pwLocal); // the ~1 s PBKDF2, off the UI thread
+            RemSoundCrypto.Prewarm(pwLocal); // the PBKDF2, off the UI thread
             try
             {
                 BeginInvoke(() =>
@@ -8434,69 +8341,22 @@ public sealed partial class MainForm : Form
         receiver.AudioFingerprint = currentAudioFingerprint;
     }
 
-    /// <summary>Since 5.6 the derivation rule refuses a WEAK password (key comes back null). This runs
-    /// automatically on profile load / auto-connect, so it must NOT pop a modal: a startup dialog that
-    /// steals focus before NVDA can reach it — and drags the window out of the tray to show it — locked
-    /// a blind user out completely (Ed, 2026-07-27, "it will fuck over all nvda users"). The weak state
-    /// is surfaced NON-modally and persistently in the status line instead (see <see cref="UpdateStatus"/>
-    /// and <see cref="WeakPasswordBlocksAudio"/>), which NVDA reads at the user's own pace. The guided
-    /// modal prompt is reserved for the user-INITIATED streaming tick (<see cref="EnsureStreamingPassword"/>),
-    /// where the user just pressed a key so focus is clean and the dialog is reachable. Here: log once.</summary>
-    private void ExplainWeakPasswordIfNeeded(string? pw)
-    {
-        if (string.IsNullOrEmpty(pw) || currentAudioKey is not null || weakPasswordExplained) return;
-        weakPasswordExplained = true;
-        logFile.Event("audio crypto: profile password fails the 5.6 strength rule — no audio until it's changed (shown in the status line)");
-    }
-
-    /// <summary>Pure, testable: is audio blocked purely because the current profile password is too
-    /// weak (as opposed to no password, or a strong password still deriving off-thread)? Drives the
-    /// status-line warning. A strong password mid-derive has a null key too, but Critique returns null
-    /// for it, so this stays false there — it fires only for a genuinely guessable password.</summary>
-    internal static bool WeakPasswordBlocksAudio(string? password, bool haveKey) =>
-        !string.IsNullOrEmpty(password) && !haveKey && PasswordStrength.Critique(password) is not null;
-
     // Bumped on every password change so a slow background derive that finishes AFTER a newer change
     // knows to discard its now-stale result (see RecomputeAudioCrypto).
     private int cryptoGeneration;
-    // One-shot flag for the weak-password explanation — the dialog must not re-fire on every profile
-    // reapply within a session (the log line still records each derivation refusal). Reset on a
-    // profile switch so a SECOND weak-password profile in one session is still explained.
-    private bool weakPasswordExplained;
 
-    /// <summary>The "you need a password before any audio can flow" gate. Called when the user
-    /// ticks Send my audio or Receive audio. If the active profile has no password, prompt for
-    /// one. Since 5.6 (Ed, 2026-07-27) an EXISTING password that fails the strength rule is gated
-    /// the same way: the user is told why, in plain words, and audio waits until a stronger one is
-    /// set — grandfathering weak passwords forever would have made the derivation-cost raise
-    /// theatre, and everyone is already coordinating a password-compatible update in this release.
-    /// If they give an acceptable password, set it (and offer to save it to the profile); if they
-    /// cancel, un-tick the box. Returns true if streaming may proceed.</summary>
+    /// <summary>The "you need a password before any audio can flow" gate. Called when the user ticks
+    /// Send my audio or Receive audio. Encryption is mandatory, so if the active profile has no
+    /// password we prompt for one; ANY password is accepted (strength is only suggested, not enforced
+    /// — v5.7). If they give one, set it (and offer to save it to the profile); if they cancel,
+    /// un-tick the box. Returns true if streaming may proceed.</summary>
     private bool EnsureStreamingPassword(AccessibleCheckBox box)
     {
-        if (!box.Checked) return true;                           // turning OFF never needs a password
-        var weakAdvice = PasswordStrength.Critique(currentProfilePassword ?? "");
-        if (!string.IsNullOrEmpty(currentProfilePassword) && weakAdvice is null) return true; // have one and it passes
+        if (!box.Checked) return true;                              // turning OFF never needs a password
+        if (!string.IsNullOrEmpty(currentProfilePassword)) return true; // already have one — good to go
 
         var label = string.IsNullOrEmpty(currentProfileTitle) ? "this session" : currentProfileTitle;
-        if (weakAdvice is not null && !string.IsNullOrEmpty(currentProfilePassword))
-        {
-            // Tell the user WHY the password prompt is about to appear with their old password in
-            // it — a bare dialog would read as a bug to someone whose password worked yesterday.
-            var page = new TaskDialogPage
-            {
-                Caption = "RemSound — password needs strengthening",
-                Heading = "Your password must be strengthened",
-                Text = "RemSound has increased its security level, so this profile's password must be "
-                     + $"strengthened before audio can flow. {weakAdvice}",
-                Icon = TaskDialogIcon.Warning,
-                Buttons = { TaskDialogButton.OK },
-                DefaultButton = TaskDialogButton.OK,
-                AllowCancel = true,
-            };
-            ForegroundDialog.Show(owner => TaskDialog.ShowDialog(owner, page));
-        }
-        var entered = ProfilePasswordDialog.Show(label, currentProfilePassword ?? "", requireNonEmpty: true, requireStrong: true);
+        var entered = ProfilePasswordDialog.Show(label, currentProfilePassword ?? "", requireNonEmpty: true);
         if (string.IsNullOrEmpty(entered))
         {
             // No acceptable password → can't stream. Put the box back without re-firing this gate.

@@ -329,11 +329,6 @@ public sealed class ServiceSendHost : IDisposable
             // verifies the fingerprint before accepting a stream; a key alone gets silently rejected).
             var plainPassword = string.IsNullOrEmpty(profile.Password) ? "" : RemSoundCrypto.Deobfuscate(profile.Password);
             (sender.AudioKey, sender.AudioFingerprint) = RemSoundCrypto.ForPlainPassword(plainPassword);
-            // Since 5.6 the shared rule also refuses a WEAK password (key null → nothing sent). The
-            // headless service can't pop a dialog, so the log must carry the why — otherwise this
-            // reads as the old "no password set" and sends someone hunting the wrong bug.
-            if (sender.AudioKey is null && plainPassword.Length > 0)
-                log?.Invoke("service: the service profile's password fails the 5.6 strength rule — no audio until it's changed (Service menu, Configure service profile, Set service profile password)");
             // The service's audio transport is FIXED to the known-good live-jamming config, regardless of
             // what the profile carries (the config dialog no longer exposes these — Ed, 2026-07-17).
             // The numbers live in ServiceAudioDefaults, shared with the dialog that writes the profile.

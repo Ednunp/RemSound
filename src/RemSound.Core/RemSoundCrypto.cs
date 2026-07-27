@@ -52,14 +52,13 @@ public static class RemSoundCrypto
     private const int NonceBytes = 12;      // AES-GCM standard nonce
     private const int TagBytes = 16;        // AES-GCM auth tag
 
-    // PBKDF2 cost. Raised 100k → 600k for v5.6 (2026-07-27, per the security audit — 100k was
-    // well below current OWASP guidance and the fingerprint travels in cleartext, so offline
-    // guessing cost is the whole defence). BREAKING: both peers must derive the SAME key from
-    // the same password, so a 5.6 machine cannot exchange audio with a pre-5.6 machine AT ALL —
-    // the release notes lead with "everyone must update". Runs once per password and is cached
-    // (never per packet); ~a few hundred ms even on old hardware, felt only when a password is
-    // set or a profile loads.
-    private const int Pbkdf2Iterations = 600_000;
+    // PBKDF2 cost. MUST stay 100k: this is part of the key recipe, so every RemSound "port" (the
+    // Windows app + service, the iOS app, any other build) has to use the same count or the SAME
+    // password produces a DIFFERENT key and audio won't decrypt between them. v5.6 briefly raised it
+    // to 600k, which silently broke cross-port compatibility (iOS/older desktops) even with matching
+    // passwords; v5.7 put it back to 100k so the other ports work again (Ed, 2026-07-27). Run once
+    // per password and cached — never per packet.
+    internal const int Pbkdf2Iterations = 100_000;
 
     // Fixed salts. A per-connection random salt would be stronger, but both peers must derive
     // the SAME key from the SAME password with no key-exchange round, so the salt has to be
@@ -71,39 +70,33 @@ public static class RemSoundCrypto
     private static readonly byte[] ObfuscationKey =
         Encoding.UTF8.GetBytes("RemSound-profile-password-scramble-v1");
 
-    // Session cache of derived credentials, keyed by plaintext password. The 600k-iteration PBKDF2
-    // (run TWICE per derive, for key + fingerprint) costs up to ~1 s on old hardware; caching means
-    // a given password pays that ONCE per process, so a profile SWITCH back to a used password — or
-    // the service re-deriving on an audio-device hot-plug — is instant. The derived key already lives
-    // in process memory (currentAudioKey), so this doesn't widen exposure; it's cleared on exit like
-    // everything else. Bounded: a user has a handful of distinct passwords, not thousands.
+    // Session cache of derived credentials, keyed by plaintext password. Caching means a given
+    // password pays the PBKDF2 cost ONCE per process, so a profile SWITCH back to a used password —
+    // or the service re-deriving on an audio-device hot-plug — is instant. The derived key already
+    // lives in process memory (currentAudioKey), so this doesn't widen exposure; cleared on exit.
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (byte[] Key, byte[] Fingerprint)> derivedCache = new(StringComparer.Ordinal);
 
     /// <summary>The one rule for turning a PLAIN password into the audio credentials: null/empty →
-    /// (null, null) → no audio flows (encryption is mandatory); since 5.6 a password that fails
-    /// <see cref="PasswordStrength.Critique"/> ALSO yields (null, null) — enforced here, at the single
-    /// choke-point the app AND the service both derive through, so no path (tick, startup auto-connect,
-    /// profile switch, headless service) can stream on a guessable password (Ed, 2026-07-27; the UI
-    /// explains and walks the user to a stronger one). Otherwise the key AND the fingerprint, always
-    /// together — the peer verifies the fingerprint before accepting a stream, so a key without its
-    /// fingerprint gets the audio silently rejected at the far end (a divergence that already bit
-    /// the service once). Result is cached per password (see <see cref="derivedCache"/>); the slow
-    /// PBKDF2 runs once per distinct password per process. Callers that must not stall the UI thread
-    /// should <see cref="Prewarm"/> off-thread first (the app does).</summary>
+    /// (null, null) → no audio flows (encryption is mandatory — a password is still required). ANY
+    /// non-empty password derives its key + fingerprint; strength is NOT enforced here (v5.7 backed
+    /// out the 5.6 weak-password block so the other ports work again — Ed, 2026-07-27; the UI just
+    /// suggests a strong one). Key and fingerprint always come together — the peer verifies the
+    /// fingerprint before accepting a stream, so a key without its fingerprint gets the audio silently
+    /// rejected at the far end. Cached per password; the PBKDF2 runs once per distinct password per
+    /// process. Callers that must not stall the UI thread should <see cref="Prewarm"/> off-thread.</summary>
     public static (byte[]? Key, byte[]? Fingerprint) ForPlainPassword(string? plainPassword)
     {
-        if (string.IsNullOrEmpty(plainPassword) || PasswordStrength.Critique(plainPassword) is not null)
-            return (null, null);
+        if (string.IsNullOrEmpty(plainPassword)) return (null, null);
         var (k, f) = derivedCache.GetOrAdd(plainPassword, static pw => (DeriveKey(pw), Fingerprint(pw)));
         return (k, f);
     }
 
     /// <summary>Derive-and-cache a password's credentials WITHOUT returning them — for calling on a
     /// background thread so the subsequent <see cref="ForPlainPassword"/> on the UI thread is a cache
-    /// hit and never blocks on PBKDF2. Null/empty/weak passwords are a no-op (nothing to warm).</summary>
+    /// hit and never blocks on PBKDF2. Null/empty is a no-op (nothing to warm).</summary>
     public static void Prewarm(string? plainPassword)
     {
-        if (!string.IsNullOrEmpty(plainPassword) && PasswordStrength.Critique(plainPassword) is null)
+        if (!string.IsNullOrEmpty(plainPassword))
             derivedCache.GetOrAdd(plainPassword, static pw => (DeriveKey(pw), Fingerprint(pw)));
     }
 
@@ -113,7 +106,6 @@ public static class RemSoundCrypto
     /// off-thread (a strong password's first use this session). Empty/weak count as "no work".</summary>
     public static bool IsCached(string? plainPassword) =>
         string.IsNullOrEmpty(plainPassword)
-        || PasswordStrength.Critique(plainPassword) is not null
         || derivedCache.ContainsKey(plainPassword);
 
     /// <summary>Derive the 256-bit AES key for a password. Cache the result; never call per packet.</summary>
