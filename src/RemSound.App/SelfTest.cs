@@ -2569,7 +2569,14 @@ internal static class SelfTest
         Check(!MainForm.WeakPasswordBlocksAudio("kettle9tiger42moon", haveKey: false), "a STRONG password still deriving (key null, Critique null) must NOT show the weak warning");
         Check(!MainForm.WeakPasswordBlocksAudio("Games", haveKey: true), "once a key exists the warning clears");
 
-        return "weak+common refused with advice; derivation refuses weak everywhere; cached; weak-block surfaced non-modally";
+        // The headless service can't ask for a password, so the app nags on launch when an INSTALLED
+        // service has a set-but-weak password (the silent-death-after-auto-update case, Ed 2026-07-27).
+        Check(MainForm.ServicePasswordNeedsStrengthening(serviceInstalled: true, "Games"), "installed service + weak password → the app must warn");
+        Check(!MainForm.ServicePasswordNeedsStrengthening(serviceInstalled: false, "Games"), "no service installed → nothing to warn about");
+        Check(!MainForm.ServicePasswordNeedsStrengthening(serviceInstalled: true, ""), "an unset service password is 'not configured', not a weak-password regression");
+        Check(!MainForm.ServicePasswordNeedsStrengthening(serviceInstalled: true, "kettle9tiger42moon"), "a strong service password needs no nag");
+
+        return "weak+common refused with advice; derivation refuses weak everywhere; cached; app+service weak surfaced";
     }
 
     /// <summary>The relay address-proof (2026-07-27): an AddrCheck cookie arriving at the receiver

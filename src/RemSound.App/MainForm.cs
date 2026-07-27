@@ -1668,7 +1668,46 @@ public sealed partial class MainForm : Form
         MaybeWarnMicBlockedOnStartup();
         if (IsDisposed) return;
         MaybeWarnWeakPassword();
+        if (IsDisposed) return;
+        MaybeWarnWeakServicePassword();
     }
+
+    /// <summary>The send-only service is headless — it CANNOT ask for a password. So when it
+    /// auto-updates to 5.6 with a pre-existing weak service-profile password, it silently stops
+    /// streaming and only a log line explains why (nobody watches a service log). This closes that
+    /// gap from the one place a user WILL see: the interactive app's launch. If a service is installed
+    /// and its profile password is too weak, warn here (readable, focus-clean, via the same settled
+    /// notice sequence as the other startup warnings) and offer to open the service settings to fix it
+    /// (Ed, 2026-07-27 — "people won't know to change the service password"). Self-resolving: once the
+    /// service password is strengthened, this never fires again.</summary>
+    private void MaybeWarnWeakServicePassword()
+    {
+        if (IsDisposed || CuePlayer.GloballyMuted) return;
+        try
+        {
+            var installed = ServiceControl.Query() is not (ServiceState.NotInstalled or ServiceState.Unknown);
+            var sp = ServiceStore.LoadProfile();
+            var pw = string.IsNullOrEmpty(sp?.Password) ? "" : RemSoundCrypto.Deobfuscate(sp!.Password);
+            if (!ServicePasswordNeedsStrengthening(installed, pw)) return;
+        }
+        catch { return; } // service state unreadable (e.g. Win7 without the feature) — nothing to warn about
+        var open = ForegroundDialog.Show(owner => MessageBox.Show(owner,
+            "Your RemSound background service is using a password that's too weak to meet the new "
+                + "security rules, so the service won't stream until the password is changed. (The "
+                + "service can't ask you itself, because it runs in the background with no window.)\n\n"
+                + "Use at least 8 characters — three unrelated words with a number, like kettle9tiger42moon, works well.\n\n"
+                + "Would you like to open the service settings now to change it?",
+            "RemSound — service password needs strengthening",
+            MessageBoxButtons.YesNo, MessageBoxIcon.Warning));
+        if (open == DialogResult.Yes && !IsDisposed) ConfigureServiceProfile();
+    }
+
+    /// <summary>Pure, testable: should the app nag about the SERVICE profile's password? Only when a
+    /// service is installed AND its password is set-but-weak — the regression case (a service that
+    /// used to stream goes silent after the 5.6 auto-update). An unset password is a never-configured
+    /// service, not a regression, so it's left alone here.</summary>
+    internal static bool ServicePasswordNeedsStrengthening(bool serviceInstalled, string? servicePlainPassword) =>
+        serviceInstalled && !string.IsNullOrEmpty(servicePlainPassword) && PasswordStrength.Critique(servicePlainPassword) is not null;
 
     /// <summary>Startup warning for a profile whose password is too weak to stream under the 5.6 rule.
     /// Runs from the SETTLED post-launch notice sequence — after the window is fully shown and
