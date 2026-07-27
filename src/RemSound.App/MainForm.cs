@@ -1373,6 +1373,10 @@ public sealed partial class MainForm : Form
                 EvaluatePriorityModeScope();
                 UpdateStatus();
                 SnapshotLogIfDue();
+                // Catch a weak SERVICE password even while the app is ALREADY open (e.g. the service
+                // auto-updated to 5.6 underneath us) — self-throttled + one-shot, so it costs nothing
+                // once handled. The service can't warn the user itself (headless, session 0).
+                MaybeWarnWeakServicePassword();
                 EnsureRequestedAudioRunning();
                 // Refresh the Connectivity tab's peer lists from the same 1 Hz tick — replaces
                 // the dialog's old 1.5 s dedicated refresh timer. Each Sync* helper short-circuits
@@ -1680,9 +1684,19 @@ public sealed partial class MainForm : Form
     /// notice sequence as the other startup warnings) and offer to open the service settings to fix it
     /// (Ed, 2026-07-27 — "people won't know to change the service password"). Self-resolving: once the
     /// service password is strengthened, this never fires again.</summary>
+    // Warn at most ONCE per app session (launch OR the live poll below), and re-check no more than
+    // every 15 s when driven from the 1 Hz status tick so we're not reading the service state every
+    // second. Cleared only by a new app session — once fixed, ServicePasswordNeedsStrengthening goes
+    // false and it never fires again anyway.
+    private bool serviceWeakPasswordWarned;
+    private long lastServicePwCheckTick;
+
     private void MaybeWarnWeakServicePassword()
     {
-        if (IsDisposed || CuePlayer.GloballyMuted) return;
+        if (IsDisposed || CuePlayer.GloballyMuted || serviceWeakPasswordWarned) return;
+        var now = Environment.TickCount64;
+        if (lastServicePwCheckTick != 0 && now - lastServicePwCheckTick < 15_000) return;
+        lastServicePwCheckTick = now;
         try
         {
             var installed = ServiceControl.Query() is not (ServiceState.NotInstalled or ServiceState.Unknown);
@@ -1691,6 +1705,7 @@ public sealed partial class MainForm : Form
             if (!ServicePasswordNeedsStrengthening(installed, pw)) return;
         }
         catch { return; } // service state unreadable (e.g. Win7 without the feature) — nothing to warn about
+        serviceWeakPasswordWarned = true; // set BEFORE the modal so a re-entrant tick can't stack it
         var open = ForegroundDialog.Show(owner => MessageBox.Show(owner,
             "Your RemSound background service is using a password that's too weak to meet the new "
                 + "security rules, so the service won't stream until the password is changed. (The "
