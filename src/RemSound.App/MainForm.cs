@@ -7188,7 +7188,12 @@ public sealed partial class MainForm : Form
             : "not receiving";
         var peerCount = knownPeers.Count;
         var hbSummary = heartbeatService?.GetHealthSummary() ?? "no peers";
-        statusLabel.Text = $"Connected for {since}. {peerCount} peer(s) known. {sendText}. {receiveText}. Heartbeat: {hbSummary}.";
+        // Weak-password block surfaced here, NON-modally, so NVDA reads it without a startup dialog
+        // trap (2026-07-27). Leads the status line so it's the first thing spoken.
+        var weakPrefix = WeakPasswordBlocksAudio(currentProfilePassword, currentAudioKey is not null)
+            ? "No audio: this profile's password is too weak to protect it — change it in the File menu, “Change this profile's password”, on every machine you connect with. "
+            : "";
+        statusLabel.Text = $"{weakPrefix}Connected for {since}. {peerCount} peer(s) known. {sendText}. {receiveText}. Heartbeat: {hbSummary}.";
         bool streaming = connected && (sender.IsRunning || receiver.IsRunning);
         healthLabel.Text = connected
             ? streaming ? "Health: streaming" : "Health: idle"
@@ -8345,32 +8350,27 @@ public sealed partial class MainForm : Form
         receiver.AudioFingerprint = currentAudioFingerprint;
     }
 
-    /// <summary>Since 5.6 the derivation rule refuses a WEAK password (key comes back null), so a
-    /// profile that auto-connects at startup with an old guessable password must not just sit
-    /// silently dead — say why, once, and point at the fix. The interactive tick path has its own
-    /// guided flow (EnsureStreamingPassword); this catches every other route in.</summary>
+    /// <summary>Since 5.6 the derivation rule refuses a WEAK password (key comes back null). This runs
+    /// automatically on profile load / auto-connect, so it must NOT pop a modal: a startup dialog that
+    /// steals focus before NVDA can reach it — and drags the window out of the tray to show it — locked
+    /// a blind user out completely (Ed, 2026-07-27, "it will fuck over all nvda users"). The weak state
+    /// is surfaced NON-modally and persistently in the status line instead (see <see cref="UpdateStatus"/>
+    /// and <see cref="WeakPasswordBlocksAudio"/>), which NVDA reads at the user's own pace. The guided
+    /// modal prompt is reserved for the user-INITIATED streaming tick (<see cref="EnsureStreamingPassword"/>),
+    /// where the user just pressed a key so focus is clean and the dialog is reachable. Here: log once.</summary>
     private void ExplainWeakPasswordIfNeeded(string? pw)
     {
         if (string.IsNullOrEmpty(pw) || currentAudioKey is not null || weakPasswordExplained) return;
         weakPasswordExplained = true;
-        logFile.Event("audio crypto: profile password fails the 5.6 strength rule — no audio until it's changed");
-        var advice = PasswordStrength.Critique(pw) ?? "";
-        BeginInvoke(() =>
-        {
-            var page = new TaskDialogPage
-            {
-                Caption = "Password needs strengthening",
-                Heading = "No audio until this profile's password is stronger",
-                Text = "From this version, RemSound refuses to stream on a password that's easy to guess. "
-                     + advice + " Change it via the File menu, “Change this profile's password” — on every machine that uses it.",
-                Icon = TaskDialogIcon.Warning,
-                Buttons = { TaskDialogButton.OK },
-                DefaultButton = TaskDialogButton.OK,
-                AllowCancel = true,
-            };
-            ForegroundDialog.Show(owner => TaskDialog.ShowDialog(owner, page));
-        });
+        logFile.Event("audio crypto: profile password fails the 5.6 strength rule — no audio until it's changed (shown in the status line)");
     }
+
+    /// <summary>Pure, testable: is audio blocked purely because the current profile password is too
+    /// weak (as opposed to no password, or a strong password still deriving off-thread)? Drives the
+    /// status-line warning. A strong password mid-derive has a null key too, but Critique returns null
+    /// for it, so this stays false there — it fires only for a genuinely guessable password.</summary>
+    internal static bool WeakPasswordBlocksAudio(string? password, bool haveKey) =>
+        !string.IsNullOrEmpty(password) && !haveKey && PasswordStrength.Critique(password) is not null;
 
     // Bumped on every password change so a slow background derive that finishes AFTER a newer change
     // knows to discard its now-stale result (see RecomputeAudioCrypto).

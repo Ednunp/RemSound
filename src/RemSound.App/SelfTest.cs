@@ -2560,7 +2560,16 @@ internal static class SelfTest
         Check(RemSoundCrypto.IsCached("") && RemSoundCrypto.IsCached("Games"),
             "empty and weak passwords must count as 'no work' (they never trigger a blocking derive)");
 
-        return "weak+common refused with advice; derivation refuses weak everywhere; results cached (no repeat PBKDF2)";
+        // The weak-password state must surface NON-modally at startup (no focus-trapping dialog that
+        // NVDA can't reach — the 2026-07-27 launch bug). WeakPasswordBlocksAudio drives the status line:
+        // true only for a genuinely weak password with no key; NOT for empty, NOT for a strong password
+        // still deriving off-thread (key null but Critique null), NOT once the key is present.
+        Check(MainForm.WeakPasswordBlocksAudio("Games", haveKey: false), "a weak password with no key must flag the status warning");
+        Check(!MainForm.WeakPasswordBlocksAudio("", haveKey: false), "no password is not a 'weak password' block");
+        Check(!MainForm.WeakPasswordBlocksAudio("kettle9tiger42moon", haveKey: false), "a STRONG password still deriving (key null, Critique null) must NOT show the weak warning");
+        Check(!MainForm.WeakPasswordBlocksAudio("Games", haveKey: true), "once a key exists the warning clears");
+
+        return "weak+common refused with advice; derivation refuses weak everywhere; cached; weak-block surfaced non-modally";
     }
 
     /// <summary>The relay address-proof (2026-07-27): an AddrCheck cookie arriving at the receiver
