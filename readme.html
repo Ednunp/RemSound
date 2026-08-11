@@ -1421,6 +1421,7 @@ RemSound.exe --connect 192.168.1.42
 <li><strong>Install service</strong> &mdash; registers it with Windows so it starts automatically at every boot. Windows asks for administrator permission (one prompt). Do this once. Straight after installing, RemSound asks whether you'd like to <strong>start it now</strong> (otherwise it waits until the next reboot). (When you first install RemSound on a PC, the app installer also offers to set the service up &mdash; and start it &mdash; for you, so you may have done this already.)</li>
 <li><strong>Start service</strong> / <strong>Stop service</strong> &mdash; run or halt it now without waiting for a reboot.</li>
 <li><strong>Uninstall service</strong> &mdash; removes it entirely.</li>
+<li><strong>Repair service folder access</strong> &mdash; fixes the permissions on the service's settings folder so your account can save the service profile and read the service logs again. You should never need this in normal use, but if saving the service profile ever fails with an &ldquo;access denied&rdquo; message, or the service's log files won't open, run this once (Windows asks for administrator permission) and everything is put right. RemSound also checks the folder itself every time it starts and offers this same repair automatically if it finds a problem.</li>
 </ol>
 <p>The top of the Service menu always shows the current state: not installed, installed and running, or installed and stopped.</p>
 
@@ -1497,6 +1498,9 @@ RemSound.exe --connect 192.168.1.42
 
 <h3>A sound card you were listening through was unplugged</h3>
 <p>If a sound card you're playing received audio through is unplugged and then plugged back in, RemSound now re-opens it on its own and the sound resumes &mdash; you don't have to re-tick it in the output list. This works when the card comes back as the same Windows device, which is the usual case when you plug it into the same socket. If you move it to a different USB socket and Windows treats it as a brand-new device, just tick it again in the output list.</p>
+
+<h3>Saving the service profile says &ldquo;access denied&rdquo;, or the service's log files won't open</h3>
+<p>Your account has lost its permissions on the service's settings folder &mdash; this could happen after some older-version reinstalls, and it also blocks the service itself from starting properly. The fix is one menu item: <strong>Service &rarr; Repair service folder access</strong>. Windows asks for administrator permission once, the folder is put right, and saving and log-reading work again. RemSound also spots this state by itself when it starts and offers the same repair automatically, and the service applies the fix on its own when it installs a RemSound update &mdash; so on an up-to-date machine you should never actually meet this problem.</p>
 
 <h3>UPnP says &ldquo;no router found&rdquo; even though my router supports it</h3>
 <p>The most common reasons:</p>

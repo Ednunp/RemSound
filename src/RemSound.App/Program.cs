@@ -24,7 +24,7 @@ internal static class Program
         HasArg(args, ServiceControl.RunVerb) || HasArg(args, ServiceControl.InstallVerb)
         || HasArg(args, ServiceControl.UninstallVerb)
         || HasArg(args, ServiceControl.StartVerb) || HasArg(args, ServiceControl.StopVerb)
-        || HasArg(args, ServiceControl.SelfUpdateVerb);
+        || HasArg(args, ServiceControl.SelfUpdateVerb) || HasArg(args, ServiceControl.RepairVerb);
 
     // Writes an otherwise-fatal exception to a timestamped crash file in the logs folder, so a
     // "RemSound just disappeared, no dialog" report (#16) leaves a stack behind to diagnose instead

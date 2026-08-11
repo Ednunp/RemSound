@@ -22,6 +22,11 @@ internal static class ServiceEntry
     /// <see cref="Program.IsServiceInvocation"/>.</summary>
     public static int Dispatch(string[] args)
     {
+        // The non-elevated app introduces the interactive user by SID (--as-user); pick it up before any
+        // verb runs so install/repair/harden grant the person at the keyboard, never whoever approved
+        // the UAC prompt. Absent or invalid → null → the old own-token fallback. See ServiceControl.AsUserArg.
+        ServiceControl.ElevatedInvokerSid = ServiceControl.ParseAsUserSid(args);
+
         if (Has(args, ServiceControl.RunVerb))
         {
             // Point the service's data (its log) at the machine-wide ProgramData location, next to its
@@ -39,6 +44,7 @@ internal static class ServiceEntry
             : Has(args, ServiceControl.StartVerb) ? "start"
             : Has(args, ServiceControl.StopVerb) ? "stop"
             : Has(args, ServiceControl.SelfUpdateVerb) ? "selfupdate"
+            : Has(args, ServiceControl.RepairVerb) ? "repair-access"
             : null;
         if (verb is null) return 0;
 
@@ -56,6 +62,7 @@ internal static class ServiceEntry
                 "start" => ServiceControl.DoStart(),
                 "stop" => ServiceControl.DoStop(),
                 "selfupdate" => ServiceControl.DoSelfUpdate(),
+                "repair-access" => ServiceControl.DoRepairAccess(),
                 _ => 0,
             };
             ServiceStore.AppendServiceEvent($"elevated {verb}: finished with code {rc}");

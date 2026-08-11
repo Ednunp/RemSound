@@ -37,6 +37,24 @@ public static class ServiceControl
     public const string StartVerb = "--start-service";
     public const string StopVerb = "--stop-service";
     public const string RunVerb = "--run-service";
+    /// <summary>Re-records the invoking user as the service folder's owner and re-applies the folder
+    /// lockdown. The self-heal for a folder hardened to the WRONG account (the 5.6 bug: the elevated
+    /// helper recorded ITS OWN identity, which on a standard-user PC is the separate admin account whose
+    /// password was typed at the UAC prompt — locking the real user out of their own service profile and
+    /// logs, with every service self-update re-applying the stale lock).</summary>
+    public const string RepairVerb = "--repair-service-access";
+
+    /// <summary>Argument the non-elevated app appends to every elevated verb: <c>--as-user &lt;SID&gt;</c>,
+    /// naming the person actually at the keyboard. The elevated helper must NOT ask its own token who the
+    /// user is — under over-the-shoulder elevation that token belongs to whoever's admin password was
+    /// typed, not the user (the root cause above). The non-elevated app's identity IS the interactive
+    /// user, so it introduces them by SID and the elevated side records THAT.</summary>
+    public const string AsUserArg = "--as-user";
+
+    /// <summary>The validated <see cref="AsUserArg"/> SID for this elevated helper process, set once by
+    /// ServiceEntry before dispatching a verb; null when absent/invalid (old caller, manual console run)
+    /// — then <see cref="InstallingUserSid"/> falls back to the process identity as before.</summary>
+    internal static string? ElevatedInvokerSid;
 
     /// <summary>Current service state. Never throws — returns <see cref="ServiceState.Unknown"/> on any
     /// error. Unprivileged, so safe to poll from the UI without elevation.</summary>
@@ -83,7 +101,7 @@ public static class ServiceControl
         var psi = new ProcessStartInfo
         {
             FileName = exe,
-            Arguments = verb,
+            Arguments = BuildElevatedArguments(verb),
             UseShellExecute = true,
             Verb = "runas",
             WindowStyle = ProcessWindowStyle.Hidden,
@@ -99,6 +117,40 @@ public static class ServiceControl
         catch { return -1; }
     }
 
+    /// <summary>Pure, testable: the full command line for an elevated helper — the verb plus
+    /// <see cref="AsUserArg"/> introducing THIS (non-elevated) process's user, when that identity is a
+    /// real user account. See <see cref="AsUserArg"/> for why the identity must travel as an argument.</summary>
+    internal static string BuildElevatedArguments(string verb)
+    {
+        string? sid = null;
+        try { sid = WindowsIdentity.GetCurrent().User?.Value; } catch { }
+        return IsValidUserSid(sid) ? $"{verb} {AsUserArg} {sid}" : verb;
+    }
+
+    /// <summary>True when <paramref name="sid"/> parses as a SID and denotes an actual user account —
+    /// not SYSTEM / LocalService / NetworkService (S-1-5-18/19/20) and not a built-in group
+    /// (S-1-5-32-*). Granting the service folder to one of those would either hand it to the service's
+    /// own identity (defeating the lockdown) or to every member of a group (re-opening the audit hole),
+    /// so such values are rejected and the caller falls back to its old behaviour.</summary>
+    internal static bool IsValidUserSid(string? sid)
+    {
+        if (string.IsNullOrWhiteSpace(sid)) return false;
+        try { _ = new SecurityIdentifier(sid); } catch { return false; }
+        if (sid is "S-1-5-18" or "S-1-5-19" or "S-1-5-20") return false;
+        if (sid.StartsWith("S-1-5-32-", StringComparison.Ordinal)) return false;
+        return true;
+    }
+
+    /// <summary>Pure, testable: extract the <see cref="AsUserArg"/> value from a verb command line, or
+    /// null when absent, valueless, or not a valid user SID (see <see cref="IsValidUserSid"/>).</summary>
+    internal static string? ParseAsUserSid(string[] args)
+    {
+        for (var i = 0; i < args.Length - 1; i++)
+            if (string.Equals(args[i], AsUserArg, StringComparison.OrdinalIgnoreCase))
+                return IsValidUserSid(args[i + 1]) ? args[i + 1] : null;
+        return null;
+    }
+
     // ---- Elevated-side (called from Program.cs when running an --xxx-service verb) ---------------
 
     /// <summary>Installs the service. Must be run elevated. Copies the program to the service's OWN folder
@@ -109,6 +161,10 @@ public static class ServiceControl
     /// reports success.</summary>
     public static int DoInstall()
     {
+        // If the non-elevated app introduced the real interactive user, record THAT identity before any
+        // hardening — including the already-installed re-harden below, which would otherwise re-apply a
+        // stale (possibly wrong-account) recorded owner forever.
+        if (IsValidUserSid(ElevatedInvokerSid)) ServiceStore.SaveInstallingUserSid(ElevatedInvokerSid!);
         if (IsInstalled()) { HardenServiceDirectory(); return 0; } // re-harden pre-audit installs
         var exe = Environment.ProcessPath;
         if (string.IsNullOrEmpty(exe)) return 2;
@@ -134,12 +190,12 @@ public static class ServiceControl
         RunSc(BuildFailureArgs());
         // Let a normal (non-admin) user start/stop it — otherwise stopping needs the app's UAC prompt.
         GrantUserStartStop();
-        // Let a normal user REPLACE the binaries in the service's bin folder too (once the service is
-        // stopped), so a new build can be dropped in without admin — the auto-updater does this as SYSTEM,
-        // but it also makes "stop the service, copy the new files in, start it" work for a developer/tester
-        // with no UAC. (Trust note: a user-writable folder whose contents run as SYSTEM is the same posture
-        // as the auto-update copy; fine for this app, a hardened build would code-sign instead.)
-        GrantUsersWriteToBin();
+        // The installing user's write access to the bin folder (drop test builds in without admin) comes
+        // from the hardening below: the folder ACL grants them Modify, inherited by bin and its files
+        // after the children reset. (A separate explicit bin grant existed until 5.8; the reset wiped it
+        // anyway, so it was removed. Trust note: a user-writable folder whose contents run as SYSTEM is
+        // the same posture as the auto-update copy; fine for this app, a hardened build would code-sign.)
+        //
         // Close the cross-user escalation the 2026-07-26 security audit found: the SYSTEM service
         // trusts app-source.txt (which folder to self-update FROM), and if ANOTHER local user had
         // pre-created ProgramData\RemSound\service (e.g. by saving the service config dialog before
@@ -180,46 +236,140 @@ public static class ServiceControl
         var own = RunProcessCaptured("takeown.exe", $"/f \"{dir}\" /a /r /d y", 30000);
         if (!own.Started || !own.Exited || own.ExitCode != 0)
             ServiceStore.AppendServiceEvent($"harden: takeown on service dir returned {(own.Exited ? own.ExitCode : -1)}: {own.StdErr}");
+        if (ApplyServiceDirAcl(dir, sid, ServiceStore.AppendServiceEvent))
+            ServiceStore.AppendServiceEvent("harden: service folder ownership + ACL locked to SYSTEM/Administrators/installing user; files rebuilt as inherited; logs readable");
+    }
+
+    /// <summary>The complete lockdown sequence minus the takeown — factored out so the self-test can
+    /// run the EXACT shipped commands against a scratch folder (reproduce → repair → verify, every
+    /// build). Steps: (1) harden the folder itself (<see cref="BuildServiceDirAclArgs"/>); (2) rebuild
+    /// all existing children as purely-inherited (<see cref="BuildResetChildrenArgs"/> — real file
+    /// access again, stale ACEs gone, and the healer for the 5.6 file-wedging bug); (3) logs + the
+    /// events file readable by every local account, read-only (the audit hole was WRITE access; taking
+    /// everyone's READ just meant a user in trouble couldn't open their own logs — support case
+    /// 2026-08-06). The profile stays locked to SYSTEM/Administrators/owner: it holds the obfuscated
+    /// password. Returns true when every command succeeded; failures are reported and keep going.</summary>
+    internal static bool ApplyServiceDirAcl(string dir, string sid, Action<string> report)
+    {
+        var ok = true;
         var acl = RunProcessCaptured("icacls.exe", BuildServiceDirAclArgs(dir, sid), 30000);
         if (!acl.Started || !acl.Exited || acl.ExitCode != 0)
-            ServiceStore.AppendServiceEvent($"harden: icacls reset on service dir returned {(acl.Exited ? acl.ExitCode : -1)}: {acl.StdErr}{acl.StdOut}");
-        else
-            ServiceStore.AppendServiceEvent("harden: service folder ownership + ACL locked to SYSTEM/Administrators/installing user");
+        {
+            ok = false;
+            report($"harden: icacls on service dir returned {(acl.Exited ? acl.ExitCode : -1)}: {acl.StdErr}{acl.StdOut}");
+        }
+        bool hasChildren;
+        try { hasChildren = Directory.EnumerateFileSystemEntries(dir).Any(); }
+        catch { hasChildren = true; } // can't tell (we may lack list rights) — try; /C tolerates
+        if (hasChildren)
+        {
+            var reset = RunProcessCaptured("icacls.exe", BuildResetChildrenArgs(dir), 30000);
+            if (!reset.Started || !reset.Exited || reset.ExitCode != 0)
+            {
+                ok = false;
+                report($"harden: children reset returned {(reset.Exited ? reset.ExitCode : -1)}: {reset.StdErr}{reset.StdOut}");
+            }
+        }
+        try { Directory.CreateDirectory(Path.Combine(dir, "logs")); } catch { }
+        var logsAcl = RunProcessCaptured("icacls.exe", BuildLogsReadAclArgs(dir), 30000);
+        if (!logsAcl.Started || !logsAcl.Exited || logsAcl.ExitCode != 0)
+        {
+            ok = false;
+            report($"harden: users-can-read-logs grant returned {(logsAcl.Exited ? logsAcl.ExitCode : -1)}: {logsAcl.StdErr}");
+        }
+        if (File.Exists(Path.Combine(dir, "service-events.log")))
+            RunProcessCaptured("icacls.exe", BuildEventsLogReadAclArgs(dir), 30000);
+        return ok;
     }
 
-    /// <summary>Pure, testable: the icacls arguments that lock the service folder down.
-    /// /inheritance:r strips inherited ACEs (ProgramData grants CREATOR OWNER full control —
-    /// the exact hole); explicit grants only: SYSTEM + Administrators Full, installing user
-    /// Modify. /T re-stamps existing files (app-source.txt included), /C continues past
-    /// per-file errors.</summary>
-    internal static string BuildServiceDirAclArgs(string dir, string installingUserSid) =>
-        $"\"{dir}\" /inheritance:r /grant \"*S-1-5-18:(OI)(CI)F\" /grant \"*S-1-5-32-544:(OI)(CI)F\" /grant \"*{installingUserSid}:(OI)(CI)(M)\" /T /C";
+    /// <summary>Re-record the invoking user as the folder's owner and re-apply the lockdown — the
+    /// elevated side of the one-click repair (Service menu, or offered automatically when the app finds
+    /// it can no longer write the service folder). Also the recovery for installs bitten by the 5.6
+    /// wrong-account recording. Returns 0 when the hardening commands all succeeded, 9 otherwise (the
+    /// service events log has the detail either way).</summary>
+    public static int DoRepairAccess()
+    {
+        if (IsValidUserSid(ElevatedInvokerSid)) ServiceStore.SaveInstallingUserSid(ElevatedInvokerSid!);
+        HardenServiceDirectory();
+        ServiceStore.AppendServiceEvent($"repair-access: completed (invoker sid {(ElevatedInvokerSid is null ? "not supplied - kept recorded owner" : "recorded")})");
+        // HardenServiceDirectory is best-effort with loud logging; sanity-check the way the app will —
+        // by writing. We're elevated (Administrators Full), so this proves the commands ran and the
+        // folder isn't wedged; the app re-probes as the real user once the helper returns.
+        return CanWriteDirectory(ServiceStore.Directory) ? 0 : 9;
+    }
 
-    /// <summary>The SID to grant the no-admin service rights to: the account that installed it (the
-    /// elevated install runs as the same interactive user with an elevated token, so its SID is that user).
-    /// Scoping the grants to ONE account instead of all Users/Authenticated-Users keeps the effortless
-    /// stop/update workflow for that user while removing the "any account on this PC could replace a
-    /// SYSTEM-run binary" escalation surface. Falls back to BUILTIN\Users only if the SID can't be read.</summary>
+    /// <summary>Pure, testable: the icacls arguments that let every local account READ the service's
+    /// logs subfolder, without granting any write. (RX) = read + traverse. The inheritable ACE on the
+    /// folder propagates to the existing log files on apply (they're unprotected after the children
+    /// reset) — no /T, which would stamp files with useless inherit-only ACEs (the 5.6 lesson).</summary>
+    internal static string BuildLogsReadAclArgs(string dir) =>
+        $"\"{Path.Combine(dir, "logs")}\" /grant \"*S-1-5-32-545:(OI)(CI)(RX)\"";
+
+    /// <summary>Pure, testable: the icacls arguments that let every local account READ the always-on
+    /// service events file (the first thing support asks for).</summary>
+    internal static string BuildEventsLogReadAclArgs(string dir) =>
+        $"\"{Path.Combine(dir, "service-events.log")}\" /grant \"*S-1-5-32-545:(RX)\"";
+
+    /// <summary>Can the CURRENT process create a file in <paramref name="dir"/>? The app-side health
+    /// probe: a missing folder counts as healthy (nothing to repair — it'll be created with the user as
+    /// owner on first save). Probes with a real create-then-delete, because that's exactly what saving
+    /// the service profile does; reading the ACL and predicting would just re-implement Windows, badly.</summary>
+    internal static bool CanWriteDirectory(string dir)
+    {
+        try
+        {
+            if (!Directory.Exists(dir)) return true;
+            var probe = Path.Combine(dir, "access-probe.tmp");
+            using (new FileStream(probe, FileMode.Create, FileAccess.Write, FileShare.None)) { }
+            try { File.Delete(probe); } catch { /* write proven; a stuck probe file is harmless */ }
+            return true;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>App-side health check: true when the interactive user can still write the service's
+    /// ProgramData folder (or it doesn't exist yet). False = they've been locked out — the 5.6
+    /// wrong-owner bug, or any outside interference — and the one-click repair should be offered.</summary>
+    public static bool CurrentUserCanWriteServiceDir() => CanWriteDirectory(ServiceStore.Directory);
+
+    /// <summary>Pure, testable: the icacls arguments that lock the service FOLDER down — the folder
+    /// only, deliberately no /T. /inheritance:r strips inherited ACEs (ProgramData grants CREATOR
+    /// OWNER full control — the exact hole); explicit grants only: SYSTEM + Administrators Full,
+    /// installing user Modify.
+    ///
+    /// WHY no /T (the 5.6 file-wedging bug, found 2026-08-06 via a user report): these grants carry
+    /// (OI)(CI), and on a FILE an ACE with inheritance flags is INHERIT-ONLY — it grants the file
+    /// itself nothing. Sweeping /T therefore stamped every EXISTING file with /inheritance:r plus
+    /// only inherit-only ACEs = an effectively empty ACL: unreadable and unwritable by everyone
+    /// (user, admin, even SYSTEM — which is how a service ends up unable to read its own profile,
+    /// and a user finds Notepad refusing their own logs). Existing children are instead cleaned by
+    /// <see cref="BuildResetChildrenArgs"/>, which rebuilds them as purely-inherited from this
+    /// folder's ACL — correct file access, and it strips any stale/planted explicit ACEs too.</summary>
+    internal static string BuildServiceDirAclArgs(string dir, string installingUserSid) =>
+        $"\"{dir}\" /inheritance:r /grant \"*S-1-5-18:(OI)(CI)F\" /grant \"*S-1-5-32-544:(OI)(CI)F\" /grant \"*{installingUserSid}:(OI)(CI)(M)\"";
+
+    /// <summary>Pure, testable: the icacls arguments that rebuild every EXISTING child of the service
+    /// folder as purely-inherited from the (just-hardened) folder ACL. /reset replaces each child's
+    /// ACL with inherited ACEs only — files get real (not inherit-only) access again, and any explicit
+    /// ACE another account picked up historically is removed. Also the healer for files wedged by the
+    /// 5.6 bug (see <see cref="BuildServiceDirAclArgs"/>). /C continues past per-file errors.</summary>
+    internal static string BuildResetChildrenArgs(string dir) =>
+        $"\"{Path.Combine(dir, "*")}\" /reset /T /C";
+
+    /// <summary>The SID to grant the no-admin service rights to: the interactive user the non-elevated
+    /// app introduced via <see cref="AsUserArg"/> when present, else this process's own identity.
+    /// The pass-through matters: an elevated helper's own token is whoever approved the UAC prompt,
+    /// which under over-the-shoulder elevation (standard user + separate admin account) is NOT the
+    /// person at the keyboard — recording that locked real users out of their service folder (the 5.6
+    /// bug). Scoping the grants to ONE account instead of all Users/Authenticated-Users keeps the
+    /// effortless stop/update workflow for that user while removing the "any account on this PC could
+    /// replace a SYSTEM-run binary" escalation surface. Falls back to BUILTIN\Users only if no identity
+    /// can be read at all.</summary>
     private static string InstallingUserSid()
     {
+        if (IsValidUserSid(ElevatedInvokerSid)) return ElevatedInvokerSid!;
         try { return WindowsIdentity.GetCurrent().User?.Value ?? "S-1-5-32-545"; }
         catch { return "S-1-5-32-545"; }
-    }
-
-    /// <summary>Grant the installing user Modify rights on the service's bin folder (via icacls), so a
-    /// stopped service's binaries can be refreshed without administrator rights. Best-effort.</summary>
-    private static void GrantUsersWriteToBin()
-    {
-        // Grant the installing user (see InstallingUserSid) Modify. (OI)(CI) = inherit to files +
-        // subfolders; (M) = Modify. /T applies to the existing contents too (the bin was just populated),
-        // /C keeps going past any single-file error. Runs through RunProcessCaptured, which drains both
-        // pipes concurrently — icacls /T over 100+ files emits far more than the pipe buffer holds, and the
-        // old read-stderr-then-stdout order deadlocked here (the install hang Ed hit, 2026-07-17).
-        var r = RunProcessCaptured("icacls.exe",
-            $"\"{ServiceStore.BinDirectory}\" /grant \"*{InstallingUserSid()}:(OI)(CI)(M)\" /T /C", 30000);
-        if (!r.Started) ServiceStore.AppendServiceEvent("install: grant-write on bin failed to launch icacls");
-        else if (!r.Exited) ServiceStore.AppendServiceEvent("install: grant-write on bin timed out (icacls killed)");
-        else if (r.ExitCode != 0) ServiceStore.AppendServiceEvent($"install: icacls grant-write on bin returned {r.ExitCode}: {r.StdErr}{r.StdOut}");
     }
 
     /// <summary>Copies the program files from <paramref name="sourceDir"/> to <paramref name="destDir"/>,
@@ -397,31 +547,38 @@ public static class ServiceControl
     }
 
     /// <summary>Starts the service. Must be run elevated. Returns 0 on success.</summary>
-    public static int DoStart()
-    {
-        try
-        {
-            using var sc = new ServiceController(ServiceName);
-            if (sc.Status is ServiceControllerStatus.Running or ServiceControllerStatus.StartPending) return 0;
-            sc.Start();
-            sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(15));
-            return 0;
-        }
-        catch { return 1; }
-    }
+    // Distinct failure codes for start/stop, so the dialog can say something useful instead of the
+    // notorious bare "(code 1)". The full exception always goes to the service events log too.
+    public const int StartStopTimedOut = 6;   // service didn't reach the target state in 15 s
+    public const int StartStopScmRefused = 7; // the service manager refused (missing, disabled, ...)
+
+    public static int DoStart() => StartStop(start: true);
 
     /// <summary>Stops the service. Must be run elevated. Returns 0 on success or if already stopped.</summary>
-    public static int DoStop()
+    public static int DoStop() => StartStop(start: false);
+
+    private static int StartStop(bool start)
     {
+        var label = start ? "start" : "stop";
         try
         {
             using var sc = new ServiceController(ServiceName);
-            if (sc.Status is ServiceControllerStatus.Stopped or ServiceControllerStatus.StopPending) return 0;
-            sc.Stop();
-            sc.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(15));
+            if (start && sc.Status is ServiceControllerStatus.Running or ServiceControllerStatus.StartPending) return 0;
+            if (!start && sc.Status is ServiceControllerStatus.Stopped or ServiceControllerStatus.StopPending) return 0;
+            if (start) sc.Start(); else sc.Stop();
+            sc.WaitForStatus(start ? ServiceControllerStatus.Running : ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(15));
             return 0;
         }
-        catch { return 1; }
+        catch (Exception ex)
+        {
+            // The WHY was swallowed here for two releases ("code 1", diagnosed blind on 2026-08-06);
+            // now it's always in the events log, and the code tells the dialog which story to tell.
+            ServiceStore.AppendServiceEvent($"elevated {label}: FAILED {ex.GetType().Name}: {ex.Message}"
+                + (ex.InnerException is { } inner ? $" (inner: {inner.GetType().Name}: {inner.Message})" : ""));
+            return ex is System.ServiceProcess.TimeoutException ? StartStopTimedOut
+                : ex is InvalidOperationException ? StartStopScmRefused
+                : 1;
+        }
     }
 
     private static int RunSc(string arguments)

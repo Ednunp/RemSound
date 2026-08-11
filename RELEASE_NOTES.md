@@ -1,28 +1,17 @@
-# RemSound v5.7
+# RemSound v5.8
 
-Stronger security, and it works with every version again.
+A repair for the lock-screen service's settings folder.
 
-This release puts the password handling back the way it was, so RemSound talks to older versions and the iPhone app again. You still set a password — your audio is always encrypted — RemSound just suggests a strong one now instead of requiring it. If you already use a good password, you won't notice any difference.
+Some machines ended up with the service's settings folder locked so tightly that nothing could use it — saving the service profile failed with "access denied", the service's log files wouldn't open even in Notepad, and on some machines the service itself couldn't start. It came from a permissions bug in a recent release, and reinstalling didn't clear it.
 
-## Signed updates
+This release fixes the cause and heals affected machines automatically:
 
-Every release is now digitally signed, and the updater refuses anything that isn't genuinely from us — so even if the download page were ever tampered with, a fake update couldn't install itself on your machine.
-
-## Remote volume, password-protected
-
-The remote volume and mute controls are locked to your password, so only someone who shares it can use them. (Both ends need 5.6 or newer for the remote-volume feature; ordinary audio works with any version.)
-
-## Set the machine's volume when the service starts
-
-In the service's Additional options you can have an unattended machine unmute itself and set its Windows volume to a level you choose — on the first start after each boot, or on every service start.
-
-## Updates on your schedule
-
-In Preferences you can restrict automatic updates to a daily time range — say 1am to 6am — so an update never closes RemSound and interrupts you. Found outside the range, it quietly waits and installs the moment the range opens.
+- The service applies the fix on its own when it installs this update — for most people that's it, nothing to do.
+- RemSound also checks the folder every time it starts, and offers a one-click repair if it finds a problem.
+- And there's a "Repair service folder access" item in the Service menu you can run any time. One administrator prompt, and saving the service profile and reading the logs work again.
 
 ## Also in this release
 
-- The app releases its high-priority and keep-awake settings when you're not actually streaming — kinder to laptops left idling in the tray.
-- Diagnostic logs cap their own size on long sessions, and old crash reports are tidied automatically.
-- The remembered-applications list explains itself when empty.
-- A large amount of behind-the-scenes hardening from a full security audit.
+- The service's log files are readable from every account on the machine again, so you can always open them in Notepad if you need to look at one or send it in. (The service's settings stay protected as before.)
+- If a service action fails, the message now says what actually went wrong instead of showing a bare error code, and the reason is recorded in the service's own log.
+- The repair, and the folder protection itself, now always apply to the account that's actually using RemSound — even on PCs where a different account's password is typed at the administrator prompt.

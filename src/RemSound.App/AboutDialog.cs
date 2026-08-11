@@ -20,6 +20,14 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v5.8
+
+        A repair for the lock-screen service's settings folder.
+
+        Some machines ended up with the service's settings folder locked so tightly that nothing could use it — saving the service profile failed with "access denied", the service's log files wouldn't open, and on some machines the service itself couldn't start. This release fixes the cause and heals affected machines automatically: the service applies the fix on its own when it updates, RemSound checks the folder every time it starts and offers a one-click repair if anything is wrong, and there's a "Repair service folder access" item in the Service menu you can run any time.
+
+        The service's log files are also readable again from every account on the machine, so you can always open them in Notepad if you're curious or need to send one in. And if a service action ever fails, the message now says what actually went wrong instead of just showing a bare error code.
+
         RemSound v5.7
 
         Stronger security, and it works with every version again.

@@ -1363,6 +1363,7 @@ Everything lives in the **Service** menu on the menu bar:
   2. **Install service** — registers it with Windows so it starts automatically at every boot. Windows asks for administrator permission (one prompt). Do this once. Straight after installing, RemSound asks whether you'd like to **start it now** (otherwise it waits until the next reboot). (When you first install RemSound on a PC, the app installer also offers to set the service up — and start it — for you, so you may have done this already.)
   3. **Start service** / **Stop service** — run or halt it now without waiting for a reboot.
   4. **Uninstall service** — removes it entirely.
+  5. **Repair service folder access** — fixes the permissions on the service's settings folder so your account can save the service profile and read the service logs again. You should never need this in normal use, but if saving the service profile ever fails with an “access denied” message, or the service's log files won't open, run this once (Windows asks for administrator permission) and everything is put right. RemSound also checks the folder itself every time it starts and offers this same repair automatically if it finds a problem.
 
 
 
@@ -1455,6 +1456,10 @@ RemSound notices when the computer has just woken up, waits a moment for any USB
 ### A sound card you were listening through was unplugged
 
 If a sound card you're playing received audio through is unplugged and then plugged back in, RemSound now re-opens it on its own and the sound resumes — you don't have to re-tick it in the output list. This works when the card comes back as the same Windows device, which is the usual case when you plug it into the same socket. If you move it to a different USB socket and Windows treats it as a brand-new device, just tick it again in the output list.
+
+### Saving the service profile says “access denied”, or the service's log files won't open
+
+Your account has lost its permissions on the service's settings folder — this could happen after some older-version reinstalls, and it also blocks the service itself from starting properly. The fix is one menu item: **Service → Repair service folder access**. Windows asks for administrator permission once, the folder is put right, and saving and log-reading work again. RemSound also spots this state by itself when it starts and offers the same repair automatically, and the service applies the fix on its own when it installs a RemSound update — so on an up-to-date machine you should never actually meet this problem.
 
 ### UPnP says “no router found” even though my router supports it
 

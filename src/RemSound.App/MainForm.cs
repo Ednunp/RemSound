@@ -1666,6 +1666,43 @@ public sealed partial class MainForm : Form
         MaybeWarnAboutRealtekAsio();
         if (IsDisposed) return;
         MaybeWarnMicBlockedOnStartup();
+        if (IsDisposed) return;
+        MaybeOfferServiceFolderRepair();
+    }
+
+    /// <summary>If the user has a service folder they can no longer write (the 5.6 wrong-owner bug, or
+    /// any outside interference), offer the one-click elevated repair. Runs in the settled startup
+    /// sequence so the dialog gets real focus for a screen reader; asks every launch while the folder
+    /// stays broken (that's genuine breakage — the profile can't save — not a nag), and never appears
+    /// once healthy. Skipped for --silent (automated) launches like every other startup notice.</summary>
+    private void MaybeOfferServiceFolderRepair()
+    {
+        if (CuePlayer.GloballyMuted) return;
+        bool broken;
+        try { broken = System.IO.Directory.Exists(ServiceStore.Directory) && !ServiceControl.CurrentUserCanWriteServiceDir(); }
+        catch { return; }
+        if (!broken) return;
+        logFile.Event("service folder access check: current user CANNOT write the service folder - offering repair");
+        var page = new TaskDialogPage
+        {
+            Caption = AppName,
+            Heading = "The service settings folder needs repairing",
+            Text = "RemSound is not allowed to change its own service settings folder, so saving the "
+                 + "service profile would fail. This can happen after a reinstall or an update.\n\n"
+                 + "Repair it now? Windows will ask for administrator permission, and your account "
+                 + "gets its access back. This is also available later as \"Repair service folder "
+                 + "access\" in the Service menu.",
+            Icon = TaskDialogIcon.Warning,
+        };
+        var yes = new TaskDialogButton("&Repair now");
+        var no = new TaskDialogButton("&Not now");
+        page.Buttons.Add(yes);
+        page.Buttons.Add(no);
+        page.DefaultButton = yes;
+        if (ForegroundDialog.Show(owner => TaskDialog.ShowDialog(owner, page)) == yes)
+            RunServiceVerbAsync(ServiceControl.RepairVerb, "access repair");
+        else
+            logFile.Event("service folder repair declined at startup");
     }
 
 
@@ -2246,12 +2283,17 @@ public sealed partial class MainForm : Form
         activityLog.Click += (_, _) => OpenServiceLog();
         var updateLog = new ToolStripMenuItem("View service update &log") { AccessibleName = "View service update log" };
         updateLog.Click += (_, _) => OpenServiceUpdateLog();
+        // The self-heal for a service folder whose permissions ended up wrong (the 5.6 wrong-owner bug,
+        // or anything else that locks the user out of their own profile/logs). Also offered automatically
+        // at startup and on a failed profile save; kept in the menu so it's discoverable and repeatable.
+        var repair = new ToolStripMenuItem("&Repair service folder access") { AccessibleName = "Repair service folder access" };
+        repair.Click += (_, _) => ServiceAction(ServiceControl.RepairVerb, "access repair", confirm: false);
 
         serviceMenu.DropDownItems.AddRange(new ToolStripItem[]
         {
             status, new ToolStripSeparator(),
             configure, new ToolStripSeparator(),
-            install, uninstall, start, stop, new ToolStripSeparator(),
+            install, uninstall, start, stop, repair, new ToolStripSeparator(),
             activityLog, updateLog,
         });
         serviceMenu.DropDownOpening += (_, _) =>
@@ -2407,6 +2449,18 @@ public sealed partial class MainForm : Form
                     : "Service profile saved.",
                 AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
+        catch (UnauthorizedAccessException)
+        {
+            // The exact wall a locked-out user hits (support case 2026-08-06): don't just report the
+            // denial — offer the fix on the spot. Same repair as the Service menu item.
+            var offer = MessageBox.Show(this,
+                "RemSound was not allowed to save the service profile — your account has lost access "
+                + "to the service settings folder. This can happen after a reinstall or an update.\n\n"
+                + "Repair the folder access now? Windows will ask for administrator permission. "
+                + "Afterwards, save the profile again.",
+                AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (offer == DialogResult.Yes) RunServiceVerbAsync(ServiceControl.RepairVerb, "access repair");
+        }
         catch (Exception ex)
         {
             MessageBox.Show(this, $"Could not save the service profile: {ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -2461,14 +2515,32 @@ public sealed partial class MainForm : Form
                 if (startNow == DialogResult.Yes) RunServiceVerbAsync(ServiceControl.StartVerb, "start");
                 return;
             }
-            MessageBox.Show(this, $"Service {label} succeeded.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this,
+                label == "access repair"
+                    ? "Service folder access repaired. Your account owns the service folder again."
+                    : $"Service {label} succeeded.",
+                AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         else if (rc == -1)
             MessageBox.Show(this, $"Service {label} was cancelled, or administrator rights were declined.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         else if (rc == ServiceControl.ElevatedTimedOut)
             MessageBox.Show(this, $"Service {label} is taking longer than expected and hasn't finished yet. It may still complete on its own — check the Service menu status in a moment.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         else
-            MessageBox.Show(this, $"Service {label} failed (code {rc}).", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        {
+            // Say what the code MEANS — "(code 1)" alone cost a support round-trip on 2026-08-06. The
+            // service events log always has the underlying exception now (View service log shows it).
+            var why = rc switch
+            {
+                ServiceControl.StartStopTimedOut => "The service did not respond within 15 seconds.",
+                ServiceControl.StartStopScmRefused => "Windows refused — the service may be missing or disabled.",
+                9 => "The repair commands ran but the folder still isn't writable.",
+                _ => "",
+            };
+            var hint = label is "start" or "install"
+                ? " The service log usually says why — Service menu, View service log. If this keeps happening, try 'Repair service folder access' in the Service menu."
+                : " The service log usually says why — Service menu, View service log.";
+            MessageBox.Show(this, $"Service {label} failed (code {rc}). {why}{hint}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 
     /// <summary>Rebuild the Recent profiles submenu from <see cref="AppConfig.RecentProfiles"/>.

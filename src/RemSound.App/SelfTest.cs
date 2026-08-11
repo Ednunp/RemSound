@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using System.Windows.Forms;
@@ -125,6 +126,8 @@ internal static class SelfTest
         RunStep(results, "Service log discovery (newest activity log)", ServiceLogDiscovery);
         RunStep(results, "Sealed remote control (auth + replay + skew) + nonce discipline", SealedRemoteControl);
         RunStep(results, "Service folder lockdown args (cross-user LPE hardening)", ServiceDirHardeningArgs);
+        RunStep(results, "Service folder repair (reproduce wrong-owner lockout → detect → repair → verify)", ServiceAccessRepairLoop);
+        RunStep(results, "Elevated verbs carry the real user (SID pass-through) + logs stay readable", ElevatedIdentityPassThrough);
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);
         RunStep(results, "Service startup volume (boot-once decision + settings round-trip)", ServiceStartupVolume);
         RunStep(results, "Update install window (same-day, wraparound, retry timing)", UpdateInstallWindow);
@@ -2754,8 +2757,15 @@ internal static class SelfTest
         Check(args.Contains("*S-1-5-18:(OI)(CI)F"), "SYSTEM keeps Full (the service runs here)");
         Check(args.Contains("*S-1-5-32-544:(OI)(CI)F"), "Administrators keep Full");
         Check(args.Contains("*S-1-5-21-111-222-333-1001:(OI)(CI)(M)"), "the installing user keeps Modify (profile saves + test builds)");
-        Check(args.Contains("/T"), "must re-stamp existing files (app-source.txt is the target of the attack)");
+        // REGRESSION PIN (the 5.6 file-wedging bug): the folder lockdown must NOT sweep /T — its
+        // (OI)(CI) grants are inherit-only on files, so a /T sweep leaves every existing file with an
+        // effectively EMPTY ACL (unreadable even by SYSTEM). Existing children are rebuilt by the
+        // separate /reset pass instead.
+        Check(!args.Contains("/T"), "the folder lockdown must NOT recurse — a /T sweep wedges every existing file (5.6 bug)");
         Check(args.Split("/grant").Length == 4, "exactly three grants — nobody else survives the reset");
+        var reset = ServiceControl.BuildResetChildrenArgs(@"C:\ProgramData\RemSound\service");
+        Check(reset.Contains(@"service\*""") && reset.Contains("/reset") && reset.Contains("/T") && reset.Contains("/C"),
+            $"children must be rebuilt as purely-inherited, recursively, continuing past errors (got: {reset})");
 
         var savedOverride = ServiceStore.TestDirectoryOverride;
         var tmp = Path.Combine(Path.GetTempPath(), "remsound-selftest-sid-" + Guid.NewGuid().ToString("N"));
@@ -2771,6 +2781,144 @@ internal static class SelfTest
         finally { ServiceStore.TestDirectoryOverride = savedOverride; try { Directory.Delete(tmp, recursive: true); } catch { } }
 
         return "inheritance stripped; SYSTEM/Admins/installing-user only; SID recorded + garbage-proofed";
+    }
+
+    /// <summary>The full life of the 5.6 wrong-owner bug, reproduced for real in a scratch folder and
+    /// healed by the 5.8 repair — with the SAME icacls arguments the shipping code runs, just aimed at a
+    /// throwaway directory. Proves: (1) a folder locked to somebody else genuinely denies this process's
+    /// writes; (2) the app-side probe reports it broken; (3) re-applying the lockdown naming the REAL
+    /// user (the repair core) restores access; (4) the probe then reports healthy. The lockout half needs
+    /// a non-elevated run (elevated, the Administrators Full grant applies to us and nothing can lock us
+    /// out) — under elevation those two assertions are skipped, the rest still prove the repair.</summary>
+    private static string? ServiceAccessRepairLoop()
+    {
+        string? mySid = null;
+        var elevated = false;
+        try
+        {
+            using var id = WindowsIdentity.GetCurrent();
+            mySid = id.User?.Value;
+            elevated = new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator);
+        }
+        catch { }
+        if (!ServiceControl.IsValidUserSid(mySid)) throw new StepSkipped("current identity has no user SID (unusual account) - cannot exercise the ACL loop");
+
+        var dir = Path.Combine(Path.GetTempPath(), "remsound-selftest-repair-" + Guid.NewGuid().ToString("N"));
+        var profile = Path.Combine(dir, "service-profile.json");
+        var logFile = Path.Combine(dir, "logs", "service.log");
+        Directory.CreateDirectory(Path.Combine(dir, "logs"));
+        File.WriteAllText(profile, "{}");
+        File.WriteAllText(logFile, "hello");
+        try
+        {
+            Check(ServiceControl.CanWriteDirectory(dir), "a fresh folder must probe healthy");
+
+            // 1a. Reproduce the 5.6 FILE-WEDGING bug exactly: apply the lockdown spec to a FILE — which
+            // is what the old /T sweep did to every existing file. The (OI)(CI) grants are inherit-only
+            // on a file, so its effective ACL empties: unreadable by everyone (the Jonathan case,
+            // 2026-08-06 — Notepad refusing his own logs, the app unable to rewrite its profile).
+            var wedge = RunIcaclsForTest(ServiceControl.BuildServiceDirAclArgs(profile, "S-1-5-32-546"));
+            Check(wedge == 0, $"the file-wedge reproduction icacls must apply (exit {wedge})");
+            var wedged = false;
+            try { File.ReadAllText(profile); } catch (UnauthorizedAccessException) { wedged = true; }
+            Check(wedged, "the wedged file must genuinely deny reads — even to administrators (this IS the shipped 5.6 bug)");
+
+            // 1b. Reproduce the wrong-owner lockdown on the folder (Guests stands in for the separate
+            // admin account whose identity the 5.6 install recorded instead of the real user's).
+            var brk = RunIcaclsForTest(ServiceControl.BuildServiceDirAclArgs(dir, "S-1-5-32-546"));
+            Check(brk == 0, $"the wrong-owner lockdown icacls must apply (exit {brk})");
+
+            // 2. Detect — the app's startup probe. (Skipped under elevation: the Administrators grant
+            // means an elevated run can't be locked out of the folder.)
+            if (!elevated)
+                Check(!ServiceControl.CanWriteDirectory(dir), "the probe must report the wrong-owner folder as broken");
+
+            // 3. Repair: the EXACT shipped sequence (DoRepairAccess minus the takeown — the test owns
+            // the scratch folder, which carries the same right to rewrite its permissions).
+            Check(ServiceControl.ApplyServiceDirAcl(dir, mySid!, _ => { }), "the repair sequence must apply cleanly");
+
+            // 4. Verify: folder writable again, wedged profile readable again, log readable again.
+            Check(ServiceControl.CanWriteDirectory(dir), "after repair the probe must report healthy");
+            Check(File.ReadAllText(profile) == "{}", "the repair must heal the wedged profile file (children reset → real inherited access)");
+            Check(File.ReadAllText(logFile) == "hello", "the log file must be readable after repair");
+            return elevated
+                ? "wedged file reproduced + healed; folder repair proven (elevated run: folder-lockout detection skipped)"
+                : "wrong owner + wedged file reproduced → probe says broken → one repair heals both → probe says healthy";
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); }
+            catch
+            {
+                // A failed half-way state can leave us without delete rights; owner can always reset.
+                try { RunIcaclsForTest($"\"{dir}\" /reset /T /C"); Directory.Delete(dir, recursive: true); } catch { }
+            }
+        }
+    }
+
+    private static int RunIcaclsForTest(string arguments)
+    {
+        using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "icacls.exe",
+            Arguments = arguments,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        })!;
+        p.StandardOutput.ReadToEnd();
+        p.StandardError.ReadToEnd();
+        return p.WaitForExit(30000) ? p.ExitCode : -1;
+    }
+
+    /// <summary>The 5.8 wrong-owner fix's pure pieces. The elevated helper must be TOLD who the user is
+    /// (its own token is whoever approved the UAC prompt — under over-the-shoulder elevation NOT the
+    /// person at the keyboard), so: the non-elevated side appends --as-user with its SID; the parse
+    /// accepts only genuine user SIDs (service identities and built-in groups rejected — granting those
+    /// would defeat the lockdown); and the logs-read grants let every account read logs (read-only)
+    /// while the profile stays locked.</summary>
+    private static string? ElevatedIdentityPassThrough()
+    {
+        const string user = "S-1-5-21-111-222-333-1001";
+
+        // SID validation: real users in, machine identities and groups out.
+        Check(ServiceControl.IsValidUserSid(user), "a normal local/domain user SID must be accepted");
+        Check(ServiceControl.IsValidUserSid("S-1-12-1-1-2-3-4"), "an Entra (Azure AD) user SID must be accepted");
+        Check(!ServiceControl.IsValidUserSid("S-1-5-18") && !ServiceControl.IsValidUserSid("S-1-5-19") && !ServiceControl.IsValidUserSid("S-1-5-20"),
+            "SYSTEM/LocalService/NetworkService must be rejected (granting the service's own identity defeats the lockdown)");
+        Check(!ServiceControl.IsValidUserSid("S-1-5-32-544") && !ServiceControl.IsValidUserSid("S-1-5-32-545"),
+            "built-in groups must be rejected (a group grant re-opens the every-account hole)");
+        Check(!ServiceControl.IsValidUserSid(null) && !ServiceControl.IsValidUserSid("") && !ServiceControl.IsValidUserSid("garbage") && !ServiceControl.IsValidUserSid("S-1-"),
+            "null/empty/garbage must be rejected");
+
+        // Argument parse: the value after --as-user, validated; missing/valueless/invalid → null.
+        Check(ServiceControl.ParseAsUserSid([ServiceControl.InstallVerb, ServiceControl.AsUserArg, user]) == user,
+            "--as-user <sid> must parse");
+        Check(ServiceControl.ParseAsUserSid([ServiceControl.InstallVerb]) is null, "absent --as-user must parse as null");
+        Check(ServiceControl.ParseAsUserSid([ServiceControl.InstallVerb, ServiceControl.AsUserArg]) is null, "valueless --as-user must parse as null");
+        Check(ServiceControl.ParseAsUserSid([ServiceControl.AsUserArg, "S-1-5-18"]) is null, "an invalid --as-user value must parse as null, not be trusted");
+
+        // The non-elevated side builds "<verb> --as-user <own sid>" (when this process has a user SID).
+        var built = ServiceControl.BuildElevatedArguments(ServiceControl.RepairVerb);
+        Check(built.StartsWith(ServiceControl.RepairVerb, StringComparison.Ordinal), "the verb must come first");
+        string? mySid = null;
+        try { mySid = WindowsIdentity.GetCurrent().User?.Value; } catch { }
+        if (ServiceControl.IsValidUserSid(mySid))
+            Check(built == $"{ServiceControl.RepairVerb} {ServiceControl.AsUserArg} {mySid}", $"the built arguments must introduce this user (got: {built})");
+
+        // Logs stay readable: read-only grant to all Users on logs\ (inherited) + the events file; no write.
+        var logs = ServiceControl.BuildLogsReadAclArgs(@"C:\ProgramData\RemSound\service");
+        Check(logs.Contains(@"service\logs""", StringComparison.Ordinal), "the grant must target the logs subfolder");
+        Check(logs.Contains("*S-1-5-32-545:(OI)(CI)(RX)", StringComparison.Ordinal), "all Users get inherited read-and-traverse only");
+        Check(!logs.Contains("/T"), "no /T — inheritable ACEs propagate to existing files on apply; a /T sweep would stamp files with useless inherit-only ACEs (5.6 lesson)");
+        Check(!logs.Contains("(M)") && !logs.Contains("(F)") && !logs.Contains("(W)"), "the logs grant must carry no write");
+        var events = ServiceControl.BuildEventsLogReadAclArgs(@"C:\ProgramData\RemSound\service");
+        Check(events.Contains("service-events.log", StringComparison.Ordinal) && events.Contains("*S-1-5-32-545:(RX)", StringComparison.Ordinal),
+            "the events file gets Users read");
+        Check(!events.Contains("(M)") && !events.Contains("(F)"), "the events grant must carry no write");
+
+        return "identity travels by argument and only real user SIDs are trusted; logs readable by every account, read-only";
     }
 
     /// <summary>Issue #23 boot self-heal decision core. Scenario: at the boot lock screen the machine's
