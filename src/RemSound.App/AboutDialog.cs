@@ -28,6 +28,8 @@ internal sealed class AboutDialog : Form
 
         The service's log files are also readable again from every account on the machine, so you can always open them in Notepad if you're curious or need to send one in. And if a service action ever fails, the message now says what actually went wrong instead of just showing a bare error code.
 
+        This About box also went on a diet: it now shows the newest five releases instead of the whole history, which had grown large enough to upset some screen readers. The full history is on the RemSound releases page on GitHub.
+
         RemSound v5.7
 
         Stronger security, and it works with every version again.
@@ -1348,6 +1350,35 @@ internal sealed class AboutDialog : Form
         on every control, the keyboard shortcuts, and the troubleshooting guide.
         """;
 
+    /// <summary>How many version blocks the About box actually displays. The full constant above is
+    /// the archive; the box shows only the newest few. The complete history reached ~70 KB in one
+    /// TextBox, and reading a control value that size crashes some screen readers (reported
+    /// 2026-08-11) — the box's job is "what's new", not the whole biography.</summary>
+    private const int ShownVersions = 5;
+
+    /// <summary>The full notes constant, exposed for the self-test that pins the About box's displayed
+    /// size (the screen-reader-crash regression guard).</summary>
+    internal static string ReleaseNotesForTest => ReleaseNotes;
+
+    /// <summary>Pure, testable: cut <paramref name="notes"/> after its first <paramref name="maxVersions"/>
+    /// version blocks (lines starting "RemSound v"), appending a plain pointer to the full history.
+    /// Notes with fewer blocks pass through unchanged.</summary>
+    internal static string TrimToLastVersions(string notes, int maxVersions)
+    {
+        var count = 0;
+        var lines = notes.Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!lines[i].TrimEnd('\r').StartsWith("RemSound v", StringComparison.Ordinal)) continue;
+            if (++count <= maxVersions) continue;
+            return string.Join("\n", lines, 0, i).TrimEnd()
+                + "\r\n\r\nThat's the newest "
+                + maxVersions
+                + " releases. Notes for every version back to the beginning are on the RemSound releases page on GitHub.";
+        }
+        return notes;
+    }
+
     public AboutDialog()
     {
         Text = "About RemSound";
@@ -1377,7 +1408,7 @@ internal sealed class AboutDialog : Form
             Dock = DockStyle.Fill,
             ScrollBars = ScrollBars.Vertical,
             BorderStyle = BorderStyle.FixedSingle,
-            Text = ReleaseNotes,
+            Text = TrimToLastVersions(ReleaseNotes, ShownVersions),
             AccessibleName = "Release notes (tab into and arrow to read)",
         };
 

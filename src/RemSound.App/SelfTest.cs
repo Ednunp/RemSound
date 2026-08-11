@@ -128,6 +128,7 @@ internal static class SelfTest
         RunStep(results, "Service folder lockdown args (cross-user LPE hardening)", ServiceDirHardeningArgs);
         RunStep(results, "Service folder repair (reproduce wrong-owner lockout → detect → repair → verify)", ServiceAccessRepairLoop);
         RunStep(results, "Elevated verbs carry the real user (SID pass-through) + logs stay readable", ElevatedIdentityPassThrough);
+        RunStep(results, "About box shows only the newest releases (screen-reader-safe size)", AboutBoxNotesTrimmed);
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);
         RunStep(results, "Service startup volume (boot-once decision + settings round-trip)", ServiceStartupVolume);
         RunStep(results, "Update install window (same-day, wraparound, retry timing)", UpdateInstallWindow);
@@ -2919,6 +2920,33 @@ internal static class SelfTest
         Check(!events.Contains("(M)") && !events.Contains("(F)"), "the events grant must carry no write");
 
         return "identity travels by argument and only real user SIDs are trusted; logs readable by every account, read-only";
+    }
+
+    /// <summary>The About box's release-notes text must stay small: the full history reached ~70 KB in
+    /// one TextBox and reading a control value that size CRASHES some screen readers (reported
+    /// 2026-08-11). The box shows only the newest five version blocks, with a pointer to the full
+    /// history; this pins both the trim logic and the real shipped text's size so the crash can't
+    /// quietly come back as releases accumulate.</summary>
+    private static string? AboutBoxNotesTrimmed()
+    {
+        // The trim logic on synthetic notes: 7 blocks in, 5 out, pointer appended; fewer than the
+        // limit passes through untouched.
+        var synthetic = string.Join("\r\n\r\n", Enumerable.Range(1, 7).Select(i => $"RemSound v9.{i}\r\n\r\nNotes for release {i}."));
+        var trimmed = AboutDialog.TrimToLastVersions(synthetic, 5);
+        Check(trimmed.Split('\n').Count(l => l.TrimEnd('\r').StartsWith("RemSound v", StringComparison.Ordinal)) == 5,
+            "seven version blocks must trim to exactly five");
+        Check(trimmed.Contains("RemSound v9.5") && !trimmed.Contains("RemSound v9.6"),
+            "the fifth-newest block stays, the sixth is cut");
+        Check(trimmed.Contains("releases page"), "the cut must end with a pointer to the full history");
+        Check(AboutDialog.TrimToLastVersions("RemSound v1.0\r\nOnly one.", 5) == "RemSound v1.0\r\nOnly one.",
+            "notes with fewer blocks than the limit pass through unchanged");
+
+        // The REAL shipped text: exactly five versions shown, and small enough to be read safely.
+        var shown = AboutDialog.TrimToLastVersions(AboutDialog.ReleaseNotesForTest, 5);
+        var versions = shown.Split('\n').Count(l => l.TrimEnd('\r').StartsWith("RemSound v", StringComparison.Ordinal));
+        Check(versions == 5, $"the shipped About text must show exactly 5 versions (got {versions})");
+        Check(shown.Length < 10_000, $"the shipped About text must stay well under screen-reader-crashing size (got {shown.Length} chars)");
+        return $"shipped About text: 5 versions, {shown.Length} chars (was ~70,000 — the screen-reader crash)";
     }
 
     /// <summary>Issue #23 boot self-heal decision core. Scenario: at the boot lock screen the machine's

@@ -15,3 +15,4 @@ This release fixes the cause and heals affected machines automatically:
 - The service's log files are readable from every account on the machine again, so you can always open them in Notepad if you need to look at one or send it in. (The service's settings stay protected as before.)
 - If a service action fails, the message now says what actually went wrong instead of showing a bare error code, and the reason is recorded in the service's own log.
 - The repair, and the folder protection itself, now always apply to the account that's actually using RemSound — even on PCs where a different account's password is typed at the administrator prompt.
+- The About box now shows the newest five releases instead of the entire version history, which had grown large enough to upset some screen readers. The full history stays here on the releases page.

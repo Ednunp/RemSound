@@ -1175,7 +1175,7 @@ A step-by-step record of every update is kept in a file called `updater.log` in 
 
 ### The About dialog and release notes
 
-To see which version you're on without checking for updates, open **Help → About RemSound** (Alt+H, A). The dialog shows the version number and the release notes for the version you're running, in a scrollable read-only box. Close (or Esc) dismisses it.
+To see which version you're on without checking for updates, open **Help → About RemSound** (Alt+H, A). The dialog shows the version number and the release notes for the newest five versions, in a scrollable read-only box — newest first, so what just changed is right at the top. Notes for every older version live on the RemSound releases page on GitHub. Close (or Esc) dismisses it.
 
 ## 21. Recording to a file
 
