@@ -88,6 +88,11 @@ internal static class CommandLine
                     return WithConsole(() => SelfTest.Run(args));
                 case "--perftest": case "--perf-test":
                     return WithConsole(() => RunPerfTest(args));
+                case "--latency-lab":
+                    // Diagnostic harness (2026-08-14 latency-slider field report): drives the real
+                    // playout with realtime-paced sender/device shapes and MEASURES whether the
+                    // buffered depth converges to a raised target. Developer tool, ~8 min runtime.
+                    return WithConsole(() => LatencyLab.Run(args));
                 case "--diagnostics": case "--diag":
                     return WithConsole(() => RunDiagnostics(ValueAfter(args, raw)));
                 case "--log":

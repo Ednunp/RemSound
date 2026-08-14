@@ -189,6 +189,10 @@ public sealed class AudioReceiver : IDisposable
         try { multiOutput.Stop(); } catch { /* ignore */ }
         try { multiOutput.Dispose(); } catch { /* ignore */ }
         multiOutput = new CompositeRenderBackend(mode, asioDriverName, playoutEngine, msg => diagnosticSink?.Invoke($"output: {msg}"));
+        // Two latency sliders exist in BothIndependent and nowhere else; every other mode has ONE
+        // slider, so one latency value governs every session (see PlayoutEngine.independentLanes —
+        // resolving it per output lane is what made the single slider inert, 2026-08-14).
+        playoutEngine.SetIndependentLaneLatency(mode == AudioMode.BothIndependent);
         if (wasRunning) multiOutput.Start();
     }
 
@@ -1116,7 +1120,11 @@ public sealed class AudioReceiver : IDisposable
 
             try
             {
-                newSession = new StreamSession(remote, streamId, format, sp, diagnostics, _ => sp.NoteFramesQueued(playoutEngine.TargetLatencyMs), decryptor);
+                // Arm against the target THIS session actually plays to (its own route's), not the
+                // engine-wide one — in BothIndependent those differ, and arming to the wrong one
+                // starts playback at the wrong depth. In single-slider mode every route resolves to
+                // the same shared value, so this is identical to the old call there.
+                newSession = new StreamSession(remote, streamId, format, sp, diagnostics, _ => sp.NoteFramesQueued(playoutEngine.TargetLatencyMsFor(sp.Route)), decryptor);
             }
             catch
             {

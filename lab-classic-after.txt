@@ -1,0 +1,18 @@
+RemSound latency lab - measuring depth-target convergence with the shipped playout code.
+Raise under test: 30ms -> 330ms. Expected growth at full depth-bias: ~3ms/s.
+
+--- T3 classic app path: WASAPI lane active, slider drives Mixed ---
+  session route after arrival: WasapiLane  (slider writes to: Mixed)
+  settled at slider 30ms: buffered=70ms
+  t+10s buffered=  48ms
+  t+20s buffered=  66ms
+  t+30s buffered= 114ms
+  t+40s buffered= 125ms
+  t+50s buffered= 165ms
+  t+60s buffered= 194ms
+  RAISE via slider: 70ms -> 194ms in 60s = 2.07ms/s  GROWS (slider works)
+  LOWER via slider: back to 30ms -> buffered=48ms after 3s
+
+
+=== SUMMARY ===
+  T3 classic app path: WASAPI lane active, slider drives Mixed: raise 2.07ms/s [GROWS (slider works)], lower -> 48ms

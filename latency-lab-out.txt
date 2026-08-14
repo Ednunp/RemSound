@@ -1,0 +1,113 @@
+RemSound latency lab - measuring depth-target convergence with the shipped playout code.
+Raise under test: 30ms -> 330ms. Expected growth at full depth-bias: ~3ms/s.
+
+--- T1 clean: write 10ms/10ms, read 10ms/10ms ---
+  settled at target 30ms: buffered=38ms ratio=1.001000 updates=1
+  t+ 5s buffered=  10ms ratio=1.000101 updates=2
+  t+10s buffered=  34ms ratio=1.000101 updates=2
+  t+15s buffered=  49ms ratio=1.000070 updates=3
+  t+20s buffered=  74ms ratio=1.000070 updates=3
+  t+25s buffered=  78ms ratio=1.000049 updates=4
+  t+30s buffered= 103ms ratio=1.000049 updates=4
+  t+35s buffered=  98ms ratio=1.000635 updates=5
+  t+40s buffered= 140ms ratio=1.000635 updates=5
+  t+45s buffered= 132ms ratio=0.999845 updates=6
+  t+50s buffered= 148ms ratio=0.999845 updates=6
+  t+55s buffered= 184ms ratio=0.999892 updates=7
+  t+60s buffered= 200ms ratio=0.999892 updates=7
+  RAISE result: 38ms -> 200ms in 60s = 2.70ms/s  GROWS (mechanism working)
+  LOWER result: back to target 30ms -> buffered=69ms after 3s
+
+--- T1 opus-frame: write 20ms/20ms, read 10ms/10ms ---
+  settled at target 30ms: buffered=76ms ratio=0.998000 updates=1
+  t+ 5s buffered=  58ms ratio=0.999200 updates=2
+  t+10s buffered=  97ms ratio=0.999200 updates=2
+  t+15s buffered= 126ms ratio=0.998841 updates=3
+  t+20s buffered= 127ms ratio=0.998841 updates=3
+  t+25s buffered= 158ms ratio=1.000088 updates=4
+  t+30s buffered= 153ms ratio=1.000088 updates=4
+  t+35s buffered= 177ms ratio=1.000062 updates=5
+  t+40s buffered= 202ms ratio=1.000062 updates=5
+  t+45s buffered= 207ms ratio=0.999144 updates=6
+  t+50s buffered= 237ms ratio=0.999144 updates=6
+  t+55s buffered= 266ms ratio=1.000001 updates=7
+  t+60s buffered= 271ms ratio=1.000001 updates=7
+  RAISE result: 76ms -> 271ms in 60s = 3.25ms/s  GROWS (mechanism working)
+  LOWER result: back to target 30ms -> buffered=59ms after 3s
+
+--- T1 gulpy device: write 20ms/20ms, read 21ms + 42ms gulp each ~1s ---
+  settled at target 30ms: buffered=43ms ratio=1.000400 updates=1
+  t+ 5s buffered=  41ms ratio=0.999771 updates=2
+  t+10s buffered=  59ms ratio=0.999771 updates=2
+  t+15s buffered=  53ms ratio=1.000529 updates=3
+  t+20s buffered=  85ms ratio=1.000529 updates=3
+  t+25s buffered=  97ms ratio=1.000460 updates=4
+  t+30s buffered= 130ms ratio=1.000460 updates=4
+  t+35s buffered= 142ms ratio=0.999214 updates=5
+  t+40s buffered= 140ms ratio=0.999214 updates=5
+  t+45s buffered= 158ms ratio=1.000737 updates=6
+  t+50s buffered= 189ms ratio=1.000737 updates=6
+  t+55s buffered= 180ms ratio=0.999408 updates=7
+  t+60s buffered= 238ms ratio=0.999408 updates=7
+  RAISE result: 43ms -> 238ms in 60s = 3.25ms/s  GROWS (mechanism working)
+  LOWER result: back to target 30ms -> buffered=59ms after 3s
+
+--- T1 jittery net: write 20ms +/-15ms, read 10ms/10ms ---
+  settled at target 30ms: buffered=70ms ratio=1.002000 updates=1
+  t+ 5s buffered=  50ms ratio=1.001100 updates=2
+  t+10s buffered=  39ms ratio=1.001100 updates=2
+  t+15s buffered=  79ms ratio=1.001370 updates=3
+  t+20s buffered=  47ms ratio=1.001370 updates=3
+  t+25s buffered=  85ms ratio=1.000359 updates=4
+  t+30s buffered=  89ms ratio=1.000359 updates=4
+  t+35s buffered=  82ms ratio=0.999952 updates=5
+  t+40s buffered= 117ms ratio=0.999952 updates=5
+  t+45s buffered= 132ms ratio=1.001166 updates=6
+  t+50s buffered= 162ms ratio=1.001166 updates=6
+  t+55s buffered= 162ms ratio=0.999619 updates=7
+  t+60s buffered= 189ms ratio=0.999619 updates=7
+  RAISE result: 70ms -> 189ms in 60s = 1.98ms/s  SLOW (partially working)
+  LOWER result: back to target 30ms -> buffered=69ms after 3s
+
+--- T2 engine-Mixed clean: write 20ms/20ms, read 10ms/10ms ---
+  settled at target 30ms: buffered=74ms ratio=1.001001 updates=1
+  t+ 5s buffered=  34ms ratio=1.000401 updates=2
+  t+10s buffered=  21ms ratio=1.000401 updates=2
+  t+15s buffered=  29ms ratio=1.000281 updates=3
+  t+20s buffered=  29ms ratio=1.000281 updates=3
+  t+25s buffered=  30ms ratio=0.999897 updates=4
+  t+30s buffered=  34ms ratio=0.999897 updates=4
+  t+35s buffered=  37ms ratio=0.999928 updates=5
+  t+40s buffered=  38ms ratio=0.999928 updates=5
+  t+45s buffered=  29ms ratio=0.999949 updates=6
+  t+50s buffered=  30ms ratio=0.999949 updates=6
+  t+55s buffered=  39ms ratio=1.000864 updates=7
+  t+60s buffered=   9ms ratio=1.000864 updates=7
+  RAISE result: 74ms -> 9ms in 60s = -1.08ms/s  STALLED (the field bug)
+  LOWER result: back to target 30ms -> buffered=29ms after 3s
+
+--- T2 engine-Mixed gulpy: write 20ms/20ms, read 21ms + 42ms gulp ---
+  settled at target 30ms: buffered=59ms ratio=0.998399 updates=1
+  t+ 5s buffered=  56ms ratio=0.999568 updates=2
+  t+10s buffered=  28ms ratio=0.999568 updates=2
+  t+15s buffered=  25ms ratio=0.999818 updates=3
+  t+20s buffered=  50ms ratio=0.999818 updates=3
+  t+25s buffered=  44ms ratio=0.999962 updates=4
+  t+30s buffered=  48ms ratio=0.999962 updates=4
+  t+35s buffered=  39ms ratio=0.999465 updates=5
+  t+40s buffered=  20ms ratio=0.999465 updates=5
+  t+45s buffered=  35ms ratio=0.999116 updates=6
+  t+50s buffered=  50ms ratio=0.999116 updates=6
+  t+55s buffered=  53ms ratio=0.999471 updates=7
+  t+60s buffered=  50ms ratio=0.999471 updates=7
+  RAISE result: 59ms -> 50ms in 60s = -0.15ms/s  STALLED (the field bug)
+  LOWER result: back to target 30ms -> buffered=62ms after 3s
+
+
+=== SUMMARY ===
+  T1 clean: write 10ms/10ms, read 10ms/10ms: raise 2.70ms/s [GROWS (mechanism working)], lower -> 69ms
+  T1 opus-frame: write 20ms/20ms, read 10ms/10ms: raise 3.25ms/s [GROWS (mechanism working)], lower -> 59ms
+  T1 gulpy device: write 20ms/20ms, read 21ms + 42ms gulp each ~1s: raise 3.25ms/s [GROWS (mechanism working)], lower -> 59ms
+  T1 jittery net: write 20ms +/-15ms, read 10ms/10ms: raise 1.98ms/s [SLOW (partially working)], lower -> 69ms
+  T2 engine-Mixed clean: write 20ms/20ms, read 10ms/10ms: raise -1.08ms/s [STALLED (the field bug)], lower -> 29ms
+  T2 engine-Mixed gulpy: write 20ms/20ms, read 21ms + 42ms gulp: raise -0.15ms/s [STALLED (the field bug)], lower -> 62ms

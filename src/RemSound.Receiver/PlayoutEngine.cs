@@ -86,7 +86,7 @@ internal sealed class PlayoutEngine : IWaveProvider
         public volatile int TargetMs = 30;
         public volatile int MaxMs = 80;
     }
-    private readonly LaneLatency mixedLatency = new();
+    private readonly LaneLatency sharedLatency = new();
     private readonly LaneLatency wasapiLaneLatency = new();
     private readonly LaneLatency asioLaneLatency = new();
     // Per-lane active flag — true when an output device is ticked for that lane in
@@ -201,26 +201,59 @@ internal sealed class PlayoutEngine : IWaveProvider
 
     public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(MixSampleRate, MixChannels);
 
-    /// <summary>Legacy property returning the Mixed route's target. Used by code paths that
-    /// don't care about per-route routing (every classic mode, plus diagnostics that report
-    /// "the" target latency in non-BothIndependent setups).</summary>
-    public int TargetLatencyMs => mixedLatency.TargetMs;
-    /// <summary>Legacy property returning the Mixed route's max.</summary>
-    public int MaxLatencyMs => mixedLatency.MaxMs;
+    /// <summary>True only in BothIndependent, where the UI genuinely shows two latency sliders
+    /// (WASAPI and ASIO) and each lane must hold its own target. FALSE in every single-slider mode,
+    /// and then there is exactly ONE latency value — <see cref="sharedLatency"/> — used by every
+    /// session whatever output lane it happens to be tagged with.
+    ///
+    /// This flag is the fix for the 2026-08-14 field report ("the latency slider does nothing").
+    /// Sessions are always tagged with an OUTPUT LANE by ReconcileReplicasLocked (WasapiLane /
+    /// AsioLane — never Mixed while any output device is ticked), but the single slider wrote to the
+    /// Mixed value, which the render path then never read. So in every classic mode the slider — and
+    /// the auto-tune with it — updated a value nothing consumed, while the real target sat on
+    /// LaneLatency's 30 ms default for the whole session: raise and lower equally inert. Only
+    /// BothIndependent worked, because there the slider writes WasapiLane, which IS what its sessions
+    /// read. Measured before/after by <c>--latency-lab classic</c> and pinned by the gate. The lane
+    /// tag says which DEVICE a session renders through; it was never meant to pick a latency knob.</summary>
+    private volatile bool independentLanes;
+
+    /// <summary>Switch between one-slider and two-slider latency. Entering two-slider mode seeds both
+    /// lane values from the shared one so the audio doesn't jump at the changeover; leaving it hands
+    /// control back to the shared value. Called from AudioReceiver.SetAudioMode.</summary>
+    public void SetIndependentLaneLatency(bool independent)
+    {
+        if (independent && !independentLanes)
+        {
+            wasapiLaneLatency.TargetMs = asioLaneLatency.TargetMs = sharedLatency.TargetMs;
+            wasapiLaneLatency.MaxMs = asioLaneLatency.MaxMs = sharedLatency.MaxMs;
+        }
+        independentLanes = independent;
+    }
+
+    /// <summary>The one latency in single-slider mode; in BothIndependent, the value diagnostics
+    /// report as "the" target (each lane's own is available via <see cref="TargetLatencyMsFor"/>).</summary>
+    public int TargetLatencyMs => sharedLatency.TargetMs;
+    /// <summary>The one max in single-slider mode (see <see cref="TargetLatencyMs"/>).</summary>
+    public int MaxLatencyMs => sharedLatency.MaxMs;
 
     /// <summary>Per-route target accessor. In BothIndependent the WASAPI and ASIO routes have
     /// independent targets so each lane can settle at its native latency without the other
-    /// pulling it. In classic modes only Mixed is meaningful; the other two routes return
-    /// their defaults.</summary>
+    /// pulling it. In every single-slider mode all routes resolve to the one shared value.</summary>
     public int TargetLatencyMsFor(RenderRoute route) => LatencyFor(route).TargetMs;
     public int MaxLatencyMsFor(RenderRoute route) => LatencyFor(route).MaxMs;
 
-    private LaneLatency LatencyFor(RenderRoute route) => route switch
+    /// <summary>The latency a route reads. With one slider that is ALWAYS the shared value — see
+    /// <see cref="independentLanes"/> for why resolving this per-lane made the slider inert.</summary>
+    private LaneLatency LatencyFor(RenderRoute route)
     {
-        RenderRoute.WasapiLane => wasapiLaneLatency,
-        RenderRoute.AsioLane => asioLaneLatency,
-        _ => mixedLatency,
-    };
+        if (!independentLanes) return sharedLatency;
+        return route switch
+        {
+            RenderRoute.WasapiLane => wasapiLaneLatency,
+            RenderRoute.AsioLane => asioLaneLatency,
+            _ => sharedLatency,
+        };
+    }
 
     /// <summary>Aggregate buffered ms across all active sessions. Used by the App's diagnostic
     /// snapshot row. Per-session levels are not currently exposed (single number is enough for
@@ -345,14 +378,26 @@ internal sealed class PlayoutEngine : IWaveProvider
         var previousTarget = lane.TargetMs;
         lane.MaxMs = clamped;
         lane.TargetMs = clamped;
-        if (clamped < previousTarget && drainOnLower)
+        if (clamped == previousTarget) return;
+        // Which sessions does this change actually govern? With one slider that's EVERY session
+        // (they all read the shared value, whatever output lane they're tagged with) — matching on
+        // the route here is what made "lower the slider" inert in classic modes, since the slider's
+        // route is Mixed and no playing session is ever tagged Mixed.
+        var snap = sessionsSnapshot;
+        foreach (var s in snap)
         {
-            // Only drain sessions on THIS route — leaves other-route sessions playing.
-            var snap = sessionsSnapshot;
-            foreach (var s in snap)
+            if (independentLanes && s.Route != route) continue;
+            if (clamped < previousTarget && drainOnLower)
             {
-                if (s.Route != route) continue;
                 s.DisarmAndRequestDrain();
+            }
+            else if (drainOnLower)
+            {
+                // drainOnLower marks the HARD setter — a deliberate move of the user's slider (the
+                // auto-tune uses the soft one). A raise can't be met by dropping audio, only by
+                // banking it, so converge in seconds instead of the steady-state crawl; without this
+                // a 400 ms raise takes over two minutes to arrive and still reads as a dead slider.
+                s.RequestFastLatencyApproach();
             }
         }
     }
