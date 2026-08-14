@@ -129,6 +129,7 @@ internal static class SelfTest
         RunStep(results, "Service folder repair (reproduce wrong-owner lockout → detect → repair → verify)", ServiceAccessRepairLoop);
         RunStep(results, "Elevated verbs carry the real user (SID pass-through) + logs stay readable", ElevatedIdentityPassThrough);
         RunStep(results, "About box shows only the newest releases (screen-reader-safe size)", AboutBoxNotesTrimmed);
+        RunStep(results, "Latency slider reaches the streams it governs (one slider = one value)", LatencySliderReachesSessions);
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);
         RunStep(results, "Service startup volume (boot-once decision + settings round-trip)", ServiceStartupVolume);
         RunStep(results, "Update install window (same-day, wraparound, retry timing)", UpdateInstallWindow);
@@ -2947,6 +2948,59 @@ internal static class SelfTest
         Check(versions == 5, $"the shipped About text must show exactly 5 versions (got {versions})");
         Check(shown.Length < 10_000, $"the shipped About text must stay well under screen-reader-crashing size (got {shown.Length} chars)");
         return $"shipped About text: 5 versions, {shown.Length} chars (was ~70,000 — the screen-reader crash)";
+    }
+
+    /// <summary>The latency slider must actually govern the streams that are playing. THE 2026-08-14
+    /// FIELD BUG: incoming sessions are tagged with an output LANE (WasapiLane/AsioLane — never Mixed
+    /// while a device is ticked), but the single slider writes RenderRoute.Mixed, and the render path
+    /// resolved its target per-lane — so in every classic mode the slider (and the auto-tune) wrote a
+    /// value nothing read, leaving the real target on the 30 ms default for the whole session. Raise
+    /// and lower both inert; only BothIndependent worked. Measured end-to-end by
+    /// <c>--latency-lab classic</c> (stalled -0.15ms/s → +2.07ms/s after the fix); pinned here as the
+    /// fast, deterministic invariant: what the slider sets IS what the session's route reads, and a
+    /// lower reaches the session. Also checks the two-slider mode keeps its lanes genuinely separate.</summary>
+    private static string? LatencySliderReachesSessions()
+    {
+        var endpoint = new IPEndPoint(IPAddress.Loopback, 47832);
+
+        // --- Single-slider mode (WasapiOnly and every other classic mode) ---
+        var engine = new RemSound.Receiver.PlayoutEngine(new RemSound.Receiver.ReceiverDiagnostics());
+        engine.SetIndependentLaneLatency(false);
+        engine.SetLaneActive(RenderRoute.WasapiLane, true);   // one WASAPI output ticked...
+        engine.SetLaneActive(RenderRoute.AsioLane, false);    // ...no ASIO, exactly as CompositeRenderBackend reports
+        engine.SetMaxLatencyMs(RenderRoute.Mixed, 30);        // MainForm's call in classic modes
+        var session = engine.GetOrCreateSession(endpoint, 1, capacityBytes: 1024 * 1024);
+        Check(session.Route == RenderRoute.WasapiLane,
+            $"a stream must land on the active output lane (got {session.Route}) — the mismatch the slider used to ignore");
+
+        engine.SetMaxLatencyMs(RenderRoute.Mixed, 330);       // the user drags the slider up
+        Check(engine.TargetLatencyMsFor(session.Route) == 330,
+            $"the target the render path reads for this stream must BE the slider's value (got {engine.TargetLatencyMsFor(session.Route)}ms for a 330ms slider)");
+        Check(engine.MaxLatencyMsFor(session.Route) == 330, "the max must follow the slider too");
+
+        // A LOWER must reach the session (disarm + drain). Arm it first, then lower and prove the
+        // very next read returns nothing — that IS the disarm, and it's what refills to the new depth.
+        var block = new byte[48000 * 8 / 2]; // 500ms stereo float — must exceed the 330ms target, or it never arms
+        session.Write(block);
+        session.NoteFramesQueued(engine.TargetLatencyMsFor(session.Route));
+        var scratch = new float[960 * 2];
+        Check(session.ReadFloats(scratch, 960, 330, 330) > 0, "the session must be armed and producing before the lower");
+        engine.SetMaxLatencyMs(RenderRoute.Mixed, 30);
+        Check(session.ReadFloats(scratch, 960, 30, 30) == 0,
+            "lowering the slider must disarm+drain this stream — matching on the slider's route is what made 'lower' inert");
+
+        // --- Two-slider mode (BothIndependent): lanes stay genuinely separate ---
+        var indep = new RemSound.Receiver.PlayoutEngine(new RemSound.Receiver.ReceiverDiagnostics());
+        indep.SetMaxLatencyMs(RenderRoute.Mixed, 250);        // whatever the single slider last held...
+        indep.SetIndependentLaneLatency(true);                // ...seeds both lanes, so audio doesn't jump
+        Check(indep.TargetLatencyMsFor(RenderRoute.WasapiLane) == 250 && indep.TargetLatencyMsFor(RenderRoute.AsioLane) == 250,
+            "entering two-slider mode must seed both lanes from the shared value (no jump at the changeover)");
+        indep.SetMaxLatencyMs(RenderRoute.WasapiLane, 40);
+        indep.SetMaxLatencyMs(RenderRoute.AsioLane, 8);
+        Check(indep.TargetLatencyMsFor(RenderRoute.WasapiLane) == 40 && indep.TargetLatencyMsFor(RenderRoute.AsioLane) == 8,
+            "each lane must hold its own target in two-slider mode");
+
+        return "one slider now governs every stream (raise + lower reach it); two-slider mode keeps its lanes separate";
     }
 
     /// <summary>Issue #23 boot self-heal decision core. Scenario: at the boot lock screen the machine's

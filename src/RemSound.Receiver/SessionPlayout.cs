@@ -179,6 +179,10 @@ internal sealed class SessionPlayout : IDisposable
     // true drift.
     private double smoothedRateRatio = 1.0;
     private bool resamplerActivelyTracking;
+    // Fast-approach state (see the FastDepthBias block). Set from the UI thread via
+    // RequestFastLatencyApproach, cleared on the audio thread once the ring reaches the new target.
+    private volatile bool fastApproachUntilOnTarget;
+    private long lastFastApplyTicks;
     private long resamplerUpdatesTotal;
 
     // Scratch buffer for reading from the ring buffer in float form. Sized lazily based on
@@ -236,6 +240,21 @@ internal sealed class SessionPlayout : IDisposable
     // ≤0.3 % pitch nudge, never a click.
     private const double DepthCorrectionSec = 15.0;
     private const double MaxDepthBias = 0.003;
+    // === Fast approach after a DELIBERATE latency change (2026-08-14) ===
+    // The steady-state numbers above are deliberately sleepy: 0.3% of realtime is ~3 ms of catch-up
+    // per second, and the correction is only recomputed at the 10 s drift-window boundary. That's
+    // right for silently absorbing clock drift, and hopeless for a user who just dragged the slider
+    // 400 ms and wants to HEAR the delay change — it would take over two minutes to arrive, which
+    // reads as "the slider does nothing" even once the slider's value reaches the right place.
+    // So a user-initiated change (the hard setter — never the auto-tune's soft one, which keeps the
+    // sleepy numbers and its parked descent behaviour) engages a fast approach: a bigger rate bias,
+    // recomputed several times a second, until the ring is near the new target. The audio slows or
+    // speeds by up to FastDepthBias while it converges — an audible, deliberate glide (that's the
+    // point: the user asked for the change and can hear it happen), never a gap or a click.
+    private const double FastDepthCorrectionSec = 3.0;
+    private const double FastDepthBias = 0.05;          // 5% => ~50 ms of catch-up per second
+    private const double FastApplyIntervalSec = 0.2;    // recompute 5x/sec while converging
+    private const double FastApproachDoneMs = 15.0;     // close enough — hand back to steady state
     // Number of stereo frames each side of a splice point that get blended when a drop or
     // repeat fires. Cosine crossfade over this window smooths the discontinuity into an audio
     // DriftDropFramesTotal / DriftRepeatFramesTotal accessors removed 2026-05-23 alongside
@@ -468,6 +487,16 @@ internal sealed class SessionPlayout : IDisposable
         drainRequested = true;
     }
 
+    /// <summary>The user just moved the latency slider: converge on the new depth in seconds rather
+    /// than minutes (see the FastDepthBias block). Deliberate changes only — the auto-tune's soft
+    /// setter must NOT call this, so its gentle, parked descent behaviour is untouched.</summary>
+    public void RequestFastLatencyApproach()
+    {
+        fastApproachUntilOnTarget = true;
+        var mir = mirrors;
+        for (var i = 0; i < mir.Length; i++) mir[i].fastApproachUntilOnTarget = true;
+    }
+
     public void Dispose()
     {
         // AudioRingBuffer is managed; nothing to free explicitly. Method present for symmetry
@@ -651,6 +680,16 @@ internal sealed class SessionPlayout : IDisposable
         prevDriftSampleTicks = nowTicks;
 
         UpdateDriftResamplerRateIfDue(nowTicks, targetLatencyMs);
+        // While converging on a freshly-moved slider, re-apply the (much larger) depth correction
+        // several times a second instead of waiting for the 10 s drift window — otherwise the first
+        // seconds after the user's move do nothing at all, which is exactly what "the slider doesn't
+        // work" felt like. Self-clearing once the ring is within FastApproachDoneMs of target.
+        if (fastApproachUntilOnTarget && resamplerActivelyTracking
+            && (nowTicks - lastFastApplyTicks) / (double)Stopwatch.Frequency >= FastApplyIntervalSec)
+        {
+            lastFastApplyTicks = nowTicks;
+            ApplyDepthCorrectedRate(targetLatencyMs);
+        }
 
         // Read through the resampler and apply concealment on full underruns.
         ReadThroughResampler(output, outFrames);
@@ -665,6 +704,30 @@ internal sealed class SessionPlayout : IDisposable
         // Split-recording tap, SHAPED variant — after pan/EQ (the default, "record what you hear").
         if (tap is not null && !recordRaw) EmitRecordTap(tap, output, outFrames);
         return outFrames;
+    }
+
+    /// <summary>Set the resampler rate to the feed-forward clock ratio plus the depth-feedback bias
+    /// that walks the ring toward <paramref name="targetLatencyMs"/>. Shared by the steady-state
+    /// 10 s window and the fast approach after a deliberate slider move — the ONLY difference is how
+    /// hard it's allowed to pull (see the FastDepthBias block), so both paths stay one piece of
+    /// arithmetic rather than two that can drift apart.</summary>
+    private void ApplyDepthCorrectedRate(int targetLatencyMs)
+    {
+        var depthFrames = playout.BufferedBytes / MixBytesPerFrame;
+        var targetFrames = targetLatencyMs * MixSampleRate / 1000;
+        var depthError = depthFrames - targetFrames;
+        var fast = fastApproachUntilOnTarget;
+        if (fast && Math.Abs(depthError) <= FastApproachDoneMs * MixSampleRate / 1000)
+        {
+            fastApproachUntilOnTarget = false; // arrived — back to the sleepy steady-state numbers
+            fast = false;
+        }
+        var spreadSec = fast ? FastDepthCorrectionSec : DepthCorrectionSec;
+        var bias = fast ? FastDepthBias : MaxDepthBias;
+        var depthCorrection = Math.Clamp(depthError / (spreadSec * MixSampleRate), -bias, bias);
+        var appliedRatio = smoothedRateRatio + depthCorrection;
+        driftResampler.SetRates(MixSampleRate * appliedRatio, MixSampleRate);
+        Interlocked.Increment(ref resamplerUpdatesTotal);
     }
 
     /// <summary>
@@ -728,18 +791,7 @@ internal sealed class SessionPlayout : IDisposable
         // faster; < 0 biases down to refill. Clamped + spread over DepthCorrectionSec so it's a
         // gentle, inaudible pitch trim, not a per-sample discontinuity. No-op until the
         // feed-forward has a valid measurement (smoothedRateRatio is meaningless before then).
-        if (resamplerActivelyTracking)
-        {
-            var depthFrames = playout.BufferedBytes / MixBytesPerFrame;
-            var targetFrames = targetLatencyMs * MixSampleRate / 1000;
-            var depthError = depthFrames - targetFrames;
-            var depthCorrection = Math.Clamp(
-                depthError / (DepthCorrectionSec * MixSampleRate),
-                -MaxDepthBias, MaxDepthBias);
-            var appliedRatio = smoothedRateRatio + depthCorrection;
-            driftResampler.SetRates(MixSampleRate * appliedRatio, MixSampleRate);
-            Interlocked.Increment(ref resamplerUpdatesTotal);
-        }
+        if (resamplerActivelyTracking) ApplyDepthCorrectedRate(targetLatencyMs);
 
         // Anchor the next window.
         resamplerWindowStartTicks = nowTicks;
