@@ -26,6 +26,7 @@
          can load the full multi-size icon at runtime for crisp title-bar / taskbar / tray rendering. -->
     <EmbeddedResource Include="remsound.ico" />
     <ProjectReference Include="..\RemSound.Core\RemSound.Core.csproj" />
+    <ProjectReference Include="..\RemSound.Ui\RemSound.Ui.csproj" />
     <ProjectReference Include="..\RemSound.Sender\RemSound.Sender.csproj" />
     <ProjectReference Include="..\RemSound.Receiver\RemSound.Receiver.csproj" />
     <PackageReference Include="NAudio" Version="2.3.0" />

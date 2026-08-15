@@ -89,6 +89,13 @@ internal sealed class AccessibleCheckBox : CheckBox
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Func<bool, bool>? SuppressCheckSound { get; set; }
 
+    /// <summary>How a toggle makes its sound. INJECTED rather than called directly so this control
+    /// carries no dependency on the app's cue machinery — the ACCESSIBILITY work here (the WinEvent
+    /// re-fire that makes NVDA announce a spacebar toggle at all) is what the VST plugin needs to
+    /// reuse, and it must not drag the whole application in behind it. The app wires this to
+    /// CheckSoundService.Play at startup; the plugin leaves it null and is simply silent.</summary>
+    public static Action<bool>? PlayToggleSound { get; set; }
+
     protected override void OnCheckedChanged(EventArgs e)
     {
         base.OnCheckedChanged(e);
@@ -101,7 +108,7 @@ internal sealed class AccessibleCheckBox : CheckBox
             // Audible tick/untick feedback. Gated on Focused so it fires for a genuine user toggle
             // (click or spacebar) but stays silent for the bulk programmatic checking on profile
             // load - and skipped when a control has its own dedicated cue (send/receive).
-            if (SuppressCheckSound?.Invoke(Checked) != true) CheckSoundService.Play(Checked);
+            if (SuppressCheckSound?.Invoke(Checked) != true) PlayToggleSound?.Invoke(Checked);
         }
     }
 }

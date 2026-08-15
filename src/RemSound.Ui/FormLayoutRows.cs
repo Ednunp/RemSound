@@ -71,6 +71,11 @@ internal sealed class CmdKeyForm : Form
 /// </summary>
 internal sealed class QuietTabControl : TabControl
 {
+    /// <summary>How a tab switch makes its sound. Injected so this control carries no dependency on
+    /// the app's cue machinery — see AccessibleCheckBox.PlayToggleSound. The app wires it at startup;
+    /// the plugin leaves it null and is silent.</summary>
+    public static Action? PlayTabSwitchSound { get; set; }
+
     protected override AccessibleObject CreateAccessibilityInstance()
         => new QuietAcc(this);
 
@@ -82,7 +87,8 @@ internal sealed class QuietTabControl : TabControl
         // with focus on a control inside the active page - clicks, while the programmatic
         // SelectedIndex set done while a window is being built or its last tab restored (nothing
         // here focused yet) stays silent.
-        if (ContainsFocus) TabSwitchSoundService.Play();
+        // Injected for the same reason as AccessibleCheckBox.PlayToggleSound — see there.
+        if (ContainsFocus) PlayTabSwitchSound?.Invoke();
     }
 
     private sealed class QuietAcc : ControlAccessibleObject

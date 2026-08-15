@@ -122,6 +122,12 @@ internal static class Program
 
         ApplicationConfiguration.Initialize();
 
+        // The shared accessible controls take their sounds by injection so they carry no dependency
+        // on the app's cue machinery (the VST plugin reuses the controls, not the app). Wire them
+        // here so the APP behaves exactly as before.
+        AccessibleCheckBox.PlayToggleSound = CheckSoundService.Play;
+        QuietTabControl.PlayTabSwitchSound = TabSwitchSoundService.Play;
+
         // Follow the user's chosen colour theme — "system" (match Windows light/dark) by default. This
         // is an experimental WinForms API; guarded so any failure just leaves the classic light theme
         // rather than stopping RemSound launching. Colours only — no effect on the screen reader.

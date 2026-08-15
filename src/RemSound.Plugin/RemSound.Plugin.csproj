@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    RemSound as a VST3 plugin (v6.0).
+
+    Same engine as the app — same protocol, same encryption, same jitter buffer, same relay — with
+    the sound card swapped for the DAW. It references Core/Sender/Receiver (the engine) and
+    RemSound.Ui (the accessible controls) but NOT the app: a plugin must not drag a WinForms
+    application, its tray icon, its single-instance lock or its service machinery into someone
+    else's DAW process.
+
+    ONE PERSON PER TRACK (Ed, 2026-08-15): an instance either sends this DAW track, or receives one
+    chosen peer onto it. Splitting one machine's devices into separate streams was considered and
+    dropped — independent jitter buffers would let a guitar and a vocal from the same performance
+    drift apart at the far end, which is worse than latency.
+
+    Route chosen: AudioPlugSharp (MIT, actively maintained, targets net10.0, several plugins shipping
+    on it) because it is the only .NET route that supports a real WinForms editor — and real WinForms
+    controls are the entire reason this plugin can be screen-reader accessible when almost no
+    commercial plugin is.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>RemSound.Plugin</AssemblyName>
+    <RootNamespace>RemSound.Plugin</RootNamespace>
+    <!-- A plugin is loaded INTO a host process; it is a library, never an exe. -->
+    <OutputType>Library</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AudioPlugSharp" Version="0.7.13" />
+    <PackageReference Include="AudioPlugSharpVst3" Version="*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RemSound.Core\RemSound.Core.csproj" />
+    <ProjectReference Include="..\RemSound.Sender\RemSound.Sender.csproj" />
+    <ProjectReference Include="..\RemSound.Receiver\RemSound.Receiver.csproj" />
+    <ProjectReference Include="..\RemSound.Ui\RemSound.Ui.csproj" />
+  </ItemGroup>
+
+</Project>

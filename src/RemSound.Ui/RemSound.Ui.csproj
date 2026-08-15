@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The house ACCESSIBLE CONTROLS, shared by the app and the VST plugin.
+
+    Split out for v6.0: the plugin's window has to be readable by NVDA, and the only reason it can be
+    is these controls — a plain WinForms CheckBox is silent to NVDA on .NET 10 (AccessibleCheckBox
+    re-fires the focus WinEvent to force the announcement), and MnemonicLabel/FormLayoutRows carry the
+    label-to-control association a screen reader needs. Duplicating them into the plugin would have
+    guaranteed the two copies drifting apart, with the plugin quietly becoming the less accessible one.
+
+    Deliberately has NO dependencies beyond WinForms: the controls take their sounds by injection
+    (AccessibleCheckBox.PlayToggleSound, QuietTabControl.PlayTabSwitchSound) so this assembly never
+    drags the app's cue machinery, config or audio engine in behind it.
+
+    The namespace stays RemSound.App so the move required no changes anywhere in the application.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>RemSound.App</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The controls are internal; both consumers need to see them. -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>RemSound</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>RemSound.Plugin</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>
