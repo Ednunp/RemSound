@@ -136,6 +136,7 @@ internal static partial class SelfTest
         RunStep(results, "Every window is reachable by the audits (no unaudited dialog)", EveryDialogIsAudited);
         RunStep(results, "Dialog control suite (every dialog: accessibility + theme + driven)", DialogControlSuite);
         RunStep(results, "Every sound is pinned (registry, custom paths, muting, checkbox suppression)", CueCoverage);
+        RunStep(results, "Latency estimate counts every stage (no silently-missing term)", LatencyEstimateComplete);
         foreach (var cfg in SuiteConfigs)
             RunStep(results, $"Control suite - {cfg.Name} (UI + accessibility + theme + effect)", () => RunControlSuite(cfg));
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);
@@ -3005,6 +3006,39 @@ internal static partial class SelfTest
         // The old crawl for comparison, so the gate records what changed.
         var oldTicks = (500 - 20) / 5;
         return $"floor never breached; fast descent {ticks} ticks vs the old crawl's {oldTicks}; creep reaches the need and stops at a learned floor";
+    }
+
+    /// <summary>The reported end-to-end latency must count EVERY stage of the journey.
+    ///
+    /// The failure this pins (2026-08-15): the estimate omitted the capture buffer entirely and used a
+    /// hardcoded 10 ms for the output device. Ed's friend heard about 40 ms while the app reported 23,
+    /// and HIS EARS WERE RIGHT — a constant dressed as a measurement is worse than no measurement,
+    /// because it reads as authoritative in a log and I had been diagnosing from it all week.
+    ///
+    /// So: the render term must FOLLOW the measured callback period rather than sit still, and the
+    /// capture stage must be present at all. A term that can't move is a term nobody is measuring.</summary>
+    private static string? LatencyEstimateComplete()
+    {
+        // The render estimate must track the measured device period, not ignore it.
+        var atTenMs = MainForm.RenderBufferEstimateMsForTest(10);
+        var atTwentyMs = MainForm.RenderBufferEstimateMsForTest(20);
+        Check(atTwentyMs > atTenMs,
+            $"the render estimate must follow the measured callback period (10ms->{atTenMs}, 20ms->{atTwentyMs}) — a fixed number is a guess wearing a measurement's clothes");
+        Check(atTenMs >= 20,
+            $"WASAPI event-sync keeps roughly two periods in flight, so a 10ms period means ~20ms in the device (got {atTenMs})");
+        Check(MainForm.RenderBufferEstimateMsForTest(0) > 0, "with nothing measured yet it must still return a sane fallback, not zero");
+
+        // The capture stage must be counted at all — it was worth a full 10ms and was simply absent.
+        Check(MainForm.CaptureBufferEstimateMsForTest() > 0,
+            "the capture device's buffer must be part of the estimate — omitting a whole stage is how the app under-reported by ~20ms");
+        Check(MainForm.CaptureBufferEstimateMsForTest() == RemSound.Sender.CaptureSource.CaptureBufferMs,
+            "the capture term must be the REAL buffer size the capture is opened with, not a second guess at it");
+
+        // Sanity on a realistic set of numbers: a 10ms capture, 2.5ms Opus, 2ms wire, 11ms queue and an
+        // 11ms device period should land near what a clap test actually shows (~45ms), not near 23.
+        var realistic = MainForm.CaptureBufferEstimateMsForTest() + 1.3 + 1.0 + 11 + MainForm.RenderBufferEstimateMsForTest(11);
+        Check(realistic > 35, $"a realistic WASAPI setup should estimate in the 40s, matching a clap test (got {realistic:0.0}ms)");
+        return $"capture {MainForm.CaptureBufferEstimateMsForTest():0}ms counted; render follows the measured period; a realistic setup estimates {realistic:0.0}ms";
     }
 
     /// <summary>The WASAPI and ASIO auto-tunes must follow exactly the SAME rules — one policy, no

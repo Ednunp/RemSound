@@ -33,7 +33,11 @@ internal sealed class CaptureSource : IDisposable
 {
     private const int MixSampleRate = 48000;
     private const int MixChannels = 2;
-    private const int CaptureBufferMs = 10;
+    /// <summary>How much audio the capture device collects before handing it over. Internal (not
+    /// private) because the end-to-end latency estimate MUST count it — it was omitted entirely, which
+    /// is why the app under-reported the delay by a full capture buffer (Ed's friend heard ~40 ms while
+    /// the probe claimed 23; his ears were right and our number was wrong, 2026-08-15).</summary>
+    internal const int CaptureBufferMs = 10;
     private const int RingBufferMs = 250;
 
     private readonly IWaveIn capture;

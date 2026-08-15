@@ -7730,12 +7730,14 @@ public sealed partial class MainForm : Form
             // the local machine is send-only.
             if ((diag.BufferSampleCount > 0 || diag.RenderReadCount > 0) || sender.IsRunning)
             {
+                var captureBufferMs = CaptureBufferEstimateMs();
                 var senderAccumulatorMs = SenderAccumulatorEstimateMs();
                 var wireOneWayMs = LowestPeerRttMs() / 2.0;
-                var renderBufferMs = RenderBufferEstimateMs();
-                var totalMs = senderAccumulatorMs + wireOneWayMs + diag.BufferAvgMs + renderBufferMs;
+                var renderBufferMs = RenderBufferEstimateMs(diag.MaxRenderCallbackGapMs);
+                // EVERY stage of the journey, or the total is a comfortable fiction.
+                var totalMs = captureBufferMs + senderAccumulatorMs + wireOneWayMs + diag.BufferAvgMs + renderBufferMs;
                 logFile.Event($"latency-probe estimated one-way ≈ {totalMs:0.0}ms " +
-                    $"(send-accum={senderAccumulatorMs:0.0}, wire={wireOneWayMs:0.0}, recv-queue={diag.BufferAvgMs}, render={renderBufferMs:0.0})");
+                    $"(capture={captureBufferMs:0.0}, send-accum={senderAccumulatorMs:0.0}, wire={wireOneWayMs:0.0}, recv-queue={diag.BufferAvgMs}, render={renderBufferMs:0.0})");
             }
 
             // If a new stream session opened since the last SNAP tick, flush the gap windows.
@@ -9328,7 +9330,31 @@ public sealed partial class MainForm : Form
     /// worse of the two governs perceived delay. ASIO depends on driver buffer settings
     /// we don't query, but is always lower than WASAPI in practice, so the WASAPI estimate
     /// is what governs in both modes.</summary>
-    private double RenderBufferEstimateMs() => 10;
+    /// <summary>How long decoded audio sits in the OUTPUT device before it reaches the speakers.
+    ///
+    /// <para>Was a hardcoded <c>10</c>. A constant dressed as a measurement is worse than no
+    /// measurement at all, because it looks authoritative in a log — and this one was quietly
+    /// optimistic in every latency figure the app has ever printed, including the ones I diagnosed
+    /// the dead slider from.</para>
+    ///
+    /// <para>Now derived from what Windows ACTUALLY granted. RemSound opens WASAPI shared with a
+    /// requested 5 ms period; a shared-mode engine typically grants 10-11 ms, and event-sync
+    /// double-buffers, so roughly two periods of audio are in flight in the endpoint at any moment.
+    /// The period is measured (the render-callback gap), not assumed. Falls back to the old constant
+    /// only when nothing has been measured yet.</para></summary>
+    private static double RenderBufferEstimateMs(int measuredCallbackGapMs)
+    {
+        var period = measuredCallbackGapMs > 0 ? measuredCallbackGapMs : 10;
+        return Math.Clamp(period * 2.0, 10, 200);
+    }
+
+    /// <summary>How long audio waits in the CAPTURE device before the app sees it. Was missing from
+    /// the latency estimate entirely — a whole stage of the journey simply not counted.</summary>
+    private static double CaptureBufferEstimateMs() => RemSound.Sender.CaptureSource.CaptureBufferMs;
+
+    // Seams for the gate step that pins the latency estimate's completeness.
+    internal static double RenderBufferEstimateMsForTest(int measuredCallbackGapMs) => RenderBufferEstimateMs(measuredCallbackGapMs);
+    internal static double CaptureBufferEstimateMsForTest() => CaptureBufferEstimateMs();
 
     /// <summary>
     /// Translates a codec choice + the user's Send Rate into the effective Opus frame size in
