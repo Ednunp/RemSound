@@ -129,8 +129,46 @@ internal static class LatencyLab
         Console.WriteLine($"      old: settled in {oldW.Ticks,3} ticks ({oldW.Ticks * 5,4}s), unsafe ticks={oldW.Unsafe}");
         Console.WriteLine($"      new: settled in {newW.Ticks,3} ticks ({newW.Ticks * 5,4}s), unsafe ticks={newW.Unsafe}");
 
+        // Tick-by-tick trace of the case Ed asked about: slider left at 500 with a machine whose
+        // real need is ~30ms, auto-tune engaged. Answers "what will it actually do" with numbers.
+        Console.WriteLine();
+        Console.WriteLine("  TRACE - slider 500ms, real need 30ms, auto-tune engaged (tick = 5s):");
+        TraceDescent(needMs: 30, startMs: 500);
+
         Console.WriteLine();
         Console.WriteLine("Verdict rule: the new policy must settle materially faster AND buy no extra unsafe ticks.");
+    }
+
+    /// <summary>Print the actual tick-by-tick path a descent takes, old policy against new.</summary>
+    private static void TraceDescent(int needMs, int startMs)
+    {
+        foreach (var evidenceBased in new[] { false, true })
+        {
+            var current = startMs;
+            var cleanTicks = 0;
+            var creep = new AutoTuneDescent.CreepState();
+            var path = new List<string> { $"{current}" };
+            var ticksUsed = 0;
+            // Long enough to show the creep finish, not just the fast phase.
+            for (var tick = 1; tick <= 400; tick++)
+            {
+                var lowWater = Math.Max(0, current - needMs);
+                cleanTicks++;
+                var next = evidenceBased
+                    ? AutoTuneDescent.NextTarget(current, needMs, lowWater, sampleCount: 15,
+                        consecutiveCleanTicks: cleanTicks, policy: null, creep: creep)
+                    : Math.Max(needMs, current - 5);
+                ticksUsed = tick;
+                if (next == current && !evidenceBased) break;
+                if (next == current) continue;      // creep is waiting out its validating quiet spell
+                current = next;
+                if (path.Count < 16) path.Add($"{current}");
+                else if (path.Count == 16) path.Add("...");
+                if (current <= needMs) break;
+            }
+            var label = evidenceBased ? "new" : "old";
+            Console.WriteLine($"      {label}: {string.Join(" -> ", path)}  (lands at {current}ms after ~{ticksUsed * 5}s)");
+        }
     }
 
     /// <summary>Drive one policy to convergence. The tuner's recommendation is the network's real need

@@ -2994,9 +2994,39 @@ internal static partial class SelfTest
         Check(ticks <= 12, $"500ms → ~20ms must converge in a handful of ticks (took {ticks}; the old fixed crawl took ~96)");
         Check(current >= 20, $"...and must land at or above the measured need (landed {current}ms)");
 
+        // PHASE 2 — the creep. The fast phase deliberately stops a margin above the measured need;
+        // the creep then keeps probing for that margin, each step validated by a quiet spell, so the
+        // tuner ends where the hardware actually wants to be rather than where a constant guessed.
+        // Ed, 2026-08-15: "that does feel wasteful... the old one would have continued shaving back".
+        var creep = new AutoTuneDescent.CreepState();
+        var cur = 60;   // already settled near the need
+        var creepTicks = 0;
+        var clean = 20; // a long quiet spell — the creep is earned, never automatic
+        while (cur > 30 && creepTicks < 200)
+        {
+            var n = AutoTuneDescent.NextTarget(cur, 30, Math.Max(0, cur - 30), 15, clean, policy: null, creep: creep);
+            creepTicks++;
+            if (n == cur) continue;   // waiting out its validating interval
+            cur = n;
+        }
+        Check(cur <= 32, $"the creep must keep shaving down to the measured need, not stop at the comfortable margin (stopped at {cur}ms)");
+        Check(creepTicks > 10, "the creep must be SLOW — each step earned by a quiet spell, not a second fast descent");
+
+        // A creep step that costs a shortfall must set a floor for THIS machine, and stick.
+        var learned = new AutoTuneDescent.CreepState();
+        learned.NoteShortfallAt(35);
+        Check(learned.DiscoveredFloorMs > 35, "a shortfall must raise the learned floor above where it happened");
+        var held = AutoTuneDescent.NextTarget(60, 20, lowWaterMs: 40, sampleCount: 15, consecutiveCleanTicks: 30, policy: null, creep: learned);
+        Check(held >= learned.DiscoveredFloorMs,
+            $"after a shortfall the tuner must never descend back through the learned floor (went to {held}ms, floor {learned.DiscoveredFloorMs}ms)");
+        Check(AutoTuneDescent.NextTarget(learned.DiscoveredFloorMs, 20, 30, 15, 30, policy: null, creep: learned) == learned.DiscoveredFloorMs,
+            "...and must hold AT the learned floor rather than creeping under it");
+        learned.Reset();
+        Check(learned.DiscoveredFloorMs == 0, "a new stream is new conditions — the learned floor must not outlive them");
+
         // The old crawl for comparison, so the gate records what changed.
         var oldTicks = (500 - 20) / 5;
-        return $"floor never breached; confident descent {ticks} ticks vs the old crawl's {oldTicks}";
+        return $"floor never breached; fast descent {ticks} ticks vs the old crawl's {oldTicks}; creep reaches the need and stops at a learned floor";
     }
 
     /// <summary>The latency slider must actually govern the streams that are playing. THE 2026-08-14

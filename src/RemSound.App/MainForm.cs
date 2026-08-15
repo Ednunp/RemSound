@@ -412,6 +412,10 @@ public sealed partial class MainForm : Form
     /// <summary>Consecutive auto-tune ticks with no tune-blocking short-reads. One quiet tick is
     /// luck; several in a row is a pattern, and only a pattern earns a big evidence-backed step.</summary>
     private int consecutiveCleanTuneTicks;
+    /// <summary>What the auto-tune has learned about how thin THIS machine can safely run — the creep
+    /// phase's discovered floor (see <see cref="RemSound.Core.AutoTuneDescent.CreepState"/>). Reset on
+    /// a new stream, because the lesson described the old conditions.</summary>
+    private readonly AutoTuneDescent.CreepState tuneCreepState = new();
     private const int RecentMaxGapWindowSeconds = 60;
     private DateTime lastUserSliderMoveUtc = DateTime.MinValue;
     private bool suppressUserSliderMoveTracking; // true while continuous tune is changing the slider
@@ -9591,6 +9595,9 @@ public sealed partial class MainForm : Form
             var prefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
             logFile.Event($"{prefix}: skipping ({underrunDelta} new underruns since last tick, devGulp={deviceGulpDelta} ignored)");
             consecutiveCleanTuneTicks = 0; // the buffer ran short — the evidence for shedding is void
+            // ...and record WHERE it ran short: that value is too thin for this machine, so the creep
+            // must never probe back down to it. A floor learned by experiment beats a guessed constant.
+            tuneCreepState.NoteShortfallAt((int)slider.Value);
             return;
         }
         consecutiveCleanTuneTicks++;
@@ -9659,7 +9666,8 @@ public sealed partial class MainForm : Form
             // is gone: AutoTuneDescent sizes the step from the unused margin when the evidence is
             // strong, and proportionally when it isn't — so a silly value converges in a few ticks
             // while a small correction stays gentle. Never below `capped`, which is the measured need.
-            target = AutoTuneDescent.NextTarget(current, capped, lowWater, sampleCount, consecutiveCleanTuneTicks);
+            target = AutoTuneDescent.NextTarget(current, capped, lowWater, sampleCount, consecutiveCleanTuneTicks,
+                policy: null, creep: tuneCreepState);
         }
 
         var clamped = Math.Clamp(target, (int)slider.Minimum, (int)slider.Maximum);
@@ -9675,7 +9683,7 @@ public sealed partial class MainForm : Form
             suppressFlag = false;
         }
         var logPrefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
-        logFile.Event($"{logPrefix}: gap-max={gapPeak}ms gap-used={observedGap}ms renderCb={observedRenderCb}ms over {sampleCount}s recommended={recommended}ms capped={capped}ms lowWater={lowWater}ms cleanTicks={consecutiveCleanTuneTicks} prev={current}ms applied={clamped}ms frame={frameMs}ms devGulp={deviceGulpDelta}");
+        logFile.Event($"{logPrefix}: gap-max={gapPeak}ms gap-used={observedGap}ms renderCb={observedRenderCb}ms over {sampleCount}s recommended={recommended}ms capped={capped}ms lowWater={lowWater}ms cleanTicks={consecutiveCleanTuneTicks} learnedFloor={tuneCreepState.DiscoveredFloorMs}ms prev={current}ms applied={clamped}ms frame={frameMs}ms devGulp={deviceGulpDelta}");
     }
 
     // UpdateTuneButtonEnabled + TuneLatencyAsync retired alongside the one-shot Tune button.

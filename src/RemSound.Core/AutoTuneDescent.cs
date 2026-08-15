@@ -48,9 +48,54 @@ public static class AutoTuneDescent
         /// evidence-backed step is allowed. One quiet tick is luck; several is a pattern.</summary>
         int CleanTicksForBigStep = 3,
         /// <summary>Seconds of history required before the low-water mark counts as evidence at all.</summary>
-        int MinSamplesForEvidence = 10);
+        int MinSamplesForEvidence = 10,
+        // --- Phase 2: the creep (Ed, 2026-08-15) ---
+        // The fast descent lands at roughly need + HeadroomMs and stops, which felt wasteful next to
+        // the old crawl — that kept shaving all the way down. It was right to: the headroom above is a
+        // GUESS about how much margin this machine needs, and a guess can be replaced by an
+        // experiment. So once the fast phase has arrived, keep probing: shed a few ms, wait, and only
+        // shed again if nothing ran short. The first shortfall sets a floor discovered on THIS machine
+        // and this network, which beats any constant chosen in advance.
+        /// <summary>How much to shed per creep probe. Small — the point is that a wrong step costs
+        /// almost nothing and is immediately reversed.</summary>
+        int CreepStepMs = 3,
+        /// <summary>Clean ticks required between creep probes. Deliberately slower than the fast
+        /// phase: each step must be VALIDATED by a quiet spell before the next one is earned.</summary>
+        int CreepIntervalTicks = 3,
+        /// <summary>Clean ticks required before creeping starts at all — a longer settling period than
+        /// the fast phase demands, because this is the phase that goes below the comfortable margin.</summary>
+        int CreepCleanTicks = 6);
 
     public static readonly Policy Default = new();
+
+    /// <summary>What the tuner has learned about THIS machine while creeping. Lives across ticks;
+    /// reset when the stream changes (new conditions, so the lesson may not hold).</summary>
+    public sealed class CreepState
+    {
+        /// <summary>The lowest latency that proved unsafe here, plus a step — the floor the creep
+        /// will not go under again. Discovered by experiment rather than assumed. 0 = nothing learned
+        /// yet.</summary>
+        public int DiscoveredFloorMs { get; private set; }
+        /// <summary>Ticks since the last creep probe, so each step is spaced by a validating wait.</summary>
+        public int TicksSinceProbe { get; set; }
+
+        /// <summary>The buffer ran short at <paramref name="atMs"/> — record it as too thin for this
+        /// machine so the creep never returns there. Called on a tick the tuner SKIPS for short-reads,
+        /// which is precisely the evidence that the last probe went too far.</summary>
+        public void NoteShortfallAt(int atMs, Policy? policy = null)
+        {
+            var p = policy ?? Default;
+            var floor = atMs + p.CreepStepMs;
+            if (floor > DiscoveredFloorMs) DiscoveredFloorMs = floor;
+        }
+
+        /// <summary>Conditions changed (a new stream): the discovered floor described the old ones.</summary>
+        public void Reset()
+        {
+            DiscoveredFloorMs = 0;
+            TicksSinceProbe = 0;
+        }
+    }
 
     /// <summary>The next latency target on a DESCENT — the caller has already established that the
     /// recommendation is at or below the current value, that this tick isn't being skipped for
@@ -64,13 +109,15 @@ public static class AutoTuneDescent
     /// <param name="sampleCount">Seconds of history behind <paramref name="lowWaterMs"/>.</param>
     /// <param name="consecutiveCleanTicks">Ticks in a row with no tune-blocking short-reads.</param>
     public static int NextTarget(
-        int currentMs, int recommendedMs, int lowWaterMs, int sampleCount, int consecutiveCleanTicks, Policy? policy = null)
+        int currentMs, int recommendedMs, int lowWaterMs, int sampleCount, int consecutiveCleanTicks,
+        Policy? policy = null, CreepState? creep = null)
     {
         var p = policy ?? Default;
         if (recommendedMs >= currentMs) return currentMs; // not a descent; the caller handles raises
 
-        // The floor is always the measured need. Nothing below this, whatever the low-water mark says.
-        var floor = recommendedMs;
+        // The floor is the measured need, raised by anything the creep has LEARNED is too thin here.
+        var floor = Math.Max(recommendedMs, creep?.DiscoveredFloorMs ?? 0);
+        if (currentMs <= floor) return currentMs;
 
         // Evidence: cushion the buffer never touched, minus the headroom we deliberately keep.
         var haveEvidence = lowWaterMs >= 0
@@ -89,7 +136,25 @@ public static class AutoTuneDescent
         var fraction = haveEvidence ? p.BigStepFraction : p.SmallStepFraction;
         var distance = currentMs - goal;
         var step = Math.Max(p.MinStepMs, (int)Math.Round(distance * fraction));
-        var next = currentMs - step;
-        return Math.Max(goal, Math.Max(floor, next));
+        var next = Math.Max(goal, Math.Max(floor, currentMs - step));
+
+        // PHASE 2 — the creep. The fast phase above stops at roughly need + headroom, because the
+        // headroom is a guess about how much margin this machine wants. Once it has arrived, replace
+        // the guess with an experiment: shed a few ms, wait for a validating quiet spell, shed again.
+        // Every step is cheap to undo and the first shortfall sets a floor for THIS machine (see
+        // CreepState.NoteShortfallAt), so the tuner ends up where the hardware actually wants to be
+        // rather than where a constant guessed. This is the persistence the old fixed crawl had and
+        // the fast phase lost — Ed asked for it back without inventing another number.
+        if (creep is not null && Math.Abs(next - currentMs) < p.MinStepMs)
+        {
+            if (consecutiveCleanTicks >= p.CreepCleanTicks && ++creep.TicksSinceProbe >= p.CreepIntervalTicks)
+            {
+                creep.TicksSinceProbe = 0;
+                return Math.Max(floor, currentMs - p.CreepStepMs);
+            }
+            return currentMs; // still earning the next probe
+        }
+        if (creep is not null) creep.TicksSinceProbe = 0;
+        return next;
     }
 }
