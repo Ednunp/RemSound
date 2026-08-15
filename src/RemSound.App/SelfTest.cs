@@ -21,7 +21,7 @@ namespace RemSound.App;
 /// Everything here is read-only or temp-folder-scoped: a self-test never touches the user's real
 /// settings, profiles or logs, and never makes a sound.
 /// </summary>
-internal static class SelfTest
+internal static partial class SelfTest
 {
     private sealed class Result
     {
@@ -131,6 +131,9 @@ internal static class SelfTest
         RunStep(results, "About box shows only the newest releases (screen-reader-safe size)", AboutBoxNotesTrimmed);
         RunStep(results, "Latency slider reaches the streams it governs (one slider = one value)", LatencySliderReachesSessions);
         RunStep(results, "Auto-tune descends on evidence (never below the measured need)", AutoTuneDescentPolicy);
+        RunStep(results, "Every control is specified (no control escapes the suite)", EveryControlIsSpecified);
+        RunStep(results, "Control suite - single-slider WASAPI (UI + accessibility + theme + effect)", () => RunControlSuite(AudioMode.WasapiOnly));
+        RunStep(results, "Control suite - two-slider WASAPI+ASIO (UI + accessibility + theme + effect)", () => RunControlSuite(AudioMode.BothIndependent));
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);
         RunStep(results, "Service startup volume (boot-once decision + settings round-trip)", ServiceStartupVolume);
         RunStep(results, "Update install window (same-day, wraparound, retry timing)", UpdateInstallWindow);

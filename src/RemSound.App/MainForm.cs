@@ -7010,6 +7010,10 @@ public sealed partial class MainForm : Form
                 sender.SetAudioMode(resolvedMode, asioDriverArg);
                 receiver.SetAudioMode(resolvedMode, asioDriverArg);
             }
+            // OUTSIDE the headless guard on purpose: how many latency sliders exist is a UI fact, not
+            // a backend one, and leaving it to SetAudioMode meant a headless host never learned the
+            // mode at all. Idempotent — the real path sets it again inside SetAudioMode.
+            receiver.SetIndependentLaneLatency(resolvedMode == AudioMode.BothIndependent);
             logFile.Event(resolvedMode == AudioMode.WasapiOnly
                 ? "audio backend: WASAPI only (fast path)"
                 : $"audio backend: WASAPI + ASIO driver \"{asioDriverArg}\" (independent lanes, no mix)");
@@ -8234,6 +8238,25 @@ public sealed partial class MainForm : Form
     // the interval from AppConfig.AutoSaveNonReadOnlyMinutes.
     internal bool AutoSaveTimerEnabledForTest => autoSaveTimer.Enabled;
     internal int AutoSaveTimerIntervalForTest => autoSaveTimer.Interval;
+
+    // Seams for the CONTROL SUITE (SelfTest.Controls.cs). Every user control is driven headlessly and
+    // then probed HERE — on the live audio objects — to prove the control reaches what it claims to
+    // govern. Reading the profile or the settings file would not be evidence: the 2026-08-14 latency
+    // slider saved its value perfectly and still governed nothing.
+    internal RemSound.Receiver.AudioReceiver ReceiverForTest => receiver;
+    internal RemSound.Sender.AudioSender SenderForTest => sender;
+    internal RemSoundSettingsStore SettingsForTest => settings;
+    /// <summary>Find a control by its private FIELD name, so a spec can name the exact control the
+    /// developer sees in the source rather than guessing at a caption.</summary>
+    internal bool SendEnabledForTest => IsSendEnabled;
+    internal bool AllPeerShapingEnabledForTest => enableAllPeerShapingBox.Checked;
+    internal int SendModeIndexForTest => sendModeList.SelectedIndex;
+    internal bool ReceiveEnabledForTest => IsReceiveEnabled;
+    internal bool AutoTuneTimerEnabledForTest => continuousTuneTimer.Enabled;
+    internal int AutoTuneTimerIntervalForTest => continuousTuneTimer.Interval;
+    internal Control? ControlByFieldNameForTest(string fieldName) =>
+        typeof(MainForm).GetField(fieldName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?.GetValue(this) as Control;
 
     /// <summary>Builds a Profile from the current control state and writes it via the store.
     /// Doesn't touch UI feedback — that's the caller's job. Throws on store failure.</summary>

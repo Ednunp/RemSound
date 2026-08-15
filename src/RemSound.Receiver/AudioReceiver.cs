@@ -183,6 +183,13 @@ public sealed class AudioReceiver : IDisposable
     /// Mirrors AudioSender.SetAudioMode. The App should re-issue SetOutputDevices afterwards with
     /// the current device-id selection.
     /// </summary>
+    /// <summary>Tell the receiver whether the UI is showing two latency sliders. Public and separate
+    /// from <see cref="SetAudioMode"/> because it is NOT a backend operation: a headless/test host
+    /// skips the backend switch (it can open a real ASIO driver) and would otherwise leave the lane
+    /// policy stuck at its default, which is exactly what made the control suite report a working
+    /// ASIO latency box as dead (2026-08-15). Idempotent and cheap.</summary>
+    public void SetIndependentLaneLatency(bool independent) => playoutEngine.SetIndependentLaneLatency(independent);
+
     public void SetAudioMode(AudioMode mode, string? asioDriverName)
     {
         var wasRunning = multiOutput.IsRunning;
@@ -204,6 +211,14 @@ public sealed class AudioReceiver : IDisposable
     /// corrector keeps the buffer near target so the trim should rarely fire regardless of
     /// this value.</summary>
     public void SetSmoothness(int value) => playoutEngine.SetSmoothness(value);
+
+    /// <summary>Live read-back of smoothness / gap-artifact, for the control suite to prove those
+    /// controls reach the audio path rather than merely persisting (see PlayoutEngine.SmoothnessValue).</summary>
+    /// <summary>Whether incoming audio is being played. Read-back for the control suite (the Receive
+    /// audio control must reach this), alongside SetPlaybackEnabled which drives it.</summary>
+    public bool PlaybackEnabled => playbackEnabled;
+    public int SmoothnessValue => playoutEngine.SmoothnessValue;
+    public ConcealmentArtifact ConcealmentArtifactValue => playoutEngine.ConcealmentArtifactValue;
 
     /// <summary>Sets the concealment artifact used when the playout buffer comes up empty
     /// on a render-side read. Pure receiver-side cosmetic — sender doesn't see this.

@@ -124,6 +124,13 @@ internal sealed class PlayoutEngine : IWaveProvider
 
     public void SetSmoothness(int value) => smoothness = Math.Clamp(value, 1, 10);
 
+    /// <summary>Read-back of the live smoothness / concealment settings. Exists so the control-suite
+    /// gate can prove the Buffer-smoothness and Gap-artifact controls actually REACH the audio path —
+    /// a control that only saves its value and never arrives is the exact 2026-08-14 latency-slider
+    /// failure, and "it's in the profile" is not evidence that anything hears it.</summary>
+    public int SmoothnessValue => smoothness;
+    public ConcealmentArtifact ConcealmentArtifactValue => (ConcealmentArtifact)concealmentArtifactRaw;
+
     /// <summary>Signal that a render-side lane's output device set just changed. <c>active</c>
     /// is true if the lane has at least one output device ticked (its render backend is
     /// actively pulling from the corresponding LaneOutput), false if no device is ticked.
