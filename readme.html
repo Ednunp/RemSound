@@ -51,6 +51,7 @@ ul, ol { padding-left: 1.4em; }
 <li><a href="#logs">Logs and diagnostics</a></li>
 <li><a href="#command-line">Command-line options</a></li>
 <li><a href="#service">The lock-screen service (send only)</a></li>
+<li><a href="#daw-plugin">The DAW plugin</a></li>
 <li><a href="#troubleshooting">Troubleshooting</a></li>
 <li><a href="#glossary">Glossary</a></li>
 </ol>
@@ -223,7 +224,7 @@ ul, ol { padding-left: 1.4em; }
 <p>The main window has three parts, stacked top to bottom:</p>
 
 <ol>
-<li>A <strong>menu bar</strong> at the top with four menus &mdash; <em>File</em>, <em>Record</em>, <em>Options</em> and <em>Help</em>. See <a href="#menu-bar">Menus</a>.</li>
+<li>A <strong>menu bar</strong> at the top with six menus &mdash; <em>File</em>, <em>Record</em>, <em>Service</em>, <em>DAW plugin</em>, <em>Options</em> and <em>Help</em>. See <a href="#menu-bar">Menus</a>.</li>
 <li>A <strong>row of tabs</strong> &mdash; Connectivity, Audio inputs and outputs, Volume, pan and EQ for peers, and Audio profile &mdash; so four by default. The Volume, pan and EQ tab can be hidden, and you can reorder or hide any of the tabs (and jump straight to one with Ctrl and its number) from the <strong>Appearance</strong> tab in Preferences. Each tab has its own Alt+letter shortcuts that only work when that tab is the one showing &mdash; so the same letter can do different things on different tabs without clashing.</li>
 <li>A <strong>status line</strong> at the bottom that updates once a second with how long you've been connected, how many peers you have, whether sound is flowing, connection health, and RemSound's own CPU and memory usage.</li>
 </ol>
@@ -273,9 +274,11 @@ ul, ol { padding-left: 1.4em; }
 <li><strong>Cancel</strong> &mdash; do nothing.</li>
 </ul>
 
-<h2 id="menu-bar">5. Menus (File, Record, Options, Service, Help)</h2>
+<h2 id="menu-bar">5. Menus (File, Record, Service, DAW plugin, Options, Help)</h2>
 
-<p>There are four menus on the main window: <strong>File (Alt+F)</strong>, <strong>Record (Alt+K)</strong>, <strong>Options (Alt+O)</strong> and <strong>Help (Alt+H)</strong>. The Record menu opens with Alt+K rather than Alt+R because Alt+R is already used by the <strong>Receive audio</strong> checkbox on the main window. The menu's title is shown as &ldquo;Record (Alt+K)&rdquo; so you can find the shortcut even though there is no K in the word.</p>
+<p>There are six menus on the main window: <strong>File (Alt+F)</strong>, <strong>Record (Alt+K)</strong>, <strong>Service (Alt+J)</strong>, <strong>DAW plugin (Alt+G)</strong>, <strong>Options (Alt+O)</strong> and <strong>Help (Alt+H)</strong>.</p>
+
+<p>Three of those shortcut letters look odd, and all three are deliberate. A checkbox on the main window beats a menu for the same Alt key, so Record uses <strong>K</strong> because Alt+R belongs to <em>Receive audio</em>, Service uses <strong>J</strong> because Alt+S belongs to <em>Send my audio</em>, and DAW plugin uses <strong>G</strong> because Alt+D belongs to the <em>Discovered peers</em> list. Each menu shows its own shortcut in its title, so you can always see which letter opens it.</p>
 
 <h3>File menu</h3>
 
@@ -364,6 +367,8 @@ ul, ol { padding-left: 1.4em; }
 </table>
 
 <p>The <strong>Service</strong> menu (Alt+S) installs and controls the optional <a href="#service">lock-screen service</a> that keeps sending your audio when you are not at the machine. See that section for the details.</p>
+
+<p>The <strong>DAW plugin</strong> menu (Alt+G) installs and removes the <a href="#daw-plugin">VST plugin</a> that puts RemSound inside your music software, and holds its two settings. See that section for the details.</p>
 
 <h2 id="tab-connectivity">6. Connectivity tab</h2>
 
@@ -1435,7 +1440,54 @@ RemSound.exe --connect 192.168.1.42
 <li>If two computers should each stream to the other unattended, install the service on both.</li>
 </ul>
 
-<h2 id="troubleshooting">25. Troubleshooting</h2>
+<h2 id="daw-plugin">25. The DAW plugin</h2>
+
+<p>RemSound can also work <em>inside</em> your music software. The plugin puts one person on one track: a track you are sending goes out to your peers, and a peer you are receiving arrives on a track of their own, where you can record them, shape them and mix them like anything else.</p>
+
+<p>It is a VST3 plugin, so it works in Reaper, Cubase, Studio One, Reaper's fellow hosts and anything else that loads VST3.</p>
+
+<h3>Putting it on your machine</h3>
+
+<p>Open the <strong>DAW plugin</strong> menu (Alt+G) and choose <strong>Install plugin</strong>. It goes into your own plugin folder, so Windows does not ask for an administrator password and nothing outside your account is touched. Restart your music software afterwards and RemSound appears in its list of effects.</p>
+
+<p><strong>Remove plugin</strong> takes it away again. It removes only the files it put there, so other plugins in that folder are left alone.</p>
+
+<h3>How you use it</h3>
+
+<p>Keep RemSound itself open. RemSound holds the connection to your peers; the plugin asks it for audio. Your password, your peers and your audio settings all stay in RemSound, so the plugin has almost nothing to set up.</p>
+
+<p>Add the plugin to a track and its window has four things:</p>
+
+<ol>
+<li><strong>What this plugin does</strong> &mdash; send this track to your peers, or receive one peer onto this track.</li>
+<li><strong>Peer to receive from</strong> &mdash; who arrives on this track. The list is RemSound's own peer list and keeps itself up to date, so somebody who connects while you are working turns up here without reopening anything.</li>
+<li><strong>Active</strong> &mdash; untick it to hand that person back to RemSound's normal output. Handy if your music software makes bypass awkward to reach from the keyboard.</li>
+<li><strong>Status</strong> &mdash; what is actually happening, including whether RemSound is answering at all.</li>
+</ol>
+
+<p>For two people on two tracks, add the plugin twice and choose a different person in each.</p>
+
+<h3>You never hear anyone twice</h3>
+
+<p>When a plugin takes a peer onto a track, that person stops coming out of RemSound's own output. You hear them once, through your music software, where you want them. Let the track go &mdash; switch it to sending, untick Active, remove the plugin, or close your music software &mdash; and they come straight back to RemSound's output on their own. There is nothing to set.</p>
+
+<h3>Pan and EQ</h3>
+
+<p>If you have set volume, pan or EQ for a peer in RemSound, that shaping comes through to the track as well, so what you get is what you were hearing. If you would rather have the untouched signal and do the work in your DAW, untick <strong>Apply pan and EQ to plugin audio</strong> in the DAW plugin menu. It is the same choice recording already offers, and it costs nothing either way.</p>
+
+<h3>If you don't use a DAW</h3>
+
+<p>RemSound listens for plugins on your own machine only &mdash; nothing on the network can reach it. If you would still rather it listened for nothing at all, untick <strong>Let plugins connect to RemSound</strong> in the DAW plugin menu.</p>
+
+<h3>Good to know</h3>
+
+<ul>
+<li>Your music software can run at any sample rate. RemSound converts at the boundary, so nobody arrives at the wrong pitch.</li>
+<li>Every control in the plugin window is a standard Windows control, so a screen reader reads it the same way it reads RemSound itself. If your host makes the plugin window hard to reach, the same three choices are also plugin parameters, which every DAW lists and Reaper with OSARA reads out.</li>
+<li>Your music software cannot compensate for the network delay automatically, so a track recorded through the plugin sits a little late and needs nudging back. This is a limit of how VST3 plugins report themselves, not something RemSound can set.</li>
+</ul>
+
+<h2 id="troubleshooting">26. Troubleshooting</h2>
 
 <h3>I don't hear my friend</h3>
 <ol>
@@ -1513,7 +1565,7 @@ RemSound.exe --connect 192.168.1.42
 </ul>
 <p>If none of those apply, just fall back to Tailscale &mdash; it works without involving the router at all.</p>
 
-<h2 id="glossary">26. Glossary</h2>
+<h2 id="glossary">27. Glossary</h2>
 
 <table>
 <tr><th>Term</th><th>Meaning</th></tr>

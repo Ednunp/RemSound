@@ -1,16 +1,31 @@
-# RemSound v5.9
+# RemSound v6.0
 
-The audio latency control now works properly while you're listening.
+RemSound now works inside your music software.
 
-On most setups, moving the latency control while sound was playing did nothing at all — neither up nor down. It only ever took effect if you set it before connecting, which made it look like the setting was simply ignored.
+There is a plugin. Put it on a track and one person goes on that track: a track you are sending goes out to your peers, and a peer you are receiving arrives on a track of their own, where you can record them, shape them and mix them like anything else. Add it twice for two people and each gets their own track.
 
-Two separate things were wrong, and both are fixed:
+It is a VST3 plugin, so it works in Reaper, Cubase, Studio One and anything else that loads VST3.
 
-- The control was sending its value somewhere the audio never looked, so the receiving side quietly stayed on its starting value for the whole session.
-- Even once that reached the right place, the change crept in so slowly that a large move took over two minutes to arrive — still indistinguishable from nothing happening.
+## Putting it on your machine
 
-Move it now and the delay follows within a few seconds. There's no gap and no click while it changes. Lowering takes effect straight away; raising can't be instant, because the extra cushion has to be built out of the sound still arriving, so RemSound plays very slightly slow for a moment while it banks the difference — you can hear it stretch, and that's the change happening.
+Open the new **DAW plugin** menu (Alt+G) and choose **Install plugin**. It goes into your own plugin folder, so Windows does not ask for an administrator password and nothing outside your account is touched. Restart your music software and RemSound appears in its list of effects. **Remove plugin** takes it away again, and removes only the files it put there.
 
-Automatic latency tuning was affected by the same fault, so it now takes effect too.
+## How it works
 
-Setups using separate WASAPI and ASIO latency controls were the one case that already worked. They keep their two independent settings, unchanged.
+Keep RemSound open while you work. RemSound holds the connection to your peers and the plugin asks it for audio, so your password, your peers and your audio settings all stay where you already set them. The plugin window asks only what that track is doing and, if it is receiving, who from.
+
+When a track takes somebody, they stop coming out of RemSound's own output — so you never hear anyone twice. Let the track go, or close your music software, and they come straight back. There is nothing to set.
+
+If you have set volume, pan or EQ for a peer in RemSound, that comes through to the track as well. Untick **Apply pan and EQ to plugin audio** if you would rather have the raw signal and do the work in your DAW.
+
+## Accessibility
+
+The plugin window is built from ordinary Windows controls, so a screen reader reads it the way it reads RemSound itself — which is unusual for a plugin. If your music software makes that window awkward to reach, the same three choices are also plugin parameters, which every DAW lists and Reaper with OSARA reads out.
+
+One limit worth knowing: your music software cannot compensate for the network delay automatically, so a track recorded through the plugin sits a little late and needs nudging back. That is a limit of how VST3 plugins report themselves.
+
+## If you do not use a DAW
+
+Nothing changes. RemSound listens for plugins on your own machine only, and never on the network. If you would rather it listened for nothing at all, untick **Let plugins connect to RemSound** in the DAW plugin menu.
+
+Section 25 of the manual walks through all of it.

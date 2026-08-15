@@ -12,7 +12,7 @@ I built RemSound to solve a specific problem of my own. I do a lot of work on a 
   1. [Quick start](#2-quick-start)
   1. [Profiles](#3-profiles)
   1. [The main window: menu bar and tabs](#4-the-main-window-menu-bar-and-tabs)
-  1. [Menus (File, Record, Options, Service, Help)](#5-menus-file-record-options-service-help)
+  1. [Menus (File, Record, Service, DAW plugin, Options, Help)](#5-menus-file-record-service-daw-plugin-options-help)
   1. [Connectivity tab](#6-connectivity-tab)
   1. [Audio inputs and outputs tab](#7-audio-inputs-and-outputs-tab)
   1. [Audio profile tab](#8-audio-profile-tab)
@@ -32,8 +32,9 @@ I built RemSound to solve a specific problem of my own. I do a lot of work on a 
   1. [Logs and diagnostics](#22-logs-and-diagnostics)
   1. [Command-line options](#23-command-line-options)
   1. [The lock-screen service (send only)](#24-the-lock-screen-service-send-only)
-  1. [Troubleshooting](#25-troubleshooting)
-  1. [Glossary](#26-glossary)
+  1. [The DAW plugin](#25-the-daw-plugin)
+  1. [Troubleshooting](#26-troubleshooting)
+  1. [Glossary](#27-glossary)
 
 
 ## 1. What RemSound does
@@ -190,7 +191,7 @@ So in summary, on a locked profile:
 
 The main window has three parts, stacked top to bottom:
 
-  1. A **menu bar** at the top with four menus — _File_ , _Record_ , _Options_ and _Help_. See Menus.
+  1. A **menu bar** at the top with six menus — _File_ , _Record_ , _Service_ , _DAW plugin_ , _Options_ and _Help_. See Menus.
   2. A **row of tabs** — Connectivity, Audio inputs and outputs, Volume, pan and EQ for peers, and Audio profile — so four by default. The Volume, pan and EQ tab can be hidden, and you can reorder or hide any of the tabs (and jump straight to one with Ctrl and its number) from the **Appearance** tab in Preferences. Each tab has its own Alt+letter shortcuts that only work when that tab is the one showing — so the same letter can do different things on different tabs without clashing.
   3. A **status line** at the bottom that updates once a second with how long you've been connected, how many peers you have, whether sound is flowing, connection health, and RemSound's own CPU and memory usage.
 
@@ -237,9 +238,11 @@ RemSound only ever runs as a single copy. If you try to open it while it's alrea
 
 
 
-## 5. Menus (File, Record, Options, Service, Help)
+## 5. Menus (File, Record, Service, DAW plugin, Options, Help)
 
-There are four menus on the main window: **File (Alt+F)** , **Record (Alt+K)** , **Options (Alt+O)** and **Help (Alt+H)**. The Record menu opens with Alt+K rather than Alt+R because Alt+R is already used by the **Receive audio** checkbox on the main window. The menu's title is shown as “Record (Alt+K)” so you can find the shortcut even though there is no K in the word.
+There are six menus on the main window: **File (Alt+F)** , **Record (Alt+K)** , **Service (Alt+J)** , **DAW plugin (Alt+G)** , **Options (Alt+O)** and **Help (Alt+H)**.
+
+Three of those shortcut letters look odd, and all three are deliberate. A checkbox on the main window beats a menu for the same Alt key, so Record uses **K** because Alt+R belongs to _Receive audio_ , Service uses **J** because Alt+S belongs to _Send my audio_ , and DAW plugin uses **G** because Alt+D belongs to the _Discovered peers_ list. Each menu shows its own shortcut in its title, so you can always see which letter opens it.
 
 ### File menu
 
@@ -323,6 +326,8 @@ Control| Shortcut| What it does
 **Enable the remembered peers list on the Connectivity tab**|  Alt+R| On by default. Untick to hide the Remembered peers list from the Connectivity tab.
 
 The **Service** menu (Alt+S) installs and controls the optional lock-screen service that keeps sending your audio when you are not at the machine. See that section for the details.
+
+The **DAW plugin** menu (Alt+G) installs and removes the VST plugin that puts RemSound inside your music software, and holds its two settings. See that section for the details.
 
 ## 6. Connectivity tab
 
@@ -1380,7 +1385,54 @@ The top of the Service menu always shows the current state: not installed, insta
 
 
 
-## 25. Troubleshooting
+## 25. The DAW plugin
+
+RemSound can also work _inside_ your music software. The plugin puts one person on one track: a track you are sending goes out to your peers, and a peer you are receiving arrives on a track of their own, where you can record them, shape them and mix them like anything else.
+
+It is a VST3 plugin, so it works in Reaper, Cubase, Studio One, Reaper's fellow hosts and anything else that loads VST3.
+
+### Putting it on your machine
+
+Open the **DAW plugin** menu (Alt+G) and choose **Install plugin**. It goes into your own plugin folder, so Windows does not ask for an administrator password and nothing outside your account is touched. Restart your music software afterwards and RemSound appears in its list of effects.
+
+**Remove plugin** takes it away again. It removes only the files it put there, so other plugins in that folder are left alone.
+
+### How you use it
+
+Keep RemSound itself open. RemSound holds the connection to your peers; the plugin asks it for audio. Your password, your peers and your audio settings all stay in RemSound, so the plugin has almost nothing to set up.
+
+Add the plugin to a track and its window has four things:
+
+  1. **What this plugin does** — send this track to your peers, or receive one peer onto this track.
+  2. **Peer to receive from** — who arrives on this track. The list is RemSound's own peer list and keeps itself up to date, so somebody who connects while you are working turns up here without reopening anything.
+  3. **Active** — untick it to hand that person back to RemSound's normal output. Handy if your music software makes bypass awkward to reach from the keyboard.
+  4. **Status** — what is actually happening, including whether RemSound is answering at all.
+
+
+
+For two people on two tracks, add the plugin twice and choose a different person in each.
+
+### You never hear anyone twice
+
+When a plugin takes a peer onto a track, that person stops coming out of RemSound's own output. You hear them once, through your music software, where you want them. Let the track go — switch it to sending, untick Active, remove the plugin, or close your music software — and they come straight back to RemSound's output on their own. There is nothing to set.
+
+### Pan and EQ
+
+If you have set volume, pan or EQ for a peer in RemSound, that shaping comes through to the track as well, so what you get is what you were hearing. If you would rather have the untouched signal and do the work in your DAW, untick **Apply pan and EQ to plugin audio** in the DAW plugin menu. It is the same choice recording already offers, and it costs nothing either way.
+
+### If you don't use a DAW
+
+RemSound listens for plugins on your own machine only — nothing on the network can reach it. If you would still rather it listened for nothing at all, untick **Let plugins connect to RemSound** in the DAW plugin menu.
+
+### Good to know
+
+  * Your music software can run at any sample rate. RemSound converts at the boundary, so nobody arrives at the wrong pitch.
+  * Every control in the plugin window is a standard Windows control, so a screen reader reads it the same way it reads RemSound itself. If your host makes the plugin window hard to reach, the same three choices are also plugin parameters, which every DAW lists and Reaper with OSARA reads out.
+  * Your music software cannot compensate for the network delay automatically, so a track recorded through the plugin sits a little late and needs nudging back. This is a limit of how VST3 plugins report themselves, not something RemSound can set.
+
+
+
+## 26. Troubleshooting
 
 ### I don't hear my friend
 
@@ -1475,7 +1527,7 @@ The most common reasons:
 
 If none of those apply, just fall back to Tailscale — it works without involving the router at all.
 
-## 26. Glossary
+## 27. Glossary
 
 Term| Meaning
 ---|---

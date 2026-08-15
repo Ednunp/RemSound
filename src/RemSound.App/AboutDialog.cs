@@ -20,6 +20,20 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v6.0
+
+        RemSound now works inside your music software.
+
+        There is a plugin. Put it on a track and one person goes on that track: a track you are sending goes out to your peers, and a peer you are receiving arrives on a track of their own, where you can record them, shape them and mix them like anything else. Add it twice for two people and each gets their own track.
+
+        You install it from the new DAW plugin menu, which puts it in your own plugin folder — no administrator password, nothing outside your account touched. Keep RemSound open while you work; it holds the connection and the plugin asks it for audio, so your password, peers and audio settings stay where you already set them.
+
+        When a track takes somebody, they stop coming out of RemSound's own output, so you never hear anyone twice. Let the track go and they come straight back. There is nothing to set.
+
+        The plugin's window is built from ordinary Windows controls, so a screen reader reads it the way it reads RemSound itself. If your music software makes that window awkward to reach, the same three choices are also plugin parameters, which every DAW lists.
+
+        Section 25 of the manual walks through all of it.
+
         RemSound v5.9
 
         The audio latency control now works properly while you're listening.
