@@ -99,6 +99,77 @@ internal static partial class SelfTest
         return "claims are reference-counted, lapse without a heartbeat, and a claimed peer is provably absent from the device mix";
     }
 
+    /// <summary>The DAW plugin menu must exist, say the truth about what is installed, and carry the
+    /// pan/EQ choice — Ed's layout: "build a menu called DAW plugin and have installed, or uninstall
+    /// and the item to disable or enable eq pan etc in there".</summary>
+    private static string? DawPluginMenu()
+    {
+        MainForm? form = null;
+        try
+        {
+            var profile = Profile.NewBlank();
+            profile.Password = RemSoundCrypto.Obfuscate("menu-test-password");
+            try { form = new MainForm(null, profile, null, null, headless: true); }
+            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+
+            var strip = form.MainMenuStrip ?? FindMenuStrip(form);
+            Check(strip is not null, "the main window must have a menu strip");
+            var menu = strip!.Items.OfType<ToolStripMenuItem>()
+                .FirstOrDefault(m => m.AccessibleName == "DAW plugin menu");
+            Check(menu is not null, "there must be a DAW plugin menu — the plugin is its own way of using RemSound, not a variation on the service");
+
+            var items = menu!.DropDownItems.OfType<ToolStripMenuItem>().ToList();
+            var install = items.FirstOrDefault(i => i.AccessibleName == "Install plugin");
+            var remove = items.FirstOrDefault(i => i.AccessibleName == "Remove plugin");
+            var shaping = items.FirstOrDefault(i => i.AccessibleName == "Apply pan and EQ to plugin audio");
+            Check(install is not null, "the menu must offer Install");
+            Check(remove is not null, "the menu must offer Remove");
+            Check(shaping is not null, "the menu must carry the pan/EQ choice");
+            // Pin to non-null locals so the checks below read plainly.
+            var installItem = install!;
+            var removeItem = remove!;
+            var shapingItem = shaping!;
+            Check(shapingItem.CheckOnClick, "the pan/EQ item must be a tick, so a screen reader announces its state");
+
+            // Opening the menu must reflect reality rather than offering an action that will fail.
+            // Drives the REAL refresh the menu runs on open, via a seam — reflecting into WinForms
+            // internals to fake the event was brittle and simply returned null.
+            form.RefreshDawPluginMenuForTest();
+            var installed = PluginInstaller.IsInstalled();
+            Check(removeItem.Enabled == installed,
+                $"Remove must be enabled only when a plugin is actually installed (installed={installed}, enabled={removeItem.Enabled})");
+            var installText = installItem.Text ?? "";
+            Check(installText.Contains(installed ? "Reinstall" : "Install", StringComparison.OrdinalIgnoreCase),
+                $"Install must rename itself to Reinstall when one is present (installed={installed}, got '{installText}')");
+
+            // The setting behind the tick must persist, in an isolated config — never the real one.
+            var scratch = Path.Combine(Path.GetTempPath(), "remsound-plugin-menu-" + Guid.NewGuid().ToString("N"));
+            using (AppConfig.UseThrowawayUserDataDirectory(scratch))
+            {
+                Check(AppConfig.Load().ApplyPeerShapingToPlugin, "pan and EQ must reach the DAW by DEFAULT — what you hear is the least surprising behaviour");
+                var cfg = AppConfig.Load();
+                cfg.ApplyPeerShapingToPlugin = false;
+                cfg.Save();
+                Check(!AppConfig.Load().ApplyPeerShapingToPlugin, "turning it off must survive a save and reload");
+            }
+            return "DAW plugin menu present with install, remove and the pan/EQ tick; the menu states what is actually installed; the setting round-trips and defaults to on";
+        }
+        finally { try { form?.Dispose(); } catch { } }
+    }
+
+    /// <summary>Walk the control tree for the menu strip — a headless form may not have it hooked to
+    /// the Form.MainMenuStrip property.</summary>
+    private static MenuStrip? FindMenuStrip(Control root)
+    {
+        foreach (Control c in root.Controls)
+        {
+            if (c is MenuStrip ms) return ms;
+            var nested = FindMenuStrip(c);
+            if (nested is not null) return nested;
+        }
+        return null;
+    }
+
     /// <summary>Installing and removing the plugin must be exact. The VST3 folder is shared with
     /// every other plugin the user owns, so an over-enthusiastic uninstall would delete somebody
     /// else's work — this proves it removes only what it placed, and that a portable install needs

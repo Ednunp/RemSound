@@ -140,6 +140,7 @@ internal static partial class SelfTest
         RunStep(results, "Measured-latency readout keeps WASAPI and ASIO separate", MeasuredLatencyReadout);
         RunStep(results, "Plugin double-audio guard (a claimed peer leaves the speakers)", PluginDoubleAudioGuard);
         RunStep(results, "Plugin install/remove is per-user and exact (other plugins untouched)", PluginInstallRoundTrip);
+        RunStep(results, "DAW plugin menu (install, remove, pan/EQ choice)", DawPluginMenu);
         foreach (var cfg in SuiteConfigs)
             RunStep(results, $"Control suite - {cfg.Name} (UI + accessibility + theme + effect)", () => RunControlSuite(cfg));
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);
@@ -178,7 +179,14 @@ internal static partial class SelfTest
         try { r.Message = body() ?? ""; r.Status = "PASS"; }
         catch (StepSkipped sk) { r.Status = "SKIP"; r.Message = sk.Message; }
         catch (CheckFailed cf) { r.Status = "FAIL"; r.Message = cf.Message; }
-        catch (Exception ex) { r.Status = "FAIL"; r.Message = $"{ex.GetType().Name}: {ex.Message}"; }
+        catch (Exception ex)
+        {
+            r.Status = "FAIL";
+            // Name the SITE, not just the type: "NullReferenceException" on its own has sent me
+            // hunting more than once (2026-08-15).
+            var frame = (ex.StackTrace ?? "").Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() ?? "";
+            r.Message = $"{ex.GetType().Name}: {ex.Message}{(frame.Length > 0 ? $" [{frame}]" : "")}";
+        }
         sw.Stop();
         r.Ms = sw.ElapsedMilliseconds;
         results.Add(r);

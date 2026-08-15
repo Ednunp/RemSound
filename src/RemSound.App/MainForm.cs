@@ -2304,9 +2304,66 @@ public sealed partial class MainForm : Form
         // Win7 the menu degrades to "status unavailable" instead of crashing. If Win7 turns out unable to
         // run the service, re-gate this with OperatingSystem.IsWindowsVersionAtLeast(10, 0).
         menu.Items.Add(BuildServiceMenu());
+        menu.Items.Add(BuildDawPluginMenu());
         menu.Items.Add(optionsMenu);
         menu.Items.Add(helpMenu);
         return menu;
+    }
+
+    /// <summary>The DAW plugin menu: put the VST plugin on this machine, take it off again, and
+    /// decide whether a peer's pan and EQ come with it.
+    ///
+    /// <para>Its own menu at Ed's request rather than buried in the Service menu — the plugin is a
+    /// separate way of using RemSound, not a variation on the background service, and a user looking
+    /// for it should find it by name.</para>
+    ///
+    /// <para>Alt+G, not the obvious Alt+D: the gate caught that D already belongs to the Discovered
+    /// peers list, and a CONTROL's mnemonic beats a menu's — so Alt+D would have silently stopped
+    /// opening this menu. G was free.</para></summary>
+    private ToolStripMenuItem BuildDawPluginMenu()
+    {
+        var pluginMenu = new ToolStripMenuItem("DAW plu&gin (Alt+G)") { AccessibleName = "DAW plugin menu" };
+
+        var pluginInstall = new ToolStripMenuItem("&Install plugin") { AccessibleName = "Install plugin" };
+        pluginInstall.Click += (_, _) => RunPluginInstallAction(install: true);
+        var pluginUninstall = new ToolStripMenuItem("&Remove plugin") { AccessibleName = "Remove plugin" };
+        pluginUninstall.Click += (_, _) => RunPluginInstallAction(install: false);
+
+        // Shaped or raw into the DAW. Same choice the recording feature already offers, and for the
+        // same reason: usually you want what you hear, but sometimes you want the untouched signal
+        // so you can do the EQ in the DAW instead. Costs nothing either way — the shaping is
+        // per-sample and already in the read path, so it adds no latency.
+        var applyShaping = new ToolStripMenuItem("Apply pan and E&Q to plugin audio")
+        {
+            AccessibleName = "Apply pan and EQ to plugin audio",
+            CheckOnClick = true,
+        };
+        applyShaping.Click += (_, _) =>
+        {
+            var cfg = AppConfig.Load();
+            cfg.ApplyPeerShapingToPlugin = applyShaping.Checked;
+            try { cfg.Save(); } catch { /* best-effort, like the app's other AppConfig writes */ }
+            logFile.Event($"vst plugin: pan/EQ into the DAW {(applyShaping.Checked ? "ON (what you hear)" : "OFF (raw)")}");
+        };
+
+        pluginMenu.DropDownItems.AddRange(new ToolStripItem[]
+        {
+            pluginInstall, pluginUninstall, new ToolStripSeparator(), applyShaping,
+        });
+        // Kept as a named method rather than an inline lambda so the gate can drive the REAL refresh
+        // instead of reflecting into WinForms internals to fake a menu opening.
+        void Refresh()
+        {
+            // Say the truth rather than offering actions that will fail.
+            var installed = PluginInstaller.IsInstalled();
+            pluginInstall.Text = installed ? "Re&install plugin" : "&Install plugin";
+            pluginUninstall.Enabled = installed;
+            applyShaping.Checked = AppConfig.Load().ApplyPeerShapingToPlugin;
+        }
+        refreshDawPluginMenu = Refresh;
+        pluginMenu.DropDownOpening += (_, _) => Refresh();
+        Refresh();
+        return pluginMenu;
     }
 
     /// <summary>The Service menu: configure the send-only lock-screen service's profile, and
@@ -2342,28 +2399,13 @@ public sealed partial class MainForm : Form
         var repair = new ToolStripMenuItem("&Repair service folder access") { AccessibleName = "Repair service folder access" };
         repair.Click += (_, _) => ServiceAction(ServiceControl.RepairVerb, "access repair", confirm: false);
 
-        // The VST plugin's install/remove. Menu items rather than a folder of scripts (Ed's call —
-        // a script folder is a command line wearing a hat, and these users navigate by screen
-        // reader). Installs PER-USER so a portable copy of RemSound never needs an admin prompt.
-        var pluginInstall = new ToolStripMenuItem("Install &VST plugin") { AccessibleName = "Install VST plugin" };
-        pluginInstall.Click += (_, _) => RunPluginInstallAction(install: true);
-        var pluginUninstall = new ToolStripMenuItem("Remove VST plu&gin") { AccessibleName = "Remove VST plugin" };
-        pluginUninstall.Click += (_, _) => RunPluginInstallAction(install: false);
-
         serviceMenu.DropDownItems.AddRange(new ToolStripItem[]
         {
             status, new ToolStripSeparator(),
             configure, new ToolStripSeparator(),
             install, uninstall, start, stop, repair, new ToolStripSeparator(),
-            pluginInstall, pluginUninstall, new ToolStripSeparator(),
             activityLog, updateLog,
         });
-        serviceMenu.DropDownOpening += (_, _) =>
-        {
-            var installed = PluginInstaller.IsInstalled();
-            pluginInstall.Text = installed ? "Reinstall &VST plugin" : "Install &VST plugin";
-            pluginUninstall.Enabled = installed;
-        };
         serviceMenu.DropDownOpening += (_, _) =>
         {
             // Never let a status-query failure crash the menu (and with it the app). The menu only appears
@@ -2538,6 +2580,11 @@ public sealed partial class MainForm : Form
     /// <summary>Install or remove the VST plugin, and say plainly what happened. No elevation is
     /// involved (per-user VST3 folder), so there is no UAC prompt and nothing to explain about
     /// administrator rights.</summary>
+    /// <summary>Refreshes the DAW plugin menu's state, as opening it does. Held so the gate can run
+    /// the real thing.</summary>
+    private Action? refreshDawPluginMenu;
+    internal void RefreshDawPluginMenuForTest() => refreshDawPluginMenu?.Invoke();
+
     private void RunPluginInstallAction(bool install)
     {
         var (ok, message) = install ? PluginInstaller.Install() : PluginInstaller.Uninstall();

@@ -146,6 +146,15 @@ public sealed class AppConfig
     /// Machine-wide; the user unticks "Play keyboard clicks" in Preferences to silence it.</summary>
     public bool EnableKeyboardClicks { get; set; } = true;
 
+    /// <summary>Whether a peer's pan and EQ (set in RemSound) are applied to the audio the VST plugin
+    /// hands to the DAW. ON by default — "what you hear is what you get" is the least surprising
+    /// behaviour, and it costs nothing: the shaping is per-sample, already in the read path the
+    /// plugin pulls from, and adds no latency whatsoever. Turn it OFF to receive a peer RAW and do
+    /// the EQ in the DAW instead — the same choice the recording feature already offers
+    /// (raw vs "record what you hear"). Machine-wide: it describes how this machine's plugin
+    /// behaves, not anything about a particular profile's peers.</summary>
+    public bool ApplyPeerShapingToPlugin { get; set; } = true;
+
     /// <summary>Per-cue enable flags for the machine-wide cues added 2026-06-13: the send/receive
     /// on/off toggle cues and the minimise(hide)/restore(show) cues. Machine-wide (like the startup
     /// cue) rather than per-profile - they're app-level feedback for an action, not a per-profile
