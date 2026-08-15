@@ -421,6 +421,31 @@ public sealed class AppConfig
         if (!string.IsNullOrWhiteSpace(path)) _userDataDirectoryOverride = Path.GetFullPath(path);
     }
 
+    /// <summary>Redirect ALL user state to a throwaway folder for the lifetime of the returned scope,
+    /// then put it back. Exists so the self-test can drive controls that PERSIST (the Preferences
+    /// dialog writes on change) without touching the real configuration — the gate must never edit
+    /// the user's settings as a side effect of proving a checkbox works. Restores on dispose even if
+    /// the test throws, and deletes the throwaway folder.</summary>
+    public static IDisposable UseThrowawayUserDataDirectory(string path) => new UserDataScope(path);
+
+    private sealed class UserDataScope : IDisposable
+    {
+        private readonly string? previous;
+        private readonly string dir;
+        public UserDataScope(string path)
+        {
+            previous = _userDataDirectoryOverride;
+            dir = Path.GetFullPath(path);
+            Directory.CreateDirectory(dir);
+            _userDataDirectoryOverride = dir;
+        }
+        public void Dispose()
+        {
+            _userDataDirectoryOverride = previous;
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
+        }
+    }
+
     public static string UserDataDirectory =>
         _userDataDirectoryOverride ?? Path.Combine(AppContext.BaseDirectory, UserDataFolderName);
 

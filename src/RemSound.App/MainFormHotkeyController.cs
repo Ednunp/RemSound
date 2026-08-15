@@ -222,7 +222,19 @@ internal sealed class MainFormHotkeyController : IDisposable
         RegisterToggleAllPeerShapingHotkey();
     }
 
+    /// <summary>Build the keyboard-shortcuts window WITHOUT showing it, so the accessibility, theme
+    /// and control audits can reach it. It was built inline and shown in one step, which made it
+    /// invisible to every test — caught by the "every window is reachable" guard, 2026-08-15. Same
+    /// build-then-show split the other inline dialogs already use.</summary>
+    internal Form BuildKeyboardShortcutsDialogForAudit() => BuildKeyboardShortcutsDialog();
+
     public void ShowKeyboardShortcutsDialog(IWin32Window dialogOwner)
+    {
+        using var built = BuildKeyboardShortcutsDialog();
+        built.ShowDialog(dialogOwner);
+    }
+
+    private Form BuildKeyboardShortcutsDialog()
     {
         // Modeled on the SpaceBlaster menu dialogs:
         //   * A ListBox fills the dialog. Each row is one bindable hotkey shown as
@@ -246,7 +258,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         // and preferences tab. (KeyPreview + the form-level KeyDown wasn't enough on
         // its own — that fires AFTER ProcessCmdKey/ProcessDialogKey, so AcceptButton
         // had already won.)
-        using var dialog = new CmdKeyForm
+        var dialog = new CmdKeyForm
         {
             Text = "Keyboard shortcuts",
             StartPosition = FormStartPosition.CenterParent,
@@ -472,7 +484,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         dialog.AcceptButton = closeButton;
         dialog.CancelButton = closeButton;
         dialog.Load += (_, _) => list.Focus();
-        dialog.ShowDialog(dialogOwner);
+        return dialog;
     }
 
     public void Dispose()

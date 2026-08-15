@@ -133,6 +133,9 @@ internal static partial class SelfTest
         RunStep(results, "Auto-tune descends on evidence (never below the measured need)", AutoTuneDescentPolicy);
         RunStep(results, "The two auto-tunes behave identically but stay independent (WASAPI vs ASIO)", AutoTuneLanesIndependent);
         RunStep(results, "Every control is specified (no control escapes the suite)", EveryControlIsSpecified);
+        RunStep(results, "Every window is reachable by the audits (no unaudited dialog)", EveryDialogIsAudited);
+        RunStep(results, "Dialog control suite (every dialog: accessibility + theme + driven)", DialogControlSuite);
+        RunStep(results, "Every sound is pinned (registry, custom paths, muting, checkbox suppression)", CueCoverage);
         foreach (var cfg in SuiteConfigs)
             RunStep(results, $"Control suite - {cfg.Name} (UI + accessibility + theme + effect)", () => RunControlSuite(cfg));
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);
@@ -1921,33 +1924,7 @@ internal static partial class SelfTest
     /// failed.</summary>
     private static string? AccessibilityAudit()
     {
-        var factories = new (string Name, Func<Form> Make)[]
-        {
-            ("Recording settings", () => new RecordingSettingsDialog(new RecordingSettings())),
-            ("Preferences", () => new PreferencesDialog(
-                new RemSoundSettingsStore("RemSound"), null,
-                () => false, _ => { }, () => { }, () => 0, () => { }, () => { }, () => { }, () => { }, () => { }, _ => { },
-                () => (default(RouterMappingStatus), (IPEndPoint?)null, ""),
-                _ => { }, _ => { })),
-            ("Service profile", () => new ServiceProfileDialog(RemSound.Core.Profile.NewBlank(), false)),
-            ("About", () => new AboutDialog()),
-            ("Add EQ band", () => new AddBandDialog()),
-            ("Rename peer", () => new RenamePeerDialog("TestMachine", null)),
-            ("Keyboard shortcut import", () => new KeyboardShortcutImportDialog(Array.Empty<string>())),
-            ("Update install notice", () => new UpdateInstallNoticeDialog(
-                new UpdateInfo("v9.9", new Version(9, 9, 0), "https://example.invalid/x.zip", "notes", "https://example.invalid/rel"))),
-            // The inline-built dialogs, via their Build seams — previously invisible to this audit,
-            // which is exactly how mnemonic-less buttons slipped through (single-instance, manual peer).
-            ("Manual peer prompt", () => ManualPeerPrompt.Build().Dialog),
-            ("Quick profile switch", QuickProfileSwitchDialog.BuildForAudit),
-            ("Change profile password", () => ProfilePasswordDialog.Build("Audit", "pw").Dialog),
-            ("Profile passwords manager", () => ProfilePasswordManagerDialog.Build(new ProfileStore(
-                Path.Combine(Path.GetTempPath(), "remsound-selftest-pwmgr-" + Guid.NewGuid().ToString("N")))).Dialog),
-            ("Profile name prompt", () => ProfileSaveAsPrompt.Build("Audit").Dialog),
-            ("Service additional options", () => ServiceProfileDialog.BuildAdditionalOptions(false).Dialog),
-            ("Profile selection", () => new ProfileSelectionDialog(new ProfileStore(
-                Path.Combine(Path.GetTempPath(), "remsound-selftest-picker-" + Guid.NewGuid().ToString("N"))))),
-        };
+        var factories = DialogFactories();
 
         var audited = new List<string>();
         var skipped = new List<string>();
@@ -3466,5 +3443,57 @@ internal static partial class SelfTest
                 return args[i + 1];
         }
         return null;
+    }
+
+    /// <summary>Every dialog the app can show, constructible headlessly. ONE list, shared by the
+    /// presence audit and the control suite — two lists would drift and a dialog would fall out of
+    /// one of them unnoticed.</summary>
+    internal static (string Name, Func<Form> Make)[] DialogFactories() => new (string Name, Func<Form> Make)[]
+        {
+            ("Recording settings", () => new RecordingSettingsDialog(new RecordingSettings())),
+            // A REAL profile store with a saved profile: with an empty one, ticking "Start with a
+            // specific profile" correctly shows "you have no saved profiles yet" — a modal that hangs
+            // a headless run forever. The fix is an honest environment, not skipping the control.
+            ("Preferences", () => new PreferencesDialog(
+                new RemSoundSettingsStore("RemSound"), StoreWithOneProfileForTest(),
+                () => false, _ => { }, () => { }, () => 0, () => { }, () => { }, () => { }, () => { }, () => { }, _ => { },
+                () => (default(RouterMappingStatus), (IPEndPoint?)null, ""),
+                _ => { }, _ => { })),
+            ("Service profile", () => new ServiceProfileDialog(RemSound.Core.Profile.NewBlank(), false)),
+            ("About", () => new AboutDialog()),
+            ("Add EQ band", () => new AddBandDialog()),
+            ("Rename peer", () => new RenamePeerDialog("TestMachine", null)),
+            ("Keyboard shortcut import", () => new KeyboardShortcutImportDialog(Array.Empty<string>())),
+            ("Update install notice", () => new UpdateInstallNoticeDialog(
+                new UpdateInfo("v9.9", new Version(9, 9, 0), "https://example.invalid/x.zip", "notes", "https://example.invalid/rel"))),
+            // The inline-built dialogs, via their Build seams — previously invisible to this audit,
+            // which is exactly how mnemonic-less buttons slipped through (single-instance, manual peer).
+            ("Manual peer prompt", () => ManualPeerPrompt.Build().Dialog),
+            ("Quick profile switch", QuickProfileSwitchDialog.BuildForAudit),
+            ("Change profile password", () => ProfilePasswordDialog.Build("Audit", "pw").Dialog),
+            ("Profile passwords manager", () => ProfilePasswordManagerDialog.Build(new ProfileStore(
+                Path.Combine(Path.GetTempPath(), "remsound-selftest-pwmgr-" + Guid.NewGuid().ToString("N")))).Dialog),
+            ("Profile name prompt", () => ProfileSaveAsPrompt.Build("Audit").Dialog),
+            ("Service additional options", () => ServiceProfileDialog.BuildAdditionalOptions(false).Dialog),
+            // The keyboard-shortcuts window: built inline and shown in one step until 2026-08-15, so
+            // no audit could reach it. The "every window is reachable" guard caught it.
+            ("Keyboard shortcuts", () => new MainFormHotkeyController(
+                new RemSoundSettingsStore("RemSound"),
+                () => { }, () => { }, () => { }, () => { }, () => { }, () => { }, () => { }, () => { },
+                () => { }, () => { }, () => { }, () => { }, () => { }, () => { }, () => { })
+                .BuildKeyboardShortcutsDialogForAudit()),
+            ("Profile selection", () => new ProfileSelectionDialog(new ProfileStore(
+                Path.Combine(Path.GetTempPath(), "remsound-selftest-picker-" + Guid.NewGuid().ToString("N"))))),
+        };
+
+    /// <summary>A throwaway ProfileStore containing one saved profile, so dialogs that reasonably
+    /// prompt when there are NO profiles ("Start with a specific profile") take their normal path
+    /// instead of opening a modal at a test with nobody to answer it.</summary>
+    internal static ProfileStore StoreWithOneProfileForTest()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "remsound-selftest-profiles-" + Guid.NewGuid().ToString("N"));
+        var store = new ProfileStore(dir);
+        try { var pr = RemSound.Core.Profile.NewBlank(); pr.Title = "Audit profile"; store.Save(pr); } catch { /* best-effort */ }
+        return store;
     }
 }
