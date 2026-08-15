@@ -425,6 +425,10 @@ public sealed partial class MainForm : Form
         public readonly AutoTuneDescent.CreepState Creep = new();
         public void Reset() { CleanTicks = 0; Creep.Reset(); }
     }
+    /// <summary>The end-to-end latency last measured, and the lane period behind it. Cached because
+    /// the per-lane callback-gap read RESETS the counter — the status line must not steal it from the
+    /// diagnostic. 0 = nothing measured yet (not receiving, or too early).</summary>
+    private double lastAchievedLatencyMs;
     private readonly LaneTuneMemory mixedTuneMemory = new();
     private readonly LaneTuneMemory wasapiTuneMemory = new();
     private readonly LaneTuneMemory asioTuneMemory = new();
@@ -7288,6 +7292,29 @@ public sealed partial class MainForm : Form
         }
     }
 
+    /// <summary>What the user ASKED the latency control for, and what the machine is ACTUALLY
+    /// delivering, end to end.
+    ///
+    /// <para>Why both numbers (Ed, 2026-08-15): the control accepts 1 ms, but no hardware delivers
+    /// that — the output device alone hands out audio in chunks of its own period, and there is a
+    /// capture buffer, a codec frame and the network on top. A user set 1 and heard about 40, with no
+    /// way to tell which part was his setting and which was his hardware.</para>
+    ///
+    /// <para>Deliberately NOT a clamp on the control. The achievable floor is an estimate, and a limit
+    /// built on an estimate would lock someone out of latency their hardware could actually reach —
+    /// a smaller ASIO buffer, a better driver. So the range stays open and the number stops lying
+    /// instead: set what you like, and see what you got. Because it is measured live, better hardware
+    /// simply reports a better figure with no stale limit in the way.</para>
+    ///
+    /// <para>The ACHIEVED figure is the whole journey — capture + encode + wire + receive queue +
+    /// output device — so it is directly comparable to a clap test, which is how people actually
+    /// judge it. Quoting the receive queue alone would be a different kind of lie.</para></summary>
+    internal static string FormatLatencyStatus(int requestedMs, double achievedMs)
+    {
+        if (requestedMs <= 0 || achievedMs <= 0) return "";
+        return $" Latency set to {requestedMs} ms, currently achieving {achievedMs:0} ms.";
+    }
+
     // ===================== Status / log =====================
 
     private void UpdateStatus()
@@ -7301,7 +7328,8 @@ public sealed partial class MainForm : Form
             : "not receiving";
         var peerCount = knownPeers.Count;
         var hbSummary = heartbeatService?.GetHealthSummary() ?? "no peers";
-        statusLabel.Text = $"Connected for {since}. {peerCount} peer(s) known. {sendText}. {receiveText}. Heartbeat: {hbSummary}.";
+        var latencyText = FormatLatencyStatus(receiver.IsRunning ? receiver.TargetLatencyMs : 0, lastAchievedLatencyMs);
+        statusLabel.Text = $"Connected for {since}. {peerCount} peer(s) known. {sendText}. {receiveText}.{latencyText} Heartbeat: {hbSummary}.";
         bool streaming = connected && (sender.IsRunning || receiver.IsRunning);
         healthLabel.Text = connected
             ? streaming ? "Health: streaming" : "Health: idle"
@@ -7744,6 +7772,7 @@ public sealed partial class MainForm : Form
                 var renderBufferMs = RenderBufferEstimateMs(lanePeriodMs);
                 // EVERY stage of the journey, or the total is a comfortable fiction.
                 var totalMs = captureBufferMs + senderAccumulatorMs + wireOneWayMs + diag.BufferAvgMs + renderBufferMs;
+                lastAchievedLatencyMs = totalMs; // for the status line — see FormatLatencyStatus
                 logFile.Event($"latency-probe estimated one-way ≈ {totalMs:0.0}ms " +
                     $"(capture={captureBufferMs:0.0}, send-accum={senderAccumulatorMs:0.0}, wire={wireOneWayMs:0.0}, recv-queue={diag.BufferAvgMs}, render={renderBufferMs:0.0})");
             }

@@ -137,6 +137,7 @@ internal static partial class SelfTest
         RunStep(results, "Dialog control suite (every dialog: accessibility + theme + driven)", DialogControlSuite);
         RunStep(results, "Every sound is pinned (registry, custom paths, muting, checkbox suppression)", CueCoverage);
         RunStep(results, "Latency estimate counts every stage (no silently-missing term)", LatencyEstimateComplete);
+        RunStep(results, "Status line reports latency asked-for vs actually achieved", LatencyStatusLine);
         foreach (var cfg in SuiteConfigs)
             RunStep(results, $"Control suite - {cfg.Name} (UI + accessibility + theme + effect)", () => RunControlSuite(cfg));
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);
@@ -3006,6 +3007,38 @@ internal static partial class SelfTest
         // The old crawl for comparison, so the gate records what changed.
         var oldTicks = (500 - 20) / 5;
         return $"floor never breached; fast descent {ticks} ticks vs the old crawl's {oldTicks}; creep reaches the need and stops at a learned floor";
+    }
+
+    /// <summary>The status line must tell the user BOTH numbers: what they asked the latency control
+    /// for, and what the machine is actually delivering end to end.
+    ///
+    /// The problem it solves (Ed, 2026-08-15): the control accepts 1 ms, no hardware delivers it, and
+    /// a user who set 1 and heard 40 had no way to tell which part was his setting and which was his
+    /// hardware. Deliberately NOT a clamp — a limit built on an estimate would lock someone out of
+    /// latency their hardware could genuinely reach.</summary>
+    private static string? LatencyStatusLine()
+    {
+        var text = MainForm.FormatLatencyStatus(1, 45.3);
+        Check(text.Contains("set to 1 ms"), $"it must state what the user ASKED for (got: {text})");
+        Check(text.Contains("achieving 45 ms"), $"it must state what is ACTUALLY achieved, rounded for speech (got: {text})");
+
+        // The achieved figure is the WHOLE journey, so it can legitimately be far bigger than the
+        // request — that is the entire point, and the line must not hide or clamp it.
+        Check(MainForm.FormatLatencyStatus(1, 45.3).Contains("45"),
+            "a request far below what the hardware can do must still report the real figure");
+
+        // Nothing to say when nothing is measured — a screen reader must not read a zero or a blank
+        // claim on a machine that isn't receiving yet.
+        Check(MainForm.FormatLatencyStatus(0, 45) == "", "no request, no claim");
+        Check(MainForm.FormatLatencyStatus(30, 0) == "", "nothing measured yet, no claim");
+        Check(MainForm.FormatLatencyStatus(30, -1) == "", "a nonsense measurement must be suppressed, not spoken");
+
+        // Speech-friendly: no decimals to read out, and it reads as a sentence.
+        var spoken = MainForm.FormatLatencyStatus(26, 41.678);
+        Check(!spoken.Contains('.') || spoken.TrimEnd().EndsWith('.'),
+            $"the figure must be rounded for speech, not read to three decimals (got: {spoken})");
+        Check(spoken.Contains("achieving 42 ms"), $"it must round rather than truncate (got: {spoken})");
+        return "reports both the requested and the achieved figure, rounded for speech, silent when nothing is measured";
     }
 
     /// <summary>The reported end-to-end latency must count EVERY stage of the journey.
