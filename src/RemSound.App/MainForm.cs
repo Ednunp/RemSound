@@ -37,6 +37,20 @@ public sealed partial class MainForm : Form
 
     /// <summary>Last plugin summary written, so an unchanged one is not repeated every second.</summary>
     private string lastPluginLogLine = "";
+
+    /// <summary>Where this session's log went, for the gate to read back. Null when logging is off.</summary>
+    internal string? LogPathForTest => logFile.Path;
+
+    /// <summary>Run the once-a-second plugin summary on demand, so the gate does not have to wait for
+    /// a timer that a headless form never starts.</summary>
+    internal void WritePluginLogLineForTest()
+    {
+        if (pluginHost is not { } host || !host.HasActivity) return;
+        var line = host.DescribeForLog();
+        if (line == lastPluginLogLine) return;
+        lastPluginLogLine = line;
+        logFile.Event($"vst plugin: {line}");
+    }
     private readonly RemSoundSettingsStore settings = new(AppName);
     private readonly RemSoundLog logFile = new();
     private readonly RemSoundUpdater updater = new();
@@ -2335,7 +2349,21 @@ public sealed partial class MainForm : Form
     /// <summary>Open or close the plugin link to match the setting. Idempotent — safe to call from
     /// startup and from the menu item, which is the point: one code path decides whether the port is
     /// open, so the menu can never disagree with reality.</summary>
-    private void ApplyPluginLinkSetting()
+    private void ApplyPluginLinkSetting() => ApplyPluginLinkSetting(PluginBridgeProtocol.DefaultPort);
+
+    /// <summary>Test seam: the SAME code path on a port the gate chooses. Not a parallel copy — the
+    /// wiring being checked (the log hook, the claim register reaching the receiver) is precisely what
+    /// a second implementation would fail to prove. A fixed port would also collide with the user's
+    /// own running RemSound, which is how a gate ends up testing nothing.</summary>
+    internal PluginBridgeHost? OpenPluginLinkForTest(int port)
+    {
+        pluginHost?.Dispose();
+        pluginHost = null;
+        ApplyPluginLinkSetting(port);
+        return pluginHost;
+    }
+
+    private void ApplyPluginLinkSetting(int port)
     {
         var wanted = AppConfig.Load().EnableDawPluginLink;
         if (wanted == (pluginHost is not null)) return;
@@ -2354,7 +2382,7 @@ public sealed partial class MainForm : Form
 
         try
         {
-            pluginHost = new PluginBridgeHost(receiver.ReadClaimedPeer);
+            pluginHost = new PluginBridgeHost(receiver.ReadClaimedPeer, port);
             pluginHost.PeerListSource = () => PeerListForPlugins();
             // Every claim, release, hello, goodbye and timeout, in plain English. This is the app's
             // half of the story; the plugin writes the other half in its own file, because it lives in

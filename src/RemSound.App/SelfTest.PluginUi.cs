@@ -264,6 +264,68 @@ internal static partial class SelfTest
         }
     }
 
+    /// <summary>The APP's plugin logging, through the real MainForm — does a plugin connecting
+    /// actually end up in RemSound's log file?
+    ///
+    /// <para>The test above proves the bridge RAISES those events. That is not the same claim. The
+    /// wiring from the bridge to the log file lives in the window, and if it were missing everything
+    /// else would still pass while a tester's log came back empty of the one thing being tested. That
+    /// is the exact shape of gap that has bitten this project before, so it is checked end to end:
+    /// open the link the way the app opens it, connect a real plugin client, read the file back.</para></summary>
+    private static string? PluginLoggingInTheApp()
+    {
+        var scratch = Path.Combine(Path.GetTempPath(), "remsound-applog-" + Guid.NewGuid().ToString("N"));
+        MainForm? form = null;
+        try
+        {
+            using (AppConfig.UseThrowawayUserDataDirectory(scratch))
+            {
+                var cfg = AppConfig.Load();
+                cfg.LoggingEnabled = true;
+                cfg.EnableDawPluginLink = true;
+                cfg.Save();
+
+                var profile = Profile.NewBlank();
+                profile.Password = RemSoundCrypto.Obfuscate("plugin-log-test-password");
+                try { form = new MainForm(null, profile, null, null, headless: true); }
+                catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+
+                // Port 0, never 47831: a gate run must never fight the RemSound the user has open.
+                var host = form.OpenPluginLinkForTest(0);
+                Check(host is not null, "with the setting on, the app must open the plugin link");
+                Check(host!.Port > 0, "and bind a port");
+
+                using (var plugin = new PluginBridgeClient(host.Port))
+                {
+                    plugin.Hello();
+                    Check(WaitUntil(() => host.InstanceCount > 0), "the app must see the plugin connect");
+                    plugin.ReceiveFrom(IPAddress.Parse("192.168.1.50"));
+                    var block = new float[512];
+                    plugin.ReadPeerBlock(block, 256);
+                    Check(WaitUntil(() => host.Claims.IsClaimed(IPAddress.Parse("192.168.1.50"))), "and see the claim");
+                    form.WritePluginLogLineForTest();
+                }
+
+                var path = form.LogPathForTest;
+                Check(path is not null, "with logging on, the app must have a log file");
+                var text = ReadSharedText(path!);
+                Check(text.Contains("vst plugin: link open"), "the app's log must record the link opening, with its port");
+                Check(text.Contains("said hello"),
+                    "the app's log must record a plugin connecting - this is the wiring the bridge's own test cannot prove");
+                Check(text.Contains("took 192.168.1.50"),
+                    "and record the peer being taken, which is the moment they leave the speakers");
+                Check(text.Contains("instances=1"), "and carry the per-second summary");
+
+                return "the app opens the link, and a plugin connecting, claiming a peer and the running summary all reach RemSound's own log file";
+            }
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { }
+            try { if (Directory.Exists(scratch)) Directory.Delete(scratch, recursive: true); } catch { }
+        }
+    }
+
     /// <summary>Read a log the writer still has open. Plain File.ReadAllText asks for exclusive-ish
     /// sharing and fails against a live writer - which is exactly the state a tester is in when they
     /// go to send the file, so it is worth reading it the same way they would have to.</summary>
