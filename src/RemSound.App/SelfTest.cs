@@ -138,6 +138,7 @@ internal static partial class SelfTest
         RunStep(results, "Every sound is pinned (registry, custom paths, muting, checkbox suppression)", CueCoverage);
         RunStep(results, "Latency estimate counts every stage (no silently-missing term)", LatencyEstimateComplete);
         RunStep(results, "Measured-latency readout keeps WASAPI and ASIO separate", MeasuredLatencyReadout);
+        RunStep(results, "Plugin double-audio guard (a claimed peer leaves the speakers)", PluginDoubleAudioGuard);
         foreach (var cfg in SuiteConfigs)
             RunStep(results, $"Control suite - {cfg.Name} (UI + accessibility + theme + effect)", () => RunControlSuite(cfg));
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);

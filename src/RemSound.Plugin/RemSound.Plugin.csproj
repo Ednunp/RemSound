@@ -31,6 +31,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The gate (in RemSound.App) drives the plugin's audio bridge directly. -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>RemSound</_Parameter1>
+    </AssemblyAttribute>
     <PackageReference Include="AudioPlugSharp" Version="0.7.13" />
     <PackageReference Include="AudioPlugSharpVst3" Version="*" />
   </ItemGroup>

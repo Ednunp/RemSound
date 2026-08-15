@@ -426,6 +426,10 @@ public sealed class AudioReceiver : IDisposable
     // shared cache to measure any more, so the method always returned 0. Removed alongside
     // CompositeRenderBackend.TakeMaxFanOutCacheBytes and the fanCacheMs= diag column.
     public string OutputDeviceName => multiOutput.ActiveDeviceSummary;
+    /// <summary>Hand the receiver the plugin claim registry, so peers taken over by a VST instance
+    /// stop coming out of this machine's speakers (see PluginPeerClaims).</summary>
+    public void SetPluginPeerClaims(PluginPeerClaims? claims) => playoutEngine.SetPluginPeerClaims(claims);
+
     public int CurrentBufferMs => playoutEngine.CurrentBufferMs;
 
     /// <summary>Queue depth for one lane — WASAPI and ASIO are separate journeys and must be reported

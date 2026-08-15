@@ -5,6 +5,9 @@ using NAudio.Wave;
 
 // Lets the in-app self-tests (assembly "RemSound") flip ForceSupportedForTest to exercise the Win7 paths.
 [assembly: System.Runtime.CompilerServices.InternalsVisibleTo("RemSound")]
+// The VST plugin implements ICaptureBackend with the DAW as the "device" — the same seam WASAPI and
+// ASIO use. Without this the plugin could not reuse the sender at all and would need its own copy.
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("RemSound.Plugin")]
 
 namespace RemSound.Sender;
 

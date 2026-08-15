@@ -27,6 +27,8 @@
     <EmbeddedResource Include="remsound.ico" />
     <ProjectReference Include="..\RemSound.Core\RemSound.Core.csproj" />
     <ProjectReference Include="..\RemSound.Ui\RemSound.Ui.csproj" />
+    <!-- The gate tests the PLUGIN too: same standard, same suite, one command. -->
+    <ProjectReference Include="..\RemSound.Plugin\RemSound.Plugin.csproj" />
     <ProjectReference Include="..\RemSound.Sender\RemSound.Sender.csproj" />
     <ProjectReference Include="..\RemSound.Receiver\RemSound.Receiver.csproj" />
     <PackageReference Include="NAudio" Version="2.3.0" />

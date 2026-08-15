@@ -38,6 +38,12 @@ internal sealed class PlayoutEngine : IWaveProvider
     private const float LimiterKnee = 1.0f - LimiterThreshold;
 
     private readonly ReceiverDiagnostics diagnostics;
+    /// <summary>Peers a VST plugin instance has taken over. Their audio goes to the DAW INSTEAD of
+    /// this machine's speakers — never as well, or the user hears them twice, slightly out of step
+    /// (Ed, 2026-08-15: "having both playing would be bad"). Null until a plugin ever connects, so
+    /// the app pays nothing for a feature it isn't using.</summary>
+    private PluginPeerClaims? pluginClaims;
+    public void SetPluginPeerClaims(PluginPeerClaims? claims) => pluginClaims = claims;
     private readonly object sessionsLock = new();
     // Sessions are keyed by (Endpoint, StreamId) — 2026-05-11. One peer can produce
     // multiple simultaneous streams (e.g. WASAPI lane + ASIO lane in the native-
@@ -942,8 +948,14 @@ internal sealed class PlayoutEngine : IWaveProvider
         };
         var aggregateBufferedBytes = 0;
         var anyContributed = false;
+        var routeClaims = pluginClaims;
         foreach (var session in snap)
         {
+            // Same rule as the mixed path: a peer taken over by a plugin goes to the DAW instead of
+            // the speakers, never both. Applied in BOTH read paths — an exclusion that covers only
+            // one of them would produce double audio in exactly one audio mode, which is the kind of
+            // bug that takes a week to pin down.
+            if (routeClaims is not null && routeClaims.IsClaimed(session.Endpoint.Address)) continue;
             var matchesOwnLane = session.Route == route;
             // Orphan = session tagged for the OTHER non-Mixed lane whose lane has no active
             // output — fall it through onto whichever lane IS being read so it stays audible
@@ -1043,8 +1055,12 @@ internal sealed class PlayoutEngine : IWaveProvider
         var snap = sessionsSnapshot;
         var aggregateBufferedBytes = 0;
         var anyContributed = false;
+        var claims = pluginClaims;
         foreach (var session in snap)
         {
+            // A peer a plugin has taken over must NOT also come out of the speakers. Skipped here
+            // rather than muted so its buffer keeps running and the plugin's copy stays continuous.
+            if (claims is not null && claims.IsClaimed(session.Endpoint.Address)) continue;
             // Per-session latency: each session's own lane governs its buffer behaviour, so a
             // WASAPI-captured stream can sit at one target depth and an ASIO-captured stream
             // at another. Mixing them at the output level doesn't collapse those targets.
