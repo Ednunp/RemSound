@@ -130,6 +130,7 @@ internal static class SelfTest
         RunStep(results, "Elevated verbs carry the real user (SID pass-through) + logs stay readable", ElevatedIdentityPassThrough);
         RunStep(results, "About box shows only the newest releases (screen-reader-safe size)", AboutBoxNotesTrimmed);
         RunStep(results, "Latency slider reaches the streams it governs (one slider = one value)", LatencySliderReachesSessions);
+        RunStep(results, "Auto-tune descends on evidence (never below the measured need)", AutoTuneDescentPolicy);
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);
         RunStep(results, "Service startup volume (boot-once decision + settings round-trip)", ServiceStartupVolume);
         RunStep(results, "Update install window (same-day, wraparound, retry timing)", UpdateInstallWindow);
@@ -2948,6 +2949,51 @@ internal static class SelfTest
         Check(versions == 5, $"the shipped About text must show exactly 5 versions (got {versions})");
         Check(shown.Length < 10_000, $"the shipped About text must stay well under screen-reader-crashing size (got {shown.Length} chars)");
         return $"shipped About text: 5 versions, {shown.Length} chars (was ~70,000 — the screen-reader crash)";
+    }
+
+    /// <summary>The auto-tune's descent policy. The safety property matters more than the speed one:
+    /// it must NEVER take the target below the measured need, however inviting the low-water mark
+    /// looks — that's the line between "converges quickly" and "sheds the cushion and clicks". Speed
+    /// is pinned too, because the whole point was that a silly value used to take twenty-plus ticks
+    /// to unwind (Ed, 2026-08-15). Scored end-to-end against the old crawl by --latency-lab tune.</summary>
+    private static string? AutoTuneDescentPolicy()
+    {
+        // SAFETY — the floor is the measurement, and nothing argues it down.
+        Check(AutoTuneDescent.NextTarget(500, 40, lowWaterMs: 460, sampleCount: 15, consecutiveCleanTicks: 10) >= 40,
+            "a descent must never go below the recommendation, however much cushion looks unused");
+        Check(AutoTuneDescent.NextTarget(60, 55, lowWaterMs: 500, sampleCount: 60, consecutiveCleanTicks: 99) >= 55,
+            "an absurd low-water reading must not punch through the floor either");
+        Check(AutoTuneDescent.NextTarget(40, 40, lowWaterMs: 30, sampleCount: 15, consecutiveCleanTicks: 9) == 40,
+            "at the recommendation, hold — no drift below it");
+        Check(AutoTuneDescent.NextTarget(30, 90, lowWaterMs: 5, sampleCount: 15, consecutiveCleanTicks: 9) == 30,
+            "a RAISE is not this function's job — it must hand back unchanged");
+
+        // EVIDENCE GATING — a big step needs history AND a clean run; otherwise step gently.
+        var noHistory = AutoTuneDescent.NextTarget(500, 20, lowWaterMs: 480, sampleCount: 2, consecutiveCleanTicks: 9);
+        var dirtyRun = AutoTuneDescent.NextTarget(500, 20, lowWaterMs: 480, sampleCount: 15, consecutiveCleanTicks: 0);
+        var confident = AutoTuneDescent.NextTarget(500, 20, lowWaterMs: 480, sampleCount: 15, consecutiveCleanTicks: 9);
+        Check(confident < dirtyRun && confident < noHistory,
+            $"confident evidence must move further than thin evidence (confident={confident}, dirty={dirtyRun}, noHistory={noHistory})");
+        Check(dirtyRun < 500 && noHistory < 500, "even without evidence it must still make progress, not stall");
+        Check(AutoTuneDescent.NextTarget(500, 20, lowWaterMs: -1, sampleCount: 15, consecutiveCleanTicks: 9) < 500,
+            "an unknown low-water mark must fall back to a gentle step, not a stall");
+
+        // SPEED — from a silly value, a confident descent converges in a handful of ticks, not ~100.
+        var current = 500;
+        var ticks = 0;
+        while (current > 25 && ticks < 200)
+        {
+            var next = AutoTuneDescent.NextTarget(current, 20, Math.Max(0, current - 20), 15, 10);
+            if (Math.Abs(next - current) < 5) break;
+            current = next;
+            ticks++;
+        }
+        Check(ticks <= 12, $"500ms → ~20ms must converge in a handful of ticks (took {ticks}; the old fixed crawl took ~96)");
+        Check(current >= 20, $"...and must land at or above the measured need (landed {current}ms)");
+
+        // The old crawl for comparison, so the gate records what changed.
+        var oldTicks = (500 - 20) / 5;
+        return $"floor never breached; confident descent {ticks} ticks vs the old crawl's {oldTicks}";
     }
 
     /// <summary>The latency slider must actually govern the streams that are playing. THE 2026-08-14

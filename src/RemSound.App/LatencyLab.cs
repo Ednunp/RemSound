@@ -45,6 +45,15 @@ internal static class LatencyLab
         // output, no ASIO), which tags every session RenderRoute.WasapiLane; the single latency
         // slider in every non-BothIndependent mode drives RenderRoute.Mixed (MainForm.MaxLatencyBox-
         // Route). Run this alone with: --latency-lab classic
+        // T5 — score the auto-tune DESCENT policy: old fixed crawl vs the evidence-based one, across
+        // several network characters. Two numbers decide it: how long to settle, and how many
+        // tune-blocking short-reads were bought on the way. Run with: --latency-lab tune
+        if (args.Any(a => string.Equals(a, "tune", StringComparison.OrdinalIgnoreCase)))
+        {
+            ScoreDescentPolicies();
+            return 0;
+        }
+
         // T4 — the BothIndependent ASIO lane: does a move of the ASIO slider reach an ASIO-lane
         // stream, and arrive in seconds like the single slider does? Run with: --latency-lab asio
         if (args.Any(a => string.Equals(a, "asio", StringComparison.OrdinalIgnoreCase)))
@@ -75,6 +84,91 @@ internal static class LatencyLab
         Console.WriteLine("=== SUMMARY ===");
         foreach (var line in results) Console.WriteLine("  " + line);
         return 0;
+    }
+
+    /// <summary>Score the auto-tune's DESCENT: old fixed 5 ms crawl against the evidence-based policy,
+    /// over several network characters. This is a fast simulation of the TICK LOOP (not realtime
+    /// audio): each network character says what jitter the tuner would measure and how deep the buffer
+    /// actually sits, and the two policies are driven tick-for-tick from the same numbers. Reported:
+    /// ticks to settle, and how many ticks the target spent BELOW what the network needed — the proxy
+    /// for "dropouts bought on the way down", which is the number that can veto the whole change.</summary>
+    private static void ScoreDescentPolicies()
+    {
+        Console.WriteLine("Auto-tune descent scoring — old fixed 5ms/tick vs evidence-based.");
+        Console.WriteLine("A tick is one auto-tune interval (5s by default). 'unsafe' = ticks spent below the network's real need.");
+        Console.WriteLine();
+
+        // name, the latency this network genuinely needs, the starting slider value
+        (string Name, int NeedMs, int StartMs)[] characters =
+        [
+            ("clean LAN, silly start",      12,  500),
+            ("clean LAN, mild overshoot",   12,   80),
+            ("stable internet",             35,  500),
+            ("jittery wifi",                70,  500),
+            ("bad network",                140,  500),
+        ];
+
+        foreach (var c in characters)
+        {
+            var old = SimulateDescent(c.NeedMs, c.StartMs, evidenceBased: false);
+            var neu = SimulateDescent(c.NeedMs, c.StartMs, evidenceBased: true);
+            Console.WriteLine($"  {c.Name,-28} need={c.NeedMs,3}ms start={c.StartMs,3}ms");
+            Console.WriteLine($"      old: settled in {old.Ticks,3} ticks ({old.Ticks * 5,4}s), unsafe ticks={old.Unsafe}");
+            Console.WriteLine($"      new: settled in {neu.Ticks,3} ticks ({neu.Ticks * 5,4}s), unsafe ticks={neu.Unsafe}");
+        }
+
+        // The case that actually threatens a fast descent: the network gets WORSE part-way down, so
+        // the low-water evidence gathered a moment ago is already out of date. A policy that sheds
+        // cushion quickly is more exposed here by construction — this is where it has to earn trust,
+        // not on the easy characters above. (Recovery is the raise path: immediate, and since 5.9 it
+        // arrives in seconds rather than minutes, which is what makes the boldness affordable.)
+        Console.WriteLine();
+        Console.WriteLine("  Worsening mid-descent — starts easy at 12ms, turns bad (90ms) at tick 6:");
+        var oldW = SimulateDescent(12, 500, evidenceBased: false, worsenAtTick: 6, worsenedNeedMs: 90);
+        var newW = SimulateDescent(12, 500, evidenceBased: true, worsenAtTick: 6, worsenedNeedMs: 90);
+        Console.WriteLine($"      old: settled in {oldW.Ticks,3} ticks ({oldW.Ticks * 5,4}s), unsafe ticks={oldW.Unsafe}");
+        Console.WriteLine($"      new: settled in {newW.Ticks,3} ticks ({newW.Ticks * 5,4}s), unsafe ticks={newW.Unsafe}");
+
+        Console.WriteLine();
+        Console.WriteLine("Verdict rule: the new policy must settle materially faster AND buy no extra unsafe ticks.");
+    }
+
+    /// <summary>Drive one policy to convergence. The tuner's recommendation is the network's real need
+    /// (that's what its gap measurements converge on), and the buffer's low-water mark is modelled as
+    /// "target minus what the network eats" — i.e. a deep buffer visibly never gets touched, which is
+    /// exactly the signal the evidence-based policy reads. Settled = within one hysteresis step.</summary>
+    private static (int Ticks, int Unsafe) SimulateDescent(
+        int needMs, int startMs, bool evidenceBased, int worsenAtTick = 0, int worsenedNeedMs = 0)
+    {
+        var current = startMs;
+        var unsafeTicks = 0;
+        var cleanTicks = 0;
+        for (var tick = 1; tick <= 400; tick++)
+        {
+            var need = worsenAtTick > 0 && tick >= worsenAtTick ? worsenedNeedMs : needMs;
+            // The buffer sits at the target and the network eats `need` of it, so the shallowest it
+            // reaches is target-need (never below zero — that's a dropout, which zeroes the evidence).
+            var lowWater = Math.Max(0, current - need);
+            var running = current < need;
+            if (running) { unsafeTicks++; cleanTicks = 0; } else cleanTicks++;
+
+            // A tick that ran short is SKIPPED by the real tuner (it returns early), and the raise
+            // path takes over on the next healthy tick — model both so the exposure is honest.
+            int next;
+            if (running)
+            {
+                next = need; // the tuner raises straight to the measured need, immediately
+            }
+            else
+            {
+                next = evidenceBased
+                    ? AutoTuneDescent.NextTarget(current, need, lowWater, sampleCount: 15, consecutiveCleanTicks: cleanTicks)
+                    : Math.Max(need, current - 5); // the old fixed crawl
+            }
+            if (Math.Abs(next - current) < 5 && !running) return (tick, unsafeTicks); // hysteresis: settled
+            current = next;
+        }
+        return (400, unsafeTicks);
     }
 
     /// <summary>The classic-mode reproduction: engine wired exactly as the shipped app wires it for a

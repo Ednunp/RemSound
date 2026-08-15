@@ -403,6 +403,15 @@ public sealed partial class MainForm : Form
     // the actual measurement lets the formula reflect reality. Same window length as the gap
     // queue so they share the lookback discipline.
     private readonly Queue<int> recentRenderCbGaps = new();
+    /// <summary>Per-second LOW-WATER marks of the receive buffer — the shallowest it got each second.
+    /// The evidence the auto-tune descends on (see <see cref="RemSound.Core.AutoTuneDescent"/>):
+    /// cushion the buffer never touched is provably spare, which is the only honest way to know what
+    /// can be shed without first taking it away and listening for the damage. Same window and same
+    /// per-second sampler as the gap queues, so all three age out together.</summary>
+    private readonly Queue<int> recentMinBuffers = new();
+    /// <summary>Consecutive auto-tune ticks with no tune-blocking short-reads. One quiet tick is
+    /// luck; several in a row is a pattern, and only a pattern earns a big evidence-backed step.</summary>
+    private int consecutiveCleanTuneTicks;
     private const int RecentMaxGapWindowSeconds = 60;
     private DateTime lastUserSliderMoveUtc = DateTime.MinValue;
     private bool suppressUserSliderMoveTracking; // true while continuous tune is changing the slider
@@ -7715,6 +7724,8 @@ public sealed partial class MainForm : Form
                 lastObservedSessionsOpenedCount = openCount;
                 recentMaxGaps.Clear();
                 recentRenderCbGaps.Clear();
+                recentMinBuffers.Clear();
+                consecutiveCleanTuneTicks = 0; // a new stream is new conditions; re-earn the evidence
                 lastSourceChangeUtc = DateTime.UtcNow;
             }
 
@@ -7729,6 +7740,10 @@ public sealed partial class MainForm : Form
                 // out together; auto-tune uses the max of this for an honest formula.
                 recentRenderCbGaps.Enqueue(diag.MaxRenderCallbackGapMs);
                 while (recentRenderCbGaps.Count > RecentMaxGapWindowSeconds) recentRenderCbGaps.Dequeue();
+                // Third mirror window: how shallow the buffer got this second. Feeds the auto-tune's
+                // unused-margin evidence (see recentMinBuffers).
+                recentMinBuffers.Enqueue(diag.BufferMinMs);
+                while (recentMinBuffers.Count > RecentMaxGapWindowSeconds) recentMinBuffers.Dequeue();
             }
         }
         else
@@ -9422,8 +9437,11 @@ public sealed partial class MainForm : Form
     ///      that the user is in "I want a huge buffer for terrible network" territory — they can
     ///      drag the slider there manually; the auto-tuner shouldn't go there on its own.
     ///   3. **Asymmetric step.** Raising the target on observed jitter happens immediately. Lowering
-    ///      is rate-limited to <see cref="MaxDecreasePerTickMs"/> per tick so a brief good window
-    ///      doesn't undo the protection a bad event just earned us.
+    ///      goes through <see cref="RemSound.Core.AutoTuneDescent"/>, which sizes the step from the
+    ///      buffer's LOW-WATER mark — cushion never touched is provably spare — and steps only
+    ///      proportionally when that evidence isn't there yet. Replaced a fixed 5 ms per tick, which
+    ///      made a silly starting value take twenty-plus ticks to unwind a distance the tuner had
+    ///      already measured in one (Ed, 2026-08-15).
     ///   4. **Skip tuning while underruns are growing.** If the buffer is currently underrunning,
     ///      the system isn't in steady state. Tuning now would react to broken stats.
     ///   5. **Skip if the user just touched the slider** — see <see cref="lastUserSliderMoveUtc"/>.
@@ -9519,7 +9537,6 @@ public sealed partial class MainForm : Form
         const int SafetyMarginMs = 5;
         const int HysteresisMs = 5;
         const int AutoTuneRecommendationCapMs = 200;
-        const int MaxDecreasePerTickMs = 5;
         const int LookbackSeconds = 15;
 
         // Defer to user's manual change — wait at least one tick interval before overriding.
@@ -9550,8 +9567,10 @@ public sealed partial class MainForm : Form
             // this tick — a high devGulp with a small underrunDelta is the Realtek fingerprint.
             var prefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
             logFile.Event($"{prefix}: skipping ({underrunDelta} new underruns since last tick, devGulp={deviceGulpDelta} ignored)");
+            consecutiveCleanTuneTicks = 0; // the buffer ran short — the evidence for shedding is void
             return;
         }
+        consecutiveCleanTuneTicks++;
 
         var sampleCount = Math.Min(LookbackSeconds, recentMaxGaps.Count);
         var skip = recentMaxGaps.Count - sampleCount;
@@ -9589,6 +9608,23 @@ public sealed partial class MainForm : Form
         var capped = Math.Min(recommended, AutoTuneRecommendationCapMs);
         var current = (int)slider.Value;
 
+        // Low-water evidence: the shallowest the buffer got across the same lookback window. Cushion
+        // it never touched is provably spare — that's what lets a descent be a measurement rather
+        // than a crawl. -1 = unknown, which AutoTuneDescent treats as "no evidence, step gently".
+        var lowWater = -1;
+        if (recentMinBuffers.Count > 0)
+        {
+            var lwSkip = recentMinBuffers.Count - Math.Min(LookbackSeconds, recentMinBuffers.Count);
+            var lwI = 0;
+            lowWater = int.MaxValue;
+            foreach (var m in recentMinBuffers)
+            {
+                if (lwI++ < lwSkip) continue;
+                if (m < lowWater) lowWater = m;
+            }
+            if (lowWater == int.MaxValue) lowWater = -1;
+        }
+
         int target;
         if (capped > current)
         {
@@ -9596,7 +9632,11 @@ public sealed partial class MainForm : Form
         }
         else
         {
-            target = Math.Max(capped, current - MaxDecreasePerTickMs);
+            // Descend on evidence rather than a fixed 5 ms crawl (2026-08-15, Ed). MaxDecreasePerTick
+            // is gone: AutoTuneDescent sizes the step from the unused margin when the evidence is
+            // strong, and proportionally when it isn't — so a silly value converges in a few ticks
+            // while a small correction stays gentle. Never below `capped`, which is the measured need.
+            target = AutoTuneDescent.NextTarget(current, capped, lowWater, sampleCount, consecutiveCleanTuneTicks);
         }
 
         var clamped = Math.Clamp(target, (int)slider.Minimum, (int)slider.Maximum);
@@ -9612,7 +9652,7 @@ public sealed partial class MainForm : Form
             suppressFlag = false;
         }
         var logPrefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
-        logFile.Event($"{logPrefix}: gap-max={gapPeak}ms gap-used={observedGap}ms renderCb={observedRenderCb}ms over {sampleCount}s recommended={recommended}ms capped={capped}ms prev={current}ms applied={clamped}ms frame={frameMs}ms devGulp={deviceGulpDelta}");
+        logFile.Event($"{logPrefix}: gap-max={gapPeak}ms gap-used={observedGap}ms renderCb={observedRenderCb}ms over {sampleCount}s recommended={recommended}ms capped={capped}ms lowWater={lowWater}ms cleanTicks={consecutiveCleanTuneTicks} prev={current}ms applied={clamped}ms frame={frameMs}ms devGulp={deviceGulpDelta}");
     }
 
     // UpdateTuneButtonEnabled + TuneLatencyAsync retired alongside the one-shot Tune button.
