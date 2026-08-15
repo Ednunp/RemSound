@@ -150,6 +150,7 @@ internal static partial class SelfTest
         RunStep(results, "Plugin window (peer list, job, bypass - screen-reader safe)", PluginWindowWiring);
         RunStep(results, "Plugin rate conversion (a 44.1k DAW must not transpose anyone)", PluginRateConversion);
         RunStep(results, "The plugin actually ships in this build (and installs from it)", PluginPayloadPresent);
+        RunStep(results, "The shipped plugin folder loads on its own (as a DAW loads it)", PluginFolderLoadsOnItsOwn);
         RunStep(results, "Plugin parameters (the screen-reader route that needs no window)", PluginParameters);
         RunStep(results, "Plugin logging (silent when off, honest when on)", PluginLogging);
         RunStep(results, "Plugin logging reaches the app's own log file (the wiring, not just the events)", PluginLoggingInTheApp);

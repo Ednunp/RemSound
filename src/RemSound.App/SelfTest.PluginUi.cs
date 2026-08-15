@@ -86,6 +86,97 @@ internal static partial class SelfTest
              + "job and peer reach the engine; Active works as a bypass that returns the peer";
     }
 
+    /// <summary>THE PLUGIN FOLDER MUST STAND ON ITS OWN — load it the way a DAW does.
+    ///
+    /// <para><b>Why this exists.</b> v6.0 shipped a plugin folder that Reaper scanned and got nothing
+    /// from. The .vst3 was there, the managed assembly was there, the runtimeconfig was there — the
+    /// gate checked for all of those and passed. What was missing was every NuGet DEPENDENCY: a .NET
+    /// library build does not copy them, so there was no NAudio and no Concentus, and the assembly
+    /// failed the moment it touched a resampler. Reaper cached "no plugins here" and it never appeared
+    /// in the effects list.</para>
+    ///
+    /// <para><b>The lesson, and why this test is shaped the way it is.</b> The old check listed the
+    /// files somebody expected to find. This one asks the ASSEMBLY what it needs and then proves the
+    /// folder can satisfy it — nothing is derived from what the author had in mind. It loads into its
+    /// own context with ONLY the plugin folder to probe, so the app's own copies of NAudio and the
+    /// rest cannot quietly stand in. That substitution is exactly what made the shipped folder look
+    /// fine from inside the app.</para></summary>
+    private static string? PluginFolderLoadsOnItsOwn()
+    {
+        var folder = PluginInstaller.SourceDirectory;
+        Check(Directory.Exists(folder), $"this build has no plugin folder ({folder})");
+
+        var assemblyPath = Path.Combine(folder, "RemSound.Plugin.dll");
+        Check(File.Exists(assemblyPath), "the managed plugin assembly must be in the shipped folder");
+
+        // Its own context, probing the plugin folder ALONE. isCollectible so the gate does not hold
+        // the files open afterwards.
+        var context = new System.Runtime.Loader.AssemblyLoadContext("remsound-plugin-folder-check", isCollectible: true);
+        try
+        {
+            var resolver = new System.Runtime.Loader.AssemblyDependencyResolver(assemblyPath);
+            var missing = new List<string>();
+            context.Resolving += (ctx, name) =>
+            {
+                // Framework assemblies come from the runtime, exactly as they do inside a DAW.
+                var beside = Path.Combine(folder, name.Name + ".dll");
+                if (File.Exists(beside)) return ctx.LoadFromAssemblyPath(beside);
+                var resolved = resolver.ResolveAssemblyToPath(name);
+                if (resolved is not null && File.Exists(resolved)) return ctx.LoadFromAssemblyPath(resolved);
+                missing.Add(name.Name ?? name.FullName);
+                return null;
+            };
+
+            var assembly = context.LoadFromAssemblyPath(assemblyPath);
+            var pluginType = assembly.GetType("RemSound.Plugin.RemSoundPlugin");
+            Check(pluginType is not null, "the plugin type must be in the shipped assembly");
+
+            // Walk what it actually references, rather than a list of what somebody expected.
+            foreach (var reference in assembly.GetReferencedAssemblies())
+            {
+                if (reference.Name is null) continue;
+                // Anything the .NET runtime supplies is a host concern, not ours to ship.
+                if (reference.Name.StartsWith("System.", StringComparison.Ordinal)
+                    || reference.Name is "mscorlib" or "netstandard" or "WindowsBase"
+                    || reference.Name.StartsWith("Microsoft.", StringComparison.Ordinal)) continue;
+                var beside = Path.Combine(folder, reference.Name + ".dll");
+                Check(File.Exists(beside),
+                    $"the plugin references {reference.Name} but it is not in the shipped folder - a DAW has nothing else to load it from");
+            }
+
+            // The real proof: CONSTRUCT it. Reflection over references catches a missing file; only
+            // running the constructor catches a dependency that resolves and then fails, and it is
+            // the constructor that a DAW calls first.
+            var instance = Activator.CreateInstance(pluginType!);
+            Check(instance is not null, "the plugin must construct from the shipped folder alone");
+            Check(missing.Count == 0,
+                $"loading the plugin from its own folder must resolve everything it asks for - could not find: {string.Join(", ", missing.Distinct())}");
+
+            // And it must reach the audio code, because that is where the missing pieces actually bit.
+            // Initialize builds the ports, the parameters and the resamplers - the NAudio types whose
+            // absence is what Reaper silently swallowed.
+            var initialize = pluginType!.GetMethod("Initialize");
+            var hostProperty = pluginType.GetProperty("Host");
+            Check(hostProperty is not null, "the plugin must expose Host, or the DAW cannot hand it one");
+            hostProperty!.SetValue(instance, new StubAudioHost());
+            try { initialize!.Invoke(instance, null); }
+            catch (Exception ex)
+            {
+                var inner = ex.InnerException ?? ex;
+                Check(false, $"the plugin must INITIALISE from the shipped folder, not just construct: {inner.GetType().Name}: {inner.Message}");
+            }
+
+            // Tidy up: close its link and log rather than leaving a socket open in the gate.
+            try { pluginType.GetMethod("CloseForTest", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?.Invoke(instance, null); }
+            catch { }
+
+            var shipped = Directory.GetFiles(folder, "*.dll").Length;
+            return $"the plugin folder loads and initialises on its own: {shipped} assemblies, every referenced one present, "
+                 + "constructed and initialised with only that folder to probe";
+        }
+        finally { try { context.Unload(); } catch { } }
+    }
+
     /// <summary>The plugin's named parameters — the screen-reader route that does not depend on the
     /// window working inside a particular host.
     ///

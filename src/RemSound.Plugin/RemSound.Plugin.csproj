@@ -28,6 +28,28 @@
     <RootNamespace>RemSound.Plugin</RootNamespace>
     <!-- A plugin is loaded INTO a host process; it is a library, never an exe. -->
     <OutputType>Library</OutputType>
+
+    <!-- SHIP THE DEPENDENCIES.
+
+         A .NET LIBRARY build does not copy its NuGet assemblies to the output folder. An application
+         does; a library normally doesn't need to, because whoever references it brings them along. A
+         VST plugin has no such parent — the DAW loads this folder and nothing else, so anything
+         missing from it simply is not there.
+
+         Without this the shipped folder had no NAudio, no Concentus and no native opus.dll, so
+         RemSound.Plugin.dll failed the moment it touched a resampler or a filter. Reaper scanned the
+         .vst3, got no plugins back, and cached that result — which is why it never appeared in the
+         effects list and left no log of its own to explain why (2026-08-15, diagnosed from Reaper's
+         own vstplugins64.ini, where our entry had a timestamp and no plugin name while every working
+         plugin had a name beside it).
+
+         The runtime identifier brings the native opus.dll along. NOT self-contained: RemSound is
+         framework-dependent everywhere and a plugin that dragged a private copy of .NET into
+         somebody's DAW would be worse. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
   </PropertyGroup>
 
   <ItemGroup>
