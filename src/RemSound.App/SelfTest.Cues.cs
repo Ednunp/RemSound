@@ -48,17 +48,57 @@ internal static partial class SelfTest
         var scratch = Path.Combine(Path.GetTempPath(), "remsound-cue-suite-" + Guid.NewGuid().ToString("N"));
         using var scope = AppConfig.UseThrowawayUserDataDirectory(scratch);
 
-        // EVERY cue must round-trip a custom sound path — that's the user-facing promise of the
-        // Preferences sound list ("choose your own WAV for this event").
+        // EVERY cue must round-trip a custom sound path — the user-facing promise of the Preferences
+        // sound list. There are TWO stores and the resolution order is per-profile FIRST, machine-wide
+        // as fallback (MainForm.LoadCueSound), so testing only one of them proves only half the
+        // journey — which is exactly what the first version of this test did.
+        var store = new RemSoundSettingsStore("RemSound");
         foreach (var id in ids)
         {
+            var machine = $@"C:\sounds\machine-{id}.wav";
             var cfg = AppConfig.Load();
-            cfg.MachineCueCustomPaths[id] = $@"C:\sounds\{id}.wav";
+            cfg.MachineCueCustomPaths[id] = machine;
             cfg.Save();
-            var back = AppConfig.Load();
-            Check(back.MachineCueCustomPaths.TryGetValue(id, out var p) && p == $@"C:\sounds\{id}.wav",
-                $"cue '{id}': a custom sound path must survive a save and reload");
+            Check(AppConfig.Load().MachineCueCustomPaths.TryGetValue(id, out var backMachine) && backMachine == machine,
+                $"cue '{id}': a machine-wide custom sound path must survive a save and reload");
+
+            var perProfile = $@"C:\sounds\profile-{id}.wav";
+            store.SaveCustomCuePath(id, perProfile);
+            Check(store.LoadCustomCuePath(id) == perProfile,
+                $"cue '{id}': a PER-PROFILE custom sound path must round-trip — it is the FIRST thing the resolver looks at");
+            store.SaveCustomCuePath(id, null);
+            Check(string.IsNullOrEmpty(store.LoadCustomCuePath(id)),
+                $"cue '{id}': clearing a per-profile custom path must actually clear it (or the cue is stuck on an old file)");
         }
+
+        // EVERY cue must have an on/off switch, and it must be findable. The flags live in two places —
+        // machine-wide ones on AppConfig, per-profile ones behind the settings store — so this maps each
+        // cue to its flag by name and FAILS on any cue that has no switch at all. A sound the user
+        // cannot turn off is a bug for someone who listens to this app all day.
+        var missingSwitch = new List<string>();
+        var machineFlags = 0;
+        var profileFlags = 0;
+        foreach (var id in ids)
+        {
+            var flagName = "Enable" + string.Concat(id.Split('-').Select(part => char.ToUpperInvariant(part[0]) + part[1..])) + "Cue";
+            var appConfigProp = typeof(AppConfig).GetProperty(flagName);
+            var storeMethod = typeof(RemSoundSettingsStore).GetMethod("Load" + flagName);
+            if (appConfigProp is not null)
+            {
+                machineFlags++;
+                // Round-trip it: off must stay off across a save/reload, or "mute this cue" is a lie.
+                var cfg = AppConfig.Load();
+                var original = (bool)appConfigProp.GetValue(cfg)!;
+                appConfigProp.SetValue(cfg, !original);
+                cfg.Save();
+                Check((bool)appConfigProp.GetValue(AppConfig.Load())! == !original,
+                    $"cue '{id}': its enable flag ({flagName}) must survive a save and reload");
+            }
+            else if (storeMethod is not null) profileFlags++;
+            else missingSwitch.Add($"{id} (looked for {flagName})");
+        }
+        Check(missingSwitch.Count == 0,
+            $"these cues have no on/off switch anywhere — the user cannot silence them: {string.Join(", ", missingSwitch)}");
 
         // MUTING must be absolute. --silent is what makes an unattended run (and the gate itself)
         // quiet; a cue that ignores it plays at whoever is at the screen. Ed heard exactly that from
@@ -90,7 +130,8 @@ internal static partial class SelfTest
         }
         finally { CheckSoundService.Suppressed = restoreSuppressed; }
 
-        return $"{ids.Length} cues in the registry; ids unique + file-safe; every one round-trips a custom sound path; muting and checkbox suppression hold";
+        return $"all {ids.Length} cues: ids unique + file-safe; BOTH custom-path stores round-trip (per-profile first, machine-wide fallback); "
+             + $"every cue has a working on/off switch ({machineFlags} machine-wide, {profileFlags} per-profile); muting and checkbox suppression hold";
     }
 
     /// <summary>A 44-byte silent WAV header — enough for a player to open without shipping a fixture.</summary>
