@@ -1,0 +1,18 @@
+RemSound latency lab - measuring depth-target convergence with the shipped playout code.
+Raise under test: 30ms -> 330ms. Expected growth at full depth-bias: ~3ms/s.
+
+--- T4 ASIO lane (two-slider mode): ASIO slider drives an ASIO-lane stream ---
+  session route after arrival: AsioLane  (slider writes to: AsioLane)
+  settled at slider 30ms: buffered=54ms
+  t+10s buffered= 289ms
+  t+20s buffered= 308ms
+  t+30s buffered= 311ms
+  t+40s buffered= 303ms
+  t+50s buffered= 322ms
+  t+60s buffered= 299ms
+  RAISE via slider: 54ms -> 299ms in 60s = 4.08ms/s  GROWS (slider works)
+  LOWER via slider: back to 30ms -> buffered=30ms after 3s
+
+
+=== SUMMARY ===
+  T4 ASIO lane (two-slider mode): ASIO slider drives an ASIO-lane stream: raise 4.08ms/s [GROWS (slider works)], lower -> 20ms

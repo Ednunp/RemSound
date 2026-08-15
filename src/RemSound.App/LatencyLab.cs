@@ -45,6 +45,17 @@ internal static class LatencyLab
         // output, no ASIO), which tags every session RenderRoute.WasapiLane; the single latency
         // slider in every non-BothIndependent mode drives RenderRoute.Mixed (MainForm.MaxLatencyBox-
         // Route). Run this alone with: --latency-lab classic
+        // T4 — the BothIndependent ASIO lane: does a move of the ASIO slider reach an ASIO-lane
+        // stream, and arrive in seconds like the single slider does? Run with: --latency-lab asio
+        if (args.Any(a => string.Equals(a, "asio", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunClassicAppPath(results, "T4 ASIO lane (two-slider mode): ASIO slider drives an ASIO-lane stream", asioLane: true);
+            Console.WriteLine();
+            Console.WriteLine("=== SUMMARY ===");
+            foreach (var line in results) Console.WriteLine("  " + line);
+            return 0;
+        }
+
         if (args.Any(a => string.Equals(a, "classic", StringComparison.OrdinalIgnoreCase)))
         {
             RunClassicAppPath(results, "T3 classic app path: WASAPI lane active, slider drives Mixed");
@@ -69,20 +80,25 @@ internal static class LatencyLab
     /// <summary>The classic-mode reproduction: engine wired exactly as the shipped app wires it for a
     /// plain WASAPI setup, then the slider raised through the very call MainForm makes. Measures the
     /// buffered depth the same way as the other scenarios.</summary>
-    private static void RunClassicAppPath(List<string> results, string name)
+    private static void RunClassicAppPath(List<string> results, string name, bool asioLane = false)
     {
         Console.WriteLine($"--- {name} ---");
         var endpoint = new IPEndPoint(IPAddress.Loopback, 47831);
         var engine = new PlayoutEngine(new ReceiverDiagnostics());
 
-        // 1. CompositeRenderBackend.SetOutputDevices: one WASAPI output ticked, no ASIO.
-        engine.SetLaneActive(RenderRoute.WasapiLane, true);
-        engine.SetLaneActive(RenderRoute.AsioLane, false);
-        // 2. The slider's startup value, applied the way MainForm applies it in classic mode.
-        engine.SetMaxLatencyMs(RenderRoute.Mixed, StartTargetMs);
+        // Which control the user is actually moving: the single slider (classic modes → Mixed), or
+        // the ASIO slider in BothIndependent (→ AsioLane, its own value, its own lane's streams).
+        var sliderRoute = asioLane ? RenderRoute.AsioLane : RenderRoute.Mixed;
+        if (asioLane) engine.SetIndependentLaneLatency(true); // AudioReceiver.SetAudioMode(BothIndependent)
+
+        // 1. CompositeRenderBackend.SetOutputDevices: which lanes have a ticked output device.
+        engine.SetLaneActive(RenderRoute.WasapiLane, !asioLane);
+        engine.SetLaneActive(RenderRoute.AsioLane, asioLane);
+        // 2. The slider's startup value, applied the way MainForm applies it.
+        engine.SetMaxLatencyMs(sliderRoute, StartTargetMs);
         // 3. A peer's stream arrives — ReconcileReplicasLocked tags it with the active lane.
         var session = engine.GetOrCreateSession(endpoint, 1, capacityBytes: 4 * 1024 * 1024);
-        Console.WriteLine($"  session route after arrival: {session.Route}  (slider writes to: {RenderRoute.Mixed})");
+        Console.WriteLine($"  session route after arrival: {session.Route}  (slider writes to: {sliderRoute})");
 
         const int WriteMs = 20, ReadMs = 10;
         var stop = false;
@@ -96,7 +112,7 @@ internal static class LatencyLab
             while (!Volatile.Read(ref stop))
             {
                 session.Write(writeBlock);
-                session.NoteFramesQueued(engine.TargetLatencyMs); // AudioReceiver's queued-callback lambda
+                session.NoteFramesQueued(engine.TargetLatencyMsFor(session.Route)); // AudioReceiver's queued-callback lambda
                 nextDueMs += WriteMs;
                 var sleep = nextDueMs - sw.Elapsed.TotalMilliseconds;
                 if (sleep > 0) Thread.Sleep((int)sleep);
@@ -126,7 +142,7 @@ internal static class LatencyLab
         Console.WriteLine($"  settled at slider {StartTargetMs}ms: buffered={settled}ms");
 
         // 4. The user drags the slider up mid-stream — MainForm's exact call.
-        engine.SetMaxLatencyMs(RenderRoute.Mixed, RaisedTargetMs);
+        engine.SetMaxLatencyMs(sliderRoute, RaisedTargetMs);
         for (var s = 0; s < MeasureSeconds; s++)
         {
             Thread.Sleep(1000);
@@ -137,7 +153,7 @@ internal static class LatencyLab
         var verdict = growth >= 2.0 ? "GROWS (slider works)" : growth >= 0.5 ? "SLOW" : "STALLED (the field bug)";
         Console.WriteLine($"  RAISE via slider: {settled}ms -> {after}ms in {MeasureSeconds}s = {growth:F2}ms/s  {verdict}");
 
-        engine.SetMaxLatencyMs(RenderRoute.Mixed, StartTargetMs);
+        engine.SetMaxLatencyMs(sliderRoute, StartTargetMs);
         Thread.Sleep(3000);
         Console.WriteLine($"  LOWER via slider: back to {StartTargetMs}ms -> buffered={session.BufferedMs}ms after 3s");
         Console.WriteLine();
