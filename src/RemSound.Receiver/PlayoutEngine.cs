@@ -373,6 +373,11 @@ internal sealed class PlayoutEngine : IWaveProvider
     /// </summary>
     public void SetMaxLatencyMs(RenderRoute route, int value, bool drainOnLower = true)
     {
+        // The ASIO slider only exists in BothIndependent. Elsewhere it's hidden, but the app still
+        // pushes its persisted value at startup (and its auto-tune can tick), which — now that every
+        // route resolves to the one shared value — would silently overwrite the visible slider with a
+        // hidden control's number. Ignore it: in single-slider mode the ASIO box governs nothing.
+        if (!independentLanes && route == RenderRoute.AsioLane) return;
         var clamped = Math.Clamp(value, 1, 500);
         var lane = LatencyFor(route);
         var previousTarget = lane.TargetMs;

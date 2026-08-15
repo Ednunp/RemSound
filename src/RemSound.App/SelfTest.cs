@@ -2989,6 +2989,15 @@ internal static class SelfTest
         Check(session.ReadFloats(scratch, 960, 30, 30) == 0,
             "lowering the slider must disarm+drain this stream — matching on the slider's route is what made 'lower' inert");
 
+        // The hidden ASIO slider must not touch the visible one. It only exists in BothIndependent,
+        // but the app pushes its persisted value at startup in EVERY mode (and its auto-tune can
+        // tick) — now that all routes resolve to the shared value, an unguarded write would overwrite
+        // the user's real slider with a hidden control's number.
+        engine.SetMaxLatencyMs(RenderRoute.Mixed, 120);
+        engine.SetMaxLatencyMs(RenderRoute.AsioLane, 8);
+        Check(engine.TargetLatencyMsFor(session.Route) == 120,
+            $"an ASIO-lane write must be ignored in single-slider mode (got {engine.TargetLatencyMsFor(session.Route)}ms, expected the visible slider's 120ms)");
+
         // --- Two-slider mode (BothIndependent): lanes stay genuinely separate ---
         var indep = new RemSound.Receiver.PlayoutEngine(new RemSound.Receiver.ReceiverDiagnostics());
         indep.SetMaxLatencyMs(RenderRoute.Mixed, 250);        // whatever the single slider last held...
@@ -3000,7 +3009,19 @@ internal static class SelfTest
         Check(indep.TargetLatencyMsFor(RenderRoute.WasapiLane) == 40 && indep.TargetLatencyMsFor(RenderRoute.AsioLane) == 8,
             "each lane must hold its own target in two-slider mode");
 
-        return "one slider now governs every stream (raise + lower reach it); two-slider mode keeps its lanes separate";
+        // An ASIO-lane stream must read the ASIO slider — and moving one slider must not disturb the
+        // other lane. This is the ASIO half of the wiring, provable without an ASIO device: the change
+        // is about WHICH value a lane reads, not about the driver path (untouched).
+        indep.SetLaneActive(RenderRoute.WasapiLane, false);
+        indep.SetLaneActive(RenderRoute.AsioLane, true);
+        var asioSession = indep.GetOrCreateSession(new IPEndPoint(IPAddress.Loopback, 47833), 2, capacityBytes: 1024 * 1024);
+        Check(asioSession.Route == RenderRoute.AsioLane, $"with only ASIO ticked a stream must land on the ASIO lane (got {asioSession.Route})");
+        Check(indep.TargetLatencyMsFor(asioSession.Route) == 8, "an ASIO-lane stream must read the ASIO slider's value");
+        indep.SetMaxLatencyMs(RenderRoute.AsioLane, 60);
+        Check(indep.TargetLatencyMsFor(asioSession.Route) == 60, "moving the ASIO slider must reach its own stream");
+        Check(indep.TargetLatencyMsFor(RenderRoute.WasapiLane) == 40, "...without disturbing the WASAPI lane");
+
+        return "one slider governs every stream (raise + lower reach it, hidden ASIO box ignored); two-slider mode keeps WASAPI and ASIO separate";
     }
 
     /// <summary>Issue #23 boot self-heal decision core. Scenario: at the boot lock screen the machine's

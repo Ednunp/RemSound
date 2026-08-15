@@ -776,6 +776,8 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 
 <p>The <strong>Audio latency</strong> control tells the receiving side how much sound to keep in reserve as a cushion against uneven network timing. A bigger cushion means more delay but fewer clicks. A smaller cushion means less delay but more clicks when the network wobbles.</p>
 
+<p><strong>You can change it while you're listening.</strong> Move the control and the delay follows within a few seconds &mdash; there's no gap or click while it changes. Lowering it takes effect straight away. Raising it can't happen instantly, because the extra cushion has to be built up out of the sound still arriving, so RemSound plays very slightly slow for a moment while it banks the difference: a big jump takes a few seconds to arrive and you can hear it stretch out as it goes. That's the change happening, not a fault.</p>
+
 <table>
 <tr><th>Setting</th><th>Best for</th><th>Trade-off</th></tr>
 <tr><td>5&ndash;10 ms</td><td>Local network, same computer.</td><td>Crackles on any internet connection with even modest jitter.</td></tr>

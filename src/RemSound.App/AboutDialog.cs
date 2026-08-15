@@ -20,6 +20,14 @@ internal sealed class AboutDialog : Form
     /// updates" path.</summary>
     private const string ReleaseNotes =
         """
+        RemSound v5.9
+
+        The audio latency control now works properly while you're listening.
+
+        On most setups, moving the latency control while sound was playing did nothing at all — neither up nor down. It only took effect if you set it before connecting. Two things were wrong: the control was writing its value where the audio never looked, and even when it landed, a change crept in so slowly that a big move took over two minutes to arrive. Both are fixed. Move it now and the delay follows within a few seconds, with no gap or click — raising it stretches the sound very slightly for a moment while the extra cushion builds up, which is the change happening. Automatic latency tuning was affected by the same fault and now works too.
+
+        Setups with separate WASAPI and ASIO controls were the one case that already worked, and they keep their two independent settings exactly as before.
+
         RemSound v5.8
 
         A repair for the lock-screen service's settings folder.

@@ -1,18 +1,16 @@
-# RemSound v5.8
+# RemSound v5.9
 
-A repair for the lock-screen service's settings folder.
+The audio latency control now works properly while you're listening.
 
-Some machines ended up with the service's settings folder locked so tightly that nothing could use it — saving the service profile failed with "access denied", the service's log files wouldn't open even in Notepad, and on some machines the service itself couldn't start. It came from a permissions bug in a recent release, and reinstalling didn't clear it.
+On most setups, moving the latency control while sound was playing did nothing at all — neither up nor down. It only ever took effect if you set it before connecting, which made it look like the setting was simply ignored.
 
-This release fixes the cause and heals affected machines automatically:
+Two separate things were wrong, and both are fixed:
 
-- The service applies the fix on its own when it installs this update — for most people that's it, nothing to do.
-- RemSound also checks the folder every time it starts, and offers a one-click repair if it finds a problem.
-- And there's a "Repair service folder access" item in the Service menu you can run any time. One administrator prompt, and saving the service profile and reading the logs work again.
+- The control was sending its value somewhere the audio never looked, so the receiving side quietly stayed on its starting value for the whole session.
+- Even once that reached the right place, the change crept in so slowly that a large move took over two minutes to arrive — still indistinguishable from nothing happening.
 
-## Also in this release
+Move it now and the delay follows within a few seconds. There's no gap and no click while it changes. Lowering takes effect straight away; raising can't be instant, because the extra cushion has to be built out of the sound still arriving, so RemSound plays very slightly slow for a moment while it banks the difference — you can hear it stretch, and that's the change happening.
 
-- The service's log files are readable from every account on the machine again, so you can always open them in Notepad if you need to look at one or send it in. (The service's settings stay protected as before.)
-- If a service action fails, the message now says what actually went wrong instead of showing a bare error code, and the reason is recorded in the service's own log.
-- The repair, and the folder protection itself, now always apply to the account that's actually using RemSound — even on PCs where a different account's password is typed at the administrator prompt.
-- The About box now shows the newest five releases instead of the entire version history, which had grown large enough to upset some screen readers. The full history stays here on the releases page.
+Automatic latency tuning was affected by the same fault, so it now takes effect too.
+
+Setups using separate WASAPI and ASIO latency controls were the one case that already worked. They keep their two independent settings, unchanged.
