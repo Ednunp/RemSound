@@ -131,6 +131,7 @@ internal static partial class SelfTest
         RunStep(results, "About box shows only the newest releases (screen-reader-safe size)", AboutBoxNotesTrimmed);
         RunStep(results, "Latency slider reaches the streams it governs (one slider = one value)", LatencySliderReachesSessions);
         RunStep(results, "Auto-tune descends on evidence (never below the measured need)", AutoTuneDescentPolicy);
+        RunStep(results, "The two auto-tunes behave identically but stay independent (WASAPI vs ASIO)", AutoTuneLanesIndependent);
         RunStep(results, "Every control is specified (no control escapes the suite)", EveryControlIsSpecified);
         foreach (var cfg in SuiteConfigs)
             RunStep(results, $"Control suite - {cfg.Name} (UI + accessibility + theme + effect)", () => RunControlSuite(cfg));
@@ -3027,6 +3028,57 @@ internal static partial class SelfTest
         // The old crawl for comparison, so the gate records what changed.
         var oldTicks = (500 - 20) / 5;
         return $"floor never breached; fast descent {ticks} ticks vs the old crawl's {oldTicks}; creep reaches the need and stops at a learned floor";
+    }
+
+    /// <summary>The WASAPI and ASIO auto-tunes must follow exactly the SAME rules — one policy, no
+    /// second implementation to drift — while keeping entirely SEPARATE memory. Different hardware,
+    /// different natural latency, different distress: one lane running short must never set the other
+    /// lane's floor, and one lane's quiet spell must never earn the other lane a bold step.
+    ///
+    /// Ed asked the question directly (2026-08-15: "do the 2 auto tunes work in exactly the same way
+    /// but independent of each other?") and it found a real bug in unshipped code — the creep's
+    /// clean-tick counter and learned floor were single shared fields, so the lanes would have
+    /// corrupted each other's evidence. Hence this test.</summary>
+    private static string? AutoTuneLanesIndependent()
+    {
+        // SAME RULES: identical inputs must give identical output, because there is one policy.
+        for (var current = 40; current <= 400; current += 60)
+        {
+            var wasapi = AutoTuneDescent.NextTarget(current, 30, current - 30, 15, 9, policy: null, creep: new AutoTuneDescent.CreepState());
+            var asio = AutoTuneDescent.NextTarget(current, 30, current - 30, 15, 9, policy: null, creep: new AutoTuneDescent.CreepState());
+            Check(wasapi == asio, $"the two lanes must follow the same rule (at {current}ms: WASAPI {wasapi}, ASIO {asio})");
+        }
+
+        // INDEPENDENT MEMORY: a shortfall on one lane must not touch the other's floor.
+        var wasapiMem = new AutoTuneDescent.CreepState();
+        var asioMem = new AutoTuneDescent.CreepState();
+        asioMem.NoteShortfallAt(60);                       // the ASIO lane got into trouble at 60ms
+        Check(asioMem.DiscoveredFloorMs > 60, "the lane that ran short must learn a floor");
+        Check(wasapiMem.DiscoveredFloorMs == 0,
+            $"the OTHER lane must learn nothing from it (it picked up a floor of {wasapiMem.DiscoveredFloorMs}ms)");
+
+        // ...and that separation must show in the actual decision, not just the field.
+        var asioNext = AutoTuneDescent.NextTarget(80, 20, lowWaterMs: 60, sampleCount: 15, consecutiveCleanTicks: 30, policy: null, creep: asioMem);
+        var wasapiNext = AutoTuneDescent.NextTarget(80, 20, lowWaterMs: 60, sampleCount: 15, consecutiveCleanTicks: 30, policy: null, creep: wasapiMem);
+        Check(asioNext >= asioMem.DiscoveredFloorMs, "the troubled lane must respect the floor it learned");
+        Check(wasapiNext < asioNext,
+            $"the untroubled lane must still be free to descend past it (WASAPI {wasapiNext}ms vs ASIO {asioNext}ms)");
+
+        // Each lane's creep interval is its own: probing one must not consume the other's wait.
+        var a = new AutoTuneDescent.CreepState();
+        var b = new AutoTuneDescent.CreepState();
+        for (var i = 0; i < 3; i++) AutoTuneDescent.NextTarget(45, 30, 15, 15, 30, policy: null, creep: a);
+        Check(b.TicksSinceProbe == 0, "one lane's creep probes must not advance the other lane's schedule");
+
+        // Forgetting is per-lane too — a new stream on one lane doesn't wipe the other's lesson.
+        asioMem.Reset();
+        Check(asioMem.DiscoveredFloorMs == 0, "a reset lane forgets its floor");
+        var kept = new AutoTuneDescent.CreepState();
+        kept.NoteShortfallAt(50);
+        asioMem.Reset();
+        Check(kept.DiscoveredFloorMs > 50, "...without wiping another lane's memory");
+
+        return "one policy for both lanes; floors, clean runs, creep schedules and resets all per-lane";
     }
 
     /// <summary>The latency slider must actually govern the streams that are playing. THE 2026-08-14

@@ -411,11 +411,30 @@ public sealed partial class MainForm : Form
     private readonly Queue<int> recentMinBuffers = new();
     /// <summary>Consecutive auto-tune ticks with no tune-blocking short-reads. One quiet tick is
     /// luck; several in a row is a pattern, and only a pattern earns a big evidence-backed step.</summary>
-    private int consecutiveCleanTuneTicks;
-    /// <summary>What the auto-tune has learned about how thin THIS machine can safely run — the creep
-    /// phase's discovered floor (see <see cref="RemSound.Core.AutoTuneDescent.CreepState"/>). Reset on
-    /// a new stream, because the lesson described the old conditions.</summary>
-    private readonly AutoTuneDescent.CreepState tuneCreepState = new();
+    /// <summary>Per-LANE auto-tune memory. The WASAPI and ASIO lanes tune independently — different
+    /// hardware, different natural latency, different distress — so each needs its OWN clean-tick run
+    /// and its OWN learned floor. Sharing them (which the first cut of the creep did, 2026-08-15, and
+    /// Ed caught by asking whether the two tuners were genuinely independent) means one lane's
+    /// shortfall sets the other lane's floor and each tick double-counts the other's quiet spell.</summary>
+    private sealed class LaneTuneMemory
+    {
+        /// <summary>Consecutive ticks on THIS lane with no tune-blocking short-reads. One quiet tick
+        /// is luck; several is a pattern, and only a pattern earns a big evidence-backed step.</summary>
+        public int CleanTicks;
+        /// <summary>What the creep has learned about how thin THIS lane can safely run.</summary>
+        public readonly AutoTuneDescent.CreepState Creep = new();
+        public void Reset() { CleanTicks = 0; Creep.Reset(); }
+    }
+    private readonly LaneTuneMemory mixedTuneMemory = new();
+    private readonly LaneTuneMemory wasapiTuneMemory = new();
+    private readonly LaneTuneMemory asioTuneMemory = new();
+    /// <summary>The memory belonging to a lane. Mixed is the classic single-slider world.</summary>
+    private LaneTuneMemory TuneMemoryFor(RenderRoute route) => route switch
+    {
+        RenderRoute.WasapiLane => wasapiTuneMemory,
+        RenderRoute.AsioLane => asioTuneMemory,
+        _ => mixedTuneMemory,
+    };
     private const int RecentMaxGapWindowSeconds = 60;
     private DateTime lastUserSliderMoveUtc = DateTime.MinValue;
     private bool suppressUserSliderMoveTracking; // true while continuous tune is changing the slider
@@ -7733,7 +7752,10 @@ public sealed partial class MainForm : Form
                 recentMaxGaps.Clear();
                 recentRenderCbGaps.Clear();
                 recentMinBuffers.Clear();
-                consecutiveCleanTuneTicks = 0; // a new stream is new conditions; re-earn the evidence
+                // New conditions: every lane re-earns its evidence and forgets its learned floor.
+                mixedTuneMemory.Reset();
+                wasapiTuneMemory.Reset();
+                asioTuneMemory.Reset();
                 lastSourceChangeUtc = DateTime.UtcNow;
             }
 
@@ -9555,6 +9577,7 @@ public sealed partial class MainForm : Form
         int intervalSec,
         int frameMs)
     {
+        var memory = TuneMemoryFor(route);
         // Render period was a hardcoded 10ms here (sized for shared-mode WASAPI). On ASIO
         // with a small buffer (32 samples = 0.67ms callback) the real value is 1-2ms, and
         // the constant inflated every recommendation by 8ms+ for ASIO users. Now derived
@@ -9594,13 +9617,13 @@ public sealed partial class MainForm : Form
             // this tick — a high devGulp with a small underrunDelta is the Realtek fingerprint.
             var prefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
             logFile.Event($"{prefix}: skipping ({underrunDelta} new underruns since last tick, devGulp={deviceGulpDelta} ignored)");
-            consecutiveCleanTuneTicks = 0; // the buffer ran short — the evidence for shedding is void
-            // ...and record WHERE it ran short: that value is too thin for this machine, so the creep
+            memory.CleanTicks = 0; // this lane's buffer ran short — its evidence for shedding is void
+            // ...and record WHERE it ran short: that value is too thin for THIS lane, so its creep
             // must never probe back down to it. A floor learned by experiment beats a guessed constant.
-            tuneCreepState.NoteShortfallAt((int)slider.Value);
+            memory.Creep.NoteShortfallAt((int)slider.Value);
             return;
         }
-        consecutiveCleanTuneTicks++;
+        memory.CleanTicks++;
 
         var sampleCount = Math.Min(LookbackSeconds, recentMaxGaps.Count);
         var skip = recentMaxGaps.Count - sampleCount;
@@ -9666,8 +9689,8 @@ public sealed partial class MainForm : Form
             // is gone: AutoTuneDescent sizes the step from the unused margin when the evidence is
             // strong, and proportionally when it isn't — so a silly value converges in a few ticks
             // while a small correction stays gentle. Never below `capped`, which is the measured need.
-            target = AutoTuneDescent.NextTarget(current, capped, lowWater, sampleCount, consecutiveCleanTuneTicks,
-                policy: null, creep: tuneCreepState);
+            target = AutoTuneDescent.NextTarget(current, capped, lowWater, sampleCount, memory.CleanTicks,
+                policy: null, creep: memory.Creep);
         }
 
         var clamped = Math.Clamp(target, (int)slider.Minimum, (int)slider.Maximum);
@@ -9683,7 +9706,7 @@ public sealed partial class MainForm : Form
             suppressFlag = false;
         }
         var logPrefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
-        logFile.Event($"{logPrefix}: gap-max={gapPeak}ms gap-used={observedGap}ms renderCb={observedRenderCb}ms over {sampleCount}s recommended={recommended}ms capped={capped}ms lowWater={lowWater}ms cleanTicks={consecutiveCleanTuneTicks} learnedFloor={tuneCreepState.DiscoveredFloorMs}ms prev={current}ms applied={clamped}ms frame={frameMs}ms devGulp={deviceGulpDelta}");
+        logFile.Event($"{logPrefix}: gap-max={gapPeak}ms gap-used={observedGap}ms renderCb={observedRenderCb}ms over {sampleCount}s recommended={recommended}ms capped={capped}ms lowWater={lowWater}ms cleanTicks={memory.CleanTicks} learnedFloor={memory.Creep.DiscoveredFloorMs}ms prev={current}ms applied={clamped}ms frame={frameMs}ms devGulp={deviceGulpDelta}");
     }
 
     // UpdateTuneButtonEnabled + TuneLatencyAsync retired alongside the one-shot Tune button.

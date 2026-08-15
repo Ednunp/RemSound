@@ -155,7 +155,9 @@ $dev = Invoke-RsCli @('--devices')
 if ($dev.Code -eq 0 -and $dev.Text.Length -gt 0) { Pass "--devices ran and produced output" } else { Fail "--devices exit $($dev.Code)" }
 
 Write-Host "`nIn-app self-test:" -ForegroundColor Cyan
-$st = Invoke-RsCli @('--selftest')
+# --silent: the gate must be SILENT. The self-test drives controls that play cue sounds, and
+# without this every gate run chimed at whoever was at the screen (Ed, 2026-08-15).
+$st = Invoke-RsCli @('--selftest', '--silent')
 foreach ($line in ($st.Text -split "`r?`n")) {
     if ($line -match '\[(PASS|FAIL|SKIP)\]|^RESULT:') { Write-Host "  $($line.Trim())" }
 }

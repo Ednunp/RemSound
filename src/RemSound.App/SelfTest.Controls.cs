@@ -245,6 +245,13 @@ internal static partial class SelfTest
             throw new CheckFailed($"could not put the app into {mode} for the suite (it reports {settings.LoadAudioMode()})");
 
         MainForm? form = null;
+        // The suite ticks controls that play cue sounds. Muting is NOT left to the caller passing
+        // --silent (run-tests.ps1 didn't, so every gate run chimed at whoever was at the screen —
+        // Ed, 2026-08-15). A test that makes noise on someone's speakers is a broken test.
+        var restoreMuted = CuePlayer.GloballyMuted;
+        var restoreCheckSounds = CheckSoundService.Suppressed;
+        CuePlayer.GloballyMuted = true;
+        CheckSoundService.Suppressed = true;
         try
         {
             // A profile WITH a password: ticking send/receive runs EnsureStreamingPassword, which
@@ -283,7 +290,7 @@ internal static partial class SelfTest
 
             var specs = BuildControlSpecs();
             var problems = new List<string>();
-            var effectsProven = 0;
+            var proven = new List<string>();
             var uiChecked = 0;
 
             foreach (var spec in specs)
@@ -337,16 +344,19 @@ internal static partial class SelfTest
                 if (Equals(before, after))
                     problems.Add($"{spec.Field}: moving it changed NOTHING — it claims to govern {spec.Governs} (before={before}, after={after})");
                 else
-                    effectsProven++;
+                    proven.Add(spec.Field);
             }
 
             if (problems.Count > 0)
                 throw new CheckFailed($"{config.Name}: " + string.Join("; ", problems));
-            return $"{config.Name}: streams land on {probe.Route}; {uiChecked} controls audited (UI + accessibility + theme), {effectsProven} proven to reach what they govern";
+            return $"{config.Name}: streams land on {probe.Route}; {uiChecked} controls audited (UI + accessibility + theme); "
+                 + $"{proven.Count} proven to reach what they govern [{string.Join(", ", proven)}]";
         }
         finally
         {
             try { form?.Dispose(); } catch { }
+            CuePlayer.GloballyMuted = restoreMuted;
+            CheckSoundService.Suppressed = restoreCheckSounds;
 
         }
     }
@@ -357,6 +367,13 @@ internal static partial class SelfTest
     private static string? EveryControlIsSpecified()
     {
         MainForm? form = null;
+        // The suite ticks controls that play cue sounds. Muting is NOT left to the caller passing
+        // --silent (run-tests.ps1 didn't, so every gate run chimed at whoever was at the screen —
+        // Ed, 2026-08-15). A test that makes noise on someone's speakers is a broken test.
+        var restoreMuted = CuePlayer.GloballyMuted;
+        var restoreCheckSounds = CheckSoundService.Suppressed;
+        CuePlayer.GloballyMuted = true;
+        CheckSoundService.Suppressed = true;
         try
         {
             try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
