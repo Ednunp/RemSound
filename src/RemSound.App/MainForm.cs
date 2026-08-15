@@ -346,6 +346,22 @@ public sealed partial class MainForm : Form
         ScrollBars = ScrollBars.Vertical,
         AccessibleName = "Connection status (Alt+S)",
     };
+    /// <summary>Read-only readout of what each lane's latency is SET to and what it is actually
+    /// DELIVERING, end to end. WASAPI and ASIO are separate journeys with their own queue depth and
+    /// their own output period, so they are reported apart — a blended figure would hide exactly the
+    /// difference the user is trying to read (Ed, 2026-08-15). Deliberately NOT in the status line:
+    /// two lanes there would bloat a line a screen reader already reads in full. A focusable
+    /// read-only TextBox (the statusReadout pattern) so NVDA can arrow through it line by line.</summary>
+    private readonly TextBox measuredLatencyReadout = new()
+    {
+        Multiline = true,
+        ReadOnly = true,
+        TabStop = true,
+        Width = 460,
+        Height = 40,
+        BorderStyle = BorderStyle.FixedSingle,
+        AccessibleName = "Measured latency (Alt+M)",
+    };
     private string lastStatusReadoutText = string.Empty;
     // For computing byte-rate deltas. Sampled at each status tick; first tick has no
     // prior baseline so the rate shows as 0.
@@ -425,10 +441,11 @@ public sealed partial class MainForm : Form
         public readonly AutoTuneDescent.CreepState Creep = new();
         public void Reset() { CleanTicks = 0; Creep.Reset(); }
     }
-    /// <summary>The end-to-end latency last measured, and the lane period behind it. Cached because
-    /// the per-lane callback-gap read RESETS the counter — the status line must not steal it from the
-    /// diagnostic. 0 = nothing measured yet (not receiving, or too early).</summary>
-    private double lastAchievedLatencyMs;
+    /// <summary>End-to-end latency last measured, PER LANE. Cached because the per-lane callback-gap
+    /// read RESETS the counter — the readout must not steal the measurement from the diagnostic.
+    /// 0 = nothing measured for that lane yet (not receiving on it, or too early).</summary>
+    private double achievedLatencyWasapiMs;
+    private double achievedLatencyAsioMs;
     private readonly LaneTuneMemory mixedTuneMemory = new();
     private readonly LaneTuneMemory wasapiTuneMemory = new();
     private readonly LaneTuneMemory asioTuneMemory = new();
@@ -4904,7 +4921,7 @@ public sealed partial class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 4,
+            RowCount = 5,
             AutoSize = true,
         };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -5057,6 +5074,18 @@ public sealed partial class MainForm : Form
         artefactContainer.Controls.Add(artefactBox);
         panel.Controls.Add(artefactLabel, 0, 3);
         panel.Controls.Add(artefactContainer, 1, 3);
+
+        // Measured latency: last row, straight after the latency + auto-tune controls it reports on.
+        measuredLatencyReadout.Text = FormatMeasuredLatency(false, 0, 0, 0, 0);
+        var measuredLatencyLabel = new MnemonicLabel
+        {
+            Text = "&Measured latency (Alt+M)",
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            MnemonicTarget = measuredLatencyReadout,
+        };
+        panel.Controls.Add(measuredLatencyLabel, 0, 4);
+        panel.Controls.Add(measuredLatencyReadout, 1, 4);
 
         // Wire ASIO companion control event handlers and apply initial visibility now that
         // every element exists. After this method returns the panel is ready to dock into
@@ -7315,6 +7344,46 @@ public sealed partial class MainForm : Form
         return $" Latency set to {requestedMs} ms, currently achieving {achievedMs:0} ms.";
     }
 
+    /// <summary>The measured end-to-end latency for ONE lane, or 0 when that lane isn't carrying
+    /// audio. Shared terms (capture, encode, wire) plus that lane's OWN queue depth and output
+    /// period — the two terms that make the two journeys different lengths.</summary>
+    private double LaneLatencyMs(RenderRoute route, double sharedMs, double fallbackTotalMs)
+    {
+        if (!receiver.HasSessionsForRoute(route)) return 0;
+        var period = receiver.MaxRenderCallbackGapMsFor(route);
+        if (period <= 0) return fallbackTotalMs; // nothing measured for this lane yet
+        return sharedMs + receiver.CurrentBufferMsFor(route) + RenderBufferEstimateMs(period);
+    }
+
+    /// <summary>Fill the read-only measured-latency readout: what each lane is SET to, and what it is
+    /// actually DELIVERING. Two lanes, reported apart — a single blended figure would hide exactly the
+    /// difference the user is trying to see (Ed, 2026-08-15). Lives next to the latency controls
+    /// rather than in the status line, which would be far too much to read out.</summary>
+    private void UpdateMeasuredLatencyReadout()
+    {
+        if (measuredLatencyReadout is null) return;
+        var text = FormatMeasuredLatency(
+            settings.LoadAudioMode() == AudioMode.BothIndependent,
+            receiver.TargetLatencyMsFor(RenderRoute.WasapiLane), achievedLatencyWasapiMs,
+            receiver.TargetLatencyMsFor(RenderRoute.AsioLane), achievedLatencyAsioMs);
+        if (measuredLatencyReadout.Text != text) measuredLatencyReadout.Text = text;
+    }
+
+    /// <summary>Pure and testable: the readout's wording. One line per lane in two-slider mode; one
+    /// unlabelled line when there is only one lane, because naming a lane the user hasn't got is
+    /// noise. "not receiving" rather than a zero, so a screen reader never reads a false figure.</summary>
+    internal static string FormatMeasuredLatency(
+        bool bothLanes, int wasapiSetMs, double wasapiAchievedMs, int asioSetMs, double asioAchievedMs)
+    {
+        static string Line(string lane, int setMs, double achievedMs) =>
+            achievedMs <= 0
+                ? $"{lane}set to {setMs} ms, not receiving"
+                : $"{lane}set to {setMs} ms, achieving {achievedMs:0} ms";
+        return bothLanes
+            ? Line("WASAPI: ", wasapiSetMs, wasapiAchievedMs) + Environment.NewLine + Line("ASIO: ", asioSetMs, asioAchievedMs)
+            : Line("", wasapiSetMs, wasapiAchievedMs);
+    }
+
     // ===================== Status / log =====================
 
     private void UpdateStatus()
@@ -7328,8 +7397,9 @@ public sealed partial class MainForm : Form
             : "not receiving";
         var peerCount = knownPeers.Count;
         var hbSummary = heartbeatService?.GetHealthSummary() ?? "no peers";
-        var latencyText = FormatLatencyStatus(receiver.IsRunning ? receiver.TargetLatencyMs : 0, lastAchievedLatencyMs);
-        statusLabel.Text = $"Connected for {since}. {peerCount} peer(s) known. {sendText}. {receiveText}.{latencyText} Heartbeat: {hbSummary}.";
+        // The measured latency deliberately does NOT appear here: with two lanes to report it would
+        // bloat a line a screen reader already reads in full. It lives beside the latency controls.
+        statusLabel.Text = $"Connected for {since}. {peerCount} peer(s) known. {sendText}. {receiveText}. Heartbeat: {hbSummary}.";
         bool streaming = connected && (sender.IsRunning || receiver.IsRunning);
         healthLabel.Text = connected
             ? streaming ? "Health: streaming" : "Health: idle"
@@ -7772,7 +7842,13 @@ public sealed partial class MainForm : Form
                 var renderBufferMs = RenderBufferEstimateMs(lanePeriodMs);
                 // EVERY stage of the journey, or the total is a comfortable fiction.
                 var totalMs = captureBufferMs + senderAccumulatorMs + wireOneWayMs + diag.BufferAvgMs + renderBufferMs;
-                lastAchievedLatencyMs = totalMs; // for the status line — see FormatLatencyStatus
+                // PER-LANE totals for the readout. Capture, encode and wire are shared by both lanes;
+                // the queue depth and the output period are not — those are the two terms that make a
+                // WASAPI journey and an ASIO journey genuinely different lengths.
+                var sharedMs = captureBufferMs + senderAccumulatorMs + wireOneWayMs;
+                achievedLatencyWasapiMs = LaneLatencyMs(RenderRoute.WasapiLane, sharedMs, totalMs);
+                achievedLatencyAsioMs = LaneLatencyMs(RenderRoute.AsioLane, sharedMs, totalMs);
+                UpdateMeasuredLatencyReadout();
                 logFile.Event($"latency-probe estimated one-way ≈ {totalMs:0.0}ms " +
                     $"(capture={captureBufferMs:0.0}, send-accum={senderAccumulatorMs:0.0}, wire={wireOneWayMs:0.0}, recv-queue={diag.BufferAvgMs}, render={renderBufferMs:0.0})");
             }

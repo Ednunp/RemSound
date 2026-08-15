@@ -427,6 +427,10 @@ public sealed class AudioReceiver : IDisposable
     // CompositeRenderBackend.TakeMaxFanOutCacheBytes and the fanCacheMs= diag column.
     public string OutputDeviceName => multiOutput.ActiveDeviceSummary;
     public int CurrentBufferMs => playoutEngine.CurrentBufferMs;
+
+    /// <summary>Queue depth for one lane — WASAPI and ASIO are separate journeys and must be reported
+    /// apart (see PlayoutEngine.CurrentBufferMsFor).</summary>
+    public int CurrentBufferMsFor(RenderRoute route) => playoutEngine.CurrentBufferMsFor(route);
     public int TargetLatencyMs => playoutEngine.TargetLatencyMs;
 
     /// <summary>

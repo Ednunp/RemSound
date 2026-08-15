@@ -149,6 +149,9 @@ internal static partial class SelfTest
         new("continuousIntervalBox", "how often auto-tune re-checks",
             (f, c) => SelectNext(c),
             f => f.AutoTuneTimerIntervalForTest),
+        // Read-only readout: it reports latency, it doesn't set any. Its WORDING is pinned separately
+        // by the "Measured-latency readout" step (FormatMeasuredLatency), which is where the substance is.
+        new("measuredLatencyReadout", "read-only display of each lane's set vs achieved latency", GovernsNothing: true),
         new("priorityModeBox", "the high-priority / keep-awake levers",
             (f, c) => ((CheckBox)c).Checked = !((CheckBox)c).Checked,
             f => f.SettingsForTest.LoadPriorityMode()),

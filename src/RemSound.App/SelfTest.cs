@@ -137,7 +137,7 @@ internal static partial class SelfTest
         RunStep(results, "Dialog control suite (every dialog: accessibility + theme + driven)", DialogControlSuite);
         RunStep(results, "Every sound is pinned (registry, custom paths, muting, checkbox suppression)", CueCoverage);
         RunStep(results, "Latency estimate counts every stage (no silently-missing term)", LatencyEstimateComplete);
-        RunStep(results, "Status line reports latency asked-for vs actually achieved", LatencyStatusLine);
+        RunStep(results, "Measured-latency readout keeps WASAPI and ASIO separate", MeasuredLatencyReadout);
         foreach (var cfg in SuiteConfigs)
             RunStep(results, $"Control suite - {cfg.Name} (UI + accessibility + theme + effect)", () => RunControlSuite(cfg));
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);
@@ -3007,6 +3007,46 @@ internal static partial class SelfTest
         // The old crawl for comparison, so the gate records what changed.
         var oldTicks = (500 - 20) / 5;
         return $"floor never breached; fast descent {ticks} ticks vs the old crawl's {oldTicks}; creep reaches the need and stops at a learned floor";
+    }
+
+    /// <summary>The measured-latency readout: what each lane is SET to, and what it is actually
+    /// DELIVERING, reported SEPARATELY for WASAPI and ASIO.
+    ///
+    /// Ed, 2026-08-15: "it should report wasapi and asio latency as 2 totally separate things... and
+    /// we can take it out of the status line, because people need to read both things and that will
+    /// be too much clutter." The two lanes have their own queue depth and their own output period —
+    /// an ASIO listener is NOT penalised by WASAPI's shared-mode buffering — so a blended figure
+    /// would hide the very difference the user is reading it for.</summary>
+    private static string? MeasuredLatencyReadout()
+    {
+        // TWO LANES: both reported, each with its own pair of numbers, and never merged.
+        var both = MainForm.FormatMeasuredLatency(true, 26, 45.2, 10, 12.4);
+        Check(both.Contains("WASAPI") && both.Contains("ASIO"), $"both lanes must be named (got: {both})");
+        Check(both.Contains("set to 26 ms") && both.Contains("achieving 45 ms"), $"the WASAPI pair must be present (got: {both})");
+        Check(both.Contains("set to 10 ms") && both.Contains("achieving 12 ms"), $"the ASIO pair must be present (got: {both})");
+        Check(both.Contains(Environment.NewLine), "one line per lane, so a screen reader can arrow between them");
+        // The whole point: an ASIO lane running better than WASAPI must SHOW as better.
+        Check(both.IndexOf("12 ms", StringComparison.Ordinal) > both.IndexOf("45 ms", StringComparison.Ordinal),
+            "the two lanes' figures must stand apart, not be averaged into one");
+
+        // ONE LANE: no point naming a lane the user hasn't got.
+        var single = MainForm.FormatMeasuredLatency(false, 30, 44.6, 0, 0);
+        Check(!single.Contains("WASAPI") && !single.Contains("ASIO"), $"a single-slider setup shouldn't name lanes (got: {single})");
+        Check(single.Contains("set to 30 ms") && single.Contains("achieving 45 ms"), $"it must still report both figures (got: {single})");
+        Check(!single.Contains(Environment.NewLine), "one lane, one line");
+
+        // NOT RECEIVING: say so rather than speak a zero, which a screen reader would read as fact.
+        var idle = MainForm.FormatMeasuredLatency(false, 30, 0, 0, 0);
+        Check(idle.Contains("not receiving") && !idle.Contains("achieving 0"),
+            $"with no audio it must say so, not claim 0 ms (got: {idle})");
+        var oneIdle = MainForm.FormatMeasuredLatency(true, 26, 45.2, 10, 0);
+        Check(oneIdle.Contains("achieving 45 ms") && oneIdle.Contains("not receiving"),
+            $"one lane can be live while the other is idle, and both must be reported honestly (got: {oneIdle})");
+
+        // Rounded for speech — NVDA must not read decimals.
+        Check(MainForm.FormatMeasuredLatency(false, 26, 41.678, 0, 0).Contains("achieving 42 ms"),
+            "figures must round for speech rather than read to three decimals");
+        return "two lanes reported apart with their own set/achieved pairs; single-lane setups stay unlabelled; idle says so instead of claiming zero";
     }
 
     /// <summary>The status line must tell the user BOTH numbers: what they asked the latency control

@@ -277,6 +277,26 @@ internal sealed class PlayoutEngine : IWaveProvider
         }
     }
 
+    /// <summary>Queue depth for ONE lane. The WASAPI and ASIO lanes are separate journeys with their
+    /// own targets, their own output periods and their own delay — reporting an aggregate would blend
+    /// two numbers the user needs to read apart (Ed, 2026-08-15). Averaged across that lane's sessions
+    /// rather than summed: two peers on one lane each carry their own cushion, they don't add up into
+    /// the delay you hear.</summary>
+    public int CurrentBufferMsFor(RenderRoute route)
+    {
+        var snap = sessionsSnapshot;
+        var bytes = 0;
+        var count = 0;
+        foreach (var s in snap)
+        {
+            if (s.Route != route) continue;
+            bytes += s.BufferedBytes;
+            count++;
+        }
+        if (count == 0) return 0;
+        return bytes / count / MixBytesPerFrame * 1000 / MixSampleRate;
+    }
+
     public bool IsArmed
     {
         get
