@@ -190,6 +190,12 @@ public sealed class AudioReceiver : IDisposable
     /// ASIO latency box as dead (2026-08-15). Idempotent and cheap.</summary>
     public void SetIndependentLaneLatency(bool independent) => playoutEngine.SetIndependentLaneLatency(independent);
 
+    /// <summary>Read one claimed peer's audio for the plugin that holds it, driven by the DAW's block
+    /// size rather than a clock of ours. Returns the frames produced, which can be short while the
+    /// peer's buffer is still filling.</summary>
+    public int ReadClaimedPeer(IPAddress peer, Span<float> destination, int frames)
+        => playoutEngine.ReadClaimedPeer(peer, destination, frames);
+
     /// <summary>Which output lanes have a ticked device. Normally derived by CompositeRenderBackend
     /// from <see cref="SetOutputDevices"/> — exposed because this, NOT the audio mode, is what decides
     /// which lane an incoming stream is tagged with, and therefore which latency control governs it.

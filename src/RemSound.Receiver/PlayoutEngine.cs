@@ -1039,6 +1039,52 @@ internal sealed class PlayoutEngine : IWaveProvider
     /// backend reads from in normal operation — the lane surfaces above are kept for
     /// potential per-output-device routing in a future revision but are not used today.
     /// </summary>
+    /// <summary>Read one claimed peer's audio for a plugin instance, instead of the speakers.
+    ///
+    /// <para>This is the other half of the double-audio guard. The mix paths SKIP a claimed peer; this
+    /// is where that audio actually goes. Skipping rather than muting matters here — the session keeps
+    /// running, so the copy the plugin gets is continuous rather than starting from an empty buffer.</para>
+    ///
+    /// <para><b>The DAW is the clock.</b> The plugin asks for exactly the number of frames it just
+    /// consumed and we read exactly that many, so the session's own drift correction adapts to the
+    /// DAW's rate the same way it adapts to a sound card's. Pumping on a timer of our own would give
+    /// the peer two masters and the ring between us would slowly drift empty or full.</para>
+    ///
+    /// <para>One person per track, but a person can be sending more than one stream, so every session
+    /// from that address is summed — the same audio the speakers would have produced for them.</para>
+    /// </summary>
+    internal int ReadClaimedPeer(IPAddress peer, Span<float> destination, int frames)
+    {
+        var wanted = Math.Min(frames, destination.Length / MixChannels);
+        if (wanted <= 0) return 0;
+        var outFloats = wanted * MixChannels;
+        destination[..outFloats].Clear();
+
+        // Scratch of our own: the mix scratch belongs to the render thread and this runs on the
+        // bridge thread. Sharing it would corrupt whichever call was in flight.
+        var scratch = claimedScratch;
+        if (scratch.Length < outFloats) claimedScratch = scratch = new float[outFloats];
+
+        var produced = 0;
+        foreach (var session in sessionsSnapshot)
+        {
+            if (!session.Endpoint.Address.Equals(peer)) continue;
+            var laneLatency = LatencyFor(session.Route);
+            var got = session.ReadFloats(scratch.AsSpan(0, outFloats), wanted, laneLatency.TargetMs, laneLatency.MaxMs, smoothness);
+            if (got <= 0) continue;
+            produced = Math.Max(produced, got);
+            var summed = got * MixChannels;
+            for (var i = 0; i < summed; i++) destination[i] += scratch[i];
+        }
+
+        // Deliberately NOT volume- or mute-adjusted: the app's volume slider governs the app's
+        // speakers. A track in a DAW has its own fader, and having a second hidden one would be a
+        // baffling thing to debug.
+        return produced;
+    }
+
+    private float[] claimedScratch = new float[8192];
+
     private int ReadAllSessions(byte[] buffer, int offset, int count, float[] mixBuf, float[] sessionBuf, bool recordDiagnostics)
     {
         // The Mixed route: the classic single-lane world, where there is only one output period.

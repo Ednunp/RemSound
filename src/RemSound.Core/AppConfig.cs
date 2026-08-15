@@ -155,6 +155,14 @@ public sealed class AppConfig
     /// behaves, not anything about a particular profile's peers.</summary>
     public bool ApplyPeerShapingToPlugin { get; set; } = true;
 
+    /// <summary>Whether RemSound listens for VST plugin instances on this machine. ON by default,
+    /// because a plugin that quietly does nothing until you find a hidden switch is worse than no
+    /// plugin at all. Off closes the loopback port entirely — for anyone who doesn't use a DAW and
+    /// would rather nothing was listening, and as the honest answer to "is RemSound opening a port I
+    /// didn't ask for?". With it off the plugin says so plainly instead of sitting mute. Machine-wide:
+    /// it describes this machine, not a profile.</summary>
+    public bool EnableDawPluginLink { get; set; } = true;
+
     /// <summary>Per-cue enable flags for the machine-wide cues added 2026-06-13: the send/receive
     /// on/off toggle cues and the minimise(hide)/restore(show) cues. Machine-wide (like the startup
     /// cue) rather than per-profile - they're app-level feedback for an action, not a per-profile

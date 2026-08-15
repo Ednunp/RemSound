@@ -28,6 +28,12 @@ public sealed partial class MainForm : Form
     private readonly PeerDiscoveryService discovery = new();
     private readonly AudioSender sender = new();
     private readonly AudioReceiver receiver = new();
+
+    /// <summary>The app's end of the link to VST plugin instances, or null when the user has turned
+    /// the link off. The app owns the ONE connection and hands audio to and from plugins — which is
+    /// what makes the double-audio problem solve itself, because a claim here is what takes a peer
+    /// out of the speakers.</summary>
+    private PluginBridgeHost? pluginHost;
     private readonly RemSoundSettingsStore settings = new(AppName);
     private readonly RemSoundLog logFile = new();
     private readonly RemSoundUpdater updater = new();
@@ -1530,6 +1536,9 @@ public sealed partial class MainForm : Form
         Shown += (_, _) =>
         {
             if (!connected) Connect();
+            // Open (or don't open) the loopback port VST plugin instances talk to. After Connect,
+            // so the receiver is already up and a plugin that was waiting gets audio on its first ask.
+            ApplyPluginLinkSetting();
             // Apply control-state portion of the loaded profile (device ticks, send/receive
             // checkboxes, audio port, volume, ticked peers). Done here AFTER device lists are
             // populated by LoadAudioDevices(). Settings-shaped fields (codec, hotkeys, etc.)
@@ -2320,6 +2329,55 @@ public sealed partial class MainForm : Form
     /// <para>Alt+G, not the obvious Alt+D: the gate caught that D already belongs to the Discovered
     /// peers list, and a CONTROL's mnemonic beats a menu's — so Alt+D would have silently stopped
     /// opening this menu. G was free.</para></summary>
+    /// <summary>Open or close the plugin link to match the setting. Idempotent — safe to call from
+    /// startup and from the menu item, which is the point: one code path decides whether the port is
+    /// open, so the menu can never disagree with reality.</summary>
+    private void ApplyPluginLinkSetting()
+    {
+        var wanted = AppConfig.Load().EnableDawPluginLink;
+        if (wanted == (pluginHost is not null)) return;
+
+        if (!wanted)
+        {
+            pluginHost?.Dispose();
+            pluginHost = null;
+            // Drop the claim register too, or a peer claimed at the moment the link was switched off
+            // would stay out of the speakers with nothing left to release it.
+            receiver.SetPluginPeerClaims(null);
+            logFile.Event("vst plugin: link closed");
+            return;
+        }
+
+        try
+        {
+            pluginHost = new PluginBridgeHost(receiver.ReadClaimedPeer);
+            pluginHost.PeerListSource = () => PeerListForPlugins();
+            receiver.SetPluginPeerClaims(pluginHost.Claims);
+            logFile.Event($"vst plugin: link open on 127.0.0.1:{pluginHost.Port}");
+        }
+        catch (Exception ex)
+        {
+            // Almost always another RemSound already holding the port. Logged rather than shown:
+            // nothing the user did is wrong, and a dialog at startup about a feature they may not
+            // use would be worse than the plugin simply reporting that it can't connect.
+            pluginHost = null;
+            logFile.Event($"vst plugin: link could not open ({ex.GetType().Name}: {ex.Message})");
+        }
+    }
+
+    /// <summary>Who a plugin can choose to receive: the peers this profile knows, named where we have
+    /// a name for them. Read live rather than pushed, so a plugin opened later sees the current list
+    /// without RemSound having to remember to tell it.</summary>
+    private IReadOnlyList<(System.Net.IPAddress Address, string Name)> PeerListForPlugins()
+    {
+        // The same question split recording already answers — "which peers could have a track of
+        // their own" — so it uses the same two collections rather than a second, slightly different
+        // idea of who is connected.
+        return selectedPeerEndpoints
+            .Select(kv => (kv.Value.Address, selectedPeerLabels.GetValueOrDefault(kv.Key, kv.Value.Address.ToString())))
+            .ToList();
+    }
+
     private ToolStripMenuItem BuildDawPluginMenu()
     {
         var pluginMenu = new ToolStripMenuItem("DAW plu&gin (Alt+G)") { AccessibleName = "DAW plugin menu" };
@@ -2346,9 +2404,27 @@ public sealed partial class MainForm : Form
             logFile.Event($"vst plugin: pan/EQ into the DAW {(applyShaping.Checked ? "ON (what you hear)" : "OFF (raw)")}");
         };
 
+        // The link itself, on or off. A user with no DAW is entitled to have RemSound not listening
+        // on anything, and "is it opening a port I didn't ask for?" deserves a switch rather than a
+        // reassurance. Off closes the loopback socket outright; the plugin then says RemSound isn't
+        // accepting it, which is a far better failure than silence with no explanation.
+        var enableLink = new ToolStripMenuItem("&Let plugins connect to RemSound")
+        {
+            AccessibleName = "Let plugins connect to RemSound",
+            CheckOnClick = true,
+        };
+        enableLink.Click += (_, _) =>
+        {
+            var cfg = AppConfig.Load();
+            cfg.EnableDawPluginLink = enableLink.Checked;
+            try { cfg.Save(); } catch { /* best-effort, like the app's other AppConfig writes */ }
+            logFile.Event($"vst plugin: link {(enableLink.Checked ? "ON" : "OFF")}");
+            ApplyPluginLinkSetting();
+        };
+
         pluginMenu.DropDownItems.AddRange(new ToolStripItem[]
         {
-            pluginInstall, pluginUninstall, new ToolStripSeparator(), applyShaping,
+            pluginInstall, pluginUninstall, new ToolStripSeparator(), applyShaping, enableLink,
         });
         // Kept as a named method rather than an inline lambda so the gate can drive the REAL refresh
         // instead of reflecting into WinForms internals to fake a menu opening.
@@ -2358,7 +2434,9 @@ public sealed partial class MainForm : Form
             var installed = PluginInstaller.IsInstalled();
             pluginInstall.Text = installed ? "Re&install plugin" : "&Install plugin";
             pluginUninstall.Enabled = installed;
-            applyShaping.Checked = AppConfig.Load().ApplyPeerShapingToPlugin;
+            var cfg = AppConfig.Load();
+            applyShaping.Checked = cfg.ApplyPeerShapingToPlugin;
+            enableLink.Checked = cfg.EnableDawPluginLink;
         }
         refreshDawPluginMenu = Refresh;
         pluginMenu.DropDownOpening += (_, _) => Refresh();
@@ -10187,6 +10265,11 @@ public sealed partial class MainForm : Form
                 // result == No falls through to a normal close.
             }
         }
+
+        // Close the plugin link before the engines tear down. Plugins hear this as RemSound going
+        // away and say so; leaving the socket open into a half-dismantled app would have them asking
+        // for audio from a receiver that no longer exists.
+        try { pluginHost?.Dispose(); pluginHost = null; receiver.SetPluginPeerClaims(null); } catch { /* teardown is best-effort */ }
 
         // Stop any active recording before the engines tear down. The recorder will flush
         // its queue and close the file cleanly. Done here (rather than in Dispose) because
