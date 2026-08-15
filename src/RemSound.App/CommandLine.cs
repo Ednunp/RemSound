@@ -88,6 +88,11 @@ internal static class CommandLine
                     return WithConsole(() => SelfTest.Run(args));
                 case "--perftest": case "--perf-test":
                     return WithConsole(() => RunPerfTest(args));
+                case "--plugin-window":
+                    // Shows the PLUGIN's window with no DAW involved, so its controls can be tested
+                    // with a screen reader before any plugin plumbing exists. If it isn't readable
+                    // as a plain window it won't be readable inside a host.
+                    return ShowPluginWindow();
                 case "--latency-lab":
                     // Diagnostic harness (2026-08-14 latency-slider field report): drives the real
                     // playout with realtime-paced sender/device shapes and MEASURES whether the
@@ -175,6 +180,15 @@ internal static class CommandLine
     /// <summary>Attach to the calling terminal (when launched from one), point Console.Out at the
     /// real stdout handle (works for an interactive console AND a redirected pipe), run the command,
     /// and return its exit code. A WinExe has no console of its own, hence the attach dance.</summary>
+    /// <summary>Show the plugin editor panel standalone (see PluginEditorPanel.ShowStandalone).
+    /// A UI verb, so it must NOT attach a console — that would flash a window at a blind user.</summary>
+    private static int ShowPluginWindow()
+    {
+        ApplicationConfiguration.Initialize();
+        PluginEditorPanel.ShowStandalone();
+        return 0;
+    }
+
     private static int WithConsole(Func<int> body)
     {
         try { AttachConsole(ATTACH_PARENT_PROCESS); } catch { /* no parent console - fine */ }
