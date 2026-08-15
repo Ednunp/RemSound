@@ -1,4 +1,7 @@
+using System.Drawing;
+using System.Windows.Forms;
 using AudioPlugSharp;
+using RemSound.App;
 using RemSound.Core;
 
 namespace RemSound.Plugin;
@@ -139,6 +142,94 @@ public class RemSoundPlugin : AudioPluginBase
         // silent rather than repeated, so a short block sounds like a gap and not like a stutter.
         render?.FillHostBlock(outLeft, outRight);
     }
+
+    // ---- The window. An ordinary WinForms panel parented into the DAW's plugin frame, which is the
+    // whole accessibility bet: real WinForms controls expose themselves to NVDA for free, while most
+    // commercial plugin windows are custom-drawn and unreadable. ----------------------------------
+
+    private Form? editorForm;
+    private PluginEditorPanel? editorPanel;
+
+    public override void InitializeEditor()
+    {
+        base.InitializeEditor();
+        EditorWidth = 420;
+        EditorHeight = 300;
+    }
+
+    public override void ShowEditor(IntPtr parentWindow)
+    {
+        base.ShowEditor(parentWindow);
+        editorPanel = new PluginEditorPanel { Dock = DockStyle.Fill };
+
+        // Everything the panel shows comes from the app over the link — the peer list it offers and
+        // the status it reports are RemSound's, not a second copy of them kept here that could
+        // disagree. Ed's call: "read the profile from the standalone app... it's far easier."
+        editorPanel.PeerSource = () => bridge?.KnownPeers.Select(p => (p.Address.ToString(), p.Name)).ToList() ?? [];
+        editorPanel.StatusSource = DescribeStatus;
+        editorPanel.JobChanged += (sending, peerText) =>
+            SetJob(sending, peerText is not null && System.Net.IPAddress.TryParse(peerText, out var a) ? a : null);
+
+        editorForm = new Form
+        {
+            FormBorderStyle = FormBorderStyle.None,
+            StartPosition = FormStartPosition.Manual,
+            TopLevel = false,
+            Width = (int)EditorWidth,
+            Height = (int)EditorHeight,
+        };
+        editorForm.Controls.Add(editorPanel);
+
+        // Parent into the host's frame. A borderless child form rather than raw child controls, so
+        // WinForms keeps its own message loop and focus handling intact across the boundary — which
+        // is what a screen reader relies on to see the controls at all.
+        if (parentWindow != IntPtr.Zero) SetParent(editorForm.Handle, parentWindow);
+        editorForm.Show();
+    }
+
+    public override void HideEditor()
+    {
+        editorForm?.Close();
+        editorForm?.Dispose();
+        editorForm = null;
+        editorPanel = null;
+        base.HideEditor();
+    }
+
+    public override void ResizeEditor(uint newWidth, uint newHeight)
+    {
+        base.ResizeEditor(newWidth, newHeight);
+        if (editorForm is not null) editorForm.Size = new Size((int)newWidth, (int)newHeight);
+    }
+
+    /// <summary>The status line, in plain English. Says what is actually true rather than "OK" —
+    /// including the awkward cases, because "the plugin isn't working" is the report we would
+    /// otherwise get with nothing to go on.</summary>
+    internal string DescribeStatus()
+    {
+        if (bridge is null) return "Starting up.";
+        if (!bridge.Connected)
+            return "RemSound is not answering." + Environment.NewLine
+                 + "Start RemSound, or switch the link on in its DAW plugin menu.";
+        if (IsSending)
+            return "Sending this track to your peers." + Environment.NewLine
+                 + $"{bridge.KnownPeers.Count} peer(s) connected in RemSound.";
+        if (chosenPeer is null)
+            return "Connected to RemSound." + Environment.NewLine + "Choose a peer to receive.";
+
+        var served = bridge.ServedBlocks;
+        var starved = bridge.StarvedBlocks;
+        // Starved blocks are reported, not hidden. A handful at the start is the buffer filling; a
+        // number that keeps climbing is the one fact that explains a crackle, and burying it would
+        // send someone hunting through their network for a week.
+        return $"Receiving {chosenPeer} onto this track." + Environment.NewLine
+             + (starved == 0
+                 ? $"{served} blocks, none missed."
+                 : $"{served} blocks, {starved} arrived short.");
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetParent(IntPtr child, IntPtr newParent);
 
     /// <summary>The host has deactivated this instance — bypassed, removed, or the session closing.
     ///

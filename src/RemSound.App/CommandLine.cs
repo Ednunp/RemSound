@@ -185,7 +185,25 @@ internal static class CommandLine
     private static int ShowPluginWindow()
     {
         ApplicationConfiguration.Initialize();
-        PluginEditorPanel.ShowStandalone();
+
+        // Talk to a running RemSound if there is one, so this is a real test of the plumbing and not
+        // just of the layout: the peer list and the status come from the app over the actual link.
+        using var link = new PluginBridgeClient();
+        link.Hello();
+
+        PluginEditorPanel.ShowStandalone(panel =>
+        {
+            panel.PeerSource = () => link.KnownPeers.Select(p => (p.Address.ToString(), p.Name)).ToList();
+            panel.StatusSource = () => link.Connected
+                // Deliberately does NOT claim a peer. A claim would take that person off RemSound's
+                // speakers, and this window has no audio output to put them on instead — so the
+                // honest test would sound exactly like the peer disappearing.
+                ? $"Connected to RemSound. {link.KnownPeers.Count} peer(s) available."
+                    + Environment.NewLine + "Test window: no audio is carried here."
+                : "RemSound is not answering." + Environment.NewLine
+                    + "Start RemSound, or switch the link on in its DAW plugin menu.";
+            panel.JobChanged += (sending, peer) => { /* no audio in the test window - see the status text */ };
+        });
         return 0;
     }
 

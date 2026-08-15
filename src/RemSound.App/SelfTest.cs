@@ -143,6 +143,9 @@ internal static partial class SelfTest
         RunStep(results, "DAW plugin menu (install, remove, pan/EQ choice)", DawPluginMenu);
         RunStep(results, "App-plugin link: framing, loopback-only, and its measured latency cost", PluginBridgeLinkTest);
         RunStep(results, "Plugin end to end (peer reaches the DAW track and leaves the speakers)", PluginBridgeEndToEnd);
+        RunStep(results, "Plugin window (peer list, job, bypass - screen-reader safe)", PluginWindowWiring);
+        RunStep(results, "Plugin rate conversion (a 44.1k DAW must not transpose anyone)", PluginRateConversion);
+        RunStep(results, "The plugin actually ships in this build (and installs from it)", PluginPayloadPresent);
         foreach (var cfg in SuiteConfigs)
             RunStep(results, $"Control suite - {cfg.Name} (UI + accessibility + theme + effect)", () => RunControlSuite(cfg));
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);

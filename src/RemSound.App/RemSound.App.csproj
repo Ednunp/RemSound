@@ -153,4 +153,31 @@
     </ItemGroup>
     <Copy SourceFiles="@(_InstallScripts)" DestinationFolder="$(PublishDir)Install Scripts" SkipUnchangedFiles="false" />
   </Target>
+
+  <!-- THE VST PLUGIN, in a plugin\ folder next to the exe.
+
+       This is what the DAW plugin menu's "Install plugin" copies into the user's own VST3 folder, so
+       without it that menu item finds nothing and says this copy of RemSound has no plugin in it.
+       Landed in BOTH a plain build and a publish: the gate drives the real installer against the real
+       folder, so a build that skipped this would have the tests passing over an empty directory.
+
+       Note what is NOT excluded. The .vst3 loader needs its own .deps.json and .runtimeconfig.json
+       beside it to find the managed assemblies, and Ijwhost.dll is the C++/CLI shim that starts the
+       runtime at all. Trim any of those to tidy the folder up and the plugin simply will not load. -->
+  <ItemGroup>
+    <_PluginPayload Include="..\RemSound.Plugin\bin\$(Configuration)\$(TargetFramework)\**\*.*"
+                    Exclude="..\RemSound.Plugin\bin\$(Configuration)\$(TargetFramework)\**\*.pdb" />
+  </ItemGroup>
+
+  <Target Name="CopyPluginPayloadToBuild" AfterTargets="Build">
+    <Copy SourceFiles="@(_PluginPayload)"
+          DestinationFiles="@(_PluginPayload->'$(OutDir)plugin\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" ContinueOnError="true" />
+  </Target>
+
+  <Target Name="CopyPluginPayloadToPublish" AfterTargets="Publish">
+    <Copy SourceFiles="@(_PluginPayload)"
+          DestinationFiles="@(_PluginPayload->'$(PublishDir)plugin\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="false" ContinueOnError="true" />
+  </Target>
 </Project>

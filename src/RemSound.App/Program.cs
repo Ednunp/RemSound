@@ -127,6 +127,7 @@ internal static class Program
         // here so the APP behaves exactly as before.
         AccessibleCheckBox.PlayToggleSound = CheckSoundService.Play;
         QuietTabControl.PlayTabSwitchSound = TabSwitchSoundService.Play;
+        PluginEditorPanel.WindowIcon = Theme.AppIcon;
 
         // Follow the user's chosen colour theme — "system" (match Windows light/dark) by default. This
         // is an experimental WinForms API; guarded so any failure just leaves the classic light theme

@@ -472,6 +472,24 @@ internal static partial class SelfTest
         session.NoteFramesQueued(30);
     }
 
+    /// <summary>Fill a session with a real tone rather than a flat level, so a test can measure what
+    /// came out the far end and catch a rate conversion that transposed it.</summary>
+    private static void FillSessionWithTone(SessionPlayout session, double toneHz, float amplitude)
+    {
+        const int Seconds = 4;   // plenty for the pump to drink from without running dry mid-measurement
+        var block = new byte[48000 * 8 * Seconds];
+        var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(block.AsSpan());
+        var step = 2 * Math.PI * toneHz / 48000;
+        for (var frame = 0; frame < floats.Length / 2; frame++)
+        {
+            var v = (float)(Math.Sin(frame * step) * amplitude);
+            floats[frame * 2] = v;
+            floats[frame * 2 + 1] = v;
+        }
+        session.Write(block);
+        session.NoteFramesQueued(30);
+    }
+
     /// <summary>Pull one block from the engine the way an output device does, and report the peak —
     /// "is this peer in the mix" answered by measuring the audio, not by reading a flag.</summary>
     private static float PeakOfMix(PlayoutEngine engine, byte[] buffer)
