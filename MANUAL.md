@@ -736,6 +736,8 @@ Separately from the controls above — which manage the cushion against _network
 
 The **Audio latency** control tells the receiving side how much sound to keep in reserve as a cushion against uneven network timing. A bigger cushion means more delay but fewer clicks. A smaller cushion means less delay but more clicks when the network wobbles.
 
+**You can change it while you're listening.** Move the control and the delay follows within a few seconds — there's no gap or click while it changes. Lowering it takes effect straight away. Raising it can't happen instantly, because the extra cushion has to be built up out of the sound still arriving, so RemSound plays very slightly slow for a moment while it banks the difference: a big jump takes a few seconds to arrive and you can hear it stretch out as it goes. That's the change happening, not a fault.
+
 Setting| Best for| Trade-off
 ---|---|---
 5–10 ms| Local network, same computer.| Crackles on any internet connection with even modest jitter.
