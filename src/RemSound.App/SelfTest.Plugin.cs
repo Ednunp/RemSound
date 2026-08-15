@@ -262,9 +262,13 @@ internal static partial class SelfTest
             var install = items.FirstOrDefault(i => i.AccessibleName == "Install plugin");
             var remove = items.FirstOrDefault(i => i.AccessibleName == "Remove plugin");
             var shaping = items.FirstOrDefault(i => i.AccessibleName == "Apply pan and EQ to plugin audio");
+            var link = items.FirstOrDefault(i => i.AccessibleName == "Let plugins connect to RemSound");
             Check(install is not null, "the menu must offer Install");
             Check(remove is not null, "the menu must offer Remove");
             Check(shaping is not null, "the menu must carry the pan/EQ choice");
+            Check(link is not null,
+                "the menu must carry the link on/off switch - somebody with no DAW is entitled to have RemSound listening on nothing");
+            Check(link!.CheckOnClick, "the link item must be a tick, so a screen reader announces its state");
             // Pin to non-null locals so the checks below read plainly.
             var installItem = install!;
             var removeItem = remove!;
@@ -291,8 +295,16 @@ internal static partial class SelfTest
                 cfg.ApplyPeerShapingToPlugin = false;
                 cfg.Save();
                 Check(!AppConfig.Load().ApplyPeerShapingToPlugin, "turning it off must survive a save and reload");
+
+                // ON by default: a plugin that quietly does nothing until you find a hidden switch is
+                // worse than no plugin at all.
+                Check(AppConfig.Load().EnableDawPluginLink, "plugins must be able to connect by DEFAULT");
+                var linkCfg = AppConfig.Load();
+                linkCfg.EnableDawPluginLink = false;
+                linkCfg.Save();
+                Check(!AppConfig.Load().EnableDawPluginLink, "switching the link off must survive a save and reload");
             }
-            return "DAW plugin menu present with install, remove and the pan/EQ tick; the menu states what is actually installed; the setting round-trips and defaults to on";
+            return "DAW plugin menu present with install, remove, the pan/EQ tick and the link switch; the menu states what is actually installed; both settings round-trip and default to on";
         }
         finally { try { form?.Dispose(); } catch { } }
     }

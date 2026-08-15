@@ -66,6 +66,52 @@ public class RemSoundPlugin : AudioPluginBase
 
     private System.Net.IPAddress? chosenPeer;
 
+    /// <summary>Which peer this instance resolved to - for the gate, so "the parameter reached the
+    /// engine" is checked rather than assumed.</summary>
+    internal System.Net.IPAddress? ChosenPeerForTest => chosenPeer;
+
+    private AudioPluginParameter? jobParameter;
+    private AudioPluginParameter? peerParameter;
+    private AudioPluginParameter? activeParameter;
+
+    /// <summary>Take what the parameters now say and make it so. Shared by the parameter list and the
+    /// window, deliberately: two routes to the same decision must not be two implementations of it,
+    /// or the fallback would drift into behaving differently from the thing it is a fallback for.</summary>
+    internal void ApplyParameters()
+    {
+        if (bridge is null) return;
+        // EditValue, not ProcessValue: these are decisions a person makes, not automation curves the
+        // host ramps per sample. ProcessValue only catches up on the audio thread, so reading it here
+        // would apply the PREVIOUS choice - the setting would appear to lag one change behind.
+        var active = activeParameter is null || activeParameter.EditValue >= 0.5;
+        var receiving = jobParameter is not null && jobParameter.EditValue >= 0.5;
+
+        System.Net.IPAddress? peer = null;
+        if (active && receiving && peerParameter is not null)
+        {
+            // One-based, and out-of-range means "nobody" rather than wrapping round to somebody else.
+            // Wrapping would put a stranger on the track when a peer disconnects, which is a far worse
+            // surprise than silence.
+            var index = (int)Math.Round(peerParameter.EditValue) - 1;
+            var peers = bridge.KnownPeers;
+            if (index >= 0 && index < peers.Count) peer = peers[index].Address;
+        }
+
+        SetJob(!active || !receiving, peer);
+    }
+
+    /// <summary>Keep the parameters in step when the WINDOW is what changed. Without this, opening the
+    /// host's parameter list after using the window would show stale values and one nudge would undo
+    /// the user's choice.</summary>
+    private void PushJobToParameters(bool sending, System.Net.IPAddress? peer)
+    {
+        if (jobParameter is not null) jobParameter.EditValue = sending ? 0 : 1;
+        if (peerParameter is null || bridge is null) return;
+        var peers = bridge.KnownPeers;
+        var index = peer is null ? 0 : peers.ToList().FindIndex(p => p.Address.Equals(peer)) + 1;
+        peerParameter.EditValue = Math.Max(0, index);
+    }
+
     public RemSoundPlugin()
     {
         Company = "RemSound";
@@ -96,6 +142,56 @@ public class RemSoundPlugin : AudioPluginBase
         // nasty surprise, especially for someone navigating by screen reader.
         InputPorts = [monitorIn = new AudioIOPortManaged("Track in", EAudioChannelConfiguration.Stereo)];
         OutputPorts = [peerOut = new AudioIOPortManaged("Peer out", EAudioChannelConfiguration.Stereo)];
+
+        // THE SCREEN-READER FALLBACK. The window is the intended way to work this plugin, and it is
+        // ordinary WinForms precisely so NVDA can read it. But keyboard focus across a host's plugin
+        // frame is the one thing that cannot be proven outside a real DAW, and if a host gets it
+        // wrong the window becomes unreachable with no way back.
+        //
+        // Named parameters are that way back: every DAW exposes a plain parameter list, and in Reaper
+        // with OSARA that list is fully keyboard-navigable and spoken. So the same three decisions the
+        // window offers are also parameters, with names that make sense read aloud out of context —
+        // "Receive instead of send", not "Mode".
+        //
+        // They are also what a host would automate, which is harmless here: nobody automates who is on
+        // a track mid-take, but a host that saves parameter values gets the instance's setup restored
+        // with the session for free.
+        AddParameter(jobParameter = new AudioPluginParameter
+        {
+            ID = "job",
+            Name = "Receive instead of send",
+            ValueFormat = "0",
+            MinValue = 0,
+            MaxValue = 1,
+            DefaultValue = 0,
+        });
+        AddParameter(peerParameter = new AudioPluginParameter
+        {
+            ID = "peer",
+            // One-based when spoken: "peer 1" is the first person in RemSound's list, which is what
+            // somebody counting down a list expects. A zero would be read as "none" by anyone sane.
+            Name = "Which peer to receive",
+            ValueFormat = "0",
+            MinValue = 0,
+            MaxValue = 32,
+            DefaultValue = 0,
+        });
+        AddParameter(activeParameter = new AudioPluginParameter
+        {
+            ID = "active",
+            Name = "Active",
+            ValueFormat = "0",
+            MinValue = 0,
+            MaxValue = 1,
+            DefaultValue = 1,
+        });
+
+        // Applied off the audio thread. A parameter change sends a datagram and touches the claim
+        // register; doing that from Process() would put a syscall on the DAW's audio thread for the
+        // sake of a decision the user makes once.
+        jobParameter.PropertyChanged += (_, _) => ApplyParameters();
+        peerParameter.PropertyChanged += (_, _) => ApplyParameters();
+        activeParameter.PropertyChanged += (_, _) => ApplyParameters();
     }
 
     public override void Process()
@@ -168,7 +264,11 @@ public class RemSoundPlugin : AudioPluginBase
         editorPanel.PeerSource = () => bridge?.KnownPeers.Select(p => (p.Address.ToString(), p.Name)).ToList() ?? [];
         editorPanel.StatusSource = DescribeStatus;
         editorPanel.JobChanged += (sending, peerText) =>
-            SetJob(sending, peerText is not null && System.Net.IPAddress.TryParse(peerText, out var a) ? a : null);
+        {
+            var peer = peerText is not null && System.Net.IPAddress.TryParse(peerText, out var a) ? a : null;
+            SetJob(sending, peer);
+            PushJobToParameters(sending, peer);
+        };
 
         editorForm = new Form
         {

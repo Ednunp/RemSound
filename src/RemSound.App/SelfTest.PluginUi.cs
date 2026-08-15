@@ -1,5 +1,6 @@
 using System.Net;
 using RemSound.Core;
+using AudioPlugSharp;
 using RemSound.Plugin;
 using RemSound.Receiver;
 
@@ -83,6 +84,88 @@ internal static partial class SelfTest
 
         return "peer list arrives from the app with names; an unchanged refresh never moves the user; a changed list keeps them on the same person; "
              + "job and peer reach the engine; Active works as a bypass that returns the peer";
+    }
+
+    /// <summary>The plugin's named parameters — the screen-reader route that does not depend on the
+    /// window working inside a particular host.
+    ///
+    /// <para>The window is the intended way to work this plugin. But keyboard focus across a host's
+    /// plugin frame is the one thing that cannot be proven outside a real DAW, and a host that gets it
+    /// wrong leaves the window unreachable with no way back. Every DAW exposes a plain parameter list,
+    /// and in Reaper with OSARA that list is keyboard-navigable and spoken — so the same three
+    /// decisions are also parameters. This checks they are there, named so they make sense read aloud
+    /// out of context, and that moving them actually changes what the instance does.</para></summary>
+    private static string? PluginParameters()
+    {
+        var plugin = new RemSoundPlugin { Host = new StubAudioHost() };
+        plugin.Initialize();
+
+        var parameters = plugin.Parameters?.ToList() ?? [];
+        Check(parameters.Count >= 3,
+            $"the three decisions the window offers must ALSO be parameters, or a host with broken window focus leaves no way in ({parameters.Count} found)");
+
+        foreach (var id in new[] { "job", "peer", "active" })
+        {
+            var parameter = parameters.FirstOrDefault(p => p.ID == id);
+            Check(parameter is not null, $"parameter '{id}' must exist");
+            Check(!string.IsNullOrWhiteSpace(parameter!.Name), $"parameter '{id}' must have a name");
+            // Read aloud, out of context, with no screen to look at. "Mode" tells somebody nothing.
+            Check(parameter.Name.Length > 4 && parameter.Name.Any(char.IsLower),
+                $"parameter '{id}' is named '{parameter.Name}' - it must read as plain English when spoken alone");
+        }
+
+        var job = parameters.First(p => p.ID == "job");
+        var peer = parameters.First(p => p.ID == "peer");
+        var active = parameters.First(p => p.ID == "active");
+
+        Check(Math.Abs(job.DefaultValue) < 0.001, "a fresh instance must default to SENDING - it cannot know whose audio you wanted");
+        Check(Math.Abs(active.DefaultValue - 1) < 0.001, "and to being active, or the plugin would appear to do nothing when first added");
+        Check(Math.Abs(peer.DefaultValue) < 0.001, "with no peer chosen");
+
+        // Moving a parameter must reach the engine. With no app running there are no known peers, so
+        // the peer choice can only resolve to nobody - which is the point of the next check.
+        job.EditValue = 1;
+        plugin.ApplyParameters();
+        Check(!plugin.IsSending, "setting 'receive' must switch the instance to receiving");
+
+        peer.EditValue = 5;                 // a peer that isn't there
+        plugin.ApplyParameters();
+        Check(plugin.ChosenPeerForTest is null,
+            "a peer index past the end of the list must resolve to NOBODY - wrapping round would put a stranger on the track when somebody disconnects");
+
+        active.EditValue = 0;
+        plugin.ApplyParameters();
+        Check(plugin.IsSending, "unticking Active must release the peer, exactly as the window's Active box does");
+
+        plugin.Stop();   // releases the peer and closes the link, as a host deactivating the instance does
+        return $"{parameters.Count} named parameters, defaulting to send/active/nobody; job and Active reach the engine; "
+             + "an out-of-range peer resolves to nobody rather than wrapping onto somebody else";
+    }
+
+
+    /// <summary>A stand-in for the DAW, so the plugin can be initialised and driven by the gate.
+    /// It answers the handful of things a host is asked at startup and does nothing else — the point
+    /// is to exercise the REAL plugin, not to simulate Reaper.</summary>
+    private sealed class StubAudioHost : IAudioHost
+    {
+        public double SampleRate => 48000;
+        public uint MaxAudioBufferSize => 4096;
+        public uint CurrentAudioBufferSize => 512;
+        public EAudioBitsPerSample BitsPerSample => EAudioBitsPerSample.Bits64;
+        public double BPM => 120;
+        public long CurrentProjectSample => 0;
+        public bool IsPlaying => false;
+        public void ProcessAllEvents() { }
+        public int ProcessEvents() => 0;
+        public void SendNoteOn(int channel, int noteNumber, float velocity, int sampleOffset) { }
+        public void SendNoteOff(int channel, int noteNumber, float velocity, int sampleOffset) { }
+        public void SendPolyPressure(int channel, int noteNumber, float pressure, int sampleOffset) { }
+        public void SendCC(int channel, int ccNumber, int ccValue, int sampleOffset) { }
+        public void BeginEdit(int parameter) { }
+        public void PerformEdit(int parameter, double normalizedValue) { }
+        public void EndEdit(int parameter) { }
+        public void SetParameter(int parameter, double normalizedValue) { }
+        public void Log(string message) { }
     }
 
     /// <summary>The plugin has to actually BE in this copy of RemSound, and be complete.
