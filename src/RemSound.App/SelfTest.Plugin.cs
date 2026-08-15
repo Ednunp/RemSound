@@ -99,6 +99,58 @@ internal static partial class SelfTest
         return "claims are reference-counted, lapse without a heartbeat, and a claimed peer is provably absent from the device mix";
     }
 
+    /// <summary>Installing and removing the plugin must be exact. The VST3 folder is shared with
+    /// every other plugin the user owns, so an over-enthusiastic uninstall would delete somebody
+    /// else's work — this proves it removes only what it placed, and that a portable install needs
+    /// no administrator rights (Ed, 2026-08-15: "a lot of people run it as portable").</summary>
+    private static string? PluginInstallRoundTrip()
+    {
+        // The target must live in the USER's profile. A path under Program Files would need
+        // elevation, which defeats the point of a portable copy.
+        var dir = PluginInstaller.InstallDirectory;
+        var localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        Check(dir.StartsWith(localApp, StringComparison.OrdinalIgnoreCase),
+            $"the plugin must install per-user (no admin), not machine-wide (got {dir})");
+        Check(dir.Contains("VST3", StringComparison.OrdinalIgnoreCase), "it must land in the VST3 folder a DAW scans");
+
+        // Exercise the real install/uninstall against throwaway folders, including a BYSTANDER file
+        // that must survive — the case that would otherwise delete another plugin.
+        var root = Path.Combine(Path.GetTempPath(), "remsound-plugin-install-" + Guid.NewGuid().ToString("N"));
+        var source = Path.Combine(root, "plugin");
+        var target = Path.Combine(root, "VST3", "RemSound");
+        Directory.CreateDirectory(source);
+        Directory.CreateDirectory(Path.Combine(source, "sub"));
+        File.WriteAllText(Path.Combine(source, "RemSound.Plugin.dll"), "plugin");
+        File.WriteAllText(Path.Combine(source, "RemSoundBridge.vst3"), "bridge");
+        File.WriteAllText(Path.Combine(source, "sub", "extra.dll"), "nested");
+        try
+        {
+            var (ok, msg) = PluginInstaller.InstallForTest(source, target);
+            Check(ok, $"install must succeed: {msg}");
+            Check(File.Exists(Path.Combine(target, "RemSound.Plugin.dll")), "the plugin dll must be placed");
+            Check(File.Exists(Path.Combine(target, "sub", "extra.dll")), "nested files must be placed too, not flattened or skipped");
+            Check(PluginInstaller.IsInstalledAt(target), "an installed plugin must report itself installed");
+
+            // Reinstall over the top — what a RemSound update does. Must refresh, not fail or double up.
+            Check(PluginInstaller.InstallForTest(source, target).Ok, "reinstalling over an existing install must succeed (that is what an update does)");
+
+            // A file that is NOT ours, sitting in the same folder. Uninstall must leave it alone.
+            var bystander = Path.Combine(target, "SomeoneElsesPlugin.vst3");
+            File.WriteAllText(bystander, "not ours");
+
+            var (rok, rmsg) = PluginInstaller.UninstallForTest(target);
+            Check(rok, $"uninstall must succeed: {rmsg}");
+            Check(!File.Exists(Path.Combine(target, "RemSound.Plugin.dll")), "our files must be gone");
+            Check(File.Exists(bystander), "a file we did not install MUST survive — the VST3 folder is shared with every other plugin");
+            Check(!PluginInstaller.IsInstalledAt(target), "after removal it must no longer report itself installed");
+
+            // Removing when nothing is installed must say so rather than throw or claim success.
+            Check(!PluginInstaller.UninstallForTest(target).Ok, "removing a plugin that isn't installed must report that plainly");
+            return "installs per-user with no admin; nested files placed; reinstall refreshes; uninstall removes only its own files and leaves other plugins untouched";
+        }
+        finally { try { Directory.Delete(root, recursive: true); } catch { } }
+    }
+
     /// <summary>Write a steady tone into a session so the mix has something measurable in it.</summary>
     private static void FillSession(SessionPlayout session, float amplitude)
     {

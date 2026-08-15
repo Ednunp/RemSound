@@ -139,6 +139,7 @@ internal static partial class SelfTest
         RunStep(results, "Latency estimate counts every stage (no silently-missing term)", LatencyEstimateComplete);
         RunStep(results, "Measured-latency readout keeps WASAPI and ASIO separate", MeasuredLatencyReadout);
         RunStep(results, "Plugin double-audio guard (a claimed peer leaves the speakers)", PluginDoubleAudioGuard);
+        RunStep(results, "Plugin install/remove is per-user and exact (other plugins untouched)", PluginInstallRoundTrip);
         foreach (var cfg in SuiteConfigs)
             RunStep(results, $"Control suite - {cfg.Name} (UI + accessibility + theme + effect)", () => RunControlSuite(cfg));
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);

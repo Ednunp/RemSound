@@ -2342,13 +2342,28 @@ public sealed partial class MainForm : Form
         var repair = new ToolStripMenuItem("&Repair service folder access") { AccessibleName = "Repair service folder access" };
         repair.Click += (_, _) => ServiceAction(ServiceControl.RepairVerb, "access repair", confirm: false);
 
+        // The VST plugin's install/remove. Menu items rather than a folder of scripts (Ed's call —
+        // a script folder is a command line wearing a hat, and these users navigate by screen
+        // reader). Installs PER-USER so a portable copy of RemSound never needs an admin prompt.
+        var pluginInstall = new ToolStripMenuItem("Install &VST plugin") { AccessibleName = "Install VST plugin" };
+        pluginInstall.Click += (_, _) => RunPluginInstallAction(install: true);
+        var pluginUninstall = new ToolStripMenuItem("Remove VST plu&gin") { AccessibleName = "Remove VST plugin" };
+        pluginUninstall.Click += (_, _) => RunPluginInstallAction(install: false);
+
         serviceMenu.DropDownItems.AddRange(new ToolStripItem[]
         {
             status, new ToolStripSeparator(),
             configure, new ToolStripSeparator(),
             install, uninstall, start, stop, repair, new ToolStripSeparator(),
+            pluginInstall, pluginUninstall, new ToolStripSeparator(),
             activityLog, updateLog,
         });
+        serviceMenu.DropDownOpening += (_, _) =>
+        {
+            var installed = PluginInstaller.IsInstalled();
+            pluginInstall.Text = installed ? "Reinstall &VST plugin" : "Install &VST plugin";
+            pluginUninstall.Enabled = installed;
+        };
         serviceMenu.DropDownOpening += (_, _) =>
         {
             // Never let a status-query failure crash the menu (and with it the app). The menu only appears
@@ -2518,6 +2533,17 @@ public sealed partial class MainForm : Form
         {
             MessageBox.Show(this, $"Could not save the service profile: {ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
+    }
+
+    /// <summary>Install or remove the VST plugin, and say plainly what happened. No elevation is
+    /// involved (per-user VST3 folder), so there is no UAC prompt and nothing to explain about
+    /// administrator rights.</summary>
+    private void RunPluginInstallAction(bool install)
+    {
+        var (ok, message) = install ? PluginInstaller.Install() : PluginInstaller.Uninstall();
+        logFile.Event($"vst plugin {(install ? "install" : "remove")}: {(ok ? "ok" : "FAILED")} - {message}");
+        MessageBox.Show(this, message, AppName, MessageBoxButtons.OK,
+            ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
     }
 
     private void ServiceAction(string verb, string label, bool confirm)
