@@ -133,6 +133,12 @@ else {
 
 # ---- 4. CLI SURFACE + IN-APP SELF-TEST (these launch the app, which consolidates sounds away;
 #         that's why the package checks ran first) ----
+# The gate is run from a throwaway PUBLISH folder, so it cannot find the source tree by looking
+# around itself. One check needs it: the event-coverage guard reads every "+=" handler wiring out of
+# the source and insists each one is named in a spec. Handing it the repo path here is what keeps
+# that guard running in the real gate instead of quietly skipping.
+$env:REMSOUND_SOURCE_ROOT = $repo
+
 function Invoke-RsCli([string[]]$cliArgs) {
     $out = Join-Path $env:TEMP ("rs-cli-" + [guid]::NewGuid().ToString('N') + ".txt")
     $p = Start-Process -FilePath $exe -ArgumentList $cliArgs -Wait -NoNewWindow -RedirectStandardOutput $out -PassThru
