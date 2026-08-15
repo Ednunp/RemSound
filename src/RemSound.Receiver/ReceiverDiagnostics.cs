@@ -130,6 +130,39 @@ public sealed class ReceiverDiagnostics
         while (bufferedBytes > curMax && Interlocked.CompareExchange(ref bufferSampleMaxBytes, bufferedBytes, curMax) != curMax);
     }
 
+    // Per-LANE render-callback timing. The single global below is whichever lane fired last, which
+    // is fine for a mixed setup and WRONG the moment two lanes run at once: the WASAPI lane's
+    // shared-mode period (~10-11 ms, whatever Windows grants) would be attributed to an ASIO listener
+    // whose audio never goes near it. ASIO's whole point is that it is NOT penalised by WASAPI's
+    // buffering (Ed, 2026-08-15) — so the latency estimate must read the period of the lane the user
+    // is actually listening on. Indexed by RenderRoute.
+    private readonly long[] lastRenderCbTicksByRoute = new long[8];
+    private readonly long[] maxRenderCbGapTicksByRoute = new long[8];
+
+    /// <summary>The measured render-callback period for ONE lane, in ms — 0 when that lane hasn't
+    /// rendered. Read (and reset) alongside the snapshot.</summary>
+    public int MaxRenderCallbackGapMsFor(RemSound.Core.RenderRoute route)
+    {
+        var idx = (int)route & 7;
+        var ticks = Interlocked.Exchange(ref maxRenderCbGapTicksByRoute[idx], 0);
+        return (int)(ticks * 1000.0 / Stopwatch.Frequency);
+    }
+
+    /// <summary>Record a render callback for a specific lane, so per-lane periods stay separate.</summary>
+    public void RecordRenderRead(int bytesRequested, RemSound.Core.RenderRoute route)
+    {
+        RecordRenderRead(bytesRequested);
+        if (!RemSound.Core.DiagnosticsGate.Enabled) return;
+        var idx = (int)route & 7;
+        var now = Stopwatch.GetTimestamp();
+        var prev = Interlocked.Exchange(ref lastRenderCbTicksByRoute[idx], now);
+        if (prev == 0) return;
+        var gap = now - prev;
+        long cur;
+        do { cur = Volatile.Read(ref maxRenderCbGapTicksByRoute[idx]); }
+        while (gap > cur && Interlocked.CompareExchange(ref maxRenderCbGapTicksByRoute[idx], gap, cur) != cur);
+    }
+
     public void RecordRenderRead(int bytesRequested)
     {
         if (!RemSound.Core.DiagnosticsGate.Enabled) return;

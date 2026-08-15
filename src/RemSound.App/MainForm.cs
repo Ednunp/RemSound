@@ -7733,7 +7733,15 @@ public sealed partial class MainForm : Form
                 var captureBufferMs = CaptureBufferEstimateMs();
                 var senderAccumulatorMs = SenderAccumulatorEstimateMs();
                 var wireOneWayMs = LowestPeerRttMs() / 2.0;
-                var renderBufferMs = RenderBufferEstimateMs(diag.MaxRenderCallbackGapMs);
+                // Which lane is the user actually listening on? ASIO runs its own backend at its own
+                // (much smaller) period and is NOT penalised by WASAPI's shared-mode buffering — so
+                // read that lane's measured period, not a single global that the slower lane wins.
+                var listeningRoute = receiver.HasSessionsForRoute(RenderRoute.AsioLane) ? RenderRoute.AsioLane
+                    : receiver.HasSessionsForRoute(RenderRoute.WasapiLane) ? RenderRoute.WasapiLane
+                    : RenderRoute.Mixed;
+                var lanePeriodMs = receiver.MaxRenderCallbackGapMsFor(listeningRoute);
+                if (lanePeriodMs <= 0) lanePeriodMs = diag.MaxRenderCallbackGapMs;
+                var renderBufferMs = RenderBufferEstimateMs(lanePeriodMs);
                 // EVERY stage of the journey, or the total is a comfortable fiction.
                 var totalMs = captureBufferMs + senderAccumulatorMs + wireOneWayMs + diag.BufferAvgMs + renderBufferMs;
                 logFile.Event($"latency-probe estimated one-way ≈ {totalMs:0.0}ms " +

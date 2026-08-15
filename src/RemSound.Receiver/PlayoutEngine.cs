@@ -877,7 +877,9 @@ internal sealed class PlayoutEngine : IWaveProvider
 
     private int ReadForRouteInner(byte[] buffer, int offset, int count, RenderRoute route, float[] mixBuf, float[] sessionBuf, bool recordDiagnostics)
     {
-        if (recordDiagnostics) diagnostics.RecordRenderRead(count);
+        // Tag the callback with the lane it came from: WASAPI's shared-mode period must never be
+        // reported as an ASIO listener's latency (see ReceiverDiagnostics' per-route arrays).
+        if (recordDiagnostics) diagnostics.RecordRenderRead(count, route);
 
         var outFrames = count / MixBytesPerFrame;
         var outFloats = outFrames * MixChannels;
@@ -1007,7 +1009,8 @@ internal sealed class PlayoutEngine : IWaveProvider
     /// </summary>
     private int ReadAllSessions(byte[] buffer, int offset, int count, float[] mixBuf, float[] sessionBuf, bool recordDiagnostics)
     {
-        if (recordDiagnostics) diagnostics.RecordRenderRead(count);
+        // The Mixed route: the classic single-lane world, where there is only one output period.
+        if (recordDiagnostics) diagnostics.RecordRenderRead(count, RenderRoute.Mixed);
 
         var outFrames = count / MixBytesPerFrame;
         var outFloats = outFrames * MixChannels;

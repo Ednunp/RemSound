@@ -3038,7 +3038,28 @@ internal static partial class SelfTest
         // 11ms device period should land near what a clap test actually shows (~45ms), not near 23.
         var realistic = MainForm.CaptureBufferEstimateMsForTest() + 1.3 + 1.0 + 11 + MainForm.RenderBufferEstimateMsForTest(11);
         Check(realistic > 35, $"a realistic WASAPI setup should estimate in the 40s, matching a clap test (got {realistic:0.0}ms)");
-        return $"capture {MainForm.CaptureBufferEstimateMsForTest():0}ms counted; render follows the measured period; a realistic setup estimates {realistic:0.0}ms";
+
+        // ASIO MUST NOT INHERIT WASAPI'S BUFFERING. The two lanes run separate backends and never mix,
+        // so an ASIO listener's audio never passes through the WASAPI shared-mode buffer — quoting a
+        // single global period would hand them a WASAPI-sized number for a path they don't use.
+        // (Ed, 2026-08-15: "shared mode should add no latency to asio though — that's the thing we
+        // wanted and I think it still holds." It does; this pins it.)
+        var wasapiPeriod = MainForm.RenderBufferEstimateMsForTest(11); // shared mode, ~11ms granted
+        var asioPeriod = MainForm.RenderBufferEstimateMsForTest(2);    // a small ASIO buffer
+        Check(asioPeriod < wasapiPeriod,
+            $"an ASIO lane's estimate must reflect ITS period, not WASAPI's (asio {asioPeriod}ms vs wasapi {wasapiPeriod}ms)");
+
+        // ...and the per-lane periods must be tracked separately at source, or the estimate above has
+        // nothing honest to read. Two lanes rendering must not pollute each other's measurement.
+        using (var rx = new RemSound.Receiver.AudioReceiver())
+        {
+            var asioGap = rx.MaxRenderCallbackGapMsFor(RenderRoute.AsioLane);
+            var wasapiGap = rx.MaxRenderCallbackGapMsFor(RenderRoute.WasapiLane);
+            Check(asioGap == 0 && wasapiGap == 0, "a fresh receiver must report no measured period for either lane, not a shared value");
+        }
+
+        return $"capture {MainForm.CaptureBufferEstimateMsForTest():0}ms counted; render follows the measured period; "
+             + $"a realistic WASAPI setup estimates {realistic:0.0}ms; ASIO reads its own period ({asioPeriod}ms vs WASAPI's {wasapiPeriod}ms)";
     }
 
     /// <summary>The WASAPI and ASIO auto-tunes must follow exactly the SAME rules — one policy, no

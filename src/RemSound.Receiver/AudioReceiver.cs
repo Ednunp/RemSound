@@ -235,6 +235,12 @@ public sealed class AudioReceiver : IDisposable
     /// <summary>Whether incoming audio is being played. Read-back for the control suite (the Receive
     /// audio control must reach this), alongside SetPlaybackEnabled which drives it.</summary>
     public bool PlaybackEnabled => playbackEnabled;
+    /// <summary>The measured render-callback period for ONE lane. The latency estimate reads the
+    /// lane the user is actually listening on: ASIO's whole point is that it is NOT penalised by
+    /// WASAPI's shared-mode buffering, so quoting a single global period would hand an ASIO listener
+    /// a WASAPI-sized number for audio that never goes near WASAPI (Ed, 2026-08-15).</summary>
+    public int MaxRenderCallbackGapMsFor(RenderRoute route) => diagnostics.MaxRenderCallbackGapMsFor(route);
+
     public int SmoothnessValue => playoutEngine.SmoothnessValue;
     public ConcealmentArtifact ConcealmentArtifactValue => playoutEngine.ConcealmentArtifactValue;
 
