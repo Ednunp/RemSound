@@ -190,6 +190,24 @@ public sealed class AudioReceiver : IDisposable
     /// ASIO latency box as dead (2026-08-15). Idempotent and cheap.</summary>
     public void SetIndependentLaneLatency(bool independent) => playoutEngine.SetIndependentLaneLatency(independent);
 
+    /// <summary>Which output lanes have a ticked device. Normally derived by CompositeRenderBackend
+    /// from <see cref="SetOutputDevices"/> — exposed because this, NOT the audio mode, is what decides
+    /// which lane an incoming stream is tagged with, and therefore which latency control governs it.
+    /// A user with an ASIO driver chosen but only ASIO outputs ticked is a genuinely different
+    /// configuration from one with both kinds ticked, and the control suite has to be able to build
+    /// all three without opening real hardware (Ed, 2026-08-15 — the suite covered two of three).</summary>
+    /// <summary>Create the playout state an arriving stream would get, so a test can assert WHICH
+    /// LANE it lands on — the relationship the 2026-08-14 dead-slider bug broke (a stream tagged with
+    /// one lane while the slider wrote another). Internal: a diagnostic seam, not app API.</summary>
+    internal SessionPlayout GetOrCreateSessionForTest(IPEndPoint remote, ushort streamId) =>
+        playoutEngine.GetOrCreateSession(remote, streamId, MaxBufferCapacityBytes(MaxLatencyForSizingMs));
+
+    public void SetActiveOutputLanes(bool wasapiActive, bool asioActive)
+    {
+        playoutEngine.SetLaneActive(RenderRoute.WasapiLane, wasapiActive);
+        playoutEngine.SetLaneActive(RenderRoute.AsioLane, asioActive);
+    }
+
     public void SetAudioMode(AudioMode mode, string? asioDriverName)
     {
         var wasRunning = multiOutput.IsRunning;

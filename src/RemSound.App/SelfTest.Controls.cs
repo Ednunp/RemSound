@@ -209,9 +209,30 @@ internal static partial class SelfTest
         new("continuousIntervalLabel", "label for the auto-tune interval", GovernsNothing: true),
     ];
 
-    /// <summary>Run the whole control suite in one audio configuration.</summary>
-    private static string RunControlSuite(AudioMode mode)
+    /// <summary>A real user configuration. The audio MODE is only half of it: which lane an incoming
+    /// stream is tagged with — and therefore which latency control governs it — is decided by which
+    /// OUTPUT DEVICES are ticked. So a user with an ASIO driver but only ASIO outputs ticked is a
+    /// third configuration, distinct from WASAPI-only and from both-ticked. Missing it was the gap Ed
+    /// caught on 2026-08-15: the suite ran two configurations and claimed to run every one.</summary>
+    private sealed record SuiteConfig(string Name, bool AsioDriver, bool WasapiLaneActive, bool AsioLaneActive)
     {
+        public AudioMode Mode => AsioDriver ? AudioMode.BothIndependent : AudioMode.WasapiOnly;
+        /// <summary>The lane an arriving stream lands on — ReconcileReplicasLocked tags it with the
+        /// FIRST active lane (WASAPI before ASIO).</summary>
+        public RenderRoute ExpectedRoute => WasapiLaneActive ? RenderRoute.WasapiLane : RenderRoute.AsioLane;
+    }
+
+    private static readonly SuiteConfig[] SuiteConfigs =
+    [
+        new("WASAPI only (one slider)",              AsioDriver: false, WasapiLaneActive: true,  AsioLaneActive: false),
+        new("ASIO only (ASIO outputs ticked)",       AsioDriver: true,  WasapiLaneActive: false, AsioLaneActive: true),
+        new("Both (WASAPI + ASIO outputs ticked)",   AsioDriver: true,  WasapiLaneActive: true,  AsioLaneActive: true),
+    ];
+
+    /// <summary>Run the whole control suite in one audio configuration.</summary>
+    private static string RunControlSuite(SuiteConfig config)
+    {
+        var mode = config.Mode;
         // The audio mode is DERIVED from whether an ASIO driver is chosen (RemSoundSettingsStore
         // .LoadAudioMode) — no driver means one slider, a driver means two. So the configuration is
         // switched exactly the way a user switches it: by the driver choice.
@@ -236,7 +257,7 @@ internal static partial class SelfTest
             // suite two runs and is exactly the kind of "the test wasn't testing what it claimed"
             // that let the dead slider through in the first place.
             var profile = Profile.NewBlank();
-            profile.AsioDriverName = mode == AudioMode.BothIndependent ? "RemSound Test ASIO Driver" : null;
+            profile.AsioDriverName = config.AsioDriver ? "RemSound Test ASIO Driver" : null;
             // Stored OBFUSCATED — MainForm deobfuscates on load, and a plain string decodes to ""
             // (which is what re-opened the modal dialog and hung the second run).
             profile.Password = RemSoundCrypto.Obfuscate("control-suite-test-password");
@@ -248,6 +269,17 @@ internal static partial class SelfTest
             var actualMode = form.SettingsForTest.LoadAudioMode();
             if (actualMode != mode)
                 throw new CheckFailed($"the app did not enter {mode} for the suite (it reports {actualMode}) — the audit below would have been a lie");
+
+            // Which lanes have a ticked output — the routing axis, normally set by
+            // CompositeRenderBackend from the device lists.
+            form.ReceiverForTest.SetActiveOutputLanes(config.WasapiLaneActive, config.AsioLaneActive);
+
+            // ROUTING ASSERTION: an arriving stream must land on the lane this configuration implies,
+            // and must read the control that governs that lane. This is the exact relationship the
+            // dead-slider bug broke, checked now in every configuration rather than assumed.
+            var probe = form.ReceiverForTest.GetOrCreateSessionForTest(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 47850), 7);
+            if (probe.Route != config.ExpectedRoute)
+                throw new CheckFailed($"{config.Name}: an arriving stream landed on {probe.Route}, expected {config.ExpectedRoute} — the latency controls would govern the wrong stream");
 
             var specs = BuildControlSpecs();
             var problems = new List<string>();
@@ -309,8 +341,8 @@ internal static partial class SelfTest
             }
 
             if (problems.Count > 0)
-                throw new CheckFailed($"{mode}: " + string.Join("; ", problems));
-            return $"{mode}: {uiChecked} controls audited (UI + accessibility + theme), {effectsProven} proven to reach what they govern";
+                throw new CheckFailed($"{config.Name}: " + string.Join("; ", problems));
+            return $"{config.Name}: streams land on {probe.Route}; {uiChecked} controls audited (UI + accessibility + theme), {effectsProven} proven to reach what they govern";
         }
         finally
         {
