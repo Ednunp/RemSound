@@ -84,6 +84,8 @@ internal static partial class SelfTest
         RunStep(results, "Encoder-boundary sample clamp (shared rule, exact count)", SampleClampRule);
         RunStep(results, "App settings save and reload", SettingsRoundTrip);
         RunStep(results, "Per-peer shaping DSP", PeerShapingDsp);
+        RunStep(results, "Volume and pan actually move the sound (measured)", ShapingVolumeAndPan);
+        RunStep(results, "All three EQ modes actually change the sound (measured, every band)", ShapingEqModes);
         RunStep(results, "Multi-output fan-out (both lanes)", FanOutToBothOutputs);
         RunStep(results, "Per-application send enumeration", AppSendEnumeration);
         RunStep(results, "Per-application capture lifecycle", AppSendCaptureLifecycle);
@@ -109,6 +111,8 @@ internal static partial class SelfTest
         RunStep(results, "Service self-contained install (own bin + user stop rights)", ServiceSelfContainedInstall);
         RunStep(results, "Recording engine (all formats + source gate + mono)", RecordingEngine);
         RunStep(results, "Recording split tracks (per-peer + own)", RecordingSplitTracks);
+        RunStep(results, "Recording: two peers, each track holds its OWN audio", RecordingMultiPeerSplit);
+        RunStep(results, "Recording: every source and channel mode, judged by the file contents", RecordingModesByContent);
         RunStep(results, "Recording churn / soak", RecordingChurn);
         RunStep(results, "v5 settings and shaping round-trip", V5ConfigRoundTrip);
         RunStep(results, "Profile save and reload", ProfileRoundTrip);

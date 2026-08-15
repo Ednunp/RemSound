@@ -58,6 +58,9 @@ internal sealed class PlayoutEngine : IWaveProvider
     // Split-recording tap: one callback shared by every session (each passes its own Endpoint), plus
     // whether to tap raw or shaped. Set on all current sessions and inherited by new ones, like the DSP.
     private Action<IPEndPoint, ReadOnlyMemory<float>>? recordTap;
+
+    /// <summary>The installed per-peer tap, for the gate to drive directly.</summary>
+    internal Action<IPEndPoint, ReadOnlyMemory<float>>? RecordTapForTest => recordTap;
     private bool recordTapRaw;
     private SessionPlayout[] sessionsSnapshot = [];
     // Mirror replicas for the "every stream plays to every output" fan-out (BothIndependent). The

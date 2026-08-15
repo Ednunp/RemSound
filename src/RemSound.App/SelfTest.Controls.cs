@@ -111,18 +111,18 @@ internal static partial class SelfTest
         new("uncheckAllDevicesButton", "clears every ticked device at once", GovernsNothing: true),
 
         // ---- Volume, pan and EQ -----------------------------------------------------------------
-        new("volumeSlider", "the SELECTED PEER's volume (per-peer shaping has its own gate step)", GovernsNothing: true),
+        new("volumeSlider", "the selected peer's volume - EFFECT PROVEN by 'Volume and pan actually move the sound', which measures the level", GovernsNothing: true),
         new("volumeBar", "the master volume actually applied to received audio",
             (f, c) => DragSlider(c, -25),
             f => f.ReceiverForTest.Volume),
-        new("panSlider", "the selected peer's pan position", GovernsNothing: true),
-        new("panEqPeerList", "which peer the pan/EQ controls apply to", GovernsNothing: true),
+        new("panSlider", "the selected peer's pan position - EFFECT PROVEN by 'Volume and pan actually move the sound', which measures each channel", GovernsNothing: true),
+        new("panEqPeerList", "which peer the pan/EQ controls apply to, and their per-peer bypass tick - the bypass is PROVEN via ShapingActiveForTest", GovernsNothing: true),
         new("enableAllPeerShapingBox", "whether per-peer pan/EQ shaping is applied at all",
             (f, c) => ((CheckBox)c).Checked = !((CheckBox)c).Checked,
             f => f.AllPeerShapingEnabledForTest),
-        new("addBandButton", "adds an EQ band to the selected peer", GovernsNothing: true),
-        new("deleteBandButton", "removes the selected EQ band", GovernsNothing: true),
-        new("resetPeerEqButton", "resets the selected peer's EQ", GovernsNothing: true),
+        new("addBandButton", "adds a parametric band - a band's effect on the audio is PROVEN by 'All three EQ modes'", GovernsNothing: true),
+        new("deleteBandButton", "removes a parametric band - a removed band leaving the curve flat is PROVEN by 'All three EQ modes'", GovernsNothing: true),
+        new("resetPeerEqButton", "resets the selected peer's EQ to flat - flat building no chain at all is PROVEN by 'All three EQ modes'", GovernsNothing: true),
 
         // ---- Audio profile: the transport itself ------------------------------------------------
         // THE REGRESSION THAT STARTED THIS SUITE. Each of these must reach the live audio path.
@@ -183,8 +183,8 @@ internal static partial class SelfTest
             (f, c) => SelectNext(c),
             f => f.ReceiverForTest.ConcealmentArtifactValue),
         new("asioDriverBox", "the ASIO driver choice — which also decides one-slider vs two-slider mode", GovernsNothing: true),
-        new("eqModeList", "simple vs parametric EQ", GovernsNothing: true),
-        new("parametricBandList", "which EQ band is being edited", GovernsNothing: true),
+        new("eqModeList", "which of the three EQ modes is active - EFFECT PROVEN by 'All three EQ modes actually change the sound', which measures that the same slider gives a different curve per mode", GovernsNothing: true),
+        new("parametricBandList", "which parametric band is being edited - each band's effect is PROVEN by 'All three EQ modes' (two bands must both apply)", GovernsNothing: true),
         new(Decorative: true, Field: "eqBandsPanel", Governs: "container for the EQ band controls", GovernsNothing: true),
         new(Decorative: true, Field: "eqCurve", Governs: "the drawn EQ curve (read-only visual)", GovernsNothing: true),
         new("connectedPeersList", "the connected-peer list", GovernsNothing: true),

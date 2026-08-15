@@ -81,8 +81,9 @@ public sealed class PeerDspChain
                 PeerEqBands.ParametricToPeaking(band.StartHz, band.EndHz, out float centre, out float q);
                 float nyquist = PeerEqBands.MixSampleRate / 2f;
                 if (centre <= 0f || centre >= nyquist) continue;
-                l.Add(BiQuadFilter.PeakingEQ(PeerEqBands.MixSampleRate, centre, q, band.GainDb));
-                r.Add(BiQuadFilter.PeakingEQ(PeerEqBands.MixSampleRate, centre, q, band.GainDb));
+                var gain = ClampGain(band.GainDb);
+                l.Add(BiQuadFilter.PeakingEQ(PeerEqBands.MixSampleRate, centre, q, gain));
+                r.Add(BiQuadFilter.PeakingEQ(PeerEqBands.MixSampleRate, centre, q, gain));
             }
         }
         else
@@ -93,6 +94,7 @@ public sealed class PeerDspChain
             {
                 float gainDb = gains is not null && i < gains.Length ? gains[i] : 0f;
                 if (MathF.Abs(gainDb) < 0.05f) continue;   // flat band — no filter needed, skip it
+                gainDb = ClampGain(gainDb);
                 l.Add(MakeBand(mode, i, bands.Length, (float)bands[i].Freq, gainDb));
                 r.Add(MakeBand(mode, i, bands.Length, (float)bands[i].Freq, gainDb));
             }
@@ -101,6 +103,17 @@ public sealed class PeerDspChain
         var chain = new PeerDspChain(gainL, gainR, hasGain, [.. l], [.. r], shaping, enabled);
         return chain.IsNoOp ? null : chain;
     }
+
+    /// <summary>Hold a band's gain to what the sliders can actually produce.
+    ///
+    /// <para>The sliders run -12 to +12, so nothing the user can do reaches this. A PROFILE, though, is
+    /// a file on disk — hand-edited, copied between machines, or corrupted — and a gain of 100 dB in
+    /// one was applied verbatim, giving very nearly 100 dB of boost straight into somebody's
+    /// headphones. The limiter downstream would catch some of it, but only after the damage.</para>
+    ///
+    /// <para>Found 2026-08-15 by a test that measured the boost rather than checking a filter got
+    /// built. Clamping costs nothing and cannot change any setting a user could have made.</para></summary>
+    private static float ClampGain(float gainDb) => Math.Clamp(gainDb, -PeerEqBands.MaxGainDb, PeerEqBands.MaxGainDb);
 
     private static BiQuadFilter MakeBand(PeerEqMode mode, int index, int count, float freq, float gainDb)
     {

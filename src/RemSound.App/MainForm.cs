@@ -8593,6 +8593,16 @@ public sealed partial class MainForm : Form
     /// developer sees in the source rather than guessing at a caption.</summary>
     internal bool SendEnabledForTest => IsSendEnabled;
     internal bool AllPeerShapingEnabledForTest => enableAllPeerShapingBox.Checked;
+
+    /// <summary>Drive the REAL per-peer bypass decision. The two switches are combined here in the
+    /// window, not inside PeerDspChain.Build — so a test that called Build with a peer's tick off
+    /// would be testing a call the app never makes, and would prove nothing about the bypass.</summary>
+    internal bool ShapingActiveForTest(string key, bool masterOn, bool peerTicked)
+    {
+        enableAllPeerShapingBox.Checked = masterOn;
+        GetOrCreateShaping(key).Enabled = peerTicked;
+        return ShapingActiveFor(key);
+    }
     internal int SendModeIndexForTest => sendModeList.SelectedIndex;
     internal bool ReceiveEnabledForTest => IsReceiveEnabled;
     internal bool AutoTuneTimerEnabledForTest => continuousTuneTimer.Enabled;

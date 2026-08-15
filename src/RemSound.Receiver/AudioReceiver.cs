@@ -267,6 +267,11 @@ public sealed class AudioReceiver : IDisposable
     public void SetPeerRecordTap(Action<IPEndPoint, ReadOnlyMemory<float>>? tap, bool raw) =>
         playoutEngine.SetRecordTap(tap, raw);
 
+    /// <summary>The per-peer tap currently installed, so the gate can drive it with known audio for a
+    /// known peer. Multi-peer recording cannot otherwise be tested without real peers on a real
+    /// network — which is how it went untested until Ed asked (2026-08-15).</summary>
+    internal Action<IPEndPoint, ReadOnlyMemory<float>>? PeerRecordTapForTest => playoutEngine.RecordTapForTest;
+
     /// <summary>Fired once per rendered block, right after <see cref="OnReceivedSamples"/> — the block
     /// boundary a single-file bypass recording uses to flush its per-peer sum.</summary>
     public Action<int>? OnRecordBlockComplete
