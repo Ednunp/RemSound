@@ -138,6 +138,7 @@ internal static partial class SelfTest
         Check(plugin.IsSending, "unticking Active must release the peer, exactly as the window's Active box does");
 
         plugin.Stop();   // releases the peer and closes the link, as a host deactivating the instance does
+        plugin.CloseForTest();   // ...and drop its log, so it is not still ticking during the logging test
         return $"{parameters.Count} named parameters, defaulting to send/active/nobody; job and Active reach the engine; "
              + "an out-of-range peer resolves to nobody rather than wrapping onto somebody else";
     }
@@ -167,6 +168,117 @@ internal static partial class SelfTest
         public void SetParameter(int parameter, double normalizedValue) { }
         public void Log(string message) { }
     }
+
+    /// <summary>The plugin's logging — off by default, honest when on, and never touching the audio
+    /// thread.
+    ///
+    /// <para>This exists so a tester can send back evidence instead of an impression. Two things have
+    /// to hold for that to be worth anything. It must write NOTHING when the user has logs switched
+    /// off — a plugin that quietly creates files in somebody's session is its own bug. And when it is
+    /// on, the numbers have to be real: a log full of zeros that were never wired up is worse than no
+    /// log, because it looks like an answer.</para></summary>
+    private static string? PluginLogging()
+    {
+        var scratch = Path.Combine(Path.GetTempPath(), "remsound-plugin-log-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using (AppConfig.UseThrowawayUserDataDirectory(scratch))
+            {
+                // --- OFF: nothing at all --------------------------------------------------------
+                var off = AppConfig.Load();
+                off.LoggingEnabled = false;
+                off.Save();
+
+                using (var quiet = new PluginLog(Guid.NewGuid()))
+                {
+                    quiet.SnapshotSource = () => SampleSnapshot();
+                    quiet.Event("this must never be written");
+                    Check(quiet.Path is null, "with logs OFF the plugin must not create a file at all - not even an empty one");
+                }
+                Check(!Directory.Exists(AppConfig.LogsDirectory) || Directory.GetFiles(AppConfig.LogsDirectory, "RemSoundPlugin-*").Length == 0,
+                    "with logs OFF there must be no plugin log file on disk");
+
+                // --- ON: a real file, with real lines --------------------------------------------
+                var on = AppConfig.Load();
+                on.LoggingEnabled = true;
+                on.Save();
+
+                string? path;
+                using (var live = new PluginLog(Guid.NewGuid()))
+                {
+                    live.SnapshotSource = () => SampleSnapshot();
+                    live.Event("initialised - host says 48000 Hz");
+                    live.Event("job: receiving 192.168.1.50 onto this track");
+                    path = live.Path;
+                    Check(path is not null, "with logs ON the plugin must create a file");
+                    // Wait on the COUNTER, not on the file. The per-second line is written by a
+                    // timer, and reading a log while its own writer still holds it open is a
+                    // file-sharing argument that proves nothing about whether the logging works.
+                    Check(WaitUntil(() => live.SnapshotsWritten > 0, timeoutMs: 4000),
+                        "the per-second snapshot line must actually be written");
+                }
+
+                var text = ReadSharedText(path!);
+                Check(text.StartsWith("Kind\tTimestamp"), "the file must start with its column header, or nobody can read it");
+                Check(text.Contains("plugin log started"), "it must say when it started, and in which host process");
+                Check(text.Contains("job: receiving 192.168.1.50"), "events must be written verbatim");
+                // The numbers a tester's report hinges on. If these are absent the log looks fine and
+                // answers nothing.
+                foreach (var column in new[] { "HostRate", "BlockFrames", "Resampling", "ShortBlocks", "RingFrames" })
+                    Check(text.Contains(column), $"the snapshot must carry '{column}' - it is one of the numbers that explains a fault");
+
+                var snap = text.Split('\n').First(l => l.StartsWith("SNAP"));
+                Check(snap.Contains("\t44100\t") && snap.Contains("\tyes\t"),
+                    $"the snapshot must report the host's real rate and whether we are resampling (got: {snap.Trim()})");
+            }
+
+            // --- The APP's half: every claim and release must reach the log ---------------------
+            var written = new List<string>();
+            var peer = IPAddress.Parse("192.168.1.50");
+            using (var host = new PluginBridgeHost(null, port: 0))
+            {
+                host.Notable += written.Add;
+                using (var plugin = new PluginBridgeClient(host.Port))
+                {
+                    plugin.Hello();
+                    Check(WaitUntil(() => written.Any(l => l.Contains("said hello"))), "a plugin connecting must be logged");
+                    plugin.ReceiveFrom(peer);
+                    var block = new float[512];
+                    plugin.ReadPeerBlock(block, 256);
+                    Check(WaitUntil(() => written.Any(l => l.Contains("took 192.168.1.50"))),
+                        "a plugin taking a peer must be logged - it is the moment that peer leaves the speakers");
+                    plugin.ReceiveFrom(null);
+                    Check(WaitUntil(() => written.Any(l => l.Contains("let 192.168.1.50 go"))),
+                        "and letting them go must be logged, so a silent peer can be explained from a file");
+                }
+                Check(WaitUntil(() => written.Any(l => l.Contains("closed cleanly"))), "a plugin closing must be logged");
+                Check(host.DescribeForLog().Contains("instances="), "the per-second summary must describe the link");
+            }
+
+            return $"off means no file at all; on gives a header, plain-English events and a per-second line carrying the host rate, "
+                 + $"block size, resampling, short blocks and ring depth; the app logs {written.Count} link events including every claim and release";
+        }
+        finally
+        {
+            try { if (Directory.Exists(scratch)) Directory.Delete(scratch, recursive: true); } catch { }
+        }
+    }
+
+    /// <summary>Read a log the writer still has open. Plain File.ReadAllText asks for exclusive-ish
+    /// sharing and fails against a live writer - which is exactly the state a tester is in when they
+    /// go to send the file, so it is worth reading it the same way they would have to.</summary>
+    private static string ReadSharedText(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
+    private static PluginLogSnapshot SampleSnapshot() => new(
+        Job: "receive", Peer: "192.168.1.50", Connected: true,
+        HostSampleRate: 44100, BlockFrames: 512, Resampling: true,
+        BlocksOut: 0, BlocksIn: 120, ShortBlocks: 3, RingFrames: 558,
+        BytesOut: 0, BytesIn: 245760, KnownPeers: 2);
 
     /// <summary>The plugin has to actually BE in this copy of RemSound, and be complete.
     ///

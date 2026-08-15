@@ -46,6 +46,14 @@ public class RemSoundPlugin : AudioPluginBase
     private int preparedBlockSize;
     private double preparedSampleRate;
 
+    /// <summary>This instance's own id, so several plugins in one DAW are told apart in the log.</summary>
+    private readonly Guid instanceId = Guid.NewGuid();
+
+    /// <summary>The plugin's log, gated by "Enable logs" in RemSound's Preferences exactly like the
+    /// app's. It exists from construction so that even a failure during Initialize gets written down —
+    /// a plugin that dies before it starts is precisely the report that arrives with no evidence.</summary>
+    private PluginLog? log;
+
     /// <summary>What this instance is doing. One person per track: it either sends this track to the
     /// peers, or receives ONE peer onto it — never both, which is what keeps the DAW routing stable
     /// and the double-audio guard simple.</summary>
@@ -59,9 +67,13 @@ public class RemSoundPlugin : AudioPluginBase
     /// than after a timeout.</summary>
     internal void SetJob(bool sending, System.Net.IPAddress? peer)
     {
+        var changed = sending != IsSending || !Equals(peer, chosenPeer);
         IsSending = sending;
         chosenPeer = peer;
         bridge?.ReceiveFrom(sending ? null : peer);
+        // Only on a real change: this is called on every parameter touch, and a line per touch would
+        // bury the one that mattered.
+        if (changed) log?.Event(sending ? "job: sending this track to the peers" : $"job: receiving {peer?.ToString() ?? "nobody"} onto this track");
     }
 
     private System.Net.IPAddress? chosenPeer;
@@ -122,6 +134,33 @@ public class RemSoundPlugin : AudioPluginBase
         // Stable identity: a DAW keys saved sessions off this, so it must never change once shipped
         // or every existing project silently loses its RemSound instances.
         PluginID = 0x52656D536E640600; // "RemSnd" + 06 00
+
+        log = new PluginLog(instanceId);
+        log.SnapshotSource = DescribeForLog;
+        log.Event($"plugin constructed (RemSound {PluginVersion})");
+    }
+
+    /// <summary>The once-a-second line. Everything needed to answer "why did it sound wrong" without
+    /// having to ask another question: what this instance was doing, whether the app was answering,
+    /// what rate and block size the host was running, whether we were resampling, and how full the
+    /// buffer was. Read on the log's timer thread, never on the audio thread.</summary>
+    private PluginLogSnapshot DescribeForLog()
+    {
+        var b = bridge;
+        return new PluginLogSnapshot(
+            Job: IsSending ? "send" : "receive",
+            Peer: chosenPeer?.ToString(),
+            Connected: b?.Connected ?? false,
+            HostSampleRate: preparedSampleRate,
+            BlockFrames: preparedBlockSize,
+            Resampling: Math.Abs(preparedSampleRate - WireSampleRate) > 0.5,
+            BlocksOut: b?.SentBlocks ?? 0,
+            BlocksIn: b?.ServedBlocks ?? 0,
+            ShortBlocks: b?.StarvedBlocks ?? 0,
+            RingFrames: b?.RingFrames ?? 0,
+            BytesOut: b?.BytesSent ?? 0,
+            BytesIn: b?.BytesReceived ?? 0,
+            KnownPeers: b?.KnownPeers.Count ?? 0);
     }
 
     public override void Initialize()
@@ -131,10 +170,13 @@ public class RemSoundPlugin : AudioPluginBase
         // The app owns the one connection; this is our end of the link to it. Opened here rather than
         // in the constructor because a DAW constructs plugins to inspect them without ever running
         // them, and a scan of the plugin folder should not open sockets.
-        bridge = new PluginBridgeClient();
+        bridge = new PluginBridgeClient(id: instanceId);
+        bridge.Notable += message => log?.Event($"link: {message}");
         capture = new HostCaptureBackend(samples => bridge?.SendTrackBlock(samples.Span));
         render = new PeerRenderBridge(bridge);
         bridge.Hello();
+        log?.Event($"initialised - host says {Host?.SampleRate ?? 0:0} Hz, up to {Host?.MaxAudioBufferSize ?? 0} frames per block; "
+                 + $"said hello to RemSound on 127.0.0.1:{PluginBridgeProtocol.DefaultPort}");
 
         // Stereo in, stereo out. IN is the track feeding your peers; OUT is what arrives from them.
         // Both ports exist in both jobs so the DAW's routing never changes when the user switches an
@@ -213,10 +255,20 @@ public class RemSoundPlugin : AudioPluginBase
         var rate = Host?.SampleRate ?? WireSampleRate;
         if (blockSize != preparedBlockSize || Math.Abs(rate - preparedSampleRate) > 0.5)
         {
+            var first = preparedBlockSize == 0;
+            var previousBlock = preparedBlockSize;
+            var previousRate = preparedSampleRate;
             preparedBlockSize = blockSize;
             preparedSampleRate = rate;
             capture?.PrepareForBlockSize(blockSize, rate);
             render?.PrepareForBlockSize(blockSize, rate);
+            // Buffers are resized OFF the audio thread's steady path, and only on a real change, so
+            // this line is rare. If it ever appears repeatedly in a log, that is the finding: the host
+            // is changing its block size every callback and we are allocating in its audio thread.
+            log?.Event(first
+                ? $"audio started: {rate:0} Hz, {blockSize} frames per block"
+                  + (Math.Abs(rate - WireSampleRate) > 0.5 ? $" - resampling to and from {WireSampleRate} Hz" : " - no resampling needed")
+                : $"host changed format: {previousRate:0} Hz/{previousBlock} frames -> {rate:0} Hz/{blockSize} frames (one block of silence while buffers resize)");
             outLeft.Clear();
             outRight.Clear();
             return;
@@ -285,10 +337,14 @@ public class RemSoundPlugin : AudioPluginBase
         // is what a screen reader relies on to see the controls at all.
         if (parentWindow != IntPtr.Zero) SetParent(editorForm.Handle, parentWindow);
         editorForm.Show();
+        // Whether the host gave us a window to parent into is worth knowing: a zero handle is the
+        // shape of "the plugin window never appeared", and it is otherwise invisible from a bug report.
+        log?.Event($"window opened ({EditorWidth}x{EditorHeight}, host frame {(parentWindow == IntPtr.Zero ? "NOT supplied" : "supplied")})");
     }
 
     public override void HideEditor()
     {
+        log?.Event("window closed");
         editorForm?.Close();
         editorForm?.Dispose();
         editorForm = null;
@@ -347,12 +403,29 @@ public class RemSoundPlugin : AudioPluginBase
         base.Stop();
         capture?.Stop();
         bridge?.ReceiveFrom(null);
+        log?.Event($"deactivated by the host - peer released. Totals: {bridge?.ServedBlocks ?? 0} blocks in, "
+                 + $"{bridge?.SentBlocks ?? 0} out, {bridge?.StarvedBlocks ?? 0} short");
+    }
+
+    /// <summary>Tear the instance down completely. AudioPlugSharp gives a plugin no dispose hook — a
+    /// host just unloads the process — so this exists for the gate, which creates real instances and
+    /// must not leave their sockets and log timers running behind it.</summary>
+    internal void CloseForTest()
+    {
+        bridge?.Dispose();
+        bridge = null;
+        capture?.Dispose();
+        capture = null;
+        log?.Event("closed");
+        log?.Dispose();
+        log = null;
     }
 
     public override void Start()
     {
         base.Start();
         capture?.Start([]);
+        log?.Event("activated by the host");
         // Ask again who is available: RemSound may have been started, or its peers changed, while
         // this instance sat inactive in a saved session.
         bridge?.Hello();

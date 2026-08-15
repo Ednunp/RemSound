@@ -1274,6 +1274,16 @@ SNAP| One-second snapshots of running figures: codec, latency target, how much s
 
 The **Write logs now** button on the Logging tab (Alt+W within the dialog) writes a “user requested write logs now” marker into the log, so you can find that moment in the file afterwards.
 
+### The DAW plugin writes its own log too
+
+The plugin runs inside your music software rather than inside RemSound, so it cannot share the app's file. It writes its own, into the same `logs` folder, named `RemSoundPlugin-` and then your computer's name. The **same** Enable logs checkbox controls it — with logging off, no plugin log is written at all.
+
+You get one file per plugin instance, so two tracks each running RemSound produce two files. Between them the app's log and the plugin's cover both halves of the conversation, which is why sending both is worth doing if something needs looking at.
+
+The plugin's file has the same two kinds of rows. Its snapshot line records what that track was doing, whether RemSound was answering, the sample rate and block size your music software was running, whether the audio was being converted between rates, how many blocks arrived short, and how much sound was waiting to be played. If a track ever sounds wrong, that line is usually where the reason is.
+
+You can turn logging on while your music software is already open — the plugin notices within a second and starts a file, so you do not have to reload anything to catch a fault that has already begun.
+
 ### Keeping the logs folder tidy
 
 Log files are small, but if you leave logging on for months they add up. The **Logging** tab has three ways to keep the folder under control, all switched off to begin with so nothing is ever deleted unless you ask for it:

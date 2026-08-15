@@ -72,6 +72,49 @@ public sealed class PluginBridgeHost : IDisposable
     /// null means "no peers yet", which the plugin shows plainly rather than looking broken.</summary>
     public Func<IReadOnlyList<(IPAddress Address, string Name)>>? PeerListSource { get; set; }
 
+    /// <summary>Raised when something worth writing down happens on the link. Fired on the bridge
+    /// thread; the app turns these into log lines. Deliberately plain English — whoever reads this file
+    /// is trying to work out why a track was silent, not trying to read our code.</summary>
+    public event Action<string>? Notable;
+
+    private long blocksServed, bytesServed, trackBlocks, trackBytes, unknownPeerRequests, shortReads;
+
+    /// <summary>Counters for the app's once-a-second plugin line.</summary>
+    public long BlocksServed => Interlocked.Read(ref blocksServed);
+    public long BytesServed => Interlocked.Read(ref bytesServed);
+    public long TrackBlocksReceived => Interlocked.Read(ref trackBlocks);
+    public long TrackBytesReceived => Interlocked.Read(ref trackBytes);
+
+    /// <summary>Blocks a plugin asked for that we could not fill. A few while a peer's buffer builds
+    /// are normal; a number that climbs is the app failing to keep up, and it is the difference between
+    /// diagnosing a crackle and guessing at it.</summary>
+    public long ShortReads => Interlocked.Read(ref shortReads);
+
+    /// <summary>Requests for a peer we have no audio for — a plugin pointed at somebody who has gone.
+    /// Silent on the track, and invisible without this.</summary>
+    public long UnknownPeerRequests => Interlocked.Read(ref unknownPeerRequests);
+
+    /// <summary>Malformed datagrams on our port. Rising means something else is talking to it.</summary>
+    public long MalformedReceived => link.MalformedReceived;
+
+    /// <summary>One line describing the whole link right now, for the app's per-second log.</summary>
+    public string DescribeForLog()
+    {
+        lock (gate)
+        {
+            var claimed = claims.ClaimedPeers();
+            return $"instances={instances.Count} claimed={claimed.Count}"
+                 + (claimed.Count == 0 ? "" : $" [{string.Join(", ", claimed)}]")
+                 + $" blocksOut={BlocksServed} bytesOut={BytesServed}"
+                 + $" blocksIn={TrackBlocksReceived} bytesIn={TrackBytesReceived}"
+                 + $" short={ShortReads} unknownPeer={UnknownPeerRequests} malformed={MalformedReceived}";
+        }
+    }
+
+    /// <summary>Is anything actually going on? The app uses this to keep a quiet log quiet — a line a
+    /// second saying "nothing" would bury the session that matters.</summary>
+    public bool HasActivity => InstanceCount > 0 || BlocksServed > 0 || TrackBlocksReceived > 0;
+
     /// <summary>How many plugin instances are talking to us right now — for the log, so "why is Andre
     /// silent in the app" is answerable from a file rather than by guesswork.</summary>
     public int InstanceCount { get { lock (gate) { return instances.Count; } } }
@@ -89,8 +132,11 @@ public sealed class PluginBridgeHost : IDisposable
         switch (type)
         {
             case PluginBridgeMessage.Hello:
-                Touch(hash, from);
+                var isNew = !KnownInstance(hash);
+                var instance = Touch(hash, from);
                 SendPeerList(from, hash);
+                if (isNew) Notable?.Invoke($"a plugin said hello (instance {Short(instance.Id)}, from port {from.Port})");
+                else Notable?.Invoke($"plugin {Short(instance.Id)} said hello again - it will have reconnected after RemSound restarted");
                 break;
 
             case PluginBridgeMessage.ClaimPeer:
@@ -110,6 +156,9 @@ public sealed class PluginBridgeHost : IDisposable
             case PluginBridgeMessage.Goodbye:
                 Forget(hash);
                 break;
+
+            default:
+                break;
         }
     }
 
@@ -124,6 +173,11 @@ public sealed class PluginBridgeHost : IDisposable
         if (instance.ClaimedPeer is not null && !instance.ClaimedPeer.Equals(peer))
         {
             claims.Release(instance.ClaimedPeer, instance.Id);
+            Notable?.Invoke($"plugin {Short(instance.Id)} moved from {instance.ClaimedPeer} to {peer} - {instance.ClaimedPeer} is back on the speakers");
+        }
+        else if (instance.ClaimedPeer is null)
+        {
+            Notable?.Invoke($"plugin {Short(instance.Id)} took {peer} - that peer now plays on the DAW track instead of the speakers");
         }
         instance.ClaimedPeer = peer;
         claims.Claim(peer, instance.Id);
@@ -137,9 +191,22 @@ public sealed class PluginBridgeHost : IDisposable
         lock (readScratch)
         {
             produced = readPeer(peer, readScratch.AsSpan(0, frames * 2), frames);
-            if (produced <= 0) return;
-            Buffer.BlockCopy(readScratch, 0, sendScratch, 0, produced * 2 * sizeof(float));
-            link.Send(from, PluginBridgeMessage.PeerAudio, hash, peer, sendScratch.AsSpan(0, produced * 2 * sizeof(float)));
+            if (produced <= 0)
+            {
+                // Nothing for that peer at all: either their buffer is still filling, or the plugin is
+                // pointed at somebody who has gone. Counted, not logged per block - at one block per
+                // audio callback a line each would be thousands a second.
+                Interlocked.Increment(ref unknownPeerRequests);
+                return;
+            }
+            if (produced < frames) Interlocked.Increment(ref shortReads);
+            var bytes = produced * 2 * sizeof(float);
+            Buffer.BlockCopy(readScratch, 0, sendScratch, 0, bytes);
+            if (link.Send(from, PluginBridgeMessage.PeerAudio, hash, peer, sendScratch.AsSpan(0, bytes)))
+            {
+                Interlocked.Increment(ref blocksServed);
+                Interlocked.Add(ref bytesServed, bytes);
+            }
         }
     }
 
@@ -155,6 +222,8 @@ public sealed class PluginBridgeHost : IDisposable
         }
         var floats = new float[payload.Length / sizeof(float)];
         Buffer.BlockCopy(payload.ToArray(), 0, floats, 0, floats.Length * sizeof(float));
+        Interlocked.Increment(ref trackBlocks);
+        Interlocked.Add(ref trackBytes, payload.Length);
         handler(id, floats);
     }
 
@@ -166,6 +235,10 @@ public sealed class PluginBridgeHost : IDisposable
         if (bytes.Length > PluginBridgeProtocol.MaxAudioBytes) bytes = bytes[..PluginBridgeProtocol.MaxAudioBytes];
         link.Send(to, PluginBridgeMessage.PeerList, hash, null, bytes);
     }
+
+    private bool KnownInstance(int hash) { lock (gate) { return instances.ContainsKey(hash); } }
+
+    private static string Short(Guid id) => id.ToString("N")[..8];
 
     private Instance Touch(int hash, IPEndPoint from)
     {
@@ -190,9 +263,11 @@ public sealed class PluginBridgeHost : IDisposable
         lock (gate)
         {
             if (!instances.TryGetValue(hash, out var instance)) return;
-            if (peer is not null) claims.Release(peer, instance.Id);
-            else if (instance.ClaimedPeer is not null) claims.Release(instance.ClaimedPeer, instance.Id);
+            var released = peer ?? instance.ClaimedPeer;
+            if (released is not null) claims.Release(released, instance.Id);
             instance.ClaimedPeer = null;
+            if (released is not null)
+                Notable?.Invoke($"plugin {Short(instance.Id)} let {released} go - back on the speakers");
         }
     }
 
@@ -204,6 +279,8 @@ public sealed class PluginBridgeHost : IDisposable
         {
             if (!instances.Remove(hash, out var instance)) return;
             claims.ReleaseAll(instance.Id);
+            Notable?.Invoke($"plugin {Short(instance.Id)} closed cleanly"
+                + (instance.ClaimedPeer is null ? "" : $" - {instance.ClaimedPeer} is back on the speakers"));
         }
     }
 
@@ -215,6 +292,10 @@ public sealed class PluginBridgeHost : IDisposable
             if (instance.LastSeenUtc > cutoff) continue;
             instances.Remove(hash);
             claims.ReleaseAll(instance.Id);
+            // No goodbye: the DAW was killed, or crashed. Worth a line - it is the difference between
+            // "the plugin misbehaved" and "the host died", which look identical from the outside.
+            Notable?.Invoke($"plugin {Short(instance.Id)} went quiet and timed out (no goodbye - the DAW probably closed abruptly)"
+                + (instance.ClaimedPeer is null ? "" : $" - {instance.ClaimedPeer} is back on the speakers"));
         }
     }
 

@@ -34,6 +34,9 @@ public sealed partial class MainForm : Form
     /// what makes the double-audio problem solve itself, because a claim here is what takes a peer
     /// out of the speakers.</summary>
     private PluginBridgeHost? pluginHost;
+
+    /// <summary>Last plugin summary written, so an unchanged one is not repeated every second.</summary>
+    private string lastPluginLogLine = "";
     private readonly RemSoundSettingsStore settings = new(AppName);
     private readonly RemSoundLog logFile = new();
     private readonly RemSoundUpdater updater = new();
@@ -2339,6 +2342,7 @@ public sealed partial class MainForm : Form
 
         if (!wanted)
         {
+            logFile.Event($"vst plugin: link closing - {pluginHost?.DescribeForLog()}");
             pluginHost?.Dispose();
             pluginHost = null;
             // Drop the claim register too, or a peer claimed at the moment the link was switched off
@@ -2352,6 +2356,10 @@ public sealed partial class MainForm : Form
         {
             pluginHost = new PluginBridgeHost(receiver.ReadClaimedPeer);
             pluginHost.PeerListSource = () => PeerListForPlugins();
+            // Every claim, release, hello, goodbye and timeout, in plain English. This is the app's
+            // half of the story; the plugin writes the other half in its own file, because it lives in
+            // the DAW's process. Either half alone leaves "it didn't work" unanswerable.
+            pluginHost.Notable += message => logFile.Event($"vst plugin: {message}");
             receiver.SetPluginPeerClaims(pluginHost.Claims);
             logFile.Event($"vst plugin: link open on 127.0.0.1:{pluginHost.Port}");
         }
@@ -7648,6 +7656,21 @@ public sealed partial class MainForm : Form
             opusUnrecoveredGaps: receiver.OpusUnrecoveredGaps,
             maxLatencyMsAsio: asioMaxMs,
             targetLatencyMsAsio: asioTargetMs);
+
+        // The plugin link, once a second, but ONLY while a plugin is actually connected. A line a
+        // second saying "nothing" would bury the session somebody is trying to read.
+        if (pluginHost is { } host && host.HasActivity)
+        {
+            var line = host.DescribeForLog();
+            // Repeating an identical line every second is the same burial by a different route, so
+            // only a change is written. A stalled link therefore shows as a gap, which is itself the
+            // finding.
+            if (line != lastPluginLogLine)
+            {
+                lastPluginLogLine = line;
+                logFile.Event($"vst plugin: {line}");
+            }
+        }
 
         // First-of-kind events make it easy to see in the log where the chain breaks.
         if (sender.IsRunning)

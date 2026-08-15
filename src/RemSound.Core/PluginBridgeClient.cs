@@ -40,7 +40,11 @@ public sealed class PluginBridgeClient : IDisposable
     private readonly byte[] requestScratch = new byte[sizeof(int)];
 
     private volatile IPAddress? receivingFrom;
-    private long blocksServed, blocksStarved;
+    private long blocksServed, blocksStarved, blocksSent, bytesSent, bytesReceived;
+
+    /// <summary>Raised when something worth writing down happens — connected, peer list arrived, the
+    /// app went away. Fired on the bridge thread, never on the DAW's audio thread.</summary>
+    public event Action<string>? Notable;
 
     /// <summary>Peers the app says are available, refreshed whenever we say hello. Empty until the
     /// app answers — which is also how "RemSound isn't running" shows up, stated plainly rather than
@@ -56,6 +60,16 @@ public sealed class PluginBridgeClient : IDisposable
     public long StarvedBlocks => Interlocked.Read(ref blocksStarved);
 
     public long ServedBlocks => Interlocked.Read(ref blocksServed);
+
+    /// <summary>Counters for the log's once-a-second line. All lock-free adds, because the audio
+    /// thread bumps them and must not take a lock to do it.</summary>
+    public long SentBlocks => Interlocked.Read(ref blocksSent);
+    public long BytesSent => Interlocked.Read(ref bytesSent);
+    public long BytesReceived => Interlocked.Read(ref bytesReceived);
+
+    /// <summary>How much audio is waiting for the DAW right now, in frames. The number that explains
+    /// a crackle: near zero means the app is not keeping up, and climbing means it is over-supplying.</summary>
+    public int RingFrames { get { lock (ringGate) { return ringCount / PluginBridgeProtocol.WireChannels; } } }
 
     public PluginBridgeClient(int appPort = PluginBridgeProtocol.DefaultPort, Guid? id = null, int ringFrames = 8192)
     {
@@ -83,6 +97,9 @@ public sealed class PluginBridgeClient : IDisposable
         }
         receivingFrom = peer;
         lock (ringGate) { ringRead = ringWrite = ringCount = 0; }
+        Notable?.Invoke(peer is null
+            ? (previous is null ? "not receiving anybody" : $"released {previous} - back to RemSound's own output")
+            : $"now receiving {peer}" + (previous is null ? "" : $" (was {previous})"));
     }
 
     /// <summary>
@@ -136,20 +153,32 @@ public sealed class PluginBridgeClient : IDisposable
         {
             BinaryPrimitives.WriteSingleLittleEndian(sendScratch.AsSpan(i * sizeof(float)), samples[i]);
         }
-        return link.Send(app, PluginBridgeMessage.TrackAudio, instanceHash, null, sendScratch.AsSpan(0, bytes));
+        if (!link.Send(app, PluginBridgeMessage.TrackAudio, instanceHash, null, sendScratch.AsSpan(0, bytes))) return false;
+        Interlocked.Increment(ref blocksSent);
+        Interlocked.Add(ref bytesSent, bytes);
+        return true;
     }
 
     private void OnMessage(PluginBridgeMessage type, int hash, IPAddress? peer, ReadOnlyMemory<byte> payload, IPEndPoint from)
     {
         if (hash != instanceHash) return;   // another instance's traffic; not ours to act on
-        Connected = true;
+        if (!Connected)
+        {
+            Connected = true;
+            Notable?.Invoke("RemSound answered - connected");
+        }
+        LastHeardUtc = DateTime.UtcNow;
         switch (type)
         {
             case PluginBridgeMessage.PeerAudio:
+                Interlocked.Add(ref bytesReceived, payload.Length);
                 WriteRing(payload.Span);
                 break;
             case PluginBridgeMessage.PeerList:
-                KnownPeers = ParsePeerList(payload.Span);
+                var updated = ParsePeerList(payload.Span);
+                var changed = updated.Count != KnownPeers.Count;
+                KnownPeers = updated;
+                if (changed) Notable?.Invoke($"peer list from RemSound: {updated.Count} peer(s) - {DescribePeers(updated)}");
                 break;
         }
     }
@@ -171,6 +200,12 @@ public sealed class PluginBridgeClient : IDisposable
             }
         }
     }
+
+    /// <summary>When the app was last heard from. Turns "it stopped working" into a time.</summary>
+    public DateTime LastHeardUtc { get; private set; } = DateTime.MinValue;
+
+    private static string DescribePeers(IReadOnlyList<(IPAddress Address, string Name)> peers)
+        => peers.Count == 0 ? "(none)" : string.Join(", ", peers.Select(p => $"{p.Name} [{p.Address}]"));
 
     private static IReadOnlyList<(IPAddress, string)> ParsePeerList(ReadOnlySpan<byte> payload)
     {
