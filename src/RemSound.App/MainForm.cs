@@ -1235,6 +1235,9 @@ public sealed partial class MainForm : Form
         // checkbox writes through to both AppConfig.LoggingEnabled and logFile.Enabled when
         // the user toggles it.
         logFile.Enabled = AppConfig.Load().LoggingEnabled;
+        // Tell any VST plugin where this machine's RemSound keeps its logs. The plugin runs inside a
+        // DAW, where it cannot work that out for itself.
+        AppConfig.WritePluginPointer(logFile.Enabled);
         // DiagnosticsGate gates the engine's hot-path instrumentation (sender/receiver
         // max-time probes, spike detector, callback-gap timers) so the audio threads pay
         // zero cost when nobody is going to read the numbers. It's ON whenever either the
@@ -7687,6 +7690,11 @@ public sealed partial class MainForm : Form
 
         // The plugin link, once a second, but ONLY while a plugin is actually connected. A line a
         // second saying "nothing" would bury the session somebody is trying to read.
+        // Expire plugins that have gone quiet, every second, whether or not anything is talking to
+        // us. A DAW killed outright never says goodbye, and a peer coming back must not wait on some
+        // other code path happening to ask.
+        pluginHost?.Sweep();
+
         if (pluginHost is { } host && host.HasActivity)
         {
             var line = host.DescribeForLog();

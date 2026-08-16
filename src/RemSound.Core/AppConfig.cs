@@ -469,6 +469,46 @@ public sealed class AppConfig
     /// <summary>Where the per-machine log files are written.</summary>
     public static string LogsDirectory => Path.Combine(UserDataDirectory, "logs");
 
+    /// <summary>A tiny file at a FIXED per-user location saying where this machine's RemSound keeps
+    /// its user data, and whether logging is on.
+    ///
+    /// <para><b>Why it exists.</b> Everything above hangs off <see cref="AppContext.BaseDirectory"/>,
+    /// which is correct for the app and wrong for the VST plugin: inside a DAW that is the DAW's own
+    /// folder. The plugin therefore looked for the config somewhere RemSound has never been, found
+    /// nothing, and wrote no log at all — so the one file a tester was asked to send never existed
+    /// (Anthony Reyers, 2026-08-16).</para>
+    ///
+    /// <para>A pointer file rather than asking the app over the link, because the case where a log
+    /// matters MOST is the one where the app is not answering.</para></summary>
+    public static string PluginPointerPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemSound", "plugin-home.txt");
+
+    /// <summary>Record where this copy of RemSound lives, for any plugin running in a DAW. Called
+    /// whenever the app starts and whenever the logging setting changes. Best-effort by design: a
+    /// machine where this cannot be written still runs, it just leaves the plugin without a log.</summary>
+    public static void WritePluginPointer(bool loggingEnabled)
+    {
+        try
+        {
+            var path = PluginPointerPath;
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllLines(path, [UserDataDirectory, loggingEnabled ? "logging=on" : "logging=off"]);
+        }
+        catch { /* the app must not fail to start because a hint file could not be written */ }
+    }
+
+    /// <summary>Read that pointer. Returns null when RemSound has never run on this machine.</summary>
+    public static (string UserDataDirectory, bool LoggingEnabled)? ReadPluginPointer()
+    {
+        try
+        {
+            var lines = File.ReadAllLines(PluginPointerPath);
+            if (lines.Length < 1 || string.IsNullOrWhiteSpace(lines[0])) return null;
+            return (lines[0], lines.Length > 1 && lines[1].Contains("on", StringComparison.OrdinalIgnoreCase));
+        }
+        catch { return null; }
+    }
+
     /// <summary>Where the shipped DEFAULT cue WAVs live: a <c>default sounds\</c> folder next to the
     /// exe. This is part of the INSTALL, not user state — the auto-updater (and a dev republish)
     /// always overwrites it, so a changed default sound reaches every user, including existing ones.

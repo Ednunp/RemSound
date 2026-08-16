@@ -299,8 +299,15 @@ public sealed class PluginBridgeHost : IDisposable
         }
     }
 
-    /// <summary>Test seam: run the expiry sweep without waiting for a message to arrive.</summary>
-    internal void SweepForTest()
+    /// <summary>Expire anything that has gone quiet, without waiting for a message to arrive.
+    ///
+    /// <para>The app calls this every second. Sweeping only when a plugin talks to us meant that a
+    /// DAW killed outright — the one case with no goodbye — left its instance in the list until
+    /// something else happened to come in. Recovery then rode on whichever code path next asked
+    /// whether a peer was claimed, which is why the peer sometimes came back and sometimes did not
+    /// (Anthony Reyers, 2026-08-16: intermittent, "the worst possible bug"). A peer returning to the
+    /// speakers must not depend on a race.</para></summary>
+    public void Sweep()
     {
         lock (gate) { SweepLocked(); }
     }

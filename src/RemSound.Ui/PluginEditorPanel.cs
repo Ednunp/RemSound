@@ -207,6 +207,11 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
             peerList.EndUpdate();
         }
 
+        // Only ever write the control when the TEXT has actually changed. Rewriting it resets keyboard
+        // focus to the first field in the window, so a status line carrying a live counter would throw
+        // the user back to the start every second — which is precisely what happened in the first
+        // build. The guard is here, and the text upstream is kept stable, because either alone would
+        // let the fault back in.
         var status = StatusSource?.Invoke();
         if (string.IsNullOrEmpty(status) || status == lastStatus) return;
         lastStatus = status;

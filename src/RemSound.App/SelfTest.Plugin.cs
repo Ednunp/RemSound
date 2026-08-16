@@ -175,7 +175,7 @@ internal static partial class SelfTest
         plugin.ReceiveFrom(null);
         Check(WaitUntil(() => !host.Claims.IsClaimed(chris.Address)),
             "leaving a peer must reach the app - otherwise it stays mute in RemSound until a timeout the user cannot see");
-        host.SweepForTest();
+        host.Sweep();
         // Top both peers up first. The pump above genuinely drained them — a claimed peer's buffer
         // really is consumed by the plugin — so without this the final check would be measuring an
         // empty buffer rather than whether the claim was lifted.

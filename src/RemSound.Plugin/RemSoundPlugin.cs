@@ -78,6 +78,12 @@ public class RemSoundPlugin : AudioPluginBase
 
     private System.Net.IPAddress? chosenPeer;
 
+    /// <summary>Gate seams: drive the real job change and the real parameter write, and read back what
+    /// was persisted, rather than a parallel copy of either.</summary>
+    internal void SetJobForTest(bool sending, System.Net.IPAddress? peer) => SetJob(sending, peer);
+    internal void PushJobToParametersForTest(bool sending, System.Net.IPAddress? peer) => PushJobToParameters(sending, peer);
+    internal string? SavedPeerAddressForTest => lastPeerAddressText;
+
     /// <summary>Which peer this instance resolved to - for the gate, so "the parameter reached the
     /// engine" is checked rather than assumed.</summary>
     internal System.Net.IPAddress? ChosenPeerForTest => chosenPeer;
@@ -101,12 +107,23 @@ public class RemSoundPlugin : AudioPluginBase
         System.Net.IPAddress? peer = null;
         if (active && receiving && peerParameter is not null)
         {
-            // One-based, and out-of-range means "nobody" rather than wrapping round to somebody else.
-            // Wrapping would put a stranger on the track when a peer disconnects, which is a far worse
-            // surprise than silence.
-            var index = (int)Math.Round(peerParameter.EditValue) - 1;
             var peers = bridge.KnownPeers;
-            if (index >= 0 && index < peers.Count) peer = peers[index].Address;
+
+            // The remembered ADDRESS wins. Somebody joining or leaving reshuffles the list, and a
+            // restored project that went by position alone would quietly put a stranger on the track.
+            if (lastPeerAddressText is not null && System.Net.IPAddress.TryParse(lastPeerAddressText, out var saved)
+                && peers.Any(p => p.Address.Equals(saved)))
+            {
+                peer = saved;
+            }
+            else
+            {
+                // One-based, and out of range means NOBODY rather than wrapping round to somebody
+                // else. Wrapping would put a stranger on the track when a peer disconnects, which is
+                // far worse than silence.
+                var index = (int)Math.Round(peerParameter.EditValue) - 1;
+                if (index >= 0 && index < peers.Count) peer = peers[index].Address;
+            }
         }
 
         SetJob(!active || !receiving, peer);
@@ -117,12 +134,33 @@ public class RemSoundPlugin : AudioPluginBase
     /// the user's choice.</summary>
     private void PushJobToParameters(bool sending, System.Net.IPAddress? peer)
     {
-        if (jobParameter is not null) jobParameter.EditValue = sending ? 0 : 1;
+        // BOTH values, not just EditValue. The host saves ProcessValue, so a window that wrote only
+        // EditValue left every parameter sitting at its default — which is why the plugin reverted to
+        // "send" within seconds of leaving the window, and why a saved project came back with job=0
+        // whatever it had been doing. The saved state chunk recorded all three at their defaults, and
+        // that was this bug written to disk.
+        SetParameter(jobParameter, sending ? 0 : 1);
         if (peerParameter is null || bridge is null) return;
         var peers = bridge.KnownPeers;
         var index = peer is null ? 0 : peers.ToList().FindIndex(p => p.Address.Equals(peer)) + 1;
-        peerParameter.EditValue = Math.Max(0, index);
+        SetParameter(peerParameter, Math.Max(0, index));
+        if (peer is not null) lastPeerAddressText = peer.ToString();
     }
+
+    private static void SetParameter(AudioPluginParameter? parameter, double value)
+    {
+        if (parameter is null) return;
+        parameter.EditValue = value;
+        parameter.ProcessValue = value;
+    }
+
+    /// <summary>The peer's ADDRESS as text, remembered alongside the index.
+    ///
+    /// <para>The parameter can only hold a number, and a position in a list is not a person: reopen a
+    /// project after somebody joined or left and position 2 is somebody else. The address is written
+    /// into the saved state as well, and on restore it wins — the index is only the fallback when that
+    /// person is no longer connected.</para></summary>
+    private string? lastPeerAddressText;
 
     public RemSoundPlugin()
     {
@@ -134,6 +172,42 @@ public class RemSoundPlugin : AudioPluginBase
         // Stable identity: a DAW keys saved sessions off this, so it must never change once shipped
         // or every existing project silently loses its RemSound instances.
         PluginID = 0x52656D536E640600; // "RemSnd" + 06 00
+
+        // THREE INHERITED PROPERTIES, EACH FATAL IF LEFT ALONE. All three were missed in the first
+        // build, and each failed silently with nothing the host could show a user (Anthony Reyers,
+        // 2026-08-16, who proved every one of them by controlled experiment against the real bridge).
+        //
+        // Contact: AudioPlugSharpFactory marshals Company, Website and Contact into a VST3
+        // PFactoryInfo. A null string becomes a null char*, the copy dereferences it, the factory
+        // constructor throws, and GetPluginFactory returns NULL — so the host sees a DLL containing no
+        // plugins at all. THIS is why RemSound never appeared in any effects list.
+        Contact = "https://github.com/Ednunp/RemSound";
+
+        // HasUserInterface: defaults to FALSE in the base constructor, and the VST3 controller refuses
+        // to build a view when it is false. The whole accessible window existed and was never once
+        // asked to appear; what a screen reader found instead was the host's own generic parameter
+        // panel, which shows our parameter and port names and so looks convincingly like ours.
+        HasUserInterface = true;
+
+        // CacheLoadContext: defaults to false, so every instance built a fresh load context and
+        // reloaded the entire RemSound stack — two plugins meant two independent copies of Core,
+        // Sender and Receiver. That is also what desynchronises AudioPlugSharp's processor/controller
+        // pairing, and a controller initialising against a plugin whose Initialize() has not run walks
+        // a null Parameters list in unguarded native code and takes the DAW down with it.
+        CacheLoadContext = true;
+
+        // PORTS IN THE CONSTRUCTOR, not in Initialize(). The host calls SetMaxAudioBufferSize — which
+        // is what allocates each port's buffers — on its own schedule, and it did so before Initialize
+        // had created the ports. The ports were then replaced by fresh ones that nobody ever sized, so
+        // every single audio block threw ArgumentNullException inside PreProcess and no input was ever
+        // read. That is why send mode was silent in both directions.
+        //
+        // Stereo in, stereo out. IN is the track feeding your peers; OUT is what arrives from them.
+        // Both ports exist in both jobs so the DAW's routing never changes when the user switches an
+        // instance between sending and receiving — a track that rewires itself mid-session is a nasty
+        // surprise, especially for someone navigating by screen reader.
+        InputPorts = [monitorIn = new AudioIOPortManaged("Track in", EAudioChannelConfiguration.Stereo)];
+        OutputPorts = [peerOut = new AudioIOPortManaged("Peer out", EAudioChannelConfiguration.Stereo)];
 
         log = new PluginLog(instanceId);
         log.SnapshotSource = DescribeForLog;
@@ -163,9 +237,28 @@ public class RemSoundPlugin : AudioPluginBase
             KnownPeers: b?.KnownPeers.Count ?? 0);
     }
 
+    /// <summary>The host telling us its largest block. Recorded as well as applied: if anything ever
+    /// replaces a port after this has been called, the replacement would otherwise carry unallocated
+    /// buffers and every block would throw. Cheap insurance against the exact fault that made send
+    /// mode silent.</summary>
+    public override void SetMaxAudioBufferSize(uint maxSamples, EAudioBitsPerSample bitsPerSample)
+    {
+        base.SetMaxAudioBufferSize(maxSamples, bitsPerSample);
+        hostMaxSamples = maxSamples;
+        hostBitsPerSample = bitsPerSample;
+        log?.Event($"host buffer size: up to {maxSamples} samples, {bitsPerSample}");
+    }
+
+    private uint hostMaxSamples;
+    private EAudioBitsPerSample hostBitsPerSample = EAudioBitsPerSample.Bits64;
+
     public override void Initialize()
     {
         base.Initialize();
+
+        // Ports are built in the constructor, but re-apply whatever size the host has already asked
+        // for, so they can never be left unallocated whichever order the host calls things in.
+        if (hostMaxSamples > 0) base.SetMaxAudioBufferSize(hostMaxSamples, hostBitsPerSample);
 
         // The app owns the one connection; this is our end of the link to it. Opened here rather than
         // in the constructor because a DAW constructs plugins to inspect them without ever running
@@ -177,13 +270,6 @@ public class RemSoundPlugin : AudioPluginBase
         bridge.Hello();
         log?.Event($"initialised - host says {Host?.SampleRate ?? 0:0} Hz, up to {Host?.MaxAudioBufferSize ?? 0} frames per block; "
                  + $"said hello to RemSound on 127.0.0.1:{PluginBridgeProtocol.DefaultPort}");
-
-        // Stereo in, stereo out. IN is the track feeding your peers; OUT is what arrives from them.
-        // Both ports exist in both jobs so the DAW's routing never changes when the user switches an
-        // instance between sending and receiving — a track that rewires itself mid-session is a
-        // nasty surprise, especially for someone navigating by screen reader.
-        InputPorts = [monitorIn = new AudioIOPortManaged("Track in", EAudioChannelConfiguration.Stereo)];
-        OutputPorts = [peerOut = new AudioIOPortManaged("Peer out", EAudioChannelConfiguration.Stereo)];
 
         // THE SCREEN-READER FALLBACK. The window is the intended way to work this plugin, and it is
         // ordinary WinForms precisely so NVDA can read it. But keyboard focus across a host's plugin
@@ -276,12 +362,20 @@ public class RemSoundPlugin : AudioPluginBase
 
         if (IsSending)
         {
-            // Sending: this track goes to the peers through the app's connection. The output stays
-            // SILENT rather than echoing the input — the track is already audible in the DAW, and a
-            // second copy of it out of our port would double it against itself.
-            capture?.SubmitHostBlock(monitorIn.GetAudioBuffer(0), monitorIn.GetAudioBuffer(1));
-            outLeft.Clear();
-            outRight.Clear();
+            // Sending: this track goes to the peers through the app's connection, AND passes straight
+            // through to the output.
+            //
+            // The first build cleared the output instead, on the reasoning that the track was already
+            // audible and a second copy would double against itself. That reasoning was simply wrong,
+            // and Anthony Reyers put it plainly: effects are in SERIES. A plugin that outputs silence
+            // silences the track from that point on, and there is no other copy of the signal for it
+            // to double against. It made the plugin unusable on any normal FX chain.
+            var inLeft = monitorIn.GetAudioBuffer(0);
+            var inRight = monitorIn.GetAudioBuffer(1);
+            capture?.SubmitHostBlock(inLeft, inRight);
+            var passthrough = Math.Min(blockSize, Math.Min(inLeft.Length, inRight.Length));
+            for (var i = 0; i < passthrough; i++) { outLeft[i] = inLeft[i]; outRight[i] = inRight[i]; }
+            for (var i = passthrough; i < blockSize; i++) { outLeft[i] = 0; outRight[i] = 0; }
             return;
         }
 
@@ -373,15 +467,19 @@ public class RemSoundPlugin : AudioPluginBase
         if (chosenPeer is null)
             return "Connected to RemSound." + Environment.NewLine + "Choose a peer to receive.";
 
+        // DELIBERATELY STABLE TEXT. The first version put live block counts in here, so the status
+        // changed every single second — and every change rewrote the control, which threw keyboard
+        // focus back to the first field and made the window nearly unusable with a screen reader
+        // (Anthony Reyers, 2026-08-16). A status line that never settles is not a status line.
+        //
+        // Trouble is still reported, but as a STATE rather than a running total: it appears when
+        // blocks start arriving short and goes away when they stop, so the text changes twice rather
+        // than sixty times a minute.
         var served = bridge.ServedBlocks;
         var starved = bridge.StarvedBlocks;
-        // Starved blocks are reported, not hidden. A handful at the start is the buffer filling; a
-        // number that keeps climbing is the one fact that explains a crackle, and burying it would
-        // send someone hunting through their network for a week.
+        var struggling = served > 200 && starved > served / 20;   // more than one block in twenty
         return $"Receiving {chosenPeer} onto this track." + Environment.NewLine
-             + (starved == 0
-                 ? $"{served} blocks, none missed."
-                 : $"{served} blocks, {starved} arrived short.");
+             + (struggling ? "Audio is arriving short - see the plugin log." : "Running normally.");
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
@@ -405,6 +503,71 @@ public class RemSoundPlugin : AudioPluginBase
         bridge?.ReceiveFrom(null);
         log?.Event($"deactivated by the host - peer released. Totals: {bridge?.ServedBlocks ?? 0} blocks in, "
                  + $"{bridge?.SentBlocks ?? 0} out, {bridge?.StarvedBlocks ?? 0} short");
+    }
+
+    /// <summary>Save this instance with the host, and add the peer's ADDRESS to what the base class
+    /// writes.
+    ///
+    /// <para>A parameter can only hold a number, and a position in a list is not a person: reopen a
+    /// project after somebody joined or left and position two is somebody else. The address is
+    /// appended after the base class's own state, and on restore it wins — the position is only the
+    /// fallback for when that person is no longer connected.</para></summary>
+    public override byte[] SaveState()
+    {
+        var baseState = base.SaveState() ?? [];
+        var address = System.Text.Encoding.UTF8.GetBytes(lastPeerAddressText ?? "");
+        var combined = new byte[baseState.Length + address.Length + Marker.Length + sizeof(int)];
+        Buffer.BlockCopy(baseState, 0, combined, 0, baseState.Length);
+        Buffer.BlockCopy(Marker, 0, combined, baseState.Length, Marker.Length);
+        BitConverter.GetBytes(address.Length).CopyTo(combined, baseState.Length + Marker.Length);
+        Buffer.BlockCopy(address, 0, combined, baseState.Length + Marker.Length + sizeof(int), address.Length);
+        return combined;
+    }
+
+    public override void RestoreState(byte[] stateData)
+    {
+        var baseLength = stateData?.Length ?? 0;
+        if (stateData is not null)
+        {
+            // Find OUR marker at the tail. Anything without one is a chunk from an older build, which
+            // must still load — refusing it would lose the user's whole plugin instance.
+            var at = LastIndexOf(stateData, Marker);
+            if (at >= 0 && at + Marker.Length + sizeof(int) <= stateData.Length)
+            {
+                var length = BitConverter.ToInt32(stateData, at + Marker.Length);
+                var from = at + Marker.Length + sizeof(int);
+                if (length >= 0 && from + length <= stateData.Length)
+                {
+                    var text = System.Text.Encoding.UTF8.GetString(stateData, from, length);
+                    lastPeerAddressText = string.IsNullOrEmpty(text) ? null : text;
+                    baseLength = at;
+                }
+            }
+        }
+
+        if (stateData is not null && baseLength != stateData.Length)
+        {
+            var trimmed = new byte[baseLength];
+            Buffer.BlockCopy(stateData, 0, trimmed, 0, baseLength);
+            base.RestoreState(trimmed);
+        }
+        else base.RestoreState(stateData!);
+
+        ApplyParameters();
+        log?.Event($"state restored - job {(IsSending ? "send" : "receive")}, peer {lastPeerAddressText ?? "(by position)"}");
+    }
+
+    private static readonly byte[] Marker = System.Text.Encoding.ASCII.GetBytes("<!--RemSoundPeer:");
+
+    private static int LastIndexOf(byte[] haystack, byte[] needle)
+    {
+        for (var i = haystack.Length - needle.Length; i >= 0; i--)
+        {
+            var hit = true;
+            for (var j = 0; j < needle.Length; j++) if (haystack[i + j] != needle[j]) { hit = false; break; }
+            if (hit) return i;
+        }
+        return -1;
     }
 
     /// <summary>Tear the instance down completely. AudioPlugSharp gives a plugin no dispose hook — a

@@ -86,6 +86,148 @@ internal static partial class SelfTest
              + "job and peer reach the engine; Active works as a bypass that returns the peer";
     }
 
+    /// <summary>THE PROPERTIES A HOST NEEDS BEFORE IT WILL LOAD ANYTHING.
+    ///
+    /// <para>Three properties inherited from AudioPluginBase were never set, and each one failed in
+    /// total silence with nothing a host could report (Anthony Reyers, 2026-08-16):</para>
+    ///
+    /// <para><b>Contact</b> is marshalled into the VST3 factory info. Null becomes a null char*, the
+    /// copy dereferences it, and GetPluginFactory returns NULL — the host sees a file containing no
+    /// plugins. That single missing line is why RemSound never appeared in any effects list.
+    /// <b>HasUserInterface</b> defaults to false, and the controller then refuses to build a view, so
+    /// the accessible window could never exist. <b>CacheLoadContext</b> defaults to false, so every
+    /// instance reloaded the whole RemSound stack — which is what desynchronised the host's
+    /// processor/controller pairing and crashed Reaper with two instances loaded.</para>
+    ///
+    /// <para>All three are one-liners, and none of them can be caught by testing behaviour: the plugin
+    /// works perfectly in every in-process test with all three wrong. Only a check that they are SET
+    /// catches them, which is why this test exists at the level it does.</para></summary>
+    private static string? PluginHostContract()
+    {
+        var plugin = new RemSoundPlugin();
+        try
+        {
+            // --- The factory info. All three strings are marshalled; any null takes the factory out.
+            Check(!string.IsNullOrWhiteSpace(plugin.Contact),
+                "Contact must be set - a null one makes GetPluginFactory return NULL and the plugin appears in no host at all");
+            Check(!string.IsNullOrWhiteSpace(plugin.Company), "Company is marshalled into the same struct and must be set");
+            Check(!string.IsNullOrWhiteSpace(plugin.Website), "Website likewise");
+            Check(!string.IsNullOrWhiteSpace(plugin.PluginName), "the plugin must have a name to show in the effects list");
+
+            // --- The window.
+            Check(plugin.HasUserInterface,
+                "HasUserInterface must be TRUE, or the host never asks for a view and the accessible window can never appear");
+
+            // --- The load context.
+            Check(plugin.CacheLoadContext,
+                "CacheLoadContext must be TRUE, or every instance reloads the whole engine and a second plugin can crash the host");
+
+            // --- The ports must exist BEFORE Initialize runs -------------------------------------
+            // The host sizes port buffers on its own schedule, and it did so before Initialize had
+            // created them. The ports were then replaced by unsized ones and every audio block threw,
+            // so no input was ever read and send mode was silent in both directions.
+            Check(plugin.InputPorts is { Length: > 0 },
+                "the input port must exist on a freshly constructed plugin, before Initialize - the host sizes buffers before then");
+            Check(plugin.OutputPorts is { Length: > 0 }, "...and the output port");
+
+            // A stable id: a DAW keys saved projects off it.
+            Check(plugin.PluginID != 0, "the plugin must have a stable id, or saved projects lose their RemSound instances");
+            return $"factory info complete (contact, company, website), window enabled, load context cached, "
+                 + $"{plugin.InputPorts.Length} in / {plugin.OutputPorts.Length} out present before Initialize";
+        }
+        finally { try { plugin.CloseForTest(); } catch { } }
+    }
+
+    /// <summary>Sending must PASS THE TRACK THROUGH, and the plugin's state must survive being saved.
+    ///
+    /// <para>The first build cleared the output while sending, reasoning that the track was already
+    /// audible. Effects are in series: a plugin that outputs silence silences the track from that
+    /// point on. And the window wrote only EditValue while the host saves ProcessValue, so nothing the
+    /// user chose was ever persisted — the instance reverted to sending within seconds.</para></summary>
+    private static string? PluginSendPassthroughAndState()
+    {
+        var plugin = new RemSoundPlugin { Host = new StubAudioHost() };
+        try
+        {
+            plugin.SetMaxAudioBufferSize(512, EAudioBitsPerSample.Bits64);
+            plugin.Initialize();
+
+            // --- Send mode must pass the track through ------------------------------------------
+            plugin.SetJobForTest(sending: true, peer: null);
+            var input = (AudioIOPortManaged)plugin.InputPorts[0];
+            var output = (AudioIOPortManaged)plugin.OutputPorts[0];
+            var left = input.GetAudioBuffer(0);
+            var right = input.GetAudioBuffer(1);
+            Check(left.Length > 0, "the input port must have real buffers after the host has set its size");
+
+            for (var i = 0; i < left.Length; i++) { left[i] = 0.5; right[i] = -0.5; }
+
+            // The FIRST block after a block-size or rate change is deliberately silent: that is when
+            // buffers are resized, and resizing on the audio thread otherwise means allocating in the
+            // middle of somebody's take. Assert that too, so the silence stays a considered choice
+            // rather than becoming an accident again.
+            plugin.Process();
+            var firstBlock = (AudioIOPortManaged)plugin.OutputPorts[0];
+            var quiet = 0;
+            for (var i = 0; i < Math.Min(64, firstBlock.GetAudioBuffer(0).Length); i++)
+                if (Math.Abs(firstBlock.GetAudioBuffer(0)[i]) < 0.001) quiet++;
+            Check(quiet > 32, "the first block after a format change is silent while buffers resize");
+
+            // Refill (the port buffers are read each block) and run a steady-state block.
+            left = input.GetAudioBuffer(0);
+            right = input.GetAudioBuffer(1);
+            for (var i = 0; i < left.Length; i++) { left[i] = 0.5; right[i] = -0.5; }
+            plugin.Process();
+
+            var outLeft = output.GetAudioBuffer(0);
+            var outRight = output.GetAudioBuffer(1);
+            var passed = 0;
+            for (var i = 0; i < Math.Min(64, outLeft.Length); i++)
+                if (Math.Abs(outLeft[i] - 0.5) < 0.001 && Math.Abs(outRight[i] + 0.5) < 0.001) passed++;
+            Check(passed > 32,
+                $"while SENDING the plugin must pass the track through - effects are in series, and clearing the output "
+              + $"silences the track from that point on ({passed} of 64 samples came through)");
+
+            // --- State: what the window sets must be what the host saves --------------------------
+            var peer = IPAddress.Parse("192.168.1.50");
+            plugin.PushJobToParametersForTest(sending: false, peer: peer);
+            var job = plugin.Parameters.First(p => p.ID == "job");
+            Check(Math.Abs(job.ProcessValue - 1) < 0.001,
+                $"the window must write ProcessValue, not just EditValue - ProcessValue is what the host saves, and writing "
+              + $"only EditValue is why the plugin reverted to sending within seconds (got {job.ProcessValue})");
+
+            var saved = plugin.SaveState();
+            Check(saved is { Length: > 0 }, "the plugin must save state");
+
+            // A fresh instance must come back on the SAME PERSON, by address rather than by position.
+            var reloaded = new RemSoundPlugin { Host = new StubAudioHost() };
+            try
+            {
+                reloaded.Initialize();
+                reloaded.RestoreState(saved);
+                Check(reloaded.SavedPeerAddressForTest == "192.168.1.50",
+                    $"the peer must be restored by ADDRESS, not by position in a list - somebody joining or leaving "
+                  + $"reshuffles that list and a restored project would land on a stranger (got {reloaded.SavedPeerAddressForTest ?? "nothing"})");
+            }
+            finally { try { reloaded.CloseForTest(); } catch { } }
+
+            // A chunk from an older build carries no address and must still load rather than throwing
+            // away the user's whole plugin instance.
+            var older = new RemSoundPlugin { Host = new StubAudioHost() };
+            try
+            {
+                older.Initialize();
+                older.RestoreState(System.Text.Encoding.UTF8.GetBytes("<AudioPluginSaveState></AudioPluginSaveState>"));
+                Check(older.SavedPeerAddressForTest is null, "an older state chunk must load with no peer rather than failing");
+            }
+            finally { try { older.CloseForTest(); } catch { } }
+
+            return "sending passes the track through; the window writes the value the host actually saves; "
+                 + "the peer is restored by address, and an older state chunk still loads";
+        }
+        finally { try { plugin.CloseForTest(); } catch { } }
+    }
+
     /// <summary>THE PLUGIN FOLDER MUST STAND ON ITS OWN — load it the way a DAW does.
     ///
     /// <para><b>Why this exists.</b> v6.0 shipped a plugin folder that Reaper scanned and got nothing
@@ -279,6 +421,7 @@ internal static partial class SelfTest
                 var off = AppConfig.Load();
                 off.LoggingEnabled = false;
                 off.Save();
+                AppConfig.WritePluginPointer(loggingEnabled: false);
 
                 using (var quiet = new PluginLog(Guid.NewGuid()))
                 {
@@ -293,6 +436,19 @@ internal static partial class SelfTest
                 var on = AppConfig.Load();
                 on.LoggingEnabled = true;
                 on.Save();
+                // The plugin reads the POINTER file, not AppConfig's own paths - inside a DAW those
+                // point at the DAW's folder. Written here exactly as the app writes it at startup.
+                AppConfig.WritePluginPointer(loggingEnabled: true);
+
+                // --- The pointer file: how the plugin finds RemSound at all -------------------------
+                // Inside a DAW the plugin cannot work out where RemSound keeps its logs - everything hangs
+                // off the running program's own folder, which is the DAW's. Without this pointer the first
+                // build wrote no plugin log anywhere, so the one file a tester was asked to send did not
+                // exist.
+                var pointer = AppConfig.ReadPluginPointer();
+                Check(pointer is not null, "the app must record where it lives, or a plugin in a DAW can never find its logs folder");
+                Check(Directory.Exists(pointer!.Value.UserDataDirectory), "...and it must point at a folder that is really there");
+
 
                 string? path;
                 using (var live = new PluginLog(Guid.NewGuid()))

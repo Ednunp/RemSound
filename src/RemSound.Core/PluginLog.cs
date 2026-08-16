@@ -38,6 +38,9 @@ public sealed class PluginLog : IDisposable
     private DateTime lastEnabledCheck = DateTime.MinValue;
     private bool enabled;
 
+    /// <summary>Where RemSound keeps its logs, learned from the pointer file. Null until it is read.</summary>
+    private string? logsDirectory;
+
     /// <summary>Cap on one file, then a fresh one starts. A DAW session left open all day with logging
     /// on would otherwise grow a single file without bound.</summary>
     internal long RollAfterBytes { get; set; } = 20L * 1024 * 1024;
@@ -70,9 +73,17 @@ public sealed class PluginLog : IDisposable
             var now = DateTime.UtcNow;
             if (now - lastEnabledCheck < TimeSpan.FromSeconds(1)) return enabled;
             lastEnabledCheck = now;
-            try { enabled = AppConfig.Load().LoggingEnabled; }
+            try
+            {
+                // The POINTER, not AppConfig's own paths. Inside a DAW, AppContext.BaseDirectory is
+                // the DAW's folder, so AppConfig would look for RemSound's settings somewhere it has
+                // never been — which is exactly why the first build wrote no plugin log anywhere.
+                var pointer = AppConfig.ReadPluginPointer();
+                enabled = pointer?.LoggingEnabled ?? false;
+                logsDirectory = pointer is null ? null : System.IO.Path.Combine(pointer.Value.UserDataDirectory, "logs");
+            }
             catch { enabled = false; }   // a config we cannot read is not a reason to break a DAW
-            return enabled;
+            return enabled && logsDirectory is not null;
         }
     }
 
@@ -114,7 +125,7 @@ public sealed class PluginLog : IDisposable
         if (creationFailed) return false;
         try
         {
-            var dir = AppConfig.LogsDirectory;
+            var dir = logsDirectory ?? AppConfig.LogsDirectory;
             Directory.CreateDirectory(dir);
             fileOrdinal++;
             // Named so it sorts next to the app's logs and is obviously the plugin's.
