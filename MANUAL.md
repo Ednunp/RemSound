@@ -1434,6 +1434,19 @@ If you have set volume, pan or EQ for a peer in RemSound, that shaping comes thr
 
 RemSound listens for plugins on your own machine only — nothing on the network can reach it. If you would still rather it listened for nothing at all, untick **Let plugins connect to RemSound** in the DAW plugin menu.
 
+### If everything sounds about a third of a second late
+
+This one is not RemSound, and it catches everybody. Reaper renders each track’s effects up to 200 milliseconds ahead of where you are listening, and holds the result in a buffer. It is a big win for ordinary plugins and completely wrong for one carrying live audio off the network, because that audio then sits waiting in the buffer. Reaper has no way to know the difference.
+
+Two ways to switch it off, either is fine:
+
+  * Record-arm the track with monitoring on. Reaper already skips the look-ahead for a track that is monitoring, so the delay collapses on its own.
+  * Or turn it off for that track: Track performance options, then “Prevent anticipative FX processing”. There is also a global setting under Options, Preferences, Audio, Buffering.
+
+
+
+The same buffer explains a couple of other oddities: muting the track takes a noticeable moment to take effect, because the buffer has to drain first.
+
 ### Good to know
 
   * Your music software can run at any sample rate. RemSound converts at the boundary, so nobody arrives at the wrong pitch.
