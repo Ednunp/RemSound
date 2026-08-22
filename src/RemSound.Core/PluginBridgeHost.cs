@@ -77,7 +77,11 @@ public sealed class PluginBridgeHost : IDisposable
     /// is trying to work out why a track was silent, not trying to read our code.</summary>
     public event Action<string>? Notable;
 
-    private long blocksServed, bytesServed, trackBlocks, trackBytes, unknownPeerRequests, shortReads;
+    private long blocksServed, bytesServed, trackBlocks, trackBytes, unknownPeerRequests, shortReads, trackBlocksDropped;
+
+    /// <summary>Track audio that arrived and had nowhere to go. Non-zero means the plugin's send side
+    /// is working and the APP's side is not — a distinction the counters could not previously make.</summary>
+    public long TrackBlocksDropped => Interlocked.Read(ref trackBlocksDropped);
 
     /// <summary>Counters for the app's once-a-second plugin line.</summary>
     public long BlocksServed => Interlocked.Read(ref blocksServed);
@@ -107,7 +111,8 @@ public sealed class PluginBridgeHost : IDisposable
                  + (claimed.Count == 0 ? "" : $" [{string.Join(", ", claimed)}]")
                  + $" blocksOut={BlocksServed} bytesOut={BytesServed}"
                  + $" blocksIn={TrackBlocksReceived} bytesIn={TrackBytesReceived}"
-                 + $" short={ShortReads} unknownPeer={UnknownPeerRequests} malformed={MalformedReceived}";
+                 + $" short={ShortReads} unknownPeer={UnknownPeerRequests} malformed={MalformedReceived}"
+                 + (TrackBlocksDropped > 0 ? $" blocksInDropped={TrackBlocksDropped}" : "");
         }
     }
 
@@ -212,8 +217,23 @@ public sealed class PluginBridgeHost : IDisposable
 
     private void DispatchTrackAudio(int hash, ReadOnlyMemory<byte> payload)
     {
+        if (payload.Length < sizeof(float)) return;
+
+        // COUNT IT FIRST, even with nobody listening. The counters said blocksIn=0 while the plugin
+        // reported 24,652 blocks sent, which reads as "the audio never arrived" — when in fact it
+        // arrived and was dropped on the floor because the app never subscribed. A diagnostic that
+        // cannot tell those two apart sends the next person hunting the wrong fault (2026-08-22).
+        Interlocked.Increment(ref trackBlocks);
+        Interlocked.Add(ref trackBytes, payload.Length);
+
         var handler = TrackAudioReceived;
-        if (handler is null || payload.Length < sizeof(float)) return;
+        if (handler is null)
+        {
+            if (Interlocked.Increment(ref trackBlocksDropped) == 1)
+                Notable?.Invoke("a plugin is sending its track, but nothing in the app is taking that audio yet - "
+                              + "sending FROM a DAW track is not wired up in this build");
+            return;
+        }
         Guid id;
         lock (gate)
         {
@@ -222,8 +242,6 @@ public sealed class PluginBridgeHost : IDisposable
         }
         var floats = new float[payload.Length / sizeof(float)];
         Buffer.BlockCopy(payload.ToArray(), 0, floats, 0, floats.Length * sizeof(float));
-        Interlocked.Increment(ref trackBlocks);
-        Interlocked.Add(ref trackBytes, payload.Length);
         handler(id, floats);
     }
 

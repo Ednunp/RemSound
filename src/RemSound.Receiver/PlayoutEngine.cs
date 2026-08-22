@@ -44,6 +44,30 @@ internal sealed class PlayoutEngine : IWaveProvider
     /// the app pays nothing for a feature it isn't using.</summary>
     private PluginPeerClaims? pluginClaims;
     public void SetPluginPeerClaims(PluginPeerClaims? claims) => pluginClaims = claims;
+
+    /// <summary>Which claimed peer a stream belongs to, keyed by stream id.
+    ///
+    /// <para><b>A peer is a PERSON, not an address.</b> One sender can be reachable on more than one
+    /// path at once — Anthony Reyers's iPhone was on both Tailscale and the LAN — and RemSound sees
+    /// that as the same stream id arriving from two addresses, one at a time, as the sender moves
+    /// between them. A plugin claims the address it was shown; when the audio moved to the other path
+    /// the plugin was left holding an address that carried nothing, and the track went silent after a
+    /// few seconds while the app still reported the peer as claimed (2026-08-22).</para>
+    ///
+    /// <para>So the stream id is what identifies the person here. Once a stream has been seen at a
+    /// claimed peer's address it stays associated with that peer, and both the plugin read and the
+    /// speaker mix follow it wherever it turns up next.</para></summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<ushort, IPAddress> claimedStreamOwners = new();
+
+    /// <summary>Is this session's audio spoken for by a plugin — at its own address, or as a stream we
+    /// have already seen belonging to a claimed peer? Used by BOTH mix paths, so a peer that moves
+    /// path cannot reappear on the speakers underneath the plugin still playing them.</summary>
+    private bool IsClaimedSession(SessionPlayout session, PluginPeerClaims? claims)
+    {
+        if (claims is null) return false;
+        if (claims.IsClaimed(session.Endpoint.Address)) return true;
+        return claimedStreamOwners.TryGetValue(session.StreamId, out var owner) && claims.IsClaimed(owner);
+    }
     private readonly object sessionsLock = new();
     // Sessions are keyed by (Endpoint, StreamId) — 2026-05-11. One peer can produce
     // multiple simultaneous streams (e.g. WASAPI lane + ASIO lane in the native-
@@ -958,7 +982,7 @@ internal sealed class PlayoutEngine : IWaveProvider
             // the speakers, never both. Applied in BOTH read paths — an exclusion that covers only
             // one of them would produce double audio in exactly one audio mode, which is the kind of
             // bug that takes a week to pin down.
-            if (routeClaims is not null && routeClaims.IsClaimed(session.Endpoint.Address)) continue;
+            if (IsClaimedSession(session, routeClaims)) continue;
             var matchesOwnLane = session.Route == route;
             // Orphan = session tagged for the OTHER non-Mixed lane whose lane has no active
             // output — fall it through onto whichever lane IS being read so it stays audible
@@ -1071,7 +1095,11 @@ internal sealed class PlayoutEngine : IWaveProvider
         var produced = 0;
         foreach (var session in sessionsSnapshot)
         {
-            if (!session.Endpoint.Address.Equals(peer)) continue;
+            // Their own address, or a stream we have already seen as theirs arriving from somewhere
+            // else. The second case is a peer whose path changed under us.
+            var atThisAddress = session.Endpoint.Address.Equals(peer);
+            if (atThisAddress) claimedStreamOwners[session.StreamId] = peer;
+            else if (!(claimedStreamOwners.TryGetValue(session.StreamId, out var owner) && owner.Equals(peer))) continue;
             var laneLatency = LatencyFor(session.Route);
             var got = session.ReadFloats(scratch.AsSpan(0, outFloats), wanted, laneLatency.TargetMs, laneLatency.MaxMs, smoothness);
             if (got <= 0) continue;
@@ -1109,7 +1137,7 @@ internal sealed class PlayoutEngine : IWaveProvider
         {
             // A peer a plugin has taken over must NOT also come out of the speakers. Skipped here
             // rather than muted so its buffer keeps running and the plugin's copy stays continuous.
-            if (claims is not null && claims.IsClaimed(session.Endpoint.Address)) continue;
+            if (IsClaimedSession(session, claims)) continue;
             // Per-session latency: each session's own lane governs its buffer behaviour, so a
             // WASAPI-captured stream can sit at one target depth and an ASIO-captured stream
             // at another. Mixing them at the output level doesn't collapse those targets.

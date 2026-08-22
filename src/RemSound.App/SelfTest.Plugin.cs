@@ -201,6 +201,95 @@ internal static partial class SelfTest
              + "and an unclaimed one stays; switching releases at once; two instances share a peer; with no app the plugin goes silent and says so";
     }
 
+    /// <summary>THE STALL Anthony Reyers hit: audio for a few seconds, then the peer is handed back.
+    ///
+    /// <para>Reproduced from his app log. A peer's stream session is PRUNED when it goes briefly idle
+    /// and a fresh one opens moments later — which happens constantly in real use, because a peer
+    /// reachable on both a LAN address and a Tailscale address alternates between them. His session
+    /// shows that churn 44 times in 24 minutes.</para>
+    ///
+    /// <para>From the moment of the first prune, the app served the plugin nothing: blocksOut froze at
+    /// 5756 and unknownPeer climbed by 375 a second for the next 201 seconds, while the app still
+    /// reported the peer as claimed. So this drives the same shape — claim, then churn the session —
+    /// and asserts audio keeps flowing.</para></summary>
+    private static string? PluginSurvivesSessionChurn()
+    {
+        var peer = new IPEndPoint(IPAddress.Parse("100.118.45.53"), 47830);
+        var engine = new PlayoutEngine(new ReceiverDiagnostics());
+        engine.SetLaneActive(RenderRoute.WasapiLane, true);
+        engine.SetLaneActive(RenderRoute.AsioLane, false);
+        engine.SetMaxLatencyMs(RenderRoute.Mixed, 30);
+
+        var claims = new PluginPeerClaims();
+        engine.SetPluginPeerClaims(claims);
+        var instance = Guid.NewGuid();
+        claims.Claim(peer.Address, instance);
+
+        var block = new float[128 * 2];
+        var served = 0;
+        var starved = 0;
+
+        // Four rounds of the churn from the log: a session opens, carries audio, is pruned, and a new
+        // one opens under a NEW stream id (his log shows the sender reusing 7582, but a new id is the
+        // harder case and both must work).
+        for (ushort round = 1; round <= 4; round++)
+        {
+            var session = engine.GetOrCreateSession(peer, round, 4 * 1024 * 1024);
+            FillSession(session, 0.5f);
+
+            var producedThisRound = 0;
+            for (var i = 0; i < 40; i++)
+            {
+                var got = engine.ReadClaimedPeer(peer.Address, block, 128);
+                if (got > 0) { producedThisRound++; served++; } else starved++;
+            }
+            Check(producedThisRound > 20,
+                $"round {round}: the plugin must get audio from the peer's CURRENT session "
+              + $"({producedThisRound} of 40 reads produced audio). A session that opened after the claim must still be readable");
+
+            engine.RemoveSession(peer, round);   // the prune
+        }
+
+        // --- THE ACTUAL STALL: one person, two addresses ------------------------------------------
+        // Anthony's peer was an iPhone reachable both over Tailscale (100.118.45.53) and on the LAN
+        // (192.168.69.44). The SAME stream id, 7582, appears on both — one sender, one stream, two
+        // paths. When the audio moved to the other path the plugin was left holding an address that
+        // no longer carried anything, and RemSound served it nothing for the next three minutes while
+        // still reporting the peer as claimed.
+        var lanAddress = new IPEndPoint(IPAddress.Parse("192.168.69.44"), 47830);
+        const ushort SharedStream = 7582;
+
+        // The peer starts on the address the plugin was given, and audio flows.
+        var viaTailscale = engine.GetOrCreateSession(peer, SharedStream, 4 * 1024 * 1024);
+        FillSession(viaTailscale, 0.5f);
+        Check(engine.ReadClaimedPeer(peer.Address, block, 128) > 0, "audio must flow on the address the plugin was given");
+
+        // Now the sender moves to its other path, exactly as the log shows: the old session is pruned
+        // and the same stream reappears from a different address.
+        engine.RemoveSession(peer, SharedStream);
+        var viaLan = engine.GetOrCreateSession(lanAddress, SharedStream, 4 * 1024 * 1024);
+        FillSession(viaLan, 0.5f);
+
+        var afterMove = 0;
+        for (var i = 0; i < 40; i++) if (engine.ReadClaimedPeer(peer.Address, block, 128) > 0) afterMove++;
+        Check(afterMove > 20,
+            $"THE STALL: when a peer moves to another address the plugin must keep receiving them ({afterMove} of 40 reads "
+          + "produced audio). A peer is a PERSON, not an address - the same sender on a second network path is still the "
+          + "person the plugin claimed, and holding the old address is what silenced the track after a few seconds");
+
+        // ...and they must not come back through the speakers on the new address either, or the user
+        // hears them twice the moment the path changes.
+        var mix = new byte[960 * 8];
+        FillSession(viaLan, 0.5f);
+        var leak = PeakOfMix(engine, mix);
+        Check(leak < 0.05f,
+            $"a claimed peer must stay off the speakers on EVERY address they are reachable at, not just the one the "
+          + $"plugin named (peak {leak:0.000})");
+
+        return $"survives 4 rounds of session churn ({served} reads produced audio); and follows a peer that moves to a "
+             + "second network path, without letting them back onto the speakers";
+    }
+
     /// <summary>Drive the plugin's audio thread the way a DAW would: read a block, let the reply land,
     /// read the next. Returns the loudest sample seen, so a test can assert on real audio rather than
     /// on "a message went past".</summary>
