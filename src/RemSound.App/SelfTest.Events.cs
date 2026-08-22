@@ -75,6 +75,7 @@ internal static partial class SelfTest
         new("RemSound.Sender/AudioSessionStartWatcher.cs", "Instant capture-on-first-sound tests"),
         new("RemSound.Sender/CaptureSource.cs", "Capture and mixing tests"),
         new("RemSound.Sender/PushModeWasapiBackend.cs", "Push-mode tests + lifecycle churn"),
+        new("RemSound.App/RecordingController.cs", "Recording suites - multi-peer split, modes by content, and the dying-writer report"),
         new("RemSound.App/CuePlayer.cs", "Every sound is pinned"),
         new("RemSound.App/PowerResumeHandler.cs", "Reconnect-after-resume test"),
 

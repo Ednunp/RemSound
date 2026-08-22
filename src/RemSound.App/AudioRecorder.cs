@@ -132,6 +132,18 @@ internal sealed class AudioRecorder : IDisposable
     /// a sign of a stalled disk. Surfaced in the on-stop diagnostic line.</summary>
     public long DroppedSampleFrames => Interlocked.Read(ref droppedSampleFrames);
 
+    /// <summary>Raised ONCE, from the writer thread, if that thread dies of something other than a
+    /// normal stop. The handler runs off the UI thread — marshal before touching anything.</summary>
+    public event Action<string>? Faulted;
+
+    /// <summary>Why the writer stopped, or null while it is healthy. Non-null means everything handed
+    /// to this recorder since is being dropped.</summary>
+    public string? FaultReason { get; private set; }
+
+    /// <summary>Is the writer still there to take audio? False means the file has stopped growing
+    /// whatever the rest of the app believes.</summary>
+    public bool WriterAlive => FaultReason is null && writerThread is { IsAlive: true };
+
     /// <summary>Constructs the recorder, opens the output file, and starts the writer
     /// thread. If anything fails the constructor throws and no cleanup is needed (no
     /// file has been opened yet).</summary>
@@ -284,7 +296,20 @@ internal sealed class AudioRecorder : IDisposable
         catch (OperationCanceledException) { /* normal shutdown */ }
         catch (Exception ex)
         {
+            // THE WRITER IS GONE, AND SOMEBODY HAS TO BE TOLD.
+            //
+            // This used to log one line and let the thread exit. Nothing else noticed: the recorder
+            // object still existed, so the app went on reporting that it was recording, the menu went
+            // on offering Stop, and every frame from that moment was dropped into a queue nobody was
+            // draining. You could record for an hour and get a file with the first few seconds in it,
+            // and find out when you opened it (Ed, 2026-08-22 audit).
+            //
+            // The failure itself is not preventable from here — a full disk or a network drive
+            // vanishing mid-take is real life. Failing SILENTLY is the part that is inexcusable.
             onDiagnostic?.Invoke($"recording: writer-thread error: {ex.GetType().Name}: {ex.Message}");
+            FaultReason = $"{ex.GetType().Name}: {ex.Message}";
+            try { Faulted?.Invoke(FaultReason); }
+            catch { /* a handler that throws must not also swallow the report */ }
         }
 
         // Final drain on shutdown: anything still queued in the rings goes to disk before
@@ -390,8 +415,19 @@ internal sealed class AudioRecorder : IDisposable
         return Math.Min(avail, maxFrames);
     }
 
+    /// <summary>Gate seam: make the very next write throw, so the death of the writer thread can be
+    /// tested rather than assumed. A disk filling up mid-take cannot be arranged on demand, and the
+    /// reporting around this failure is exactly the part that was missing.</summary>
+    internal bool FailNextWriteForTest { get; set; }
+
     private void Process()
     {
+        if (FailNextWriteForTest)
+        {
+            FailNextWriteForTest = false;
+            throw new IOException("simulated disk failure (gate)");
+        }
+
         int framesThisCall;
         switch (settings.Source)
         {

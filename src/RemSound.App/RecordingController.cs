@@ -70,12 +70,61 @@ internal sealed class RecordingController
     /// and announce the change to NVDA.</summary>
     public event Action<bool>? RecordingStateChanged;
 
+    /// <summary>A recording STOPPED ON ITS OWN because the writer died — disk full, a drive that went
+    /// away, permissions changing under it. Carries a plain-English reason and whatever file was
+    /// salvaged. MainForm marshals this to the UI thread and tells the user, because the alternative
+    /// is what used to happen: the app going on claiming to record into a file that stopped growing
+    /// (Ed, 2026-08-22 audit).</summary>
+    public event Action<string, string?>? RecordingFailed;
+
+    /// <summary>Frames the audio thread has had to throw away because the writer could not keep up,
+    /// across every track of the current recording. Climbing means audio is being lost RIGHT NOW.</summary>
+    public long DroppedSampleFrames =>
+        (active?.DroppedSampleFrames ?? 0)
+        + (meRecorder?.DroppedSampleFrames ?? 0)
+        + (peerTracks?.Values.Sum(t => t.Recorder.DroppedSampleFrames) ?? 0);
+
+    /// <summary>Every recorder currently running, so the caller can watch their health.</summary>
+    /// <summary>Gate seam: arm the next write on every live recorder to fail, so the death of a
+    /// writer can be tested instead of hoped about.</summary>
+    internal void FailNextWriteForTest()
+    {
+        foreach (var r in LiveRecorders()) r.FailNextWriteForTest = true;
+    }
+
+    private IEnumerable<AudioRecorder> LiveRecorders()
+    {
+        if (active is not null) yield return active;
+        if (meRecorder is not null) yield return meRecorder;
+        if (peerTracks is not null) foreach (var t in peerTracks.Values) yield return t.Recorder;
+    }
+
+    /// <summary>Wire a freshly-created recorder's fault report back to us. Every recorder goes through
+    /// here — a split recording has one per peer, and any one of them dying means the take is no
+    /// longer what the user thinks it is.</summary>
+    private AudioRecorder Watch(AudioRecorder recorder)
+    {
+        recorder.Faulted += reason => OnRecorderFaulted(recorder, reason);
+        return recorder;
+    }
+
+    private int faultReported;
+
+    private void OnRecorderFaulted(AudioRecorder recorder, string reason)
+    {
+        // Once per recording, however many tracks fall over. Called from a writer thread.
+        if (Interlocked.Exchange(ref faultReported, 1) != 0) return;
+        diagnostic($"recording: STOPPED - the writer failed ({reason}). Everything since is being lost.");
+        RecordingFailed?.Invoke(reason, recorder.FilePath);
+    }
+
     /// <summary>Start a new recording using the currently-saved profile settings. If a
     /// recording is already running this is a no-op (the menu shouldn't ever offer Start
     /// while recording, but the guard is here for safety).</summary>
     public void Start()
     {
         if (IsRecording) return;
+        Interlocked.Exchange(ref faultReported, 0);   // a new take, a fresh chance to report
         var s = (SettingsSourceForTest ?? settings.LoadRecordingSettings)();
         var now = DateTime.Now;
         try
@@ -135,7 +184,7 @@ internal sealed class RecordingController
     private void StartSingleTrack(RecordingSettings s, DateTime now)
     {
         var path = SingleTrackPath(s, now);
-        active = new AudioRecorder(s, diagnostic, OnRecorderFinished, path);
+        active = Watch(new AudioRecorder(s, diagnostic, OnRecorderFinished, path));
         sender.OnSentSamples = active.WriteSent;
         if (s.BypassShaping)
         {
@@ -188,7 +237,7 @@ internal sealed class RecordingController
                 var fileName = $"{baseName} {time}";
                 if (!usedNames.Add(fileName)) fileName = $"{baseName} ({addrKey}) {time}";
                 var path = Path.Combine(folder, $"{fileName}.{ext}");
-                recs[addrKey] = new PeerTrack(new AudioRecorder(WithSource(s, RecordingSource.ReceivedOnly), diagnostic, OnRecorderFinished, path));
+                recs[addrKey] = new PeerTrack(Watch(new AudioRecorder(WithSource(s, RecordingSource.ReceivedOnly), diagnostic, OnRecorderFinished, path)));
             }
             peerTracks = recs;
             receiver.SetPeerRecordTap(OnPeerRecordBlock, raw: s.BypassShaping);
@@ -199,7 +248,7 @@ internal sealed class RecordingController
         if (s.Source != RecordingSource.ReceivedOnly)
         {
             var mePath = Path.Combine(folder, $"{Sanitize(Environment.MachineName)} {time}.{ext}");
-            meRecorder = new AudioRecorder(WithSource(s, RecordingSource.SentOnly), diagnostic, OnRecorderFinished, mePath);
+            meRecorder = Watch(new AudioRecorder(WithSource(s, RecordingSource.SentOnly), diagnostic, OnRecorderFinished, mePath));
             sender.OnSentSamples = meRecorder.WriteSent;
         }
 

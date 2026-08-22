@@ -103,6 +103,73 @@ internal static partial class SelfTest
         finally { try { Directory.Delete(temp, recursive: true); } catch { } }
     }
 
+    /// <summary>A RECORDING THAT DIES MUST SAY SO.
+    ///
+    /// <para>Found in the 2026-08-22 audit. If the writer thread threw — a full disk, a network drive
+    /// going away, permissions changing under it — it logged one line and exited. Nothing else
+    /// noticed. The recorder object still existed, so the app went on reporting that it was recording,
+    /// the menu went on offering Stop, and every frame from that moment was dropped into a queue
+    /// nobody was draining. An hour of recording, a file with the first few seconds in it, and you
+    /// find out when you open it.</para>
+    ///
+    /// <para>The failure itself is real life and cannot be prevented from inside the app. Failing
+    /// SILENTLY is the part that had to go.</para></summary>
+    private static string? RecordingReportsItsOwnDeath()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "remsound-recfail-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        using var receiver = new AudioReceiver();
+        using var sender = new RemSound.Sender.AudioSender();
+        try
+        {
+            string? failureReason = null;
+            string? failedPath = null;
+            var controller = new RecordingController(sender, receiver, new RemSoundSettingsStore("RemSound"), _ => { })
+            {
+                SettingsSourceForTest = () => new RecordingSettings
+                {
+                    FileFormat = RecordingFileFormat.Wav,
+                    Source = RecordingSource.SentOnly,
+                    Folder = temp,
+                },
+            };
+            controller.RecordingFailed += (reason, path) => { failureReason = reason; failedPath = path; };
+
+            controller.Start();
+            Check(controller.IsRecording, "the recording must be running before it can be killed");
+
+            // Arm the failure, then feed audio so the writer wakes up and hits it.
+            controller.FailNextWriteForTest();
+            var block = MakeBlock(0.4f);
+            for (var i = 0; i < 40 && failureReason is null; i++)
+            {
+                sender.OnSentSamples?.Invoke(block.AsMemory(), RenderRoute.Mixed);
+                Thread.Sleep(25);
+            }
+
+            Check(failureReason is not null,
+                "a writer that dies must REPORT it - this is the whole finding: it used to log one line and let the "
+              + "app go on claiming to record into a file that had stopped growing");
+            Check(failureReason!.Contains("simulated disk failure"),
+                $"the report must carry the real reason so the user is told what happened (got: {failureReason})");
+            Check(failedPath is not null, "...and which file was partly written, so whatever was salvaged can be found");
+
+            // Only once, however many tracks fall over - a split recording must not produce a warning
+            // per peer.
+            var reportCount = 0;
+            controller.RecordingFailed += (_, _) => reportCount++;
+            controller.FailNextWriteForTest();
+            for (var i = 0; i < 10; i++) { sender.OnSentSamples?.Invoke(block.AsMemory(), RenderRoute.Mixed); Thread.Sleep(10); }
+            Check(reportCount == 0, "the failure must be reported ONCE per recording, not once per track that falls over");
+
+            controller.Stop();
+            Check(!controller.IsRecording, "and stopping afterwards must leave the app honest about its state");
+
+            return $"a dying writer reports itself with the reason and the partial file, exactly once per recording";
+        }
+        finally { try { Directory.Delete(temp, recursive: true); } catch { } }
+    }
+
     /// <summary>Every source mode and every channel mode, checked by what ends up in the file.
     ///
     /// <para>The old test covered SentOnly only, and judged mono by file size. A downmix that dropped

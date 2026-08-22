@@ -112,6 +112,7 @@ internal static partial class SelfTest
         RunStep(results, "Recording engine (all formats + source gate + mono)", RecordingEngine);
         RunStep(results, "Recording split tracks (per-peer + own)", RecordingSplitTracks);
         RunStep(results, "Recording: two peers, each track holds its OWN audio", RecordingMultiPeerSplit);
+        RunStep(results, "Recording reports its own death (never silently stops)", RecordingReportsItsOwnDeath);
         RunStep(results, "Recording: every source and channel mode, judged by the file contents", RecordingModesByContent);
         RunStep(results, "Recording churn / soak", RecordingChurn);
         RunStep(results, "v5 settings and shaping round-trip", V5ConfigRoundTrip);

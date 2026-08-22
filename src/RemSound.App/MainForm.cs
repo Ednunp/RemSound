@@ -1005,6 +1005,9 @@ public sealed partial class MainForm : Form
             settings,
             msg => logFile.Event($"recorder: {msg}"));
         recordingController.RecordingStateChanged += UpdateStartStopRecordingMenuLabel;
+        // A recording that dies on its own must SAY SO. It used to fail in silence: the writer thread
+        // went, the app went on claiming to record, and the file stopped growing (2026-08-22 audit).
+        recordingController.RecordingFailed += (reason, path) => BeginInvoke(() => OnRecordingFailed(reason, path));
         // Supply the connected peers when a split recording starts, so it can make one track per peer.
         recordingController.ConnectedPeersProvider = () =>
             selectedPeerEndpoints
@@ -7671,6 +7674,45 @@ public sealed partial class MainForm : Form
         healthDot.SetColor(!connected ? Theme.Neutral : streaming ? Theme.Healthy : Theme.Warning);
     }
 
+    /// <summary>A recording stopped because its writer died. Stop properly so the menu and the tray
+    /// stop lying, keep whatever was salvaged, and tell the user in plain words.</summary>
+    private void OnRecordingFailed(string reason, string? path)
+    {
+        logFile.Event($"recording: stopped by a failure - {reason}");
+        try { recordingController.Stop(); } catch { /* already coming down; the message matters more */ }
+
+        var where = string.IsNullOrEmpty(path) ? "" : Environment.NewLine + Environment.NewLine + $"Partly-written file: {path}";
+        var failedText = "Recording stopped on its own." + Environment.NewLine + Environment.NewLine
+          + "RemSound could not keep writing to disk, so the recording has been stopped and anything after "
+          + "that point was not saved." + Environment.NewLine + Environment.NewLine
+          + $"Reason: {reason}" + where;
+        // ForegroundDialog, not a bare MessageBox: this can fire while RemSound is minimised to the
+        // tray, and a warning that opens behind everything else is a warning nobody gets.
+        ForegroundDialog.Show(owner => MessageBox.Show(owner, failedText,
+            "RemSound - recording stopped", MessageBoxButtons.OK, MessageBoxIcon.Warning));
+    }
+
+    /// <summary>Warn ONCE per recording when audio starts being thrown away because the disk cannot
+    /// keep up. Losing audio quietly and mentioning it afterwards is no use to somebody mid-take.</summary>
+    private void WarnIfRecordingIsLosingAudio()
+    {
+        if (!recordingController.IsRecording) { recordingDropWarningGiven = false; return; }
+        if (recordingDropWarningGiven) return;
+        var dropped = recordingController.DroppedSampleFrames;
+        // A whole second of audio lost is past any reasonable hiccup.
+        if (dropped < 48000) return;
+        recordingDropWarningGiven = true;
+        logFile.Event($"recording: losing audio - {dropped:N0} frames dropped, the disk is not keeping up");
+        var losingText = "The recording is losing audio." + Environment.NewLine + Environment.NewLine
+          + "RemSound cannot write to the disk as fast as the sound is arriving, so parts of this recording "
+          + "are being lost. A slower or busier drive is the usual cause." + Environment.NewLine + Environment.NewLine
+          + "The recording is still running. You may want to stop it and record somewhere else.";
+        ForegroundDialog.Show(owner => MessageBox.Show(owner, losingText,
+            "RemSound - recording", MessageBoxButtons.OK, MessageBoxIcon.Warning));
+    }
+
+    private bool recordingDropWarningGiven;
+
     private void SnapshotLogIfDue()
     {
         if (DateTime.UtcNow - lastSnapshotUtc < TimeSpan.FromMilliseconds(950)) return;
@@ -7768,6 +7810,11 @@ public sealed partial class MainForm : Form
         // us. A DAW killed outright never says goodbye, and a peer coming back must not wait on some
         // other code path happening to ask.
         pluginHost?.Sweep();
+
+        // Is the recording still actually recording? Both halves of that question: a writer that has
+        // died reports itself, and a disk that cannot keep up is caught here while there is still
+        // something to be done about it.
+        WarnIfRecordingIsLosingAudio();
 
         if (pluginHost is { } host && host.HasActivity)
         {
