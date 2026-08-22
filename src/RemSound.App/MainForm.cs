@@ -9987,62 +9987,12 @@ public sealed partial class MainForm : Form
         // target high forever by making every tick skip. The recommendation below still folds in
         // the render-callback gap, so even when we're free to lower we can never lower below what
         // the device structurally needs; it just settles to that floor instead of overshooting up.
-        var currentUnderruns = route == RenderRoute.Mixed ? receiver.TuneBlockingUnderruns : receiver.TuneBlockingUnderrunsFor(route);
-        var underrunDelta = currentUnderruns - lastObservedUnderruns;
-        lastObservedUnderruns = currentUnderruns;
-        // Device-gulp delta is tracked for the diagnostic trail only — it never gates.
-        var currentDeviceGulps = route == RenderRoute.Mixed ? receiver.DeviceGulpUnderruns : receiver.DeviceGulpUnderrunsFor(route);
-        var deviceGulpDelta = currentDeviceGulps - lastObservedDeviceGulps;
-        lastObservedDeviceGulps = currentDeviceGulps;
-        if (underrunDelta > 0)
-        {
-            // Route label slots into the message body when present, omitted entirely in classic
-            // modes so the legacy "continuous auto-tune: skipping (N new underruns...)" wording
-            // is preserved bit-for-bit. The trailing-space + colon ordering is what gave the
-            // pre-fix line its weird "continuous auto-tune : skipping" formatting when the
-            // label was empty. devGulp shows how many inaudible device-gulp partials were ignored
-            // this tick — a high devGulp with a small underrunDelta is the Realtek fingerprint.
-            var prefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
-            memory.CleanTicks = 0; // this lane's buffer ran short — its evidence for shedding is void
-            // ...and record WHERE it ran short: that value is too thin for THIS lane, so its creep
-            // must never probe back down to it. A floor learned by experiment beats a guessed constant.
-            memory.Creep.NoteShortfallAt((int)slider.Value);
-
-            // UNDERRUNS MUST RAISE, NOT FREEZE.
-            //
-            // This used to log "skipping" and return, doing nothing at all. The guard is right for
-            // LOWERING — you must never shave the buffer on the back of a second where it already ran
-            // out — but returning here blocked raising too, and an underrun is the strongest evidence
-            // there is that the buffer is too thin. So the one condition that proves a raise is needed
-            // was the one condition that prevented it.
-            //
-            // Ed hit it on 2026-08-22: set to 20 ms, auto-tune on, and it sat at 20 for six minutes
-            // underrunning hundreds of times a tick. Fifteen ticks, fourteen of them "skipping". The
-            // fifteenth happened to be clean, and it immediately went 20 -> 37 and settled. Auto-tune
-            // had the answer the whole time and no way to act on it.
-            var underrunCurrent = (int)slider.Value;
-            var learnedFloor = memory.Creep.DiscoveredFloorMs;
-            if (learnedFloor > underrunCurrent)
-            {
-                // Same mechanism the descent path uses: set the slider under the suppress flag and let
-                // its own handler push the value into the receiver. One way to apply a value, not two.
-                var raiseTo = (int)Math.Min(learnedFloor, slider.Maximum);
-                suppressFlag = true;
-                try { slider.Value = raiseTo; }
-                finally { suppressFlag = false; }
-                logFile.Event($"{prefix}: RAISING {underrunCurrent}ms -> {raiseTo}ms ({underrunDelta} new underruns, devGulp={deviceGulpDelta} ignored) "
-                            + $"- the buffer ran short, so this is the floor it has learned by experiment");
-                return;
-            }
-
-            // Already at or above what it has learned; hold and gather more evidence rather than
-            // climbing on every tick, which would ratchet the buffer up on a single bad second.
-            logFile.Event($"{prefix}: holding at {underrunCurrent}ms ({underrunDelta} new underruns, devGulp={deviceGulpDelta} ignored) "
-                        + $"- already at or above the learned floor of {learnedFloor}ms");
-            return;
-        }
-        memory.CleanTicks++;
-
+        // MEASURE FIRST, then decide. This block used to sit below the underrun branch, so a raise
+        // had nothing to aim at except the learned floor's 3 ms crawl — while the recommendation that
+        // knew the real answer was computed a few lines later and thrown away on that path.
+        // Ed, 2026-08-22: "I wonder if I had set it to 5 ms whether it would have seen that as stupid
+        // and jumped up, like it jumps down?" It would not have. It would have gone 5, 8, 11, 14 and
+        // taken most of a minute of broken audio to arrive. Now it can jump.
         var sampleCount = Math.Min(LookbackSeconds, recentMaxGaps.Count);
         var skip = recentMaxGaps.Count - sampleCount;
         // Track the TWO highest arrival-gap seconds, not just the worst. A single transient spike —
@@ -10078,6 +10028,76 @@ public sealed partial class MainForm : Form
         var recommended = Math.Max(codecFloor, jitterBased);
         var capped = Math.Min(recommended, AutoTuneRecommendationCapMs);
         var current = (int)slider.Value;
+
+        var currentUnderruns = route == RenderRoute.Mixed ? receiver.TuneBlockingUnderruns : receiver.TuneBlockingUnderrunsFor(route);
+        var underrunDelta = currentUnderruns - lastObservedUnderruns;
+        lastObservedUnderruns = currentUnderruns;
+        // Device-gulp delta is tracked for the diagnostic trail only — it never gates.
+        var currentDeviceGulps = route == RenderRoute.Mixed ? receiver.DeviceGulpUnderruns : receiver.DeviceGulpUnderrunsFor(route);
+        var deviceGulpDelta = currentDeviceGulps - lastObservedDeviceGulps;
+        lastObservedDeviceGulps = currentDeviceGulps;
+        if (underrunDelta > 0)
+        {
+            // Route label slots into the message body when present, omitted entirely in classic
+            // modes so the legacy "continuous auto-tune: skipping (N new underruns...)" wording
+            // is preserved bit-for-bit. The trailing-space + colon ordering is what gave the
+            // pre-fix line its weird "continuous auto-tune : skipping" formatting when the
+            // label was empty. devGulp shows how many inaudible device-gulp partials were ignored
+            // this tick — a high devGulp with a small underrunDelta is the Realtek fingerprint.
+            var prefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
+            memory.CleanTicks = 0; // this lane's buffer ran short — its evidence for shedding is void
+            // ...and record WHERE it ran short: that value is too thin for THIS lane, so its creep
+            // must never probe back down to it. A floor learned by experiment beats a guessed constant.
+            memory.Creep.NoteShortfallAt((int)slider.Value);
+
+            // UNDERRUNS MUST RAISE, NOT FREEZE.
+            //
+            // This used to log "skipping" and return, doing nothing at all. The guard is right for
+            // LOWERING — you must never shave the buffer on the back of a second where it already ran
+            // out — but returning here blocked raising too, and an underrun is the strongest evidence
+            // there is that the buffer is too thin. So the one condition that proves a raise is needed
+            // was the one condition that prevented it.
+            //
+            // Ed hit it on 2026-08-22: set to 20 ms, auto-tune on, and it sat at 20 for six minutes
+            // underrunning hundreds of times a tick. Fifteen ticks, fourteen of them "skipping". The
+            // fifteenth happened to be clean, and it immediately went 20 -> 37 and settled. Auto-tune
+            // had the answer the whole time and no way to act on it.
+            var learnedFloor = memory.Creep.DiscoveredFloorMs;
+
+            // AIM AT THE MEASUREMENT, NOT JUST THE CRAWL.
+            //
+            // The learned floor only ever sits 3 ms above wherever it last ran short, so using it
+            // alone meant every raise was a 3 ms step no matter how badly the buffer failed — one
+            // underrun and fifteen underruns moved it exactly the same distance. From a silly value
+            // like 5 ms that is fourteen ticks and the best part of a minute of broken audio.
+            //
+            // `capped` is the jitter measurement's own answer, computed above from the arrival gaps
+            // and the render period. Taking whichever is higher means a wild setting is corrected in
+            // ONE step, while the learned floor still does its real job: stopping a later descent
+            // from probing back into a depth already proven too thin.
+            var raiseTarget = AutoTuneDescent.NextRaiseTarget(current, capped, learnedFloor);
+            if (raiseTarget > current)
+            {
+                // Same mechanism the descent path uses: set the slider under the suppress flag and let
+                // its own handler push the value into the receiver. One way to apply a value, not two.
+                var raiseTo = (int)Math.Clamp(raiseTarget, slider.Minimum, slider.Maximum);
+                suppressFlag = true;
+                try { slider.Value = raiseTo; }
+                finally { suppressFlag = false; }
+                var why = capped >= learnedFloor ? "the measured need" : "the floor it has learned by experiment";
+                logFile.Event($"{prefix}: RAISING {current}ms -> {raiseTo}ms ({underrunDelta} new underruns, devGulp={deviceGulpDelta} ignored) "
+                            + $"- the buffer ran short; measured={capped}ms learnedFloor={learnedFloor}ms, aiming at {why}");
+                return;
+            }
+
+            // Already at or above both; hold and gather more evidence rather than climbing on every
+            // tick, which would ratchet the buffer up on a single bad second.
+            logFile.Event($"{prefix}: holding at {current}ms ({underrunDelta} new underruns, devGulp={deviceGulpDelta} ignored) "
+                        + $"- already at or above measured={capped}ms and learnedFloor={learnedFloor}ms");
+            return;
+        }
+        memory.CleanTicks++;
+
 
         // Low-water evidence: the shallowest the buffer got across the same lookback window. Cushion
         // it never touched is provably spare — that's what lets a descent be a measurement rather

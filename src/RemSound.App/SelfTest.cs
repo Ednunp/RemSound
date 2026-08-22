@@ -3092,12 +3092,35 @@ internal static partial class SelfTest
                 sampleCount: 0, consecutiveCleanTicks: 0, creep: creep) == floorAfter30,
             "sitting exactly on the floor must hold, not climb");
 
+        // --- THE WAY UP MUST BE AS DECISIVE AS THE WAY DOWN --------------------------------------
+        // Ed, 2026-08-22: "I wonder if I had set it to 5 ms whether it would have seen that as stupid
+        // and jumped up, like it jumps down?" It would not have. The raise had only the learned floor
+        // to aim at, which sits 3 ms above the last failure, so a silly setting crawled up 3 ms a
+        // tick — fourteen ticks and most of a minute of broken audio to get from 5 to 47.
+        var silly = AutoTuneDescent.NextRaiseTarget(currentMs: 5, recommendedMs: 47, learnedFloorMs: 8);
+        Check(silly == 47,
+            $"a wild setting must be corrected in ONE step using the measurement, not crawled up from the learned floor (got {silly})");
+
+        // A single tick must be enough. Walking it proves there is no second step hiding.
+        var walked = AutoTuneDescent.NextRaiseTarget(silly, recommendedMs: 47, learnedFloorMs: 8);
+        Check(walked == 47, $"and it must then HOLD, not keep climbing on the next bad second (got {walked})");
+
+        // The learned floor still wins when it is the higher of the two: a measurement taken during a
+        // calm second can read lower than what this hardware has already proven it needs.
+        Check(AutoTuneDescent.NextRaiseTarget(currentMs: 20, recommendedMs: 26, learnedFloorMs: 40) == 40,
+            "experience must beat an optimistic measurement - the floor exists because that depth already failed here");
+
+        // Neither pushes it up when it is already deep enough.
+        Check(AutoTuneDescent.NextRaiseTarget(currentMs: 60, recommendedMs: 26, learnedFloorMs: 40) == 60,
+            "sitting above both must hold - raising on every bad second would ratchet the buffer upward for ever");
+
         // Reset clears it: a new device or a new session has not proven anything yet.
         creep.Reset();
         Check(creep.DiscoveredFloorMs == 0, "resetting must forget the floor - a different setup has proven nothing");
 
         return $"a shortfall at 20 ms teaches a floor of {floorAfter20} ms and a shortfall at 30 teaches {floorAfter30}; "
-             + "a shallower shortfall never lowers it; a descent never crosses it; sitting on it holds";
+             + "a shallower shortfall never lowers it; a descent never crosses it; "
+             + "and a wild setting is corrected in one step (5 -> 47) rather than crawling three at a time";
     }
 
     private static string? MeasuredLatencyReadout()

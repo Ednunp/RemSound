@@ -97,6 +97,34 @@ public static class AutoTuneDescent
         }
     }
 
+    /// <summary>The next target when the buffer has just RUN SHORT — the way up.
+    ///
+    /// <para>Counterpart to <see cref="NextTarget"/>, and deliberately the same shape: aim at the
+    /// evidence rather than crawl. The descent has looked ahead and moved by a sensible amount since
+    /// v6.0; the raise used to inch upward in <see cref="Policy.CreepStepMs"/> steps because it had
+    /// only the learned floor to go on, which sits exactly that far above the last failure. One
+    /// underrun and fifty underruns moved it the same distance, and a setting of 5 ms against a real
+    /// need of 47 took fourteen ticks of broken audio to correct (Ed, 2026-08-22).</para>
+    ///
+    /// <para>So it takes whichever is higher of the two things it knows:</para>
+    ///
+    /// <para><paramref name="recommendedMs"/> — what the jitter measurement says is needed right now,
+    /// from the arrival gaps and the render period. This is what lets a wild setting be corrected in
+    /// ONE step.</para>
+    ///
+    /// <para><paramref name="learnedFloorMs"/> — depths already proven too thin on this machine. It
+    /// still matters: a measurement taken during a calm second can read lower than what this hardware
+    /// actually needs, and the floor stops the raise landing somewhere experience has already ruled
+    /// out.</para>
+    ///
+    /// <para>Returns <paramref name="currentMs"/> unchanged when it is already at or above both —
+    /// holding rather than ratcheting the buffer up on every bad second.</para></summary>
+    public static int NextRaiseTarget(int currentMs, int recommendedMs, int learnedFloorMs)
+    {
+        var target = Math.Max(recommendedMs, learnedFloorMs);
+        return target > currentMs ? target : currentMs;
+    }
+
     /// <summary>The next latency target on a DESCENT — the caller has already established that the
     /// recommendation is at or below the current value, that this tick isn't being skipped for
     /// short-reads, and has clamped/hysteresis-checked the result.
