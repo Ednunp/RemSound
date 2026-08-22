@@ -442,6 +442,20 @@ public sealed partial class MainForm : Form
     // the actual measurement lets the formula reflect reality. Same window length as the gap
     // queue so they share the lookback discipline.
     private readonly Queue<int> recentRenderCbGaps = new();
+
+    /// <summary>How often the CAPTURE device actually hands us audio, one reading a second, same
+    /// window and same lone-spike rejection as the render side. Capture used to be a flat 10 ms in the
+    /// latency figure — the size RemSound asks Windows for, not what the device delivers (Ed,
+    /// 2026-08-22: "that seems wrong"). It is measured now.</summary>
+    private readonly Queue<int> recentCaptureCbGaps = new();
+
+    /// <summary>Packets sent at the previous tick, so the real emit cadence can be worked out from the
+    /// difference. The send-side wait was derived from the codec setting, which is exact for Opus and
+    /// PCM but fell back to a guessed 0.5 ms for ASIO PCM. Measuring covers that case and catches a
+    /// sender that is not hitting its own frame timing.</summary>
+    private long lastPacketsSentForLatency;
+    private DateTime lastPacketsSentAtUtc = DateTime.MinValue;
+    private double measuredEmitIntervalMs;
     /// <summary>Per-second LOW-WATER marks of the receive buffer — the shallowest it got each second.
     /// The evidence the auto-tune descends on (see <see cref="RemSound.Core.AutoTuneDescent"/>):
     /// cushion the buffer never touched is provably spare, which is the only honest way to know what
@@ -8066,7 +8080,10 @@ public sealed partial class MainForm : Form
             // the local machine is send-only.
             if ((diag.BufferSampleCount > 0 || diag.RenderReadCount > 0) || sender.IsRunning)
             {
-                var captureBufferMs = CaptureBufferEstimateMs();
+                // Second-highest of the window, not the peak: one OS hiccup must not inflate the
+                // figure for the next fifteen seconds. Same rule the auto-tune uses on its gaps.
+                var captureGapMs = SecondHighest(recentCaptureCbGaps);
+                var captureBufferMs = CaptureBufferEstimateMs(captureGapMs);
                 var senderAccumulatorMs = SenderAccumulatorEstimateMs();
                 var wireOneWayMs = LowestPeerRttMs() / 2.0;
                 // Which lane is the user actually listening on? ASIO runs its own backend at its own
@@ -8104,6 +8121,7 @@ public sealed partial class MainForm : Form
                 lastObservedSessionsOpenedCount = openCount;
                 recentMaxGaps.Clear();
                 recentRenderCbGaps.Clear();
+                recentCaptureCbGaps.Clear();
                 recentMinBuffers.Clear();
                 // New conditions: every lane re-earns its evidence and forgets its learned floor.
                 mixedTuneMemory.Reset();
@@ -8115,6 +8133,28 @@ public sealed partial class MainForm : Form
             // Push this second's max-gap reading into the rolling window the continuous
             // auto-tune samples from. Capped at RecentMaxGapWindowSeconds entries so older
             // readings naturally fall out as conditions evolve.
+            // Capture timing belongs to the SENDER, so it is gathered whether or not anything is being
+            // received — a send-only machine still deserves an honest figure.
+            if (sendCbGapMs > 0)
+            {
+                recentCaptureCbGaps.Enqueue(sendCbGapMs);
+                while (recentCaptureCbGaps.Count > RecentMaxGapWindowSeconds) recentCaptureCbGaps.Dequeue();
+            }
+            if (sender.IsRunning)
+            {
+                var now = DateTime.UtcNow;
+                var packets = sender.PacketsSent;
+                if (lastPacketsSentAtUtc != DateTime.MinValue && packets > lastPacketsSentForLatency)
+                {
+                    var elapsedMs = (now - lastPacketsSentAtUtc).TotalMilliseconds;
+                    var sent = packets - lastPacketsSentForLatency;
+                    if (elapsedMs > 0 && sent > 0) measuredEmitIntervalMs = elapsedMs / sent;
+                }
+                lastPacketsSentForLatency = packets;
+                lastPacketsSentAtUtc = now;
+            }
+            else measuredEmitIntervalMs = 0;
+
             if (diag.PacketCount > 0)
             {
                 recentMaxGaps.Enqueue(diag.MaxArrivalGapMs);
@@ -9657,6 +9697,16 @@ public sealed partial class MainForm : Form
     /// AsioOnly bypasses the accumulator entirely so this estimate is an upper bound there.</summary>
     private double SenderAccumulatorEstimateMs()
     {
+        // MEASURED first. The derived figures below are exact for Opus and PCM - the wait really is
+        // half a frame - but the ASIO PCM branch returned a guessed 0.5 ms, admitted in its own
+        // comment as "hard to know without driver introspection". Timing the real emit cadence covers
+        // that case and catches a sender not hitting its own frame timing, which no amount of reading
+        // the settings back could ever show (Ed, 2026-08-22: "surely if it's a setting that can be
+        // measured too?").
+        //
+        // Half the interval, because a sample arriving at a random moment waits on average half a
+        // packet - the same average the derived values below express.
+        if (measuredEmitIntervalMs > 0) return Math.Clamp(measuredEmitIntervalMs / 2.0, 0.1, 200);
         if (codecBox.SelectedItem is not CodecChoice item) return 2.5;
         var rate = settings.LoadSendRate();
         if (item.Codec == AudioTransportCodec.Opus)
@@ -9711,11 +9761,35 @@ public sealed partial class MainForm : Form
 
     /// <summary>How long audio waits in the CAPTURE device before the app sees it. Was missing from
     /// the latency estimate entirely — a whole stage of the journey simply not counted.</summary>
-    private static double CaptureBufferEstimateMs() => RemSound.Sender.CaptureSource.CaptureBufferMs;
+    /// <summary>Second-highest reading in a window, falling back to the only one when that is all
+    /// there is. A single transient spike is not evidence; two are.</summary>
+    private static int SecondHighest(Queue<int> window)
+    {
+        int peak = 0, second = 0;
+        foreach (var v in window)
+        {
+            if (v > peak) { second = peak; peak = v; }
+            else if (v > second) second = v;
+        }
+        return window.Count >= 2 ? second : peak;
+    }
+
+    private static double CaptureBufferEstimateMs(int measuredCallbackGapMs)
+    {
+        // MEASURED when we have it. Audio accumulates in the device for one callback period before
+        // the app sees it, so the period IS the wait — no doubling, unlike the render side where the
+        // device holds a second buffer while playing the first.
+        //
+        // The fallback is the size RemSound asks Windows for, which is all we knew before. It was
+        // reported as fact for every device on every machine, which is exactly the kind of constant
+        // that hides inside a total and makes it look measured (Ed, 2026-08-22).
+        if (measuredCallbackGapMs > 0) return Math.Clamp(measuredCallbackGapMs, 1, 200);
+        return RemSound.Sender.CaptureSource.CaptureBufferMs;
+    }
 
     // Seams for the gate step that pins the latency estimate's completeness.
     internal static double RenderBufferEstimateMsForTest(int measuredCallbackGapMs) => RenderBufferEstimateMs(measuredCallbackGapMs);
-    internal static double CaptureBufferEstimateMsForTest() => CaptureBufferEstimateMs();
+    internal static double CaptureBufferEstimateMsForTest(int measuredCallbackGapMs = 0) => CaptureBufferEstimateMs(measuredCallbackGapMs);
 
     /// <summary>
     /// Translates a codec choice + the user's Send Rate into the effective Opus frame size in

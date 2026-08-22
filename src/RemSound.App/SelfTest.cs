@@ -3226,7 +3226,19 @@ internal static partial class SelfTest
         Check(MainForm.CaptureBufferEstimateMsForTest() > 0,
             "the capture device's buffer must be part of the estimate — omitting a whole stage is how the app under-reported by ~20ms");
         Check(MainForm.CaptureBufferEstimateMsForTest() == RemSound.Sender.CaptureSource.CaptureBufferMs,
-            "the capture term must be the REAL buffer size the capture is opened with, not a second guess at it");
+            "with nothing measured, it falls back to the buffer size the capture is opened with");
+
+        // ...but a MEASUREMENT must win. Capture was a flat 10 ms for every device on every machine -
+        // the size RemSound asks Windows for, not what the device delivers. A constant sitting inside
+        // a total is how the whole figure comes to look measured when it isn't (Ed, 2026-08-22).
+        Check(MainForm.CaptureBufferEstimateMsForTest(3) == 3,
+            "a measured capture period must be used, not the 10 ms RemSound asked for");
+        Check(MainForm.CaptureBufferEstimateMsForTest(32) == 32,
+            "...at both ends of the range - a slow device must report its real cost, not a flattering constant");
+        // Not doubled, unlike render: audio accumulates for one period before we see it, whereas the
+        // output device holds a second buffer while playing the first.
+        Check(MainForm.CaptureBufferEstimateMsForTest(10) < MainForm.RenderBufferEstimateMsForTest(10),
+            "capture waits ONE period; the output device holds two, so the same period must not cost the same at both ends");
 
         // Sanity on a realistic set of numbers: a 10ms capture, 2.5ms Opus, 2ms wire, 11ms queue and an
         // 11ms device period should land near what a clap test actually shows (~45ms), not near 23.
