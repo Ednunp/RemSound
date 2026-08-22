@@ -141,6 +141,7 @@ internal static partial class SelfTest
         RunStep(results, "Dialog control suite (every dialog: accessibility + theme + driven)", DialogControlSuite);
         RunStep(results, "Every sound is pinned (registry, custom paths, muting, checkbox suppression)", CueCoverage);
         RunStep(results, "Latency estimate counts every stage (no silently-missing term)", LatencyEstimateComplete);
+        RunStep(results, "Auto-tune interval: every offered value survives a save", AutoTuneIntervalRoundTrips);
         RunStep(results, "Auto-tune climbs out of trouble (underruns raise, never freeze)", AutoTuneClimbsOutOfTrouble);
         RunStep(results, "Measured-latency readout keeps WASAPI and ASIO separate", MeasuredLatencyReadout);
         RunStep(results, "Plugin double-audio guard (a claimed peer leaves the speakers)", PluginDoubleAudioGuard);
@@ -3060,6 +3061,53 @@ internal static partial class SelfTest
     ///
     /// <para>This drives the learned floor, which is what the raise now acts on, and pins the two
     /// directions apart: shortfalls must push the floor UP, and a descent must never cross it.</para></summary>
+    /// <summary>EVERY VALUE A CONTROL OFFERS MUST SURVIVE BEING SAVED.
+    ///
+    /// <para>The auto-tune interval dropdown offered "3 seconds", the app honoured it for the whole
+    /// session, and it silently reverted to 5 on reload — the store clamped it to 5 going out and
+    /// rejected anything under 5 coming back. Ed hit it on 2026-08-22: "why the hell can I not save
+    /// the auto tune check delay as 3 seconds? I've saved the profile but it always jumps back."</para>
+    ///
+    /// <para>Written as a LOOP over the offered values rather than a check of the one that broke,
+    /// because the fault was never really about 3 seconds — it was a control and a store disagreeing
+    /// about what is allowed, and that can happen at either end of any list.</para></summary>
+    private static string? AutoTuneIntervalRoundTrips()
+    {
+        var scratch = Path.Combine(Path.GetTempPath(), "remsound-interval-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using (AppConfig.UseThrowawayUserDataDirectory(scratch))
+            {
+                var store = new RemSoundSettingsStore("RemSound");
+
+                // Exactly what the dropdown lists, in MainForm's own order.
+                foreach (var offered in new[] { 3, 5, 10, 15, 30 })
+                {
+                    store.SaveContinuousAutoTuneIntervalSec(offered);
+                    var readBack = store.LoadContinuousAutoTuneIntervalSec();
+                    Check(readBack == offered,
+                        $"the dropdown offers {offered} seconds, so saving it must give {offered} back - got {readBack}. "
+                      + "A control offering a value its store refuses is broken, whichever end disagrees");
+                }
+
+                // The floor the store enforces must BE the floor the dropdown offers, not a second
+                // opinion about it. Pinned so the two can never drift apart again.
+                Check(RemSoundSettingsStore.MinAutoTuneIntervalSec == 3,
+                    $"the store's minimum must match the shortest interval the dropdown offers (store says {RemSoundSettingsStore.MinAutoTuneIntervalSec})");
+
+                // Out of range in both directions still has to be handled, not stored blindly - a
+                // hand-edited profile must not be able to set a zero-second tick.
+                store.SaveContinuousAutoTuneIntervalSec(0);
+                Check(store.LoadContinuousAutoTuneIntervalSec() >= RemSoundSettingsStore.MinAutoTuneIntervalSec,
+                    "a nonsense value must be clamped, not accepted - a zero-second interval would spin the tuner");
+                store.SaveContinuousAutoTuneIntervalSec(9999);
+                Check(store.LoadContinuousAutoTuneIntervalSec() <= 60, "and the same at the top end");
+            }
+            return "all five offered intervals (3, 5, 10, 15, 30 seconds) survive a save and reload; the store's floor matches the dropdown's; nonsense is clamped";
+        }
+        finally { try { if (Directory.Exists(scratch)) Directory.Delete(scratch, recursive: true); } catch { } }
+    }
+
     private static string? AutoTuneClimbsOutOfTrouble()
     {
         // Every tick that runs short records where it ran short. That is the evidence the raise uses.

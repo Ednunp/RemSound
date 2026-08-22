@@ -196,15 +196,29 @@ public sealed class RemSoundSettingsStore
         Save(s);
     }
 
+    /// <summary>How often continuous auto-tune re-checks, in seconds.
+    ///
+    /// <para><b>The floor is 3, not 5, because 3 is what the dropdown OFFERS.</b> It used to clamp
+    /// and validate at 5, so picking "3 seconds" worked perfectly for the session and then silently
+    /// reverted on reload - saved as 5 going out, and rejected as out of range coming back. A control
+    /// that offers a value the store refuses is a broken control (Ed, 2026-08-22: "why the hell can I
+    /// not save the auto tune check delay as 3 seconds?").</para>
+    ///
+    /// <para>Safe for older builds reading the same profile: they reject anything below 5 and fall
+    /// back to the default, so a 3 written here degrades to 5 there rather than breaking anything.</para></summary>
     public int LoadContinuousAutoTuneIntervalSec(int defaultValue = 5) =>
-        Try(() => Load()?.ContinuousAutoTuneIntervalSec is int v && v >= 5 && v <= 60 ? v : (int?)null) ?? defaultValue;
+        Try(() => Load()?.ContinuousAutoTuneIntervalSec is int v && v >= MinAutoTuneIntervalSec && v <= 60 ? v : (int?)null) ?? defaultValue;
 
     public void SaveContinuousAutoTuneIntervalSec(int value)
     {
         var s = Load() ?? new Settings();
-        s.ContinuousAutoTuneIntervalSec = Math.Clamp(value, 5, 60);
+        s.ContinuousAutoTuneIntervalSec = Math.Clamp(value, MinAutoTuneIntervalSec, 60);
         Save(s);
     }
+
+    /// <summary>The shortest interval the dropdown offers. Pinned here so the store and the control
+    /// can never drift apart again.</summary>
+    public const int MinAutoTuneIntervalSec = 3;
 
     // Remembered peers + remembered applications are MACHINE-WIDE, backed by AppConfig (the same
     // persistent per-machine file the global hotkeys use) — NOT the in-memory settings cache. They used
