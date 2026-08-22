@@ -3159,6 +3159,24 @@ internal static partial class SelfTest
         Check(AutoTuneDescent.NextRaiseTarget(currentMs: 20, recommendedMs: 26, learnedFloorMs: 40) == 40,
             "experience must beat an optimistic measurement - the floor exists because that depth already failed here");
 
+        // --- A RAISE MUST BE WORTH HEARING -------------------------------------------------------
+        // Every latency change is audible: the buffer stretches slightly while it banks the extra.
+        // The descent has always skipped moves under the hysteresis; the raise did not, so a learned
+        // floor offering 3 ms at a time gave a 3 ms adjustment on EVERY tick of a rough patch - each
+        // one heard, none of them worth it. At a 3-second tick that is a constant fidget.
+        var small = AutoTuneDescent.NextRaiseTarget(currentMs: 20, recommendedMs: 23, learnedFloorMs: 23, minStepMs: 5);
+        Check(small >= 25,
+            $"a raise smaller than the hysteresis must be ROUNDED UP to it, so one audible change happens instead of a stream of them (got {small})");
+
+        // ...but never SKIPPED. The buffer has just run short; doing nothing is the one answer that is
+        // always wrong, and skipping sub-threshold raises would put the original freeze straight back.
+        Check(AutoTuneDescent.NextRaiseTarget(currentMs: 20, recommendedMs: 21, learnedFloorMs: 21, minStepMs: 5) > 20,
+            "a shortfall must ALWAYS move the buffer - skipping a small raise is how the freeze bug comes back");
+
+        // A raise already bigger than the hysteresis is left exactly as measured, not inflated.
+        Check(AutoTuneDescent.NextRaiseTarget(currentMs: 20, recommendedMs: 47, learnedFloorMs: 23, minStepMs: 5) == 47,
+            "a raise that is already big enough must land on the measurement, not be padded");
+
         // Neither pushes it up when it is already deep enough.
         Check(AutoTuneDescent.NextRaiseTarget(currentMs: 60, recommendedMs: 26, learnedFloorMs: 40) == 60,
             "sitting above both must hold - raising on every bad second would ratchet the buffer upward for ever");
@@ -3169,7 +3187,8 @@ internal static partial class SelfTest
 
         return $"a shortfall at 20 ms teaches a floor of {floorAfter20} ms and a shortfall at 30 teaches {floorAfter30}; "
              + "a shallower shortfall never lowers it; a descent never crosses it; "
-             + "and a wild setting is corrected in one step (5 -> 47) rather than crawling three at a time";
+             + "a wild setting is corrected in one step (5 -> 47) rather than crawling three at a time; "
+             + "and a raise too small to be worth hearing is rounded up rather than repeated every tick";
     }
 
     private static string? MeasuredLatencyReadout()

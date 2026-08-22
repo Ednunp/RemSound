@@ -119,10 +119,21 @@ public static class AutoTuneDescent
     ///
     /// <para>Returns <paramref name="currentMs"/> unchanged when it is already at or above both —
     /// holding rather than ratcheting the buffer up on every bad second.</para></summary>
-    public static int NextRaiseTarget(int currentMs, int recommendedMs, int learnedFloorMs)
+    /// <param name="minStepMs">Smallest move worth making. Every latency change is AUDIBLE — the
+    /// buffer either stretches slightly while it banks the extra, or drops when it sheds — so a change
+    /// too small to matter is a change nobody should have to hear. The descent has always skipped
+    /// those; the raise did not, so a learned floor offering 3 ms at a time produced a 3 ms adjustment
+    /// on every tick of a rough patch, each one audible and none of them worth it.</param>
+    public static int NextRaiseTarget(int currentMs, int recommendedMs, int learnedFloorMs, int minStepMs = 0)
     {
         var target = Math.Max(recommendedMs, learnedFloorMs);
-        return target > currentMs ? target : currentMs;
+        if (target <= currentMs) return currentMs;
+
+        // ROUND UP rather than skip. Skipping a sub-threshold raise would put the freeze straight back
+        // — the buffer has just run short, so doing nothing is the one answer that is always wrong.
+        // Going a little further than asked costs a few milliseconds of delay and buys one audible
+        // change instead of a stream of them.
+        return Math.Max(target, currentMs + minStepMs);
     }
 
     /// <summary>The next latency target on a DESCENT — the caller has already established that the

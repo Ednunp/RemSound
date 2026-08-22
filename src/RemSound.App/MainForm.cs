@@ -10149,7 +10149,7 @@ public sealed partial class MainForm : Form
             // and the render period. Taking whichever is higher means a wild setting is corrected in
             // ONE step, while the learned floor still does its real job: stopping a later descent
             // from probing back into a depth already proven too thin.
-            var raiseTarget = AutoTuneDescent.NextRaiseTarget(current, capped, learnedFloor);
+            var raiseTarget = AutoTuneDescent.NextRaiseTarget(current, capped, learnedFloor, HysteresisMs);
             if (raiseTarget > current)
             {
                 // Same mechanism the descent path uses: set the slider under the suppress flag and let
