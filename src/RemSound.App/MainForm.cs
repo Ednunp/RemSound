@@ -476,7 +476,39 @@ public sealed partial class MainForm : Form
         public int CleanTicks;
         /// <summary>What the creep has learned about how thin THIS lane can safely run.</summary>
         public readonly AutoTuneDescent.CreepState Creep = new();
-        public void Reset() { CleanTicks = 0; Creep.Reset(); }
+
+        /// <summary>The next tick must only take a BASELINE reading of the underrun counter, not act
+        /// on the difference.
+        ///
+        /// <para>The counter is a lifetime total. Nothing was updating this lane's baseline while the
+        /// tuner was off, or while the lane had no sessions, so the first tick afterwards saw the
+        /// entire backlog as "new since last tick" — Ed's log has a tick reporting 1772 of them, which
+        /// is history, not a rate. Under the old rules that merely wasted a tick. Now that underruns
+        /// RAISE, it would jack the buffer up on evidence from before the tuner was even running.</para></summary>
+        public bool NeedsUnderrunBaseline = true;
+
+        /// <summary>THIS LANE's render-callback period and buffer low-water, one reading a second.
+        ///
+        /// <para>They used to come from a single shared window, so in the mode whose entire purpose is
+        /// tuning the two lanes independently, ASIO could be sized using WASAPI's much slower callback
+        /// period. Ed's log has them genuinely different — 2 ms against 8 ms — so this was pushing one
+        /// lane deeper than its hardware ever needed.</para>
+        ///
+        /// <para>Arrival gaps stay shared on purpose: a packet arrives from the network ONCE and is
+        /// fanned out to both lanes, so when it turned up is a property of the connection, not of
+        /// either output device.</para></summary>
+        public readonly Queue<int> RenderCbGaps = new();
+        public readonly Queue<int> MinBuffers = new();
+
+        public void Reset()
+        {
+            CleanTicks = 0;
+            Creep.Reset();
+            RenderCbGaps.Clear();
+            MinBuffers.Clear();
+            // New conditions: the counter baseline describes the old ones too.
+            NeedsUnderrunBaseline = true;
+        }
     }
     /// <summary>End-to-end latency last measured, PER LANE. Cached because the per-lane callback-gap
     /// read RESETS the counter — the readout must not steal the measurement from the diagnostic.
@@ -8163,6 +8195,30 @@ public sealed partial class MainForm : Form
                 // out together; auto-tune uses the max of this for an honest formula.
                 recentRenderCbGaps.Enqueue(diag.MaxRenderCallbackGapMs);
                 while (recentRenderCbGaps.Count > RecentMaxGapWindowSeconds) recentRenderCbGaps.Dequeue();
+
+                // ...and the SAME readings per lane, because the render period and the buffer depth
+                // belong to an output device, not to the machine. Sharing them let one lane be sized
+                // by the other's hardware.
+                foreach (var (laneRoute, laneMemory) in new[]
+                {
+                    (RenderRoute.WasapiLane, wasapiTuneMemory),
+                    (RenderRoute.AsioLane, asioTuneMemory),
+                    (RenderRoute.Mixed, mixedTuneMemory),
+                })
+                {
+                    var laneGap = receiver.MaxRenderCallbackGapMsFor(laneRoute);
+                    if (laneGap > 0)
+                    {
+                        laneMemory.RenderCbGaps.Enqueue(laneGap);
+                        while (laneMemory.RenderCbGaps.Count > RecentMaxGapWindowSeconds) laneMemory.RenderCbGaps.Dequeue();
+                    }
+                    var laneBuffer = receiver.CurrentBufferMsFor(laneRoute);
+                    if (laneBuffer > 0)
+                    {
+                        laneMemory.MinBuffers.Enqueue(laneBuffer);
+                        while (laneMemory.MinBuffers.Count > RecentMaxGapWindowSeconds) laneMemory.MinBuffers.Dequeue();
+                    }
+                }
                 // Third mirror window: how shallow the buffer got this second. Feeds the auto-tune's
                 // unused-margin evidence (see recentMinBuffers).
                 recentMinBuffers.Enqueue(diag.BufferMinMs);
@@ -8668,6 +8724,29 @@ public sealed partial class MainForm : Form
     /// <summary>Find a control by its private FIELD name, so a spec can name the exact control the
     /// developer sees in the source rather than guessing at a caption.</summary>
     internal bool SendEnabledForTest => IsSendEnabled;
+    // ---- Auto-tune state seams. The tick itself needs a live receiver with real sessions, so the
+    // gate drives the STATE it depends on: whether a lane still owes a baseline reading, and whether
+    // the two lanes' evidence is genuinely separate. Both were wrong, and both are invisible from
+    // outside without asking. ------------------------------------------------------------------
+    internal bool LaneNeedsBaselineForTest(RenderRoute route) => TuneMemoryFor(route).NeedsUnderrunBaseline;
+    internal void ClearLaneBaselineForTest(RenderRoute route) => TuneMemoryFor(route).NeedsUnderrunBaseline = false;
+    internal void ResetLaneForTest(RenderRoute route) => TuneMemoryFor(route).Reset();
+    /// <summary>Switch continuous auto-tune on or off the way the checkbox does, so the gate exercises
+    /// the REAL enable path — including the baseline re-arm that hangs off it.</summary>
+    internal void SetContinuousTuneForTest(bool enabled)
+    {
+        continuousTuneEnabled = enabled;
+        ApplyContinuousTuneTimer();
+    }
+
+    /// <summary>True when each lane owns its evidence rather than sharing one window. Sharing let
+    /// ASIO be sized by WASAPI's render period, which is the opposite of what independent lanes are
+    /// for.</summary>
+    internal bool LaneEvidenceIsSeparateForTest() =>
+        !ReferenceEquals(wasapiTuneMemory.RenderCbGaps, asioTuneMemory.RenderCbGaps)
+        && !ReferenceEquals(wasapiTuneMemory.MinBuffers, asioTuneMemory.MinBuffers)
+        && !ReferenceEquals(wasapiTuneMemory.Creep, asioTuneMemory.Creep);
+
     internal bool AllPeerShapingEnabledForTest => enableAllPeerShapingBox.Checked;
 
     /// <summary>Drive the REAL per-peer bypass decision. The two switches are combined here in the
@@ -9910,6 +9989,15 @@ public sealed partial class MainForm : Form
         // is off.
         UpdateDiagnosticsGate();
         if (!continuousTuneEnabled && !asioEnabled) return;
+
+        // Starting (or restarting) the tuner: every lane takes a fresh baseline reading before it
+        // acts on anything. The underrun counter is a lifetime total and has been climbing while the
+        // tuner was off, so without this the first tick would treat the whole backlog as one tick's
+        // worth of trouble and raise the buffer on it.
+        mixedTuneMemory.NeedsUnderrunBaseline = true;
+        wasapiTuneMemory.NeedsUnderrunBaseline = true;
+        asioTuneMemory.NeedsUnderrunBaseline = true;
+
         continuousTuneTimer.Interval = Math.Max(1000, continuousTuneIntervalSec * 1000);
         continuousTuneTimer.Start();
     }
@@ -10050,7 +10138,33 @@ public sealed partial class MainForm : Form
         const int AutoTuneRecommendationCapMs = 200;
         const int LookbackSeconds = 15;
 
-        // Defer to user's manual change — wait at least one tick interval before overriding.
+        // COUNTERS FIRST, before any early return, because they are LIFETIME TOTALS and this is the
+        // only place the baseline moves. Returning early without reading them let underruns pile up
+        // and land as one enormous delta on the next tick that did run — which now RAISES the buffer,
+        // on evidence from a stretch the tuner was not even watching.
+        var currentUnderruns = route == RenderRoute.Mixed ? receiver.TuneBlockingUnderruns : receiver.TuneBlockingUnderrunsFor(route);
+        var currentDeviceGulps = route == RenderRoute.Mixed ? receiver.DeviceGulpUnderruns : receiver.DeviceGulpUnderrunsFor(route);
+        var underrunDelta = currentUnderruns - lastObservedUnderruns;
+        var deviceGulpDelta = currentDeviceGulps - lastObservedDeviceGulps;
+        lastObservedUnderruns = currentUnderruns;
+        lastObservedDeviceGulps = currentDeviceGulps;
+
+        // First tick for this lane since the tuner started, or since conditions changed: take the
+        // reading and nothing else. Whatever happened before it was watching is not its evidence.
+        if (memory.NeedsUnderrunBaseline)
+        {
+            memory.NeedsUnderrunBaseline = false;
+            if (underrunDelta > 0)
+            {
+                var baselinePrefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
+                logFile.Event($"{baselinePrefix}: baseline taken ({underrunDelta} underruns already on the counter before this lane started tuning - ignored, not acted on)");
+            }
+            return;
+        }
+
+        // Defer to user's manual change — wait at least one tick interval before overriding. The
+        // counters above are already banked, so the pause absorbs what happened during it rather than
+        // saving it up to ambush the user a second after they let go of the slider.
         if (DateTime.UtcNow - lastUserMoveUtc < TimeSpan.FromSeconds(intervalSec)) return;
 
         // Per-route underrun delta — but the CAUSE-AWARE kind (2026-06-13). We gate on
@@ -10085,11 +10199,13 @@ public sealed partial class MainForm : Form
         }
         var observedGap = sampleCount >= 2 ? gapSecond : gapPeak;
 
-        // Same lone-spike rejection for the render-callback gap.
+        // Same lone-spike rejection for the render-callback gap — from THIS LANE's window. The render
+        // period belongs to an output device, and the two lanes' devices are not the same device.
+        var laneRenderCbGaps = memory.RenderCbGaps.Count > 0 ? memory.RenderCbGaps : recentRenderCbGaps;
         int rcbPeak = RenderPeriodFloorMs, rcbSecond = RenderPeriodFloorMs;
-        var rcbSkip = recentRenderCbGaps.Count - sampleCount;
+        var rcbSkip = laneRenderCbGaps.Count - Math.Min(sampleCount, laneRenderCbGaps.Count);
         var rcbI = 0;
-        foreach (var rcb in recentRenderCbGaps)
+        foreach (var rcb in laneRenderCbGaps)
         {
             if (rcbI++ < rcbSkip) continue;
             if (rcb > rcbPeak) { rcbSecond = rcbPeak; rcbPeak = rcb; }
@@ -10103,13 +10219,7 @@ public sealed partial class MainForm : Form
         var capped = Math.Min(recommended, AutoTuneRecommendationCapMs);
         var current = (int)slider.Value;
 
-        var currentUnderruns = route == RenderRoute.Mixed ? receiver.TuneBlockingUnderruns : receiver.TuneBlockingUnderrunsFor(route);
-        var underrunDelta = currentUnderruns - lastObservedUnderruns;
-        lastObservedUnderruns = currentUnderruns;
-        // Device-gulp delta is tracked for the diagnostic trail only — it never gates.
-        var currentDeviceGulps = route == RenderRoute.Mixed ? receiver.DeviceGulpUnderruns : receiver.DeviceGulpUnderrunsFor(route);
-        var deviceGulpDelta = currentDeviceGulps - lastObservedDeviceGulps;
-        lastObservedDeviceGulps = currentDeviceGulps;
+        // (the counters were read at the top, before any early return — see there for why)
         if (underrunDelta > 0)
         {
             // Route label slots into the message body when present, omitted entirely in classic
@@ -10149,7 +10259,11 @@ public sealed partial class MainForm : Form
             // and the render period. Taking whichever is higher means a wild setting is corrected in
             // ONE step, while the learned floor still does its real job: stopping a later descent
             // from probing back into a depth already proven too thin.
-            var raiseTarget = AutoTuneDescent.NextRaiseTarget(current, capped, learnedFloor, HysteresisMs);
+            // The learned floor grows a few ms per shortfall with nothing to stop it, while the
+            // recommendation is capped. Taking the higher of the two without capping BOTH let a long
+            // rough patch walk the buffer past the ceiling the measurement itself respects.
+            var cappedFloor = Math.Min(learnedFloor, AutoTuneRecommendationCapMs);
+            var raiseTarget = AutoTuneDescent.NextRaiseTarget(current, capped, cappedFloor, HysteresisMs);
             if (raiseTarget > current)
             {
                 // Same mechanism the descent path uses: set the slider under the suppress flag and let
@@ -10158,9 +10272,9 @@ public sealed partial class MainForm : Form
                 suppressFlag = true;
                 try { slider.Value = raiseTo; }
                 finally { suppressFlag = false; }
-                var why = capped >= learnedFloor ? "the measured need" : "the floor it has learned by experiment";
+                var why = capped >= cappedFloor ? "the measured need" : "the floor it has learned by experiment";
                 logFile.Event($"{prefix}: RAISING {current}ms -> {raiseTo}ms ({underrunDelta} new underruns, devGulp={deviceGulpDelta} ignored) "
-                            + $"- the buffer ran short; measured={capped}ms learnedFloor={learnedFloor}ms, aiming at {why}");
+                            + $"- the buffer ran short; measured={capped}ms learnedFloor={cappedFloor}ms, aiming at {why}");
                 return;
             }
 
@@ -10176,13 +10290,15 @@ public sealed partial class MainForm : Form
         // Low-water evidence: the shallowest the buffer got across the same lookback window. Cushion
         // it never touched is provably spare — that's what lets a descent be a measurement rather
         // than a crawl. -1 = unknown, which AutoTuneDescent treats as "no evidence, step gently".
+        // ...and the low-water mark likewise: how shallow THIS lane's buffer got, not the machine's.
+        var laneMinBuffers = memory.MinBuffers.Count > 0 ? memory.MinBuffers : recentMinBuffers;
         var lowWater = -1;
-        if (recentMinBuffers.Count > 0)
+        if (laneMinBuffers.Count > 0)
         {
-            var lwSkip = recentMinBuffers.Count - Math.Min(LookbackSeconds, recentMinBuffers.Count);
+            var lwSkip = laneMinBuffers.Count - Math.Min(LookbackSeconds, laneMinBuffers.Count);
             var lwI = 0;
             lowWater = int.MaxValue;
-            foreach (var m in recentMinBuffers)
+            foreach (var m in laneMinBuffers)
             {
                 if (lwI++ < lwSkip) continue;
                 if (m < lowWater) lowWater = m;
@@ -10207,6 +10323,12 @@ public sealed partial class MainForm : Form
 
         var clamped = Math.Clamp(target, (int)slider.Minimum, (int)slider.Maximum);
         if (Math.Abs(clamped - current) < HysteresisMs) return;
+
+        // A RAISE ENDS THE CLEAN RUN. Those ticks were evidence that the CURRENT depth was
+        // comfortable; the moment the depth changes upward they describe a setting that no longer
+        // exists. Left standing, the tuner could take a big confident descent step on the very next
+        // tick — undoing the raise it just decided was necessary.
+        if (clamped > current) memory.CleanTicks = 0;
 
         suppressFlag = true;
         try

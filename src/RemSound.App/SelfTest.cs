@@ -141,6 +141,7 @@ internal static partial class SelfTest
         RunStep(results, "Dialog control suite (every dialog: accessibility + theme + driven)", DialogControlSuite);
         RunStep(results, "Every sound is pinned (registry, custom paths, muting, checkbox suppression)", CueCoverage);
         RunStep(results, "Latency estimate counts every stage (no silently-missing term)", LatencyEstimateComplete);
+        RunStep(results, "Auto-tune never acts on state from while it was not running", AutoTuneStaleStateGuards);
         RunStep(results, "Auto-tune interval: every offered value survives a save", AutoTuneIntervalRoundTrips);
         RunStep(results, "Auto-tune climbs out of trouble (underruns raise, never freeze)", AutoTuneClimbsOutOfTrouble);
         RunStep(results, "Measured-latency readout keeps WASAPI and ASIO separate", MeasuredLatencyReadout);
@@ -3071,6 +3072,63 @@ internal static partial class SelfTest
     /// <para>Written as a LOOP over the offered values rather than a check of the one that broke,
     /// because the fault was never really about 3 seconds — it was a control and a store disagreeing
     /// about what is allowed, and that can happen at either end of any list.</para></summary>
+    /// <summary>THE STALE-STATE FAULTS. Three of the six problems found in the 2026-08-22 audit were
+    /// the same shape: state the tuner kept while it was NOT running, then acted on as if it had been
+    /// watching all along.
+    ///
+    /// <para>The underrun counter is a lifetime total. Nothing moved a lane's baseline while auto-tune
+    /// was off, or while that lane had no sessions, so the first tick afterwards saw the whole backlog
+    /// as one tick's worth of trouble — Ed's log has a tick reporting 1772 of them. Under the old rules
+    /// that wasted a tick; once underruns began to RAISE the buffer, it meant jacking the latency up on
+    /// evidence from before the tuner existed. The same hole sat behind the user-move pause, which
+    /// returned without banking the counters.</para>
+    ///
+    /// <para>And the two lanes shared one set of evidence windows, in the mode whose entire purpose is
+    /// tuning them independently.</para></summary>
+    private static string? AutoTuneStaleStateGuards()
+    {
+        MainForm? form = null;
+        try
+        {
+            var profile = Profile.NewBlank();
+            profile.Password = RemSoundCrypto.Obfuscate("autotune-state-test");
+            try { form = new MainForm(null, profile, null, null, headless: true); }
+            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+
+            // --- Each lane owns its evidence -----------------------------------------------------
+            Check(form.LaneEvidenceIsSeparateForTest(),
+                "each lane must own its render-period window, its buffer low-water window and its learned floor - "
+              + "sharing them let ASIO be sized by WASAPI's much slower callback period, which is the opposite of "
+              + "what independently-tuned lanes are for");
+
+            // --- A fresh lane owes a baseline before it may act ----------------------------------
+            foreach (var route in new[] { RenderRoute.WasapiLane, RenderRoute.AsioLane, RenderRoute.Mixed })
+            {
+                form.ResetLaneForTest(route);
+                Check(form.LaneNeedsBaselineForTest(route),
+                    $"{route}: a lane whose conditions just changed must take a BASELINE reading before acting - "
+                  + "the underrun counter is a lifetime total and everything on it predates these conditions");
+            }
+
+            // --- ...and switching the tuner ON re-arms every lane, however it was left ------------
+            // Driven through the real enable path, not a shortcut: arming hangs off that path, and a
+            // test that armed them directly would not notice if the wiring came apart.
+            form.SetContinuousTuneForTest(false);
+            foreach (var route in new[] { RenderRoute.WasapiLane, RenderRoute.AsioLane, RenderRoute.Mixed })
+                form.ClearLaneBaselineForTest(route);
+            form.SetContinuousTuneForTest(true);
+            foreach (var route in new[] { RenderRoute.WasapiLane, RenderRoute.AsioLane, RenderRoute.Mixed })
+                Check(form.LaneNeedsBaselineForTest(route),
+                    $"{route}: switching auto-tune on must re-arm the baseline - the counter has been climbing the "
+                  + "whole time it was off, and that backlog is not this tick's evidence");
+
+            form.SetContinuousTuneForTest(false);   // leave the form as it was found
+            return "each lane owns its evidence and its learned floor; a reset lane owes a baseline reading before it acts; "
+                 + "switching the tuner on re-arms all three lanes through the real enable path";
+        }
+        finally { try { form?.Dispose(); } catch { } }
+    }
+
     private static string? AutoTuneIntervalRoundTrips()
     {
         var scratch = Path.Combine(Path.GetTempPath(), "remsound-interval-" + Guid.NewGuid().ToString("N"));
@@ -3176,6 +3234,14 @@ internal static partial class SelfTest
         // A raise already bigger than the hysteresis is left exactly as measured, not inflated.
         Check(AutoTuneDescent.NextRaiseTarget(currentMs: 20, recommendedMs: 47, learnedFloorMs: 23, minStepMs: 5) == 47,
             "a raise that is already big enough must land on the measurement, not be padded");
+
+        // --- The learned floor must respect the same ceiling the measurement does -----------------
+        // It grows a few ms per shortfall with nothing to stop it, while the recommendation is capped
+        // at 200. Taking the higher of the two without capping BOTH let a long rough patch walk the
+        // buffer past the ceiling the measurement itself respects.
+        var runaway = Math.Min(900, 200);   // what the caller now passes: the floor, capped
+        Check(AutoTuneDescent.NextRaiseTarget(currentMs: 50, recommendedMs: 60, learnedFloorMs: runaway, minStepMs: 5) <= 200,
+            "a learned floor that has run away must be capped like the recommendation, not allowed past it");
 
         // Neither pushes it up when it is already deep enough.
         Check(AutoTuneDescent.NextRaiseTarget(currentMs: 60, recommendedMs: 26, learnedFloorMs: 40) == 60,
