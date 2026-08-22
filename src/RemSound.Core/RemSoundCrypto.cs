@@ -60,6 +60,11 @@ public static class RemSoundCrypto
     // per password and cached — never per packet.
     internal const int Pbkdf2Iterations = 100_000;
 
+    /// <summary>The iteration count, for the cross-port contract test. Exposed because that test is
+    /// the thing standing between a one-line change here and every iPhone in the wild going silent -
+    /// which is exactly what v5.6 did.</summary>
+    public static int Pbkdf2IterationsForTest => Pbkdf2Iterations;
+
     // Fixed salts. A per-connection random salt would be stronger, but both peers must derive
     // the SAME key from the SAME password with no key-exchange round, so the salt has to be
     // shared and known in advance. Distinct salts keep the key and the fingerprint independent.

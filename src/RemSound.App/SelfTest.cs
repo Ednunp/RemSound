@@ -166,6 +166,7 @@ internal static partial class SelfTest
         RunStep(results, "Update install window (same-day, wraparound, retry timing)", UpdateInstallWindow);
         RunStep(results, "Release signing (verify, tamper, key-embed match)", ReleaseSigning);
         RunStep(results, "Updater refuses an unsigned or badly-signed release (enforcement flow)", UpdaterRefusesUnsignedRelease);
+        RunStep(results, "CROSS-PORT CONTRACT (the values other RemSounds depend on)", CrossPortContract);
         RunStep(results, "Password derivation (any password derives a key; cached; 100k for cross-port compat)", PasswordDerivation);
         RunStep(results, "Relay address-proof echo (AddrCheck round-trip)", RelayAddrCheckEcho);
 
