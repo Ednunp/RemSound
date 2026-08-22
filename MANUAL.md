@@ -463,10 +463,10 @@ What you see in this section depends on whether an ASIO driver is chosen on the 
 
 Control| Shortcut| What it does
 ---|---|---
-**ASIO latency in milliseconds**|  Alt+L| (Only when an ASIO driver is chosen.) A small up/down number control. It sets the target amount of sound to keep buffered for the ASIO path. Default 10 ms. ASIO can sustain very low values, but going below the network's real-world jitter level (typically 15–25 ms) causes constant tiny corrections that you can hear — pick 25 ms as a safe floor unless both computers are on the same wired network or the same machine.
-**Continuous auto-tune ASIO latency**|  Alt+T| (Only when an ASIO driver is chosen.) A checkbox. It nudges the ASIO delay target as the ASIO path's jitter changes. It works independently of the WASAPI toggle.
-**WASAPI latency in milliseconds** (called just “Audio latency” when there's no ASIO driver)| Alt+W (Alt+L when no ASIO driver)| A small up/down number control. It sets the target amount of sound to keep buffered for the WASAPI path (or the only path, in WASAPI-only setups). Smaller means less delay but more clicks. Most people want 20–80 ms.
-**Continuous auto-tune WASAPI latency** (called “Continuous auto-tune latency” when there's no ASIO driver)| Alt+Y (Alt+T when no ASIO driver)| A checkbox. When it's on, RemSound nudges the WASAPI delay value automatically as the network changes. The companion interval combo box (**Alt+I**) sets how often it re-checks: 3, 5, 10, 15, or 30 seconds. The combo's label is “Auto-tune latency interval” in WASAPI-only setups and “Auto-tune interval — WASAPI and ASIO” when an ASIO driver is chosen, because that one timer drives both paths' auto-tuning. Each path still settles at whatever target its own calculation chooses; only the timing of the re-checks is shared.
+**ASIO jitter buffer in milliseconds**|  Alt+L| (Only when an ASIO driver is chosen.) A small up/down number control. It sets the target amount of sound to keep buffered for the ASIO path. Default 10 ms. ASIO can sustain very low values, but going below the network's real-world jitter level (typically 15–25 ms) causes constant tiny corrections that you can hear — pick 25 ms as a safe floor unless both computers are on the same wired network or the same machine.
+**Continuous auto-tune ASIO jitter buffer**|  Alt+T| (Only when an ASIO driver is chosen.) A checkbox. It nudges the ASIO delay target as the ASIO path's jitter changes. It works independently of the WASAPI toggle.
+**WASAPI jitter buffer in milliseconds** (called just “Jitter buffer” when there's no ASIO driver)| Alt+W (Alt+L when no ASIO driver)| A small up/down number control. It sets the target amount of sound to keep buffered for the WASAPI path (or the only path, in WASAPI-only setups). Smaller means less delay but more clicks. Most people want 20–80 ms.
+**Continuous auto-tune WASAPI jitter buffer** (called “Continuous auto-tune jitter buffer” when there's no ASIO driver)| Alt+Y (Alt+T when no ASIO driver)| A checkbox. When it's on, RemSound nudges the WASAPI delay value automatically as the network changes. The companion interval combo box (**Alt+I**) sets how often it re-checks: 3, 5, 10, 15, or 30 seconds. The combo's label is “Auto-tune latency interval” in WASAPI-only setups and “Auto-tune interval — WASAPI and ASIO” when an ASIO driver is chosen, because that one timer drives both paths' auto-tuning. Each path still settles at whatever target its own calculation chooses; only the timing of the re-checks is shared.
 **Buffer smoothness**|  Alt+B| A list, 1 to 10. It controls how patient the receiving side is with sound that arrives late, on either path. Higher means more protection from clicks but a longer steady delay. Default 3.
 **Artefact sound type**|  Alt+A| A list. _Noise burst_ (the default) fills a momentary gap with a brief soft hiss, which blends into music. _Click_ leaves the gap unfilled so you hear an obvious click — useful when you want to hear every problem.
 
@@ -737,9 +737,9 @@ Plus the codec choice (PCM, Opus broadcast quality, or Opus live latency), also 
 
 Separately from the controls above — which manage the cushion against _network_ jitter — RemSound also keeps a small cushion at the sound card itself, to smooth over the tiny timing differences between your two computers' sound clocks. From this version, RemSound sizes that cushion to each card automatically: a card that moves sound in bigger chunks (some onboard and USB cards do) gets a little more room, while a fast professional interface stays tight. You don't set this or think about it — it settles on the right amount for whatever card you're using.
 
-### Audio latency control
+### The jitter buffer
 
-The **Audio latency** control tells the receiving side how much sound to keep in reserve as a cushion against uneven network timing. A bigger cushion means more delay but fewer clicks. A smaller cushion means less delay but more clicks when the network wobbles.
+The **jitter buffer** tells the receiving side how much sound to keep in reserve as a cushion against uneven network timing. It used to be called “audio latency”, which was misleading: it is only one part of the delay you hear, and the only part RemSound controls. A bigger cushion means more delay but fewer clicks. A smaller cushion means less delay but more clicks when the network wobbles.
 
 **You can change it while you're listening.** Move the control and the delay follows within a few seconds — there's no gap or click while it changes. Lowering it takes effect straight away. Raising it can't happen instantly, because the extra cushion has to be built up out of the sound still arriving, so RemSound plays very slightly slow for a moment while it banks the difference: a big jump takes a few seconds to arrive and you can hear it stretch out as it goes. That's the change happening, not a fault.
 
@@ -782,11 +782,25 @@ RemSound always ties its sending timing to the sound device's own hardware clock
 
 > **Why it matters:** Windows' general timer can wake the audio loop with up to about 6 ms of wobble, even at top priority. At target latencies under about 15 ms, that wobble shows up as clicks. Locking to the audio clock takes Windows' timer out of the picture — the sound device itself drives the timing.
 
+### Total latency: what the box is telling you
+
+Beside the jitter buffer there is a read-only **Total latency** box. It reports three things, and they are three different measurements rather than a target and a score:
+
+  * **Jitter buffer** — what the control above is set to. The only part RemSound governs, and the part auto-tune moves.
+  * **Sound card and hardware add** — everything else in the chain: capturing the sound, packing it up, the network itself, and your sound card's own output buffer. RemSound cannot give any of this back. It is measured live, not a fixed figure, so it moves by a few milliseconds as your machine works.
+  * **Total latency** — the two added together. This is _one way_ : from their microphone to your ears, not there and back.
+
+
+
+So a jitter buffer of 20 ms with a total of 60 ms does not mean anything is failing to reach 20. It means the cushion is 20 and your equipment and connection account for the other 40. Auto-tune cannot make the total equal the buffer, because most of the total was never the buffer.
+
 ### Continuous auto-tune
 
-The **Continuous auto-tune latency** checkbox hands the latency value over to RemSound itself. When it's on, RemSound watches how evenly packets are arriving, every few seconds, and nudges the latency target up if it's seeing late packets, or down if the network has been calm. It deliberately ignores a single one-off stall — the kind a driver or Windows hiccup causes once and never again — and only raises the cushion when late audio keeps arriving, so one brief blip doesn't balloon your latency for the rest of the session. The companion **Auto-tune latency interval (Alt+I)** combo box sets how often it re-checks — **3, 5, 10, 15, or 30 seconds**. Faster values react quickly to a change in the network but can feel a bit twitchy. Think of continuous auto-tune as a hands-off way to keep the cushion the right size as your network changes through the session.
+The **Continuous auto-tune jitter buffer** checkbox hands the jitter buffer over to RemSound itself. When it's on, RemSound watches how evenly packets are arriving, every few seconds, and nudges the latency target up if it's seeing late packets, or down if the network has been calm. It deliberately ignores a single one-off stall — the kind a driver or Windows hiccup causes once and never again — and only raises the cushion when late audio keeps arriving, so one brief blip doesn't balloon your latency for the rest of the session. The companion **Auto-tune latency interval (Alt+I)** combo box sets how often it re-checks — **3, 5, 10, 15, or 30 seconds**. Faster values react quickly to a change in the network but can feel a bit twitchy. Think of continuous auto-tune as a hands-off way to keep the cushion the right size as your network changes through the session.
 
-If you turn auto-tune off, the latency value just stays wherever it last was.
+If you turn auto-tune off, the jitter buffer just stays wherever it last was.
+
+Auto-tune moves in both directions. If the buffer keeps running short — which is what happens when you set it lower than your equipment can manage — it raises it to the smallest value it has found that stays clean, rather than leaving you with a setting that cannot work. It learns that value by experiment on your own machine, so it never has to guess.
 
 ### Artefact sound type
 

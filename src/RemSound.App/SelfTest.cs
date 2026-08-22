@@ -141,6 +141,7 @@ internal static partial class SelfTest
         RunStep(results, "Dialog control suite (every dialog: accessibility + theme + driven)", DialogControlSuite);
         RunStep(results, "Every sound is pinned (registry, custom paths, muting, checkbox suppression)", CueCoverage);
         RunStep(results, "Latency estimate counts every stage (no silently-missing term)", LatencyEstimateComplete);
+        RunStep(results, "Auto-tune climbs out of trouble (underruns raise, never freeze)", AutoTuneClimbsOutOfTrouble);
         RunStep(results, "Measured-latency readout keeps WASAPI and ASIO separate", MeasuredLatencyReadout);
         RunStep(results, "Plugin double-audio guard (a claimed peer leaves the speakers)", PluginDoubleAudioGuard);
         RunStep(results, "Plugin install/remove is per-user and exact (other plugins untouched)", PluginInstallRoundTrip);
@@ -3044,13 +3045,72 @@ internal static partial class SelfTest
     /// be too much clutter." The two lanes have their own queue depth and their own output period —
     /// an ASIO listener is NOT penalised by WASAPI's shared-mode buffering — so a blended figure
     /// would hide the very difference the user is reading it for.</summary>
+    /// <summary>AUTO-TUNE MUST CLIMB OUT OF TROUBLE, NOT FREEZE IN IT.
+    ///
+    /// <para>Ed set the jitter buffer to 20 ms on 2026-08-22, switched auto-tune on, and it never
+    /// moved — for six minutes, while the buffer underran hundreds of times a tick. Fifteen ticks,
+    /// fourteen of them logged "skipping (N new underruns since last tick)". The fifteenth happened to
+    /// be clean, and it went 20 to 37 immediately and settled.</para>
+    ///
+    /// <para>The guard that skipped is right for LOWERING: never shave the buffer on the back of a
+    /// second where it already ran out. But it returned without doing anything, so it blocked raising
+    /// too — and an underrun is the strongest evidence there is that the buffer is too thin. The one
+    /// condition proving a raise was needed was the one preventing it.</para>
+    ///
+    /// <para>This drives the learned floor, which is what the raise now acts on, and pins the two
+    /// directions apart: shortfalls must push the floor UP, and a descent must never cross it.</para></summary>
+    private static string? AutoTuneClimbsOutOfTrouble()
+    {
+        // Every tick that runs short records where it ran short. That is the evidence the raise uses.
+        var creep = new AutoTuneDescent.CreepState();
+        Check(creep.DiscoveredFloorMs == 0, "nothing is known before anything has run short");
+
+        creep.NoteShortfallAt(20);
+        Check(creep.DiscoveredFloorMs > 20,
+            $"running short AT 20 ms must teach a floor ABOVE 20 - 20 is proven too thin, so it can never be the answer "
+          + $"(learned {creep.DiscoveredFloorMs})");
+        var floorAfter20 = creep.DiscoveredFloorMs;
+
+        // Running short deeper raises it further; running short shallower must NOT lower it, or one
+        // good second at a thin setting would undo everything learned the hard way.
+        creep.NoteShortfallAt(30);
+        Check(creep.DiscoveredFloorMs > floorAfter20, "running short deeper must raise the floor further");
+        var floorAfter30 = creep.DiscoveredFloorMs;
+        creep.NoteShortfallAt(10);
+        Check(creep.DiscoveredFloorMs == floorAfter30,
+            "a shortfall at a SHALLOWER setting must not lower a floor already learned deeper");
+
+        // ...and the descent can never cross it. This is the other half: the floor is a hard stop
+        // going down, which is why raising to it is safe rather than a fight between the two paths.
+        var descended = AutoTuneDescent.NextTarget(
+            currentMs: 80, recommendedMs: 10, lowWaterMs: 60, sampleCount: 30, consecutiveCleanTicks: 10, creep: creep);
+        Check(descended >= floorAfter30,
+            $"a descent must never go below the learned floor of {floorAfter30} ms (went to {descended})");
+
+        // A value ABOVE the floor is not raised - that would ratchet the buffer up on one bad second.
+        Check(AutoTuneDescent.NextTarget(currentMs: floorAfter30, recommendedMs: floorAfter30, lowWaterMs: -1,
+                sampleCount: 0, consecutiveCleanTicks: 0, creep: creep) == floorAfter30,
+            "sitting exactly on the floor must hold, not climb");
+
+        // Reset clears it: a new device or a new session has not proven anything yet.
+        creep.Reset();
+        Check(creep.DiscoveredFloorMs == 0, "resetting must forget the floor - a different setup has proven nothing");
+
+        return $"a shortfall at 20 ms teaches a floor of {floorAfter20} ms and a shortfall at 30 teaches {floorAfter30}; "
+             + "a shallower shortfall never lowers it; a descent never crosses it; sitting on it holds";
+    }
+
     private static string? MeasuredLatencyReadout()
     {
         // TWO LANES: both reported, each with its own pair of numbers, and never merged.
         var both = MainForm.FormatMeasuredLatency(true, 26, 45.2, 10, 12.4);
         Check(both.Contains("WASAPI") && both.Contains("ASIO"), $"both lanes must be named (got: {both})");
-        Check(both.Contains("set to 26 ms") && both.Contains("achieving 45 ms"), $"the WASAPI pair must be present (got: {both})");
-        Check(both.Contains("set to 10 ms") && both.Contains("achieving 12 ms"), $"the ASIO pair must be present (got: {both})");
+        Check(both.Contains("jitter buffer 26 ms") && both.Contains("Total latency 45 ms"), $"the WASAPI figures must be present (got: {both})");
+        Check(both.Contains("jitter buffer 10 ms") && both.Contains("Total latency 12 ms"), $"the ASIO figures must be present (got: {both})");
+        // NEVER the old wording. "set to X, achieving Y" read as a target being missed, when the two
+        // are different quantities entirely - which is what made auto-tune look broken.
+        Check(!both.Contains("achieving") && !both.Contains("set to"),
+            $"the box must not say 'set to'/'achieving' - those words implied one number was failing to reach the other (got: {both})");
         Check(both.Contains(Environment.NewLine), "one line per lane, so a screen reader can arrow between them");
         // The whole point: an ASIO lane running better than WASAPI must SHOW as better.
         Check(both.IndexOf("12 ms", StringComparison.Ordinal) > both.IndexOf("45 ms", StringComparison.Ordinal),
@@ -3059,20 +3119,26 @@ internal static partial class SelfTest
         // ONE LANE: no point naming a lane the user hasn't got.
         var single = MainForm.FormatMeasuredLatency(false, 30, 44.6, 0, 0);
         Check(!single.Contains("WASAPI") && !single.Contains("ASIO"), $"a single-slider setup shouldn't name lanes (got: {single})");
-        Check(single.Contains("set to 30 ms") && single.Contains("achieving 45 ms"), $"it must still report both figures (got: {single})");
+        Check(single.Contains("jitter buffer 30 ms") && single.Contains("Total latency 45 ms"), $"it must still report the figures (got: {single})");
+        // The middle figure is the whole point: it explains the gap instead of leaving it a mystery.
+        Check(single.Contains("Sound card and hardware add 15 ms"),
+            $"the box must show what the REST of the chain adds - 45 total minus a 30 ms buffer is 15 (got: {single})");
+        Check(single.Contains("one way"),
+            $"'total' must say ONE WAY - an engineer could fairly read a bare total as round trip (got: {single})");
         Check(!single.Contains(Environment.NewLine), "one lane, one line");
 
         // NOT RECEIVING: say so rather than speak a zero, which a screen reader would read as fact.
         var idle = MainForm.FormatMeasuredLatency(false, 30, 0, 0, 0);
-        Check(idle.Contains("not receiving") && !idle.Contains("achieving 0"),
+        Check(idle.Contains("not receiving") && !idle.Contains("Total latency 0"),
             $"with no audio it must say so, not claim 0 ms (got: {idle})");
         var oneIdle = MainForm.FormatMeasuredLatency(true, 26, 45.2, 10, 0);
-        Check(oneIdle.Contains("achieving 45 ms") && oneIdle.Contains("not receiving"),
+        Check(oneIdle.Contains("Total latency 45 ms") && oneIdle.Contains("not receiving"),
             $"one lane can be live while the other is idle, and both must be reported honestly (got: {oneIdle})");
 
         // Rounded for speech — NVDA must not read decimals.
-        Check(MainForm.FormatMeasuredLatency(false, 26, 41.678, 0, 0).Contains("achieving 42 ms"),
-            "figures must round for speech rather than read to three decimals");
+        var rounded = MainForm.FormatMeasuredLatency(false, 26, 41.678, 0, 0);
+        Check(rounded.Contains("Total latency 42 ms") && rounded.Contains("add 16 ms"),
+            $"every figure must round for speech rather than read to three decimals (got: {rounded})");
         return "two lanes reported apart with their own set/achieved pairs; single-lane setups stay unlabelled; idle says so instead of claiming zero";
     }
 

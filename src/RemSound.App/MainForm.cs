@@ -288,11 +288,11 @@ public sealed partial class MainForm : Form
     private readonly ListBox sendRateBox = new() { Width = 240, Height = 40, IntegralHeight = false, AccessibleName = "Packet size (Alt+P)" };
     // Min 1 ms is intentionally aggressive — for LAN/localhost users who want to push it.
     // Values below ~10 ms cause audible crackling on any network with real jitter.
-    private readonly NumericUpDown maxLatencyBox = new() { Minimum = 1, Maximum = 500, Increment = 1, Value = 80, Width = 90, AccessibleName = "Audio latency in milliseconds (Alt+L)" };
+    private readonly NumericUpDown maxLatencyBox = new() { Minimum = 1, Maximum = 500, Increment = 1, Value = 80, Width = 90, AccessibleName = "Jitter buffer in milliseconds (Alt+L)" };
     // One-shot "Tune latency for best sound" button retired — continuous auto-tune covers
     // the same job, and the manual button confused users by sitting next to the auto-tune
     // checkbox doing almost the same thing in a less convenient one-shot shape.
-    private readonly AccessibleCheckBox continuousTuneBox = new() { Text = "Continuous auto-tune latency", AutoSize = true };
+    private readonly AccessibleCheckBox continuousTuneBox = new() { Text = "Continuous auto-tune jitter buffer", AutoSize = true };
     private readonly ComboBox continuousIntervalBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90, AccessibleName = "Auto-tune latency interval (Alt+I)" };
     // Label for continuousIntervalBox. Held as a field (rather than a local in
     // BuildAudioReceiveGroupContents) so UpdateBothIndependentVisibility can rewrite the
@@ -308,8 +308,8 @@ public sealed partial class MainForm : Form
     // become the WASAPI-lane controls (Alt+W / Alt+Y) and these new ASIO controls take over
     // the simpler Alt+L / Alt+T mnemonics — ASIO is the "headline" lane in the new mode
     // (the reason a user picked it) so it gets the more memorable shortcuts.
-    private readonly NumericUpDown maxLatencyAsioBox = new() { Minimum = 1, Maximum = 500, Increment = 1, Value = 10, Width = 90, AccessibleName = "ASIO latency in milliseconds (Alt+I)" };
-    private readonly AccessibleCheckBox continuousTuneAsioBox = new() { Text = "Continuous auto-tune ASIO latency", AutoSize = true };
+    private readonly NumericUpDown maxLatencyAsioBox = new() { Minimum = 1, Maximum = 500, Increment = 1, Value = 10, Width = 90, AccessibleName = "ASIO jitter buffer in milliseconds (Alt+I)" };
+    private readonly AccessibleCheckBox continuousTuneAsioBox = new() { Text = "Continuous auto-tune ASIO jitter buffer", AutoSize = true };
     private readonly ListBox smoothnessBox = new() { Width = 420, Height = 200, IntegralHeight = false, AccessibleName = "Buffer smoothness (Alt+B)" };
     private readonly ListBox artefactBox = new() { Width = 420, Height = 60, IntegralHeight = false, AccessibleName = "Artefact sound type (Alt+A) — controls how audio gaps sound" };
     // Priority mode (per profile). Sits as the first control on the Audio profile tab,
@@ -383,7 +383,7 @@ public sealed partial class MainForm : Form
         Width = 460,
         Height = 40,
         BorderStyle = BorderStyle.FixedSingle,
-        AccessibleName = "Measured latency (Alt+M)",
+        AccessibleName = "Total latency (Alt+M)",
     };
     private string lastStatusReadoutText = string.Empty;
     // For computing byte-rate deltas. Sampled at each status tick; first tick has no
@@ -1142,7 +1142,7 @@ public sealed partial class MainForm : Form
         healthLabel.AccessibleName = "Connection health";
         statusLabel.AccessibleName = "Status";
         codecBox.AccessibleName = "Audio codec (Alt+C)";
-        maxLatencyBox.AccessibleName = "Audio latency in milliseconds (Alt+L)";
+        maxLatencyBox.AccessibleName = "Jitter buffer in milliseconds (Alt+L)";
 
         // --- Populate static choices ---
         // Three transport choices, ordered most-tolerant-of-bad-networks to most-demanding:
@@ -5129,8 +5129,8 @@ public sealed partial class MainForm : Form
         asioLatencyLabel.Click += (_, _) => FocusControl(maxLatencyAsioBox);
         SelectAllOnFocus(maxLatencyAsioBox);
         maxLatencyAsioBox.Value = Math.Clamp(settings.LoadMaxLatencyMsAsio(), (int)maxLatencyAsioBox.Minimum, (int)maxLatencyAsioBox.Maximum);
-        continuousTuneAsioBox.Text = "Continuous auto-tune ASIO latency (Alt+&T)";
-        continuousTuneAsioBox.AccessibleName = "Continuous auto-tune ASIO latency";
+        continuousTuneAsioBox.Text = "Continuous auto-tune ASIO jitter buffer (Alt+&T)";
+        continuousTuneAsioBox.AccessibleName = "Continuous auto-tune ASIO jitter buffer";
         continuousTuneAsioBox.Checked = settings.LoadContinuousAutoTuneAsioEnabled();
         asioDelayContainer = new FlowLayoutPanel
         {
@@ -5154,8 +5154,8 @@ public sealed partial class MainForm : Form
         wasapiLatencyLabel = new Label { Text = "Audio latency in milliseconds (Alt+&L)", AutoSize = true, Anchor = AnchorStyles.Left };
         wasapiLatencyLabel.Click += (_, _) => FocusControl(maxLatencyBox);
         SelectAllOnFocus(maxLatencyBox);
-        continuousTuneBox.Text = "Continuous auto-tune latency (Alt+&T)";
-        continuousTuneBox.AccessibleName = "Continuous auto-tune latency";
+        continuousTuneBox.Text = "Continuous auto-tune jitter buffer (Alt+&T)";
+        continuousTuneBox.AccessibleName = "Continuous auto-tune jitter buffer";
         continuousTuneBox.Checked = continuousTuneEnabled;
         // 3 seconds added 2026-05-06 alongside the lookback shortening — the new combination
         // lets users dial in tighter latency on calm networks much faster (each tick samples
@@ -5269,7 +5269,7 @@ public sealed partial class MainForm : Form
         measuredLatencyReadout.Text = FormatMeasuredLatency(false, 0, 0, 0, 0);
         var measuredLatencyLabel = new MnemonicLabel
         {
-            Text = "&Measured latency (Alt+M)",
+            Text = "&Total latency (Alt+M)",
             AutoSize = true,
             Anchor = AnchorStyles.Left,
             MnemonicTarget = measuredLatencyReadout,
@@ -7188,10 +7188,10 @@ public sealed partial class MainForm : Form
         continuousIntervalBox.Enabled = AnyAutoTuneEnabled();
         if (inBothIndependent)
         {
-            wasapiLatencyLabel.Text = "WASAPI latency in milliseconds (Alt+&W)";
-            maxLatencyBox.AccessibleName = "WASAPI latency in milliseconds (Alt+W)";
-            continuousTuneBox.Text = "Continuous auto-tune WASAPI latency (Alt+&Y)";
-            continuousTuneBox.AccessibleName = "Continuous auto-tune WASAPI latency";
+            wasapiLatencyLabel.Text = "WASAPI jitter buffer in milliseconds (Alt+&W)";
+            maxLatencyBox.AccessibleName = "WASAPI jitter buffer in milliseconds (Alt+W)";
+            continuousTuneBox.Text = "Continuous auto-tune WASAPI jitter buffer (Alt+&Y)";
+            continuousTuneBox.AccessibleName = "Continuous auto-tune WASAPI jitter buffer";
             // The interval combo drives ticks for BOTH lanes' auto-tunes — each lane
             // independently lands wherever its own algorithm decides (40 ms WASAPI / 20 ms
             // ASIO is fine), but the cadence dropdown is shared. Make that explicit in the
@@ -7565,10 +7565,24 @@ public sealed partial class MainForm : Form
     internal static string FormatMeasuredLatency(
         bool bothLanes, int wasapiSetMs, double wasapiAchievedMs, int asioSetMs, double asioAchievedMs)
     {
-        static string Line(string lane, int setMs, double achievedMs) =>
-            achievedMs <= 0
-                ? $"{lane}set to {setMs} ms, not receiving"
-                : $"{lane}set to {setMs} ms, achieving {achievedMs:0} ms";
+        // THREE NAMED PARTS, never "set" against "achieving".
+        //
+        // Those two words implied one number was a target the other was failing to hit, and they are
+        // not the same quantity at all. The box now says what each figure IS (Ed, 2026-08-22):
+        //
+        //   Jitter buffer   what this control sets - the cushion that absorbs network jitter. The
+        //                   ONLY part RemSound governs, and what auto-tune moves.
+        //   Sound card and  everything else in the chain: capture, send accumulation, the network,
+        //   hardware add    and the output device's own buffer. Not RemSound's to give back. Measured
+        //                   each second, not a constant - the output buffer alone moves a few ms.
+        //   Total latency   the sum, ONE WAY, from their microphone to your ears. Said explicitly
+        //                   because an engineer reading "total" could fairly assume round trip.
+        static string Line(string lane, int setMs, double achievedMs)
+        {
+            if (achievedMs <= 0) return $"{lane}jitter buffer {setMs} ms, not receiving";
+            var rest = Math.Max(0, achievedMs - setMs);
+            return $"{lane}jitter buffer {setMs} ms. Sound card and hardware add {rest:0} ms. Total latency {achievedMs:0} ms one way.";
+        }
         return bothLanes
             ? Line("WASAPI: ", wasapiSetMs, wasapiAchievedMs) + Environment.NewLine + Line("ASIO: ", asioSetMs, asioAchievedMs)
             : Line("", wasapiSetMs, wasapiAchievedMs);
@@ -9975,11 +9989,42 @@ public sealed partial class MainForm : Form
             // label was empty. devGulp shows how many inaudible device-gulp partials were ignored
             // this tick — a high devGulp with a small underrunDelta is the Realtek fingerprint.
             var prefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
-            logFile.Event($"{prefix}: skipping ({underrunDelta} new underruns since last tick, devGulp={deviceGulpDelta} ignored)");
             memory.CleanTicks = 0; // this lane's buffer ran short — its evidence for shedding is void
             // ...and record WHERE it ran short: that value is too thin for THIS lane, so its creep
             // must never probe back down to it. A floor learned by experiment beats a guessed constant.
             memory.Creep.NoteShortfallAt((int)slider.Value);
+
+            // UNDERRUNS MUST RAISE, NOT FREEZE.
+            //
+            // This used to log "skipping" and return, doing nothing at all. The guard is right for
+            // LOWERING — you must never shave the buffer on the back of a second where it already ran
+            // out — but returning here blocked raising too, and an underrun is the strongest evidence
+            // there is that the buffer is too thin. So the one condition that proves a raise is needed
+            // was the one condition that prevented it.
+            //
+            // Ed hit it on 2026-08-22: set to 20 ms, auto-tune on, and it sat at 20 for six minutes
+            // underrunning hundreds of times a tick. Fifteen ticks, fourteen of them "skipping". The
+            // fifteenth happened to be clean, and it immediately went 20 -> 37 and settled. Auto-tune
+            // had the answer the whole time and no way to act on it.
+            var underrunCurrent = (int)slider.Value;
+            var learnedFloor = memory.Creep.DiscoveredFloorMs;
+            if (learnedFloor > underrunCurrent)
+            {
+                // Same mechanism the descent path uses: set the slider under the suppress flag and let
+                // its own handler push the value into the receiver. One way to apply a value, not two.
+                var raiseTo = (int)Math.Min(learnedFloor, slider.Maximum);
+                suppressFlag = true;
+                try { slider.Value = raiseTo; }
+                finally { suppressFlag = false; }
+                logFile.Event($"{prefix}: RAISING {underrunCurrent}ms -> {raiseTo}ms ({underrunDelta} new underruns, devGulp={deviceGulpDelta} ignored) "
+                            + $"- the buffer ran short, so this is the floor it has learned by experiment");
+                return;
+            }
+
+            // Already at or above what it has learned; hold and gather more evidence rather than
+            // climbing on every tick, which would ratchet the buffer up on a single bad second.
+            logFile.Event($"{prefix}: holding at {underrunCurrent}ms ({underrunDelta} new underruns, devGulp={deviceGulpDelta} ignored) "
+                        + $"- already at or above the learned floor of {learnedFloor}ms");
             return;
         }
         memory.CleanTicks++;
