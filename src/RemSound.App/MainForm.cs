@@ -7581,7 +7581,21 @@ public sealed partial class MainForm : Form
         {
             if (achievedMs <= 0) return $"{lane}jitter buffer {setMs} ms, not receiving";
             var rest = Math.Max(0, achievedMs - setMs);
-            return $"{lane}jitter buffer {setMs} ms. Sound card and hardware add {rest:0} ms. Total latency {achievedMs:0} ms one way.";
+            // "APPROXIMATELY", because most of the total is not directly measured (Ed, 2026-08-22 —
+            // "if there is any made up or assumptions there we should say approximately"). Of the five
+            // stages that make up the figure:
+            //
+            //   jitter buffer   MEASURED - the actual buffered depth.
+            //   capture         a CONSTANT: the 10 ms we ask WASAPI for, not what the device delivers.
+            //   send packing    DERIVED from the codec frame size setting, not timed.
+            //   network         measured round trip, HALVED - which assumes the path is symmetric.
+            //   sound card out  measured callback period times two, clamped - the doubling assumes
+            //                   double buffering rather than observing it.
+            //
+            // Only the jitter buffer is a straight measurement. The rest is a good estimate and it
+            // matched what a real listener heard, but calling it exact would be a lie told in a number.
+            return $"{lane}jitter buffer {setMs} ms. Sound card and hardware add {rest:0} ms. "
+                 + $"Total latency approximately {achievedMs:0} ms one way.";
         }
         return bothLanes
             ? Line("WASAPI: ", wasapiSetMs, wasapiAchievedMs) + Environment.NewLine + Line("ASIO: ", asioSetMs, asioAchievedMs)

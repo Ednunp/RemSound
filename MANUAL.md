@@ -788,9 +788,23 @@ Beside the jitter buffer there is a read-only **Total latency** box. It reports 
 
   * **Jitter buffer** — what the control above is set to. The only part RemSound governs, and the part auto-tune moves.
   * **Sound card and hardware add** — everything else in the chain: capturing the sound, packing it up, the network itself, and your sound card's own output buffer. RemSound cannot give any of this back. It is measured live, not a fixed figure, so it moves by a few milliseconds as your machine works.
-  * **Total latency** — the two added together. This is _one way_ : from their microphone to your ears, not there and back.
+  * **Total latency** — the two added together, and shown as _approximately_ for the reason below. This is _one way_ : from their microphone to your ears, not there and back.
 
 
+
+#### Why it says “approximately”
+
+Because most of that total is worked out rather than timed, and it would be wrong to hand you a figure that looks more certain than it is. The five stages behind it:
+
+  * **The jitter buffer** is measured. It is how much sound is actually sitting in the buffer.
+  * **Capturing the sound** is a fixed 10 ms — the size RemSound asks Windows for. Your device may hand it over a little sooner or later than that.
+  * **Packing it for sending** is worked out from the codec and send rate you chose, not timed.
+  * **The network** is a real measurement — the round trip to that peer — halved. That assumes the trip out takes as long as the trip back, which is usually close but not guaranteed.
+  * **Your sound card's output** is a real measurement of how often it asks for audio, doubled. The doubling reflects how these devices normally buffer, rather than something RemSound observes directly.
+
+
+
+So it is a good estimate, and it has matched what people actually hear. It is not a stopwatch. If you need a precise figure — for lining up a recording, say — measure it rather than reading it here.
 
 So a jitter buffer of 20 ms with a total of 60 ms does not mean anything is failing to reach 20. It means the cushion is 20 and your equipment and connection account for the other 40. Auto-tune cannot make the total equal the buffer, because most of the total was never the buffer.
 

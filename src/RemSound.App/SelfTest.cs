@@ -3105,8 +3105,8 @@ internal static partial class SelfTest
         // TWO LANES: both reported, each with its own pair of numbers, and never merged.
         var both = MainForm.FormatMeasuredLatency(true, 26, 45.2, 10, 12.4);
         Check(both.Contains("WASAPI") && both.Contains("ASIO"), $"both lanes must be named (got: {both})");
-        Check(both.Contains("jitter buffer 26 ms") && both.Contains("Total latency 45 ms"), $"the WASAPI figures must be present (got: {both})");
-        Check(both.Contains("jitter buffer 10 ms") && both.Contains("Total latency 12 ms"), $"the ASIO figures must be present (got: {both})");
+        Check(both.Contains("jitter buffer 26 ms") && both.Contains("Total latency approximately 45 ms"), $"the WASAPI figures must be present (got: {both})");
+        Check(both.Contains("jitter buffer 10 ms") && both.Contains("Total latency approximately 12 ms"), $"the ASIO figures must be present (got: {both})");
         // NEVER the old wording. "set to X, achieving Y" read as a target being missed, when the two
         // are different quantities entirely - which is what made auto-tune look broken.
         Check(!both.Contains("achieving") && !both.Contains("set to"),
@@ -3119,25 +3119,30 @@ internal static partial class SelfTest
         // ONE LANE: no point naming a lane the user hasn't got.
         var single = MainForm.FormatMeasuredLatency(false, 30, 44.6, 0, 0);
         Check(!single.Contains("WASAPI") && !single.Contains("ASIO"), $"a single-slider setup shouldn't name lanes (got: {single})");
-        Check(single.Contains("jitter buffer 30 ms") && single.Contains("Total latency 45 ms"), $"it must still report the figures (got: {single})");
+        Check(single.Contains("jitter buffer 30 ms") && single.Contains("Total latency approximately 45 ms"), $"it must still report the figures (got: {single})");
         // The middle figure is the whole point: it explains the gap instead of leaving it a mystery.
         Check(single.Contains("Sound card and hardware add 15 ms"),
             $"the box must show what the REST of the chain adds - 45 total minus a 30 ms buffer is 15 (got: {single})");
+        // Only the jitter buffer is a straight measurement; capture is a constant, the packing is
+        // derived, the network is a halved round trip and the output buffer is a doubled period. The
+        // word "approximately" is the difference between an estimate and a claim.
+        Check(single.Contains("approximately"),
+            $"the total must be marked APPROXIMATE - most of it is estimated rather than measured (got: {single})");
         Check(single.Contains("one way"),
             $"'total' must say ONE WAY - an engineer could fairly read a bare total as round trip (got: {single})");
         Check(!single.Contains(Environment.NewLine), "one lane, one line");
 
         // NOT RECEIVING: say so rather than speak a zero, which a screen reader would read as fact.
         var idle = MainForm.FormatMeasuredLatency(false, 30, 0, 0, 0);
-        Check(idle.Contains("not receiving") && !idle.Contains("Total latency 0"),
+        Check(idle.Contains("not receiving") && !idle.Contains("Total latency approximately 0"),
             $"with no audio it must say so, not claim 0 ms (got: {idle})");
         var oneIdle = MainForm.FormatMeasuredLatency(true, 26, 45.2, 10, 0);
-        Check(oneIdle.Contains("Total latency 45 ms") && oneIdle.Contains("not receiving"),
+        Check(oneIdle.Contains("Total latency approximately 45 ms") && oneIdle.Contains("not receiving"),
             $"one lane can be live while the other is idle, and both must be reported honestly (got: {oneIdle})");
 
         // Rounded for speech — NVDA must not read decimals.
         var rounded = MainForm.FormatMeasuredLatency(false, 26, 41.678, 0, 0);
-        Check(rounded.Contains("Total latency 42 ms") && rounded.Contains("add 16 ms"),
+        Check(rounded.Contains("Total latency approximately 42 ms") && rounded.Contains("add 16 ms"),
             $"every figure must round for speech rather than read to three decimals (got: {rounded})");
         return "two lanes reported apart with their own set/achieved pairs; single-lane setups stay unlabelled; idle says so instead of claiming zero";
     }

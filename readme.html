@@ -834,8 +834,22 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <ul>
 <li><strong>Jitter buffer</strong> &mdash; what the control above is set to. The only part RemSound governs, and the part auto-tune moves.</li>
 <li><strong>Sound card and hardware add</strong> &mdash; everything else in the chain: capturing the sound, packing it up, the network itself, and your sound card's own output buffer. RemSound cannot give any of this back. It is measured live, not a fixed figure, so it moves by a few milliseconds as your machine works.</li>
-<li><strong>Total latency</strong> &mdash; the two added together. This is <em>one way</em>: from their microphone to your ears, not there and back.</li>
+<li><strong>Total latency</strong> &mdash; the two added together, and shown as <em>approximately</em> for the reason below. This is <em>one way</em>: from their microphone to your ears, not there and back.</li>
 </ul>
+
+<h4>Why it says &ldquo;approximately&rdquo;</h4>
+
+<p>Because most of that total is worked out rather than timed, and it would be wrong to hand you a figure that looks more certain than it is. The five stages behind it:</p>
+
+<ul>
+<li><strong>The jitter buffer</strong> is measured. It is how much sound is actually sitting in the buffer.</li>
+<li><strong>Capturing the sound</strong> is a fixed 10 ms &mdash; the size RemSound asks Windows for. Your device may hand it over a little sooner or later than that.</li>
+<li><strong>Packing it for sending</strong> is worked out from the codec and send rate you chose, not timed.</li>
+<li><strong>The network</strong> is a real measurement &mdash; the round trip to that peer &mdash; halved. That assumes the trip out takes as long as the trip back, which is usually close but not guaranteed.</li>
+<li><strong>Your sound card's output</strong> is a real measurement of how often it asks for audio, doubled. The doubling reflects how these devices normally buffer, rather than something RemSound observes directly.</li>
+</ul>
+
+<p>So it is a good estimate, and it has matched what people actually hear. It is not a stopwatch. If you need a precise figure &mdash; for lining up a recording, say &mdash; measure it rather than reading it here.</p>
 
 <p>So a jitter buffer of 20 ms with a total of 60 ms does not mean anything is failing to reach 20. It means the cushion is 20 and your equipment and connection account for the other 40. Auto-tune cannot make the total equal the buffer, because most of the total was never the buffer.</p>
 
