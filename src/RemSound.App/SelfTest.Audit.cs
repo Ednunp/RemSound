@@ -446,4 +446,58 @@ internal static partial class SelfTest
         return $"wobble under {MainForm.LatencyReadoutDeadbandMs:0} ms is held; start, stop and real moves get through; "
              + $"Ed's 21 recorded readings redraw the box {redraws} times instead of 21";
     }
+
+    /// <summary>
+    /// The total-latency readout must sit with the jitter-buffer controls it reports on, in the TAB
+    /// ORDER and not merely on screen.
+    ///
+    /// <para>Ed asked for it moved out of last place: "it makes more sense after the jitter buffer
+    /// and auto-tune". The trap is that this panel sets no TabIndex, so WinForms walks its children
+    /// in the order they were ADDED — renumbering the table rows would have moved the box visually
+    /// while leaving it last in the keyboard walk, which for a screen-reader user is the only order
+    /// that exists. So this asserts the walk, not the layout.</para>
+    /// </summary>
+    private static string? AuditLatencyReadoutSitsWithItsControls()
+    {
+        MainForm form;
+        try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+        catch (Exception ex) { return Skip($"headless main window could not be built: {ex.GetType().Name}: {ex.Message}"); }
+
+        using (form)
+        {
+            // Reach the controls the same way the control suite does — by private field, so no test
+            // seam has to be added to the form just to be able to check its tab order.
+            Control? ByField(string field) =>
+                typeof(MainForm).GetField(field, BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(form) as Control;
+
+            var jitterBox = ByField("maxLatencyBox");
+            var readoutBox = ByField("measuredLatencyReadout");
+            var smoothnessBox = ByField("smoothnessBox");
+            Check(jitterBox is not null && readoutBox is not null && smoothnessBox is not null,
+                "the jitter-buffer, readout and smoothness controls must all be found by field name, or this test is comparing nothing");
+
+            // Walk the whole window the way Tab does, and record where each one lands.
+            var order = new List<Control>();
+            var seen = new HashSet<Control>();
+            for (var c = form.GetNextControl(form, true); c is not null && seen.Add(c); c = form.GetNextControl(c, true))
+            {
+                order.Add(c);
+            }
+
+            var jitter = order.IndexOf(jitterBox!);
+            var readout = order.IndexOf(readoutBox!);
+            var smoothness = order.IndexOf(smoothnessBox!);
+
+            Check(readout >= 0, "the total-latency readout must be reachable by Tab at all");
+            Check(jitter >= 0 && smoothness >= 0,
+                "the jitter-buffer and smoothness controls must be in the tab walk, or this test is comparing nothing");
+            Check(readout > jitter,
+                $"the readout must come AFTER the jitter-buffer control it reports on (jitter at {jitter}, readout at {readout})");
+            Check(readout < smoothness,
+                $"the readout must come BEFORE buffer smoothness — it belongs with the jitter-buffer settings, not "
+                + $"stranded past the unrelated controls (readout at {readout}, smoothness at {smoothness})");
+
+            return $"tab order reaches the jitter buffer, then the total-latency readout, then smoothness ({jitter} → {readout} → {smoothness})";
+        }
+    }
 }

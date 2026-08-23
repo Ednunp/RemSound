@@ -5276,12 +5276,34 @@ public sealed partial class MainForm : Form
             logFile.Event($"buffer smoothness changed to {newSmoothness}");
             MarkProfileDirty();
         };
+        // === Row 2: Total latency readout ===
+        // Sits directly under the two jitter-buffer rows it reports on, because that is what it is
+        // about — Ed, 2026-08-23: "move the control after all the [jitter buffer] settings, not at
+        // the end of all the controls, it makes more sense after the jitter buffer and auto-tune".
+        // It used to be the last row, after smoothness and the artefact picker, which put two
+        // unrelated controls between a setting and the readout that measures it.
+        //
+        // Order here IS tab order: this panel sets no TabIndex, so WinForms walks its children in the
+        // order they were ADDED. Renumbering the rows alone would have moved it visually and left it
+        // last in the tab walk — worse than leaving it alone. The block was moved, not renumbered.
+        measuredLatencyReadout.Text = FormatMeasuredLatency(false, 0, 0, 0, 0);
+        var measuredLatencyLabel = new MnemonicLabel
+        {
+            Text = "&Total latency (Alt+M)",
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            MnemonicTarget = measuredLatencyReadout,
+        };
+        panel.Controls.Add(measuredLatencyLabel, 0, 2);
+        panel.Controls.Add(measuredLatencyReadout, 1, 2);
+
+        // === Row 3: Buffer smoothness ===
         var smoothnessLabel = new Label { Text = "Buffer smoothness (Alt+&B)", AutoSize = true, Anchor = AnchorStyles.Left };
         smoothnessLabel.Click += (_, _) => FocusControl(smoothnessBox);
-        panel.Controls.Add(smoothnessLabel, 0, 2);
-        panel.Controls.Add(smoothnessBox, 1, 2);
+        panel.Controls.Add(smoothnessLabel, 0, 3);
+        panel.Controls.Add(smoothnessBox, 1, 3);
 
-        // === Row 2: Artefact ===
+        // === Row 4: Artefact ===
         artefactBox.Items.Clear();
         artefactBox.Items.Add("Noise burst (default) — broadband shhh, blends into music");
         artefactBox.Items.Add("Click — no concealment, raw zero-fill click");
@@ -5311,20 +5333,8 @@ public sealed partial class MainForm : Form
         var artefactContainer = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, Dock = DockStyle.Fill };
         artefactContainer.Controls.Add(artefactHint);
         artefactContainer.Controls.Add(artefactBox);
-        panel.Controls.Add(artefactLabel, 0, 3);
-        panel.Controls.Add(artefactContainer, 1, 3);
-
-        // Measured latency: last row, straight after the latency + auto-tune controls it reports on.
-        measuredLatencyReadout.Text = FormatMeasuredLatency(false, 0, 0, 0, 0);
-        var measuredLatencyLabel = new MnemonicLabel
-        {
-            Text = "&Total latency (Alt+M)",
-            AutoSize = true,
-            Anchor = AnchorStyles.Left,
-            MnemonicTarget = measuredLatencyReadout,
-        };
-        panel.Controls.Add(measuredLatencyLabel, 0, 4);
-        panel.Controls.Add(measuredLatencyReadout, 1, 4);
+        panel.Controls.Add(artefactLabel, 0, 4);
+        panel.Controls.Add(artefactContainer, 1, 4);
 
         // Wire ASIO companion control event handlers and apply initial visibility now that
         // every element exists. After this method returns the panel is ready to dock into
