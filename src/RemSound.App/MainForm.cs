@@ -7032,7 +7032,56 @@ public sealed partial class MainForm : Form
             if (!string.IsNullOrEmpty(c.DeviceId) && added.Add(c.DeviceId)) ids.Add(c.DeviceId);
         }
         receiver.SetOutputDevices(ids);
+        // Ticking outputs is what decides how many jitter buffers are in play, so the auto-tune
+        // interval's wording has to be re-evaluated here. See UpdateAutoTuneIntervalWording.
+        UpdateAutoTuneIntervalWording();
     }
+
+    /// <summary>Which of the three real audio configurations is live, from the TICKED OUTPUTS.
+    ///
+    /// <para>This is the axis that matters, and it is NOT the audio-mode setting. There are three:
+    /// WASAPI only, ASIO only, and both. The mode flag only says whether an ASIO driver has been
+    /// chosen at all, which is a different question — with a driver chosen but only ASIO outputs
+    /// ticked you are in ASIO-only, every stream reads the ASIO jitter buffer, and the WASAPI one
+    /// governs nothing.</para></summary>
+    private (bool Wasapi, bool Asio) ActiveOutputLanes()
+    {
+        var wasapi = receiveOutputDevicesList.CheckedItems.Count > 0;
+        var asio = settings.LoadAudioMode() == AudioMode.BothIndependent
+            && asioReceiveOutputDevicesList.CheckedItems.Count > 0;
+        return (wasapi, asio);
+    }
+
+    /// <summary>
+    /// Name the auto-tune interval after the jitter buffer(s) it is actually re-checking.
+    ///
+    /// <para>Ed's rule, 2026-08-23: "if you're using either ASIO or WASAPI, just have it say
+    /// auto-tune interval for jitter buffer. That works for both modes. If you're using 2 modes,
+    /// then it mentions the 2 things."</para>
+    ///
+    /// <para>So it follows the CONFIGURATION, not the mode flag. One lane in use and it doesn't name
+    /// a lane, because there is only one and naming it is noise. Two lanes and it names both, because
+    /// one dropdown drives both auto-tunes and someone looking at the WASAPI row needs to know it
+    /// applies to ASIO as well. The previous version keyed off "is an ASIO driver chosen", so an
+    /// ASIO-only user was told about a WASAPI buffer they were not using.</para>
+    /// </summary>
+    private void UpdateAutoTuneIntervalWording()
+    {
+        if (continuousIntervalLabel is null) return;
+        var (wasapi, asio) = ActiveOutputLanes();
+        var text = AutoTuneIntervalLabel(wasapi, asio);
+        if (continuousIntervalLabel.Text != text) continuousIntervalLabel.Text = text;
+        var spoken = text.Replace("&", "");
+        if (continuousIntervalBox.AccessibleName != spoken) continuousIntervalBox.AccessibleName = spoken;
+    }
+
+    /// <summary>Pure and testable: the interval label for a given configuration. Both lanes live →
+    /// name both; anything else → just "jitter buffer". Kept pure so the gate can pin all THREE
+    /// configurations without building a window.</summary>
+    internal static string AutoTuneIntervalLabel(bool wasapiActive, bool asioActive) =>
+        wasapiActive && asioActive
+            ? "Auto-tune interval for WASAPI and ASIO jitter buffer (Alt+&I)"
+            : "Auto-tune interval for jitter buffer (Alt+&I)";
 
     // ===================== "Use Windows default device" follower support =====================
 
@@ -7281,16 +7330,10 @@ public sealed partial class MainForm : Form
             maxLatencyBox.AccessibleName = "WASAPI jitter buffer in milliseconds (Alt+W)";
             continuousTuneBox.Text = "Continuous auto-tune WASAPI jitter buffer (Alt+&Y)";
             continuousTuneBox.AccessibleName = "Continuous auto-tune WASAPI jitter buffer";
-            // The interval combo drives ticks for BOTH lanes' auto-tunes — each lane
-            // independently lands wherever its own algorithm decides (40 ms WASAPI / 20 ms
-            // ASIO is fine), but the cadence dropdown is shared. Make that explicit in the
-            // label so a user looking at the WASAPI row doesn't assume the interval only
-            // applies there.
-            if (continuousIntervalLabel is not null)
-            {
-                continuousIntervalLabel.Text = "Auto-tune interval for WASAPI and ASIO jitter buffer (Alt+&I)";
-            }
-            continuousIntervalBox.AccessibleName = "Auto-tune interval for WASAPI and ASIO jitter buffer (Alt+I)";
+            // The interval wording is decided by the ACTIVE OUTPUT LANES, not by this mode flag —
+            // see UpdateAutoTuneIntervalWording. Choosing an ASIO driver does not by itself mean two
+            // jitter buffers are in play; ticking outputs in both lists does.
+            UpdateAutoTuneIntervalWording();
         }
         else
         {
@@ -7304,12 +7347,7 @@ public sealed partial class MainForm : Form
             maxLatencyBox.AccessibleName = "Audio jitter buffer in milliseconds (Alt+L)";
             continuousTuneBox.Text = "Continuous auto-tune jitter buffer (Alt+&T)";
             continuousTuneBox.AccessibleName = "Continuous auto-tune jitter buffer";
-            // One lane, so no need to name it — but it is still an interval, not a buffer.
-            if (continuousIntervalLabel is not null)
-            {
-                continuousIntervalLabel.Text = "Auto-tune interval for jitter buffer (Alt+&I)";
-            }
-            continuousIntervalBox.AccessibleName = "Auto-tune interval for jitter buffer (Alt+I)";
+            UpdateAutoTuneIntervalWording();
         }
     }
 

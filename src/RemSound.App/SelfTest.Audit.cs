@@ -583,6 +583,40 @@ internal static partial class SelfTest
 
             Check(checkedModes == 2, "both audio modes must actually have been exercised");
 
+            // === ALL THREE CONFIGURATIONS ===
+            //
+            // There are three, and they are decided by which OUTPUT DEVICES are ticked, not by the
+            // audio-mode setting: WASAPI only, ASIO only, and both. The mode flag only says whether
+            // an ASIO driver has been chosen at all. Looping over modes tests the wrong axis, which
+            // is how ASIO-only got missed — it was shown a WASAPI control it wasn't using, and a
+            // test that looped over two modes sailed past it. Ed has had to point the three
+            // configurations out more than once; this is the guard so it stops happening.
+            var configurations = new (string Name, bool Wasapi, bool Asio)[]
+            {
+                ("WASAPI only", true, false),
+                ("ASIO only", false, true),
+                ("both", true, true),
+            };
+            foreach (var (name, w, a) in configurations)
+            {
+                var label = MainForm.AutoTuneIntervalLabel(w, a);
+                Check(label.Contains("jitter buffer", StringComparison.OrdinalIgnoreCase),
+                    $"in the \"{name}\" configuration the interval label reads \"{label}\" — it must say what it tunes");
+                if (w && a)
+                {
+                    Check(label.Contains("WASAPI", StringComparison.OrdinalIgnoreCase) && label.Contains("ASIO", StringComparison.OrdinalIgnoreCase),
+                        $"with BOTH lanes live the interval drives both auto-tunes, so it must name both — got \"{label}\"");
+                }
+                else
+                {
+                    Check(!label.Contains("WASAPI", StringComparison.OrdinalIgnoreCase) && !label.Contains("ASIO", StringComparison.OrdinalIgnoreCase),
+                        $"in the \"{name}\" configuration only one jitter buffer is in play, so the label must NOT name a lane — "
+                        + $"naming the one you are not using is exactly the ASIO-only bug. Got \"{label}\"");
+                }
+            }
+            Check(MainForm.AutoTuneIntervalLabel(false, true) == MainForm.AutoTuneIntervalLabel(true, false),
+                "ASIO-only and WASAPI-only must read identically — one jitter buffer is one jitter buffer");
+
             // And the readout keeps the word, because for that box it is the correct one.
             if (Field("measuredLatencyReadout") is Control readout)
             {
@@ -590,7 +624,7 @@ internal static partial class SelfTest
                     "the Total latency readout must KEEP its name — it reports jitter buffer plus hardware, which really is total latency");
             }
 
-            return "no jitter-buffer control says \"latency\" in either audio mode, by label or by spoken name; the Total latency readout keeps its own name";
+            return "all three configurations checked (WASAPI only, ASIO only, both): nothing says \"latency\", every auto-tune control names the jitter buffer, a single-lane setup names no lane, and the Total latency readout keeps its own name";
         }
     }
 }
