@@ -7644,9 +7644,74 @@ public sealed partial class MainForm : Form
         // Compared against the LIVE control text rather than a cached copy, so whatever landed while
         // you were reading is written on the first tick after focus leaves — no separate LostFocus
         // handler, and nothing can be stranded.
-        if (!ShouldWriteReadout(measuredLatencyReadout.Text, text, measuredLatencyReadout.Focused)) return;
-        measuredLatencyReadout.Text = text;
+        var focused = measuredLatencyReadout.Focused;
+        if (!ShouldWriteReadout(measuredLatencyReadout.Text, text, focused))
+        {
+            if (focused) readoutSkippedWhileFocused++;
+            return;
+        }
+        // INSTRUMENTED, because the focus guard alone did not fix it on Ed's laptop (2026-08-23) and
+        // the log had nothing to say about why. This records whether the control actually reported
+        // focus at the moment we wrote, which is the one fact needed to tell "the guard isn't firing"
+        // apart from "something else is moving the caret". Rate-limited to a transition or one line
+        // every 10 s, so it can stay in without becoming noise.
+        NoteLatencyReadoutWrite(focused);
+        WritePreservingReaderPosition(measuredLatencyReadout, text);
     }
+
+    private int readoutSkippedWhileFocused;
+    private bool lastReadoutWriteFocused;
+    private DateTime lastReadoutWriteLogUtc = DateTime.MinValue;
+
+    private void NoteLatencyReadoutWrite(bool focused)
+    {
+        var now = DateTime.UtcNow;
+        var transition = focused != lastReadoutWriteFocused;
+        if (!transition && now - lastReadoutWriteLogUtc < TimeSpan.FromSeconds(10)) return;
+        lastReadoutWriteFocused = focused;
+        lastReadoutWriteLogUtc = now;
+        var skipped = readoutSkippedWhileFocused;
+        readoutSkippedWhileFocused = 0;
+        logFile.Event($"latency readout: wrote while focused={focused}"
+            + (skipped > 0 ? $"; {skipped} refresh(es) held back while it had focus" : ""));
+    }
+
+    /// <summary>
+    /// Replace a read-only multiline readout's text WITHOUT throwing a screen-reader user back to the
+    /// top of it.
+    ///
+    /// <para>Setting Text scrolls a multiline TextBox back to line one and drops the caret to
+    /// position zero. Skipping the write while the box reports focus was the first fix and was not
+    /// enough on real hardware, so the write itself is now non-destructive: the caret offset and the
+    /// scroll position are captured, the text is swapped with redraw suspended, and the position is
+    /// put back. If the text got shorter the offset is clamped rather than lost.</para>
+    /// </summary>
+    private static void WritePreservingReaderPosition(TextBox box, string text)
+    {
+        // Deliberately simple: save the caret, swap the text, put the caret back, scroll to it.
+        // An earlier attempt also tried to restore the top visible line, which meant moving
+        // SelectionStart three times per refresh — more chances to confuse a screen reader than the
+        // problem it solved. The caret IS where the reader is; scrolling to it is enough.
+        var caret = box.SelectionStart;
+        SendMessage(box.Handle, WM_SETREDRAW, 0, 0);
+        try
+        {
+            box.Text = text;
+            box.SelectionStart = Math.Min(caret, text.Length);
+            box.SelectionLength = 0;
+            box.ScrollToCaret();
+        }
+        finally
+        {
+            SendMessage(box.Handle, WM_SETREDRAW, 1, 0);
+            box.Invalidate();
+        }
+    }
+
+    private const int WM_SETREDRAW = 0x000B;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern nint SendMessage(nint hWnd, int msg, nint wParam, nint lParam);
 
     /// <summary>Pure and testable: write a read-only readout now, or leave it alone? Don't touch it
     /// while it has focus (a screen-reader user is reading it), and don't rewrite identical text.
