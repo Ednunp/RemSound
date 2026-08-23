@@ -398,4 +398,52 @@ internal static partial class SelfTest
 
         return "a readout is never rewritten under a reader's caret, and whatever arrived meanwhile lands the moment focus goes";
     }
+
+    /// <summary>
+    /// The measured-latency figure must not redraw the readout for wobble.
+    ///
+    /// <para>Every rewrite of a TextBox makes NVDA speak, focused or not — Ed heard "edit, edit"
+    /// while sitting on a different control, which is why skipping the write while focused could
+    /// never have fixed it. The achieved figure is recomputed every second and moves a millisecond
+    /// or two on its own, so the text differed on nearly every tick and the box spoke roughly once a
+    /// second, all session.</para>
+    ///
+    /// <para>What must still get through immediately: the first reading, and audio starting or
+    /// stopping. Those change what the line means rather than nudging a number.</para>
+    /// </summary>
+    private static string? AuditLatencyReadoutIgnoresWobble()
+    {
+        Check(MainForm.ShouldCommitLatencyFigure(-1, 42), "the first reading must always be shown");
+        Check(MainForm.ShouldCommitLatencyFigure(0, 42), "audio STARTING must be shown at once, not waited out");
+        Check(MainForm.ShouldCommitLatencyFigure(42, 0), "audio STOPPING must be shown at once — a stale figure would be a lie");
+
+        Check(!MainForm.ShouldCommitLatencyFigure(42, 43), "a 1 ms wobble must not redraw the box");
+        Check(!MainForm.ShouldCommitLatencyFigure(42, 41), "a 1 ms wobble downward must not redraw the box");
+        Check(!MainForm.ShouldCommitLatencyFigure(42, 44), "a 2 ms wobble must not redraw the box");
+        Check(MainForm.ShouldCommitLatencyFigure(42, 46), "a real 4 ms move must be shown");
+        Check(MainForm.ShouldCommitLatencyFigure(42, 20), "a big drop must be shown");
+
+        // The numbers Ed's laptop actually produced, replayed against the filter: 38 probes, 25 of
+        // them distinct. Count how many would have redrawn the box. Anything close to one a second
+        // is the bug, whatever the unit tests above say.
+        double[] observed =
+        [
+            68.5, 67.5, 68.5, 69.5, 68.5, 67.5, 68.5, 69.5, 68.5, 67.5, 68.5, 65.5, 65.5, 70.0, 72.0,
+            26.5, 24.5, 24.5, 26.5, 24.5, 24.5,
+        ];
+        var committed = -1.0;
+        var redraws = 0;
+        foreach (var live in observed)
+        {
+            if (!MainForm.ShouldCommitLatencyFigure(committed, live)) continue;
+            committed = live;
+            redraws++;
+        }
+        Check(redraws <= 4,
+            $"replaying Ed's own 21 readings must not redraw the box more than a handful of times — got {redraws}. "
+            + "Every redraw is NVDA speaking over him.");
+
+        return $"wobble under {MainForm.LatencyReadoutDeadbandMs:0} ms is held; start, stop and real moves get through; "
+             + $"Ed's 21 recorded readings redraw the box {redraws} times instead of 21";
+    }
 }

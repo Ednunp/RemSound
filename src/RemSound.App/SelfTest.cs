@@ -181,6 +181,7 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT R2: a plugin gets a claimed peer once, not once per output lane", AuditClaimedPeerIsNotDoubled);
         RunStep(results, "AUDIT R3: a throwing recorder tap can't be reported as a lost output device", AuditRecorderCannotKillTheOutput);
         RunStep(results, "AUDIT: a read-only readout holds still while a screen reader reads it", AuditReadoutHoldsStillWhileRead);
+        RunStep(results, "AUDIT: the latency readout doesn't redraw (and speak) for wobble", AuditLatencyReadoutIgnoresWobble);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");

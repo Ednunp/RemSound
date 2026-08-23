@@ -7631,10 +7631,30 @@ public sealed partial class MainForm : Form
     private void UpdateMeasuredLatencyReadout()
     {
         if (measuredLatencyReadout is null) return;
+
+        // HYSTERESIS ON THE MEASURED FIGURE — this is the actual fix for the readout chattering.
+        //
+        // Every rewrite of a TextBox makes NVDA speak, whether or not the box has focus: Ed was
+        // hearing "edit, edit" while sitting on a completely different control. Skipping the write
+        // while focused could never have helped that, and neither could preserving the caret. The
+        // only thing that helps is REWRITING LESS.
+        //
+        // The achieved figure is recomputed every second and wobbles by a millisecond or two on its
+        // own, so the text genuinely differed on nearly every tick — the only-if-different guard was
+        // doing nothing. Since this number is explicitly "approximately" (most of it is estimated,
+        // not timed), chasing ±1 ms was false precision as well as noise. The displayed value is
+        // still an exact figure from a real moment; it is simply held until the live one has moved
+        // far enough to be worth saying out loud. The SET values are not filtered — a slider move or
+        // an auto-tune step changes the text immediately, which is what you want to hear about.
+        if (ShouldCommitLatencyFigure(committedWasapiAchievedMs, achievedLatencyWasapiMs))
+            committedWasapiAchievedMs = achievedLatencyWasapiMs;
+        if (ShouldCommitLatencyFigure(committedAsioAchievedMs, achievedLatencyAsioMs))
+            committedAsioAchievedMs = achievedLatencyAsioMs;
+
         var text = FormatMeasuredLatency(
             settings.LoadAudioMode() == AudioMode.BothIndependent,
-            receiver.TargetLatencyMsFor(RenderRoute.WasapiLane), achievedLatencyWasapiMs,
-            receiver.TargetLatencyMsFor(RenderRoute.AsioLane), achievedLatencyAsioMs);
+            receiver.TargetLatencyMsFor(RenderRoute.WasapiLane), committedWasapiAchievedMs,
+            receiver.TargetLatencyMsFor(RenderRoute.AsioLane), committedAsioAchievedMs);
         // HOLD STILL WHILE IT IS BEING READ — the same rule RefreshStatusReadout already follows.
         // Setting Text on a multiline TextBox resets the caret to the top, so a once-a-second refresh
         // threw the screen-reader cursor back to line one every second and made this box impossible to
@@ -7688,10 +7708,17 @@ public sealed partial class MainForm : Form
     /// </summary>
     private static void WritePreservingReaderPosition(TextBox box, string text)
     {
-        // Deliberately simple: save the caret, swap the text, put the caret back, scroll to it.
-        // An earlier attempt also tried to restore the top visible line, which meant moving
-        // SelectionStart three times per refresh — more chances to confuse a screen reader than the
-        // problem it solved. The caret IS where the reader is; scrolling to it is enough.
+        // ONLY touch the caret when the box actually has focus. Setting SelectionStart or calling
+        // ScrollToCaret on an UNFOCUSED edit control fires accessibility events of its own, which is
+        // the opposite of what this method is for — Ed was hearing NVDA say "edit" while sitting on a
+        // different control entirely. When it is not focused there is no reader position to preserve,
+        // so the plain assignment is both correct and quieter.
+        if (!box.Focused)
+        {
+            box.Text = text;
+            return;
+        }
+
         var caret = box.SelectionStart;
         SendMessage(box.Handle, WM_SETREDRAW, 0, 0);
         try
@@ -7719,6 +7746,25 @@ public sealed partial class MainForm : Form
     /// somebody tries to read it with a screen reader, which is how it shipped broken.</summary>
     internal static bool ShouldWriteReadout(string currentText, string newText, bool focused) =>
         currentText != newText && !focused;
+
+    /// <summary>How far the measured latency has to move before the readout is allowed to say so.
+    /// Below this it is wobble on a figure that is mostly estimated anyway, and rewriting the box for
+    /// it makes a screen reader speak over whatever the user is doing.</summary>
+    internal const double LatencyReadoutDeadbandMs = 3.0;
+
+    /// <summary>Pure and testable: has the measured figure moved enough to be worth redrawing?
+    /// Always yes on the first value and whenever the receiving / not-receiving state flips, because
+    /// those change what the line MEANS rather than nudging a number.</summary>
+    internal static bool ShouldCommitLatencyFigure(double committedMs, double liveMs)
+    {
+        if (committedMs < 0) return true;                              // nothing shown yet
+        if (liveMs <= 0 != committedMs <= 0) return true;              // started or stopped receiving
+        return Math.Abs(liveMs - committedMs) >= LatencyReadoutDeadbandMs;
+    }
+
+    // The figures currently ON SHOW, as opposed to the live ones. Negative = nothing shown yet.
+    private double committedWasapiAchievedMs = -1;
+    private double committedAsioAchievedMs = -1;
 
     /// <summary>Pure and testable: the readout's wording. One line per lane in two-slider mode; one
     /// unlabelled line when there is only one lane, because naming a lane the user hasn't got is
