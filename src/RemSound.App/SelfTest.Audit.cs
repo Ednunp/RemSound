@@ -554,6 +554,31 @@ internal static partial class SelfTest
                     Check(!c.Text.Contains("latenc", StringComparison.OrdinalIgnoreCase),
                         $"in {mode}, {fieldName} shows \"{c.Text}\"");
                 }
+
+                // NAMING THE THING IT TUNES is the other half, and the half a "does it say latency"
+                // check sails straight past. Renaming this combo to a bare "Auto-tune interval"
+                // passed that check and told the user nothing — Ed: "how the hell is anyone going to
+                // know what the auto tune interval is for?" Every auto-tune control has to say it
+                // adjusts the jitter buffer, in both modes.
+                foreach (var fieldName in new[] { "continuousIntervalLabel", "continuousIntervalBox", "continuousTuneBox", "continuousTuneAsioBox" })
+                {
+                    if (Field(fieldName) is not Control c) continue;
+                    var shown = c.Text ?? "";
+                    var spoken = c.AccessibleName ?? "";
+                    // Prefer the SPOKEN name where there is one. A ComboBox's Text is its selected
+                    // VALUE ("5 seconds"), not what the control is — reading Text first made this
+                    // check assert against the wrong string entirely. Labels have no AccessibleName,
+                    // so they fall through to their Text, which for a label is the name.
+                    var names = string.IsNullOrEmpty(spoken) ? shown : spoken;
+                    Check(names.Contains("jitter buffer", StringComparison.OrdinalIgnoreCase),
+                        $"in {mode}, {fieldName} reads \"{names}\" — an auto-tune control must say WHAT it tunes, "
+                        + "or the user is left guessing what the interval applies to");
+                    if (!string.IsNullOrEmpty(spoken))
+                    {
+                        Check(spoken.Contains("jitter buffer", StringComparison.OrdinalIgnoreCase),
+                            $"in {mode}, {fieldName} is ANNOUNCED as \"{spoken}\" — the spoken name is the one that matters here");
+                    }
+                }
             }
 
             Check(checkedModes == 2, "both audio modes must actually have been exercised");

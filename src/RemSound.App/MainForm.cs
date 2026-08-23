@@ -293,7 +293,7 @@ public sealed partial class MainForm : Form
     // the same job, and the manual button confused users by sitting next to the auto-tune
     // checkbox doing almost the same thing in a less convenient one-shot shape.
     private readonly AccessibleCheckBox continuousTuneBox = new() { Text = "Continuous auto-tune jitter buffer", AutoSize = true };
-    private readonly ComboBox continuousIntervalBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90, AccessibleName = "Auto-tune interval (Alt+I)" };
+    private readonly ComboBox continuousIntervalBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90, AccessibleName = "Auto-tune interval for jitter buffer (Alt+I)" };
     // Label for continuousIntervalBox. Held as a field (rather than a local in
     // BuildAudioReceiveGroupContents) so UpdateBothIndependentVisibility can rewrite the
     // text and mnemonic when the user flips audio mode — the interval governs both lanes'
@@ -5219,8 +5219,8 @@ public sealed partial class MainForm : Form
         // timer was running and the interval was being honoured for the ASIO lane.
         continuousIntervalBox.Enabled = AnyAutoTuneEnabled();
         // Label text is set by UpdateBothIndependentVisibility — it differs between classic
-        // modes (single lane → "Auto-tune interval") and BothIndependent
-        // (two lanes → "Auto-tune interval (WASAPI + ASIO)") to make explicit that the same
+        // modes (single lane → "Auto-tune interval for jitter buffer") and BothIndependent
+        // (two lanes → "Auto-tune interval for WASAPI and ASIO jitter buffer") to make explicit that the same
         // dropdown drives both lanes' tick cadence in the latter case.
         continuousIntervalLabel = new Label { AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(8, 6, 0, 0) };
         var delayContainer = new FlowLayoutPanel
@@ -7288,9 +7288,9 @@ public sealed partial class MainForm : Form
             // applies there.
             if (continuousIntervalLabel is not null)
             {
-                continuousIntervalLabel.Text = "Auto-tune interval — WASAPI and ASIO (Alt+&I)";
+                continuousIntervalLabel.Text = "Auto-tune interval for WASAPI and ASIO jitter buffer (Alt+&I)";
             }
-            continuousIntervalBox.AccessibleName = "Auto-tune interval for WASAPI and ASIO (Alt+I)";
+            continuousIntervalBox.AccessibleName = "Auto-tune interval for WASAPI and ASIO jitter buffer (Alt+I)";
         }
         else
         {
@@ -7307,9 +7307,9 @@ public sealed partial class MainForm : Form
             // One lane, so no need to name it — but it is still an interval, not a buffer.
             if (continuousIntervalLabel is not null)
             {
-                continuousIntervalLabel.Text = "Auto-tune interval (Alt+&I)";
+                continuousIntervalLabel.Text = "Auto-tune interval for jitter buffer (Alt+&I)";
             }
-            continuousIntervalBox.AccessibleName = "Auto-tune interval (Alt+I)";
+            continuousIntervalBox.AccessibleName = "Auto-tune interval for jitter buffer (Alt+I)";
         }
     }
 
