@@ -293,7 +293,7 @@ public sealed partial class MainForm : Form
     // the same job, and the manual button confused users by sitting next to the auto-tune
     // checkbox doing almost the same thing in a less convenient one-shot shape.
     private readonly AccessibleCheckBox continuousTuneBox = new() { Text = "Continuous auto-tune jitter buffer", AutoSize = true };
-    private readonly ComboBox continuousIntervalBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90, AccessibleName = "Auto-tune latency interval (Alt+I)" };
+    private readonly ComboBox continuousIntervalBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90, AccessibleName = "Auto-tune interval (Alt+I)" };
     // Label for continuousIntervalBox. Held as a field (rather than a local in
     // BuildAudioReceiveGroupContents) so UpdateBothIndependentVisibility can rewrite the
     // text and mnemonic when the user flips audio mode — the interval governs both lanes'
@@ -5173,8 +5173,8 @@ public sealed partial class MainForm : Form
         // the user enters BothIndependent the WASAPI row's labels mutate to "WASAPI latency
         // (Alt+W)" / "Continuous auto-tune WASAPI (Alt+Y)", surrendering L/T to ASIO. In every
         // classic mode this row is hidden via UpdateBothIndependentVisibility and the WASAPI
-        // row keeps the original "Audio latency (Alt+L)" labels.
-        asioLatencyLabel = new Label { Text = "AS&IO latency in milliseconds (Alt+I)", AutoSize = true, Anchor = AnchorStyles.Left };
+        // row keeps the unqualified "Audio jitter buffer (Alt+L)" labels.
+        asioLatencyLabel = new Label { Text = "AS&IO jitter buffer in milliseconds (Alt+I)", AutoSize = true, Anchor = AnchorStyles.Left };
         asioLatencyLabel.Click += (_, _) => FocusControl(maxLatencyAsioBox);
         SelectAllOnFocus(maxLatencyAsioBox);
         maxLatencyAsioBox.Value = Math.Clamp(settings.LoadMaxLatencyMsAsio(), (int)maxLatencyAsioBox.Minimum, (int)maxLatencyAsioBox.Maximum);
@@ -5195,12 +5195,12 @@ public sealed partial class MainForm : Form
 
         // === Row 1: WASAPI / classic latency row ===
         // Labels and mnemonics mutate based on audio mode — see UpdateBothIndependentVisibility.
-        //   Classic modes: "Audio latency (Alt+L)" / "Continuous auto-tune latency (Alt+T)"
-        //   BothIndependent: "WASAPI latency (Alt+W)" / "Continuous auto-tune WASAPI (Alt+Y)"
+        //   No ASIO:        "Audio jitter buffer (Alt+L)" / "Continuous auto-tune jitter buffer (Alt+T)"
+        //   WASAPI+ASIO:    "WASAPI jitter buffer (Alt+W)" / "Continuous auto-tune WASAPI (Alt+Y)"
         // The interval dropdown stays attached to this row in both modes; one interval setting
         // governs both lanes' auto-tune ticks (separate intervals would be more knobs than
         // value).
-        wasapiLatencyLabel = new Label { Text = "Audio latency in milliseconds (Alt+&L)", AutoSize = true, Anchor = AnchorStyles.Left };
+        wasapiLatencyLabel = new Label { Text = "Audio jitter buffer in milliseconds (Alt+&L)", AutoSize = true, Anchor = AnchorStyles.Left };
         wasapiLatencyLabel.Click += (_, _) => FocusControl(maxLatencyBox);
         SelectAllOnFocus(maxLatencyBox);
         continuousTuneBox.Text = "Continuous auto-tune jitter buffer (Alt+&T)";
@@ -5219,7 +5219,7 @@ public sealed partial class MainForm : Form
         // timer was running and the interval was being honoured for the ASIO lane.
         continuousIntervalBox.Enabled = AnyAutoTuneEnabled();
         // Label text is set by UpdateBothIndependentVisibility — it differs between classic
-        // modes (single lane → "Auto-tune latency interval") and BothIndependent
+        // modes (single lane → "Auto-tune interval") and BothIndependent
         // (two lanes → "Auto-tune interval (WASAPI + ASIO)") to make explicit that the same
         // dropdown drives both lanes' tick cadence in the latter case.
         continuousIntervalLabel = new Label { AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(8, 6, 0, 0) };
@@ -7256,7 +7256,7 @@ public sealed partial class MainForm : Form
     /// <summary>
     /// Toggles visibility of the BothIndependent-only ASIO row and rewrites the WASAPI row's
     /// labels and mnemonics based on the current audio mode. In classic modes the WASAPI row
-    /// reverts to its legacy "Audio latency (Alt+L)" / "Continuous auto-tune latency (Alt+T)"
+    /// reverts to its unqualified "Audio jitter buffer (Alt+L)" / "Continuous auto-tune jitter buffer (Alt+T)"
     /// shape and the ASIO row is hidden. In BothIndependent the ASIO row is shown above the
     /// WASAPI row (first in tab order) and the WASAPI row's labels become "WASAPI latency
     /// (Alt+W)" / "Continuous auto-tune WASAPI (Alt+Y)" so the two sets of mnemonics don't
@@ -7294,16 +7294,22 @@ public sealed partial class MainForm : Form
         }
         else
         {
-            wasapiLatencyLabel.Text = "Audio latency in milliseconds (Alt+&L)";
-            maxLatencyBox.AccessibleName = "Audio latency in milliseconds (Alt+L)";
-            continuousTuneBox.Text = "Continuous auto-tune latency (Alt+&T)";
-            continuousTuneBox.AccessibleName = "Continuous auto-tune latency";
-            // Classic mode — single lane, original label is unambiguous.
+            // "Jitter buffer", never "latency" — this control sets the jitter buffer, and the
+            // readout below it reports TOTAL latency, which is a different quantity (jitter buffer
+            // plus what the sound card and hardware add). Calling both "latency" made the two
+            // impossible to talk about. The rename originally reached only the WASAPI+ASIO wording
+            // above, so the SAME control renamed itself back to "latency" the moment you were not in
+            // that mode. Whatever mode you are in, it says jitter buffer. 2026-08-23.
+            wasapiLatencyLabel.Text = "Audio jitter buffer in milliseconds (Alt+&L)";
+            maxLatencyBox.AccessibleName = "Audio jitter buffer in milliseconds (Alt+L)";
+            continuousTuneBox.Text = "Continuous auto-tune jitter buffer (Alt+&T)";
+            continuousTuneBox.AccessibleName = "Continuous auto-tune jitter buffer";
+            // One lane, so no need to name it — but it is still an interval, not a buffer.
             if (continuousIntervalLabel is not null)
             {
-                continuousIntervalLabel.Text = "Auto-tune latency interval (Alt+&I)";
+                continuousIntervalLabel.Text = "Auto-tune interval (Alt+&I)";
             }
-            continuousIntervalBox.AccessibleName = "Auto-tune latency interval (Alt+I)";
+            continuousIntervalBox.AccessibleName = "Auto-tune interval (Alt+I)";
         }
     }
 
@@ -7620,7 +7626,10 @@ public sealed partial class MainForm : Form
     internal static string FormatLatencyStatus(int requestedMs, double achievedMs)
     {
         if (requestedMs <= 0 || achievedMs <= 0) return "";
-        return $" Latency set to {requestedMs} ms, currently achieving {achievedMs:0} ms.";
+        // "Jitter buffer set to" against the TOTAL being achieved. "Latency set to X, achieving Y"
+        // implied the two were the same quantity and that we were falling short of a target; they
+        // are different things, and the jitter buffer is only one part of the total. 2026-08-23.
+        return $" Jitter buffer set to {requestedMs} ms, total latency approximately {achievedMs:0} ms.";
     }
 
     /// <summary>The measured end-to-end latency for ONE lane, or 0 when that lane isn't carrying

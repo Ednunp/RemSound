@@ -500,4 +500,72 @@ internal static partial class SelfTest
             return $"tab order reaches the jitter buffer, then the total-latency readout, then smoothness ({jitter} → {readout} → {smoothness})";
         }
     }
+
+    /// <summary>
+    /// The jitter-buffer controls must say "jitter buffer" in EVERY audio mode.
+    ///
+    /// <para>These controls rename themselves depending on whether an ASIO driver is chosen. The
+    /// rename from "latency" reached the WASAPI-plus-ASIO wording and nothing else, so the same
+    /// control called itself "Audio latency in milliseconds" the moment you left that mode — and the
+    /// ASIO row said "ASIO latency in milliseconds" with a tickbox beside it already reading
+    /// "Continuous auto-tune ASIO jitter buffer". Two names for one thing, in one row.</para>
+    ///
+    /// <para>Ed: "make sure whatever mode we're in it says the right thing." So this drives the mode
+    /// switch and checks both wordings, rather than trusting the one that happened to be on screen.
+    /// The total-latency READOUT is deliberately exempt: it reports the jitter buffer plus what the
+    /// hardware adds, which genuinely is total latency and is the one place the word belongs.</para>
+    /// </summary>
+    private static string? AuditJitterBufferWordingInEveryMode()
+    {
+        MainForm form;
+        try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+        catch (Exception ex) { return Skip($"headless main window could not be built: {ex.GetType().Name}: {ex.Message}"); }
+
+        using (form)
+        {
+            var apply = typeof(MainForm).GetMethod("UpdateBothIndependentVisibility", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new CheckFailed("UpdateBothIndependentVisibility not found — this test would check nothing");
+            var saveMode = typeof(MainForm).GetField("settings", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(form);
+            Check(saveMode is not null, "the settings object must be reachable to drive the mode switch");
+
+            object? Field(string name) =>
+                typeof(MainForm).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(form);
+
+            var checkedModes = 0;
+            foreach (var mode in new[] { AudioMode.WasapiOnly, AudioMode.BothIndependent })
+            {
+                saveMode!.GetType().GetMethod("SaveAudioMode")?.Invoke(saveMode, [mode]);
+                apply.Invoke(form, null);
+                checkedModes++;
+
+                foreach (var fieldName in new[] { "wasapiLatencyLabel", "asioLatencyLabel", "continuousIntervalLabel" })
+                {
+                    if (Field(fieldName) is not Control c) continue;
+                    Check(!c.Text.Contains("latenc", StringComparison.OrdinalIgnoreCase),
+                        $"in {mode}, {fieldName} still says \"{c.Text}\" — a jitter-buffer control must never be called latency, "
+                        + "or it cannot be told apart from the Total latency readout beside it");
+                }
+                foreach (var fieldName in new[] { "maxLatencyBox", "maxLatencyAsioBox", "continuousTuneBox", "continuousTuneAsioBox", "continuousIntervalBox" })
+                {
+                    if (Field(fieldName) is not Control c) continue;
+                    var spoken = c.AccessibleName ?? "";
+                    Check(!spoken.Contains("latenc", StringComparison.OrdinalIgnoreCase),
+                        $"in {mode}, {fieldName} is announced as \"{spoken}\" — the spoken name is the one that matters most here");
+                    Check(!c.Text.Contains("latenc", StringComparison.OrdinalIgnoreCase),
+                        $"in {mode}, {fieldName} shows \"{c.Text}\"");
+                }
+            }
+
+            Check(checkedModes == 2, "both audio modes must actually have been exercised");
+
+            // And the readout keeps the word, because for that box it is the correct one.
+            if (Field("measuredLatencyReadout") is Control readout)
+            {
+                Check((readout.AccessibleName ?? "").Contains("Total latency", StringComparison.OrdinalIgnoreCase),
+                    "the Total latency readout must KEEP its name — it reports jitter buffer plus hardware, which really is total latency");
+            }
+
+            return "no jitter-buffer control says \"latency\" in either audio mode, by label or by spoken name; the Total latency readout keeps its own name";
+        }
+    }
 }

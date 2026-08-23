@@ -112,7 +112,10 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
         peerList.SelectedIndex = 0;
 
         activeBox.Checked = true;
-        statusReadout.Text = "Not connected." + Environment.NewLine + "Latency: not receiving.";
+        // Placeholder until the first real status arrives. It used to read "Latency: not receiving",
+        // naming a quantity this panel never reports — nothing else here mentions latency and the
+        // live wording (RemSoundPlugin.DescribeStatus) doesn't either. 2026-08-23.
+        statusReadout.Text = "Not connected." + Environment.NewLine + "Not receiving.";
 
         FormLayoutRows.AddRow(this, 0, "&What this plugin does (Alt+W)", jobList, c => c.Focus());
         FormLayoutRows.AddRow(this, 1, "&Peer to receive from (Alt+P)", peerList, c => c.Focus());

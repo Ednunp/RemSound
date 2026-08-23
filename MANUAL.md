@@ -200,7 +200,7 @@ Tab| What it's for
 **Connectivity**|  Connected, discovered and remembered peers. Adding a peer by address. A connection status read-out.
 **Audio inputs and outputs**|  The ASIO driver picker (when an ASIO driver is installed), the Receive audio and Send my audio checkboxes, and all the device lists. Choosing a real driver in the picker brings up the ASIO device lists alongside the ordinary Windows ones; choosing _(none)_ hides them.
 **Volume, pan and EQ for peers** (optional)| Shape each connected peer's sound on its own — their volume, pan (left/right) and EQ. Shown by default; untick “Show the volume, pan and EQ for peers tab” on the Appearance tab of Preferences to hide it. See Volume, pan and EQ for peers tab.
-**Audio profile**|  Codec, packet size, latency, continuous auto-tune, buffer smoothness, artefact sound. Split into an _Audio send parameters_ group and an _Audio receive parameters_ group.
+**Audio profile**|  Codec, packet size, jitter buffer, continuous auto-tune, buffer smoothness, artefact sound. Split into an _Audio send parameters_ group and an _Audio receive parameters_ group.
 
 ### The system tray icon and its menu
 
@@ -459,14 +459,14 @@ RemSound always **locks its sending timing to the sound device's own hardware cl
 
 ### Audio receive parameters
 
-What you see in this section depends on whether an ASIO driver is chosen on the Audio inputs and outputs tab. With no ASIO driver, you see one delay setting (labelled simply “Audio latency”). With an ASIO driver chosen, you see two delay settings — one for each sound path — each with its own auto-tune toggle. The two paths are independent: a problem on one doesn't affect the other.
+What you see in this section depends on whether an ASIO driver is chosen on the Audio inputs and outputs tab. With no ASIO driver, you see one delay setting (labelled simply “Audio jitter buffer”). With an ASIO driver chosen, you see two delay settings — one for each sound path — each with its own auto-tune toggle. The two paths are independent: a problem on one doesn't affect the other.
 
 Control| Shortcut| What it does
 ---|---|---
 **ASIO jitter buffer in milliseconds**|  Alt+L| (Only when an ASIO driver is chosen.) A small up/down number control. It sets the target amount of sound to keep buffered for the ASIO path. Default 10 ms. ASIO can sustain very low values, but going below the network's real-world jitter level (typically 15–25 ms) causes constant tiny corrections that you can hear — pick 25 ms as a safe floor unless both computers are on the same wired network or the same machine.
 **Continuous auto-tune ASIO jitter buffer**|  Alt+T| (Only when an ASIO driver is chosen.) A checkbox. It nudges the ASIO delay target as the ASIO path's jitter changes. It works independently of the WASAPI toggle.
 **WASAPI jitter buffer in milliseconds** (called just “Jitter buffer” when there's no ASIO driver)| Alt+W (Alt+L when no ASIO driver)| A small up/down number control. It sets the target amount of sound to keep buffered for the WASAPI path (or the only path, in WASAPI-only setups). Smaller means less delay but more clicks. Most people want 20–80 ms.
-**Continuous auto-tune WASAPI jitter buffer** (called “Continuous auto-tune jitter buffer” when there's no ASIO driver)| Alt+Y (Alt+T when no ASIO driver)| A checkbox. When it's on, RemSound nudges the WASAPI delay value automatically as the network changes. The companion interval combo box (**Alt+I**) sets how often it re-checks: 3, 5, 10, 15, or 30 seconds. The combo's label is “Auto-tune latency interval” in WASAPI-only setups and “Auto-tune interval — WASAPI and ASIO” when an ASIO driver is chosen, because that one timer drives both paths' auto-tuning. Each path still settles at whatever target its own calculation chooses; only the timing of the re-checks is shared.
+**Continuous auto-tune WASAPI jitter buffer** (called “Continuous auto-tune jitter buffer” when there's no ASIO driver)| Alt+Y (Alt+T when no ASIO driver)| A checkbox. When it's on, RemSound nudges the WASAPI delay value automatically as the network changes. The companion interval combo box (**Alt+I**) sets how often it re-checks: 3, 5, 10, 15, or 30 seconds. The combo’s label is “Auto-tune interval” in WASAPI-only setups and “Auto-tune interval — WASAPI and ASIO” when an ASIO driver is chosen, because that one timer drives both paths' auto-tuning. Each path still settles at whatever target its own calculation chooses; only the timing of the re-checks is shared.
 **Buffer smoothness**|  Alt+B| A list, 1 to 10. It controls how patient the receiving side is with sound that arrives late, on either path. Higher means more protection from clicks but a longer steady delay. Default 3.
 **Artefact sound type**|  Alt+A| A list. _Noise burst_ (the default) fills a momentary gap with a brief soft hiss, which blends into music. _Click_ leaves the gap unfilled so you hear an obvious click — useful when you want to hear every problem.
 
@@ -724,10 +724,10 @@ If you connect to someone whose password is different from yours, RemSound shows
 
 Latency is the small delay between sound leaving one computer and arriving at the other. Four controls together shape the trade-off between latency and sound quality, all on the Audio profile tab:
 
-  * **Audio latency in milliseconds (Alt+L)** — the main target for how much sound the receiving side keeps in reserve.
+  * **Audio jitter buffer in milliseconds (Alt+L)** — the main target for how much sound the receiving side keeps in reserve.
   * **Buffer smoothness (Alt+B)** — how hard the receiving side works to protect against sudden jitter.
   * **Packet size (Alt+P)** — Standard or Small. Small packets shave a couple of milliseconds off the sending delay, but double how many packets are sent.
-  * **Continuous auto-tune** — lets the receiving side choose the latency target for you, re-checking every few seconds.
+  * **Continuous auto-tune** — lets the receiving side choose the jitter buffer for you, re-checking every few seconds.
 
 
 
@@ -763,7 +763,7 @@ Smoothness| Behaviour| Pick when
 3 — default| Moderate protection; brief clicks possible when jitter spikes.| A stable internet connection or a quiet local network.
 1 — tightest delay| The receiving side gives up immediately when sound is late. Frequent clicks, lowest delay.| Testing on a local network, experiments where you want the lowest possible delay.
 
-Smoothness and the Audio latency control work together — smoothness controls _how the receiving side reacts_ when sound runs late; the latency value controls _how big a head-start it builds up_. A practical tip: if you can hear clicks, try raising smoothness by one or two before you reach for a bigger latency value.
+Smoothness and the jitter buffer work together — smoothness controls _how the receiving side reacts_ when sound runs late; the jitter buffer controls _how big a head-start it builds up_. A practical tip: if you can hear clicks, try raising smoothness by one or two before you reach for a bigger jitter buffer.
 
 ### Packet size — Standard or Small
 
@@ -812,7 +812,7 @@ So a jitter buffer of 20 ms with a total of 60 ms does not mean anything is fail
 
 ### Continuous auto-tune
 
-The **Continuous auto-tune jitter buffer** checkbox hands the jitter buffer over to RemSound itself. When it's on, RemSound watches how evenly packets are arriving, every few seconds, and nudges the latency target up if it's seeing late packets, or down if the network has been calm. It deliberately ignores a single one-off stall — the kind a driver or Windows hiccup causes once and never again — and only raises the cushion when late audio keeps arriving, so one brief blip doesn't balloon your latency for the rest of the session. The companion **Auto-tune latency interval (Alt+I)** combo box sets how often it re-checks — **3, 5, 10, 15, or 30 seconds**. Faster values react quickly to a change in the network but can feel a bit twitchy. Think of continuous auto-tune as a hands-off way to keep the cushion the right size as your network changes through the session.
+The **Continuous auto-tune jitter buffer** checkbox hands the jitter buffer over to RemSound itself. When it's on, RemSound watches how evenly packets are arriving, every few seconds, and nudges the jitter buffer up if it’s seeing late packets, or down if the network has been calm. It deliberately ignores a single one-off stall — the kind a driver or Windows hiccup causes once and never again — and only raises the cushion when late audio keeps arriving, so one brief blip doesn't balloon your latency for the rest of the session. The companion **Auto-tune interval (Alt+I)** combo box sets how often it re-checks — **3, 5, 10, 15, or 30 seconds**. Faster values react quickly to a change in the network but can feel a bit twitchy. Think of continuous auto-tune as a hands-off way to keep the cushion the right size as your network changes through the session.
 
 If you turn auto-tune off, the jitter buffer just stays wherever it last was.
 
@@ -823,7 +823,7 @@ Auto-tune moves in both directions. If the buffer keeps running short — which 
 When the playback reserve briefly runs empty, RemSound has to fill the gap with something. The **Artefact sound type** list decides what that gap sounds like:
 
   * **Noise burst (default)** — a brief soft hiss that blends into music. Easy on the ear; it tells you something happened without being jarring.
-  * **Click** — the gap is left unfilled, so you hear an obvious click each time. Use this when you want to _hear_ every problem (for example, while you're tuning the latency down).
+  * **Click** — the gap is left unfilled, so you hear an obvious click each time. Use this when you want to _hear_ every problem (for example, while you’re tuning the jitter buffer down).
 
 
 
@@ -894,11 +894,11 @@ Key| Action
 Alt+U| Toggle Use CPU and Windows performance settings in high priority mode (for this profile)
 Alt+C| Focus Audio codec
 Alt+P| Focus Packet size
-Alt+L| Focus the latency control — the ASIO path when an ASIO driver is chosen, otherwise the single Audio latency control
+Alt+L| Focus the jitter-buffer control. With no ASIO driver this is the single **Audio jitter buffer** box; with an ASIO driver chosen the WASAPI box takes Alt+W and the ASIO box takes Alt+I instead
 Alt+T| Toggle continuous auto-tune — the ASIO path when an ASIO driver is chosen, otherwise the single Continuous auto-tune toggle
-Alt+W| (Only when an ASIO driver is chosen.) Focus the WASAPI-path latency control
+Alt+W| (Only when an ASIO driver is chosen.) Focus the WASAPI-path jitter-buffer control
 Alt+Y| (Only when an ASIO driver is chosen.) Toggle the WASAPI-path continuous auto-tune
-Alt+I| Focus the Auto-tune latency interval combo box. It drives the timing for the WASAPI auto-tune and, when an ASIO driver is chosen, the ASIO auto-tune too — one combo, both paths. Each path still settles at whatever latency its own calculation chooses; only the timing of the re-checks is shared. The label changes from “Auto-tune latency interval” to “Auto-tune interval — WASAPI and ASIO” once an ASIO driver is in use.
+Alt+I| Focus the Auto-tune interval combo box. It drives the timing for the WASAPI auto-tune and, when an ASIO driver is chosen, the ASIO auto-tune too — one combo, both paths. Each path still settles at whatever jitter buffer its own calculation chooses; only the timing of the re-checks is shared. The label changes from “Auto-tune interval” to “Auto-tune interval — WASAPI and ASIO” once an ASIO driver is in use.
 Alt+B| Focus Buffer smoothness
 Alt+A| Focus Artefact sound type
 
@@ -1300,7 +1300,7 @@ The file contains two kinds of rows:
 Kind| Contents
 ---|---
 EVT| Event lines — startup, a peer being selected, capture starting, errors, and so on.
-SNAP| One-second snapshots of running figures: codec, latency target, how much sound is buffered, packets sent, packets received, drop-outs, drops, and peer round-trip times.
+SNAP| One-second snapshots of running figures: codec, jitter buffer, how much sound is buffered, packets sent, packets received, drop-outs, drops, and peer round-trip times.
 
 The **Write logs now** button on the Logging tab (Alt+W within the dialog) writes a “user requested write logs now” marker into the log, so you can find that moment in the file afterwards.
 
@@ -1326,7 +1326,7 @@ Log files are small, but if you leave logging on for months they add up. The **L
 
 Logs are plain text and can be opened in any text editor, or in a spreadsheet. The most useful figures when something feels wrong:
 
-  * **BufferMs** — how much sound is queued up ready to play. It should sit close to your latency target.
+  * **BufferMs** — how much sound is queued up ready to play. It should sit close to your jitter buffer setting.
   * **Underruns** — how many times the playback reserve ran dry. Each one is a tiny click. A few per minute is normal over the internet; hundreds per second means something is broken.
   * **Drops** — packets thrown away because the reserve overflowed. This should stay near zero in normal use.
   * **Heartbeat** — the round-trip time to each connected peer. `pending` / `unreachable` / `stale` mean there's a problem.
@@ -1507,8 +1507,8 @@ The same buffer explains a couple of other oddities: muting the track takes a no
 
 ### I can hear them but the sound crackles
 
-  * **First, try raising Buffer smoothness** by 1 or 2 on the Audio profile tab (Alt+B). It usually fixes crackles for a smaller delay cost than raising the latency does.
-  * Then, try raising the Audio latency value (Alt+L). Internet connections often need 30–80 ms.
+  * **First, try raising Buffer smoothness** by 1 or 2 on the Audio profile tab (Alt+B). It usually fixes crackles for a smaller delay cost than raising the jitter buffer does.
+  * Then, try raising the Audio jitter buffer value (Alt+L). Internet connections often need 30–80 ms.
   * If you're using PCM, switch to Opus — Opus can repair single missing packets automatically, which PCM can't. It's much more tolerant of an unsteady network.
   * If you're on Wi-Fi, try wired Ethernet — Wi-Fi adds 5–20 ms of unpredictable jitter.
   * If you previously set Packet size to “Small (LAN only)” but you're now on the internet rather than a same-house network, switch it back to Standard. Small packets double the packet rate, which makes internet clicks more likely.
@@ -1517,7 +1517,7 @@ The same buffer explains a couple of other oddities: muting the track takes a no
 
 ### The sound is fine but the delay feels long
 
-  * Lower the relevant latency value on the Audio profile tab, step by step, until clicks just start, then nudge it back up by one step. With an ASIO driver chosen, this is two separate controls (one for each path).
+  * Lower the relevant jitter-buffer value on the Audio profile tab, step by step, until clicks just start, then nudge it back up by one step. With an ASIO driver chosen, this is two separate controls (one for each path).
   * Or, turn on Continuous auto-tune for the path that feels slow and let RemSound find the right level.
   * Lower Buffer smoothness towards 3 if you'd been running it high “just in case”.
   * If only WASAPI matters for your session, set the ASIO driver picker to _(none)_ — that turns ASIO off entirely.
@@ -1526,7 +1526,7 @@ The same buffer explains a couple of other oddities: muting the track takes a no
 
 ### The ASIO sound is grainy or constantly micro-clicks
 
-Most likely your ASIO latency target is below the network's real-world jitter level. The receiving side fights to hold the reserve at the target, and that fight is audible. Raise **ASIO latency in milliseconds (Alt+L)** on the Audio profile tab to 25 ms or more and the graininess should disappear. Even pure-ASIO setups can't safely sustain a receive reserve below about 15 ms over real networks; aim higher on Wi-Fi.
+Most likely your ASIO jitter buffer is below the network's real-world jitter level. The receiving side fights to hold the reserve at the target, and that fight is audible. Raise **ASIO jitter buffer in milliseconds (Alt+I)** on the Audio profile tab to 25 ms or more and the graininess should disappear. Even pure-ASIO setups can't safely sustain a receive reserve below about 15 ms over real networks; aim higher on Wi-Fi.
 
 ### I can't see my friend in Discovered peers
 
@@ -1601,8 +1601,8 @@ Tailscale| An easy-to-use VPN that puts your computers on a private network toge
 UPnP| Short for “Universal Plug and Play”. A feature most home routers support that lets an app politely ask the router to open a port for incoming connections, without the user having to log into the router. RemSound uses UPnP (and its newer relatives NAT-PMP and PCP) to set up port forwarding automatically when you tick “Automatically open my router for incoming connections” in Preferences. Off by default.
 NAT| Short for “Network Address Translation”. The way your router lets several computers share a single internet connection — one public address on the outside, lots of private addresses on the inside. Most home networks use NAT, which is why you usually need port forwarding (or UPnP, or a VPN) for two computers in different places to reach each other directly.
 Carrier-grade NAT| An extra layer of NAT that some internet providers (especially on mobile broadband and some cable connections) put in between your router and the rest of the internet. Your home router opens a port fine, but the provider's NAT in front of it still blocks incoming connections. RemSound's UPnP status line warns you when this is the case — the way through it is a VPN like Tailscale, or the relay server.
-Auto-tune| RemSound automatically adjusting the latency target based on how evenly packets are arriving. Off by default; turn it on with the Continuous auto-tune checkbox on the Audio profile tab.
-Profile| A saved snapshot of every RemSound setting and choice — device ticks, send / receive states, codec, latency, peers, ASIO driver choice, the lot. (Keyboard shortcuts are the exception — they're shared across all profiles, not saved per profile.) Stored as one settings file. You pick one at startup, and can switch with File → Open profile.
+Auto-tune| RemSound automatically adjusting the jitter buffer based on how evenly packets are arriving. Off by default; turn it on with the Continuous auto-tune checkbox on the Audio profile tab.
+Profile| A saved snapshot of every RemSound setting and choice — device ticks, send / receive states, codec, jitter buffer, peers, ASIO driver choice, the lot. (Keyboard shortcuts are the exception — they're shared across all profiles, not saved per profile.) Stored as one settings file. You pick one at startup, and can switch with File → Open profile.
 New profile| An entry in the startup profile picker that begins a session with all the defaults — nothing ticked, no peers, no saved name. A clean starting point for a new profile, or for a one-off session you don't plan to save.
 Lock to audio clock| A sending-side timing mode that takes its timing straight from the sound device's hardware clock instead of from Windows. Removes a few milliseconds of wobble at tight latency targets. RemSound now does this always — it used to be a checkbox on the Audio profile tab, but it is on permanently and no longer a setting.
 Concealment| A receiving-side feature that fills brief gaps in the playback reserve with a small noise burst (the default) or an obvious click. You choose which on the Audio profile tab, in the _Artefact sound type_ list. Opus also has its own repair of lost packets on top of this.
