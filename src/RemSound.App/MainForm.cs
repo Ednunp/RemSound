@@ -5355,11 +5355,16 @@ public sealed partial class MainForm : Form
     private void RefreshStatusReadout()
     {
         var text = ComputeStatusText();
-        if (text == lastStatusReadoutText) return;
+        // Don't disrupt the user mid-read — same rule as UpdateMeasuredLatencyReadout, and the same
+        // shared decision so the two cannot drift apart.
+        //
+        // The cache assignment used to sit ABOVE the focus check, which meant a change that landed
+        // while the box had focus was recorded as "already rendered" and then never written: the box
+        // kept stale text until the NEXT change came along. It self-healed here because the status
+        // text changes often, but it is the same defect that made the latency readout unreadable, so
+        // it is fixed rather than left to be rediscovered. 2026-08-23.
+        if (!ShouldWriteReadout(lastStatusReadoutText, text, statusReadout.Focused)) return;
         lastStatusReadoutText = text;
-        // Don't disrupt the user mid-read. The text we computed is already cached so the
-        // next tick will pick it up if the user moves focus away.
-        if (statusReadout.Focused) return;
         statusReadout.Text = text;
     }
 
@@ -6272,7 +6277,16 @@ public sealed partial class MainForm : Form
             {
                 ApplySendSources();
                 sender.Start();
-                logFile.Event($"sender started codec={sender.Codec} sources=[{sender.CaptureDeviceName}] peers=[{string.Join(",", endpoints.Select(e => e.ToString()))}]");
+                // Log only if it ACTUALLY started. With the toggle on and no capture device ticked,
+                // Start is a no-op and this branch is re-entered every second — Ed's 2026-08-23 log
+                // carries 43 identical "sender started ... sources=[(none)]" lines, which is exactly
+                // the noise the sender's own loggedNoSources guard was added to stop. The sender says
+                // "start requested but no sources configured" once; this said it started, forty-three
+                // times, and buried the evidence around it.
+                if (sender.IsRunning)
+                {
+                    logFile.Event($"sender started codec={sender.Codec} sources=[{sender.CaptureDeviceName}] peers=[{string.Join(",", endpoints.Select(e => e.ToString()))}]");
+                }
             }
             else if (wantSend && sender.IsRunning)
             {
@@ -6410,12 +6424,28 @@ public sealed partial class MainForm : Form
             if (item.DeviceId is { } id) specs.Add(new CaptureSourceSpec(id, CaptureKind.Input, item.Name));
         }
         sender.Configure(specs);
-        // Tell the auto-tune to ignore the next tick AND throw away the rolling window — newly-
-        // added captures take a moment to fill their first ring buffer, and that initial-fill
-        // jitter shouldn't bias the recommendation. The window-clear is the load-bearing piece;
-        // without it a single big-gap entry keeps the recommendation pinned for ~30 s.
+
+        // ONLY invalidate when the capture set ACTUALLY changed.
+        //
+        // This throws away the auto-tune's rolling window and defers its next tick by a whole tune
+        // interval, which is right after a real change — a freshly-opened capture's first packets land
+        // off-cadence while its ring fills, and that transient must not bias the recommendation.
+        //
+        // But ApplySendSources is also called on every one-second tick whenever the sender is not
+        // running, which is the state you sit in with "Send my audio" on and no capture device ticked.
+        // Ed's 2026-08-23 log shows 49 of those in one session. Each one silently re-armed the deferral,
+        // so the auto-tune could never accumulate the history it needs — "I had to check and uncheck the
+        // boxes a bit before it got moving". Re-applying an unchanged list is not a change and must not
+        // count as one.
+        var signature = string.Join("|", specs.Select(s => $"{s.DeviceId}:{s.Kind}"));
+        if (signature == lastAppliedSendSpecSignature) return;
+        lastAppliedSendSpecSignature = signature;
         InvalidateAutoTuneHistory();
     }
+
+    /// <summary>The capture set last handed to the sender, so a redundant re-apply can be told apart
+    /// from a real change. See <see cref="ApplySendSources"/>.</summary>
+    private string? lastAppliedSendSpecSignature;
 
     // ===================== Devices =====================
 
@@ -7605,8 +7635,25 @@ public sealed partial class MainForm : Form
             settings.LoadAudioMode() == AudioMode.BothIndependent,
             receiver.TargetLatencyMsFor(RenderRoute.WasapiLane), achievedLatencyWasapiMs,
             receiver.TargetLatencyMsFor(RenderRoute.AsioLane), achievedLatencyAsioMs);
-        if (measuredLatencyReadout.Text != text) measuredLatencyReadout.Text = text;
+        // HOLD STILL WHILE IT IS BEING READ — the same rule RefreshStatusReadout already follows.
+        // Setting Text on a multiline TextBox resets the caret to the top, so a once-a-second refresh
+        // threw the screen-reader cursor back to line one every second and made this box impossible to
+        // arrow through (Ed, 2026-08-23: "I keep getting bounced about"). The achieved figure changes
+        // on nearly every tick, so the only-if-different guard below never helped on its own.
+        //
+        // Compared against the LIVE control text rather than a cached copy, so whatever landed while
+        // you were reading is written on the first tick after focus leaves — no separate LostFocus
+        // handler, and nothing can be stranded.
+        if (!ShouldWriteReadout(measuredLatencyReadout.Text, text, measuredLatencyReadout.Focused)) return;
+        measuredLatencyReadout.Text = text;
     }
+
+    /// <summary>Pure and testable: write a read-only readout now, or leave it alone? Don't touch it
+    /// while it has focus (a screen-reader user is reading it), and don't rewrite identical text.
+    /// Pinned by the gate because "the readout holds still while you read it" is invisible until
+    /// somebody tries to read it with a screen reader, which is how it shipped broken.</summary>
+    internal static bool ShouldWriteReadout(string currentText, string newText, bool focused) =>
+        currentText != newText && !focused;
 
     /// <summary>Pure and testable: the readout's wording. One line per lane in two-slider mode; one
     /// unlabelled line when there is only one lane, because naming a lane the user hasn't got is

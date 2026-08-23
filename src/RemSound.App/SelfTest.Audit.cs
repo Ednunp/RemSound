@@ -361,4 +361,41 @@ internal static partial class SelfTest
         Check(peak > 0.05f, $"the audio must keep flowing through a failing recorder (peak {peak:0.000})");
         return "a throwing per-peer record tap is contained; the mix keeps playing and the output is not reported as lost";
     }
+
+    // ---------------------------------------------------------------------------------------
+    // From Ed's 2026-08-23 hardware test
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// A read-only readout must hold still while a screen reader is reading it.
+    ///
+    /// <para>Setting Text on a multiline TextBox puts the caret back at the top. The total-latency
+    /// readout refreshes once a second and its achieved figure changes on nearly every tick, so
+    /// arrowing through it was impossible — "I keep getting bounced about". The connection-status
+    /// readout already had this rule; the latency one, added later, did not.</para>
+    ///
+    /// <para>Also pins the staleness half. The status readout recorded the new text as rendered
+    /// BEFORE checking focus, so a change that landed while the box was focused was never written
+    /// afterwards — it waited for the next change. Both now share one decision, so they cannot drift
+    /// apart again.</para>
+    /// </summary>
+    private static string? AuditReadoutHoldsStillWhileRead()
+    {
+        Check(MainForm.ShouldWriteReadout("old", "new", focused: false),
+            "a changed readout must be written when nobody is reading it");
+        Check(!MainForm.ShouldWriteReadout("old", "new", focused: true),
+            "a readout must NOT be rewritten while it has focus — that resets the caret and throws a "
+            + "screen-reader user back to line one every tick");
+        Check(!MainForm.ShouldWriteReadout("same", "same", focused: false),
+            "identical text must not be rewritten");
+
+        // The staleness half: text that arrived during focus must be written on the first tick after
+        // focus leaves, NOT held back until the value happens to change again.
+        const string held = "arrived while you were reading";
+        Check(!MainForm.ShouldWriteReadout("stale", held, focused: true), "held back while focused");
+        Check(MainForm.ShouldWriteReadout("stale", held, focused: false),
+            "the text that arrived while the box was focused must be written as soon as focus leaves");
+
+        return "a readout is never rewritten under a reader's caret, and whatever arrived meanwhile lands the moment focus goes";
+    }
 }
