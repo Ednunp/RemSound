@@ -553,7 +553,7 @@ internal sealed class PlayoutEngine : IWaveProvider
             foreach (var lane in wanted)
             {
                 if (existing.Exists(x => x.Route == lane)) continue;
-                var mir = new SessionPlayout(primary.Endpoint, primary.StreamId, primary.Capacity) { Route = lane };
+                var mir = new SessionPlayout(primary.Endpoint, primary.StreamId, primary.Capacity) { Route = lane, IsMirror = true };
                 mir.SetConcealmentArtifact((ConcealmentArtifact)concealmentArtifactRaw);
                 if (peerDspByAddress.TryGetValue(primary.Endpoint.Address, out var chain) && chain is not null)
                     mir.SetDsp(chain.Clone()); // its own filter state — must NOT share with the primary
@@ -1095,6 +1095,13 @@ internal sealed class PlayoutEngine : IWaveProvider
         var produced = 0;
         foreach (var session in sessionsSnapshot)
         {
+            // PRIMARIES ONLY. The snapshot also holds a mirror replica per extra active output lane,
+            // carrying the same decoded audio for a second sound card. The speaker paths filter those
+            // out by Route; this one does not filter by Route at all (a plugin's track has no output
+            // lane), so without this check it summed the primary AND its mirror and handed the DAW
+            // the peer twice — about 6 dB hot, and comb-filtered as the two rings drifted apart.
+            // Only bit when both a WASAPI and an ASIO output were ticked. 2026-08-23 audit, R2.
+            if (session.IsMirror) continue;
             // Their own address, or a stream we have already seen as theirs arriving from somewhere
             // else. The second case is a peer whose path changed under us.
             var atThisAddress = session.Endpoint.Address.Equals(peer);
@@ -1246,13 +1253,18 @@ internal sealed class PlayoutEngine : IWaveProvider
         }
 
         public int Read(byte[] buffer, int offset, int count) =>
-            // recordDiagnostics: true so the diag log line in MainForm gets buffer-level
-            // and render-read samples in BothIndependent mode. Originally false to avoid
-            // double-counting when both lanes ran concurrently, but in practice only one
-            // lane has sessions at a time (the user's chosen capture path) — the other
-            // lane's Read returns zero-mix and contributes nothing meaningful to the diag
-            // numbers. Without this the diag line never fires in BothIndependent setups,
-            // which is the user's normal mode of operation. 2026-05-14.
+            // recordDiagnostics: true so the diag log line in MainForm gets buffer-level and
+            // render-read samples in BothIndependent mode; without it the diag line never fires
+            // there, which is Ed's normal mode of operation. 2026-05-14.
+            //
+            // The original justification for it being safe was "only one lane has sessions at a
+            // time". THAT IS NO LONGER TRUE: the every-stream-to-every-output fan-out gives each
+            // active lane a replica of every stream, so both lanes report. The per-route render
+            // period (MaxRenderCallbackGapMsFor) is indexed by route and stays correct, and the
+            // buffer level is a sum-and-count average so it also survives — but the min/max buffer
+            // figures now blend two lanes, and the auto-tune reads these. Recorded rather than
+            // changed: splitting the remaining aggregates per route is a bigger job than this audit,
+            // and blending is not currently wrong enough to justify it. 2026-08-23 audit, R6.
             owner.ReadForRoute(buffer, offset, count, route, MixScratch, SessionScratch, recordDiagnostics: true);
     }
 }

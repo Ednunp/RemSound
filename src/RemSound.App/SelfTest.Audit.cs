@@ -1,0 +1,364 @@
+using System.Net;
+using System.Reflection;
+using RemSound.Core;
+using RemSound.Receiver;
+
+namespace RemSound.App;
+
+/// <summary>
+/// Regression cover for the 2026-08-23 line-by-line audit of the send and receive paths
+/// (AUDIT-FINDINGS.md). One test per finding that can be pinned headlessly.
+///
+/// <para>These are all written to FAIL against the code as it was. Where a test could pass whether
+/// or not the fix is present, it has been rewritten until it cannot — a test that cannot fail is
+/// decoration, and this audit found two of its own earlier tests in that state.</para>
+/// </summary>
+internal static partial class SelfTest
+{
+    // ---------------------------------------------------------------------------------------
+    // S1 — turning sending off must stop the ASIO lane delivering audio
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Park must actually stop audio reaching the sender lane — WITHOUT closing the driver.
+    ///
+    /// <para>Both halves are load-bearing and pull in opposite directions, which is why this is
+    /// measured rather than asserted. Keeping the driver OPEN across a stop is deliberate: closing
+    /// and reopening it is what hangs Audient for five seconds, and that is why the composite never
+    /// stops the borrowed ASIO child. But nothing else stood the lane down either, so with "Send my
+    /// audio" off the driver went on handing buffers to the lane, which went on encoding,
+    /// encrypting and transmitting them to every armed peer.</para>
+    ///
+    /// <para>Testing that Park() was called would prove nothing. The bug was a LIVE CALLBACK still
+    /// delivering, so the test invokes the callback the driver's thread invokes and counts what
+    /// arrives at the far end.</para>
+    /// </summary>
+    private static string? AuditAsioParkStopsDelivery()
+    {
+        var delivered = 0;
+        // A driver name that cannot exist: the constructor only spins up the apartment thread, so
+        // no hardware is touched and this runs anywhere.
+        using var backend = new RemSound.Sender.AsioCaptureBackend(
+            "RemSound self-test — no such ASIO driver", _ => delivered++, _ => { });
+
+        var block = new ReadOnlyMemory<float>(new float[960]);
+
+        // Before: the callback delivers, which is the whole point of the lane.
+        backend.CallbackForTest(block);
+        Check(delivered == 1, "the ASIO lane must deliver audio to its callback while sending");
+
+        // Park — Ed's own mechanism from "park the driver on switch-away instead of closing it".
+        backend.Park();
+        backend.CallbackForTest(block);
+        backend.CallbackForTest(block);
+        Check(delivered == 1,
+            $"after Park, the driver's callback must deliver NOTHING to the sender lane — this is the "
+            + $"'send off but still transmitting' bug (delivered {delivered}, expected 1)");
+
+        // And the park must not have closed anything: a second park is a no-op, not a teardown.
+        backend.Park();
+        Check(!backend.IsRunning, "no driver was ever opened in this test, so nothing should report running");
+
+        // Unparking re-points the callback at a live lane again.
+        var reDelivered = 0;
+        backend.SetCallback(_ => reDelivered++);
+        backend.CallbackForTest(block);
+        Check(reDelivered == 1, "re-pointing the callback must bring delivery back (this is what Start does)");
+
+        // --- And the part that actually broke: STOPPING THE SENDER must park the lane. ------------
+        // Park itself was never the bug; the bug was that nothing called it, so an ASIO lane kept
+        // capturing and transmitting with "Send my audio" off. Driven through AudioSender's real
+        // public surface. Constructing the backend opens no driver, so this runs anywhere.
+        using var sender = new RemSound.Sender.AudioSender();
+        sender.SetAudioMode(AudioMode.BothIndependent, "RemSound self-test — no such ASIO driver");
+        var persistent = sender.PersistentAsioForTest;
+        Check(persistent is not null, "BothIndependent with a driver name must create the persistent ASIO lane");
+        Check(!persistent!.CallbackDetachedForTest,
+            "after selecting an ASIO mode the lane's callback must be live, or the test proves nothing");
+
+        sender.Stop();
+        Check(persistent.CallbackDetachedForTest,
+            "stopping the sender must PARK the ASIO lane — otherwise the driver keeps handing buffers to "
+            + "the sender lane and audio is still encoded, encrypted and transmitted with sending switched off");
+
+        return "parked lane delivers nothing; stopping the sender parks it; the driver is never closed; re-pointing restores delivery";
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // S5 — the audio loops must stay on their own MMCSS-boosted thread
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// The mix loop and the output producer loop must not be async.
+    ///
+    /// <para>Both applied an MMCSS "Pro Audio" boost to the thread <c>Task.Run</c> started them on,
+    /// and both then did <c>await Task.Delay(50, ct)</c> in their catch block. MMCSS characteristics
+    /// are per-THREAD, so the first await resumed the loop on some other thread-pool thread and every
+    /// iteration after that ran unboosted for the rest of the session — a silent, permanent
+    /// demotion of the audio path triggered by one logged hiccup.</para>
+    ///
+    /// <para>This is checked by reflection on the compiler's own marker rather than by reading the
+    /// source, so it stays true no matter how the wait is written. Any future edit that reintroduces
+    /// an await in either loop turns this red.</para>
+    /// </summary>
+    private static string? AuditAudioLoopsAreNotAsync()
+    {
+        CheckNotAsync(typeof(RemSound.Sender.MixingEngine), "MixLoop", "the WASAPI capture mix tick");
+        CheckNotAsync(typeof(RemSound.Receiver.MultiOutputPlayout), "ProduceLoop", "the output producer tick");
+        return "neither audio loop is async, so neither can lose its Pro Audio thread to a continuation";
+    }
+
+    private static void CheckNotAsync(Type type, string methodName, string what)
+    {
+        var method = type.GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new CheckFailed($"{type.Name}.{methodName} not found — the audio-loop guard is testing nothing");
+        var isAsync = method.GetCustomAttribute<System.Runtime.CompilerServices.AsyncStateMachineAttribute>() is not null;
+        Check(!isAsync,
+            $"{what} ({type.Name}.{methodName}) is async — an await moves it off its MMCSS Pro Audio thread "
+            + "and silently demotes the audio path for the rest of the session. Wait with ct.WaitHandle.WaitOne instead.");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // R4 — a Format packet is unauthenticated network input and must fail closed
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Garbage in a Format packet must be rejected before anything acts on it, and every format a
+    /// real RemSound sends must still be accepted.
+    ///
+    /// <para>The second half is the cross-port half and matters as much as the first: this validation
+    /// sits on a wire surface that an iPhone, a Pi relay and a send-only service all speak, and
+    /// rejecting something one of them legitimately sends would take their audio away silently. The
+    /// accepted cases below are the exact values <c>SenderLane.EnsureFormatPacketSent</c> writes.</para>
+    /// </summary>
+    private static string? AuditFormatValidation()
+    {
+        // --- What a real RemSound sends. All of these MUST pass. ---
+        // PCM, standard 5 ms and tight 2.5 ms — straight from SenderLane.
+        AcceptFormat(new AudioFormatInfo(48000, 2, 24, 1, 6, 288_000, (int)AudioTransportCodec.Pcm, 240), "PCM 5 ms");
+        AcceptFormat(new AudioFormatInfo(48000, 2, 24, 1, 6, 288_000, (int)AudioTransportCodec.Pcm, 120), "PCM tight 2.5 ms");
+        // Opus at every frame size the UI can produce, including the 60 ms maximum.
+        foreach (var frame in new[] { 120, 240, 480, 960, 2880 })
+        {
+            AcceptFormat(new AudioFormatInfo(48000, 2, 16, 1, 4, 192_000, (int)AudioTransportCodec.Opus, frame), $"Opus {frame} samples");
+        }
+        // Mono, and the lower Opus rates: nothing in the Windows app sends these today, but they are
+        // legal and a future port might. Rejecting them would be a silent interop break.
+        AcceptFormat(new AudioFormatInfo(48000, 1, 16, 1, 4, 192_000, (int)AudioTransportCodec.Opus, 480), "mono Opus");
+        AcceptFormat(new AudioFormatInfo(24000, 2, 16, 1, 4, 96_000, (int)AudioTransportCodec.Opus, 480), "Opus at 24 kHz");
+
+        // --- What must be rejected. ---
+        // Zero channels divided by zero once per packet in the PCM path — a log flood at packet rate.
+        RejectFormat(new AudioFormatInfo(48000, 0, 24, 1, 6, 288_000, (int)AudioTransportCodec.Pcm, 240), "zero channels");
+        RejectFormat(new AudioFormatInfo(48000, 8, 24, 1, 6, 288_000, (int)AudioTransportCodec.Pcm, 240), "eight channels");
+        // A huge frame size sized the Opus decode scratch — a remote-controlled multi-megabyte
+        // allocation per packet on the network thread.
+        RejectFormat(new AudioFormatInfo(48000, 2, 16, 1, 4, 192_000, (int)AudioTransportCodec.Opus, 10_000_000), "absurd frame size");
+        RejectFormat(new AudioFormatInfo(48000, 2, 16, 1, 4, 192_000, (int)AudioTransportCodec.Opus, 0), "zero frame size");
+        RejectFormat(new AudioFormatInfo(0, 2, 24, 1, 6, 288_000, (int)AudioTransportCodec.Pcm, 240), "zero sample rate");
+        RejectFormat(new AudioFormatInfo(48000, 2, 24, 1, 6, 288_000, 99, 240), "unknown codec");
+        // Opus at a rate libopus does not support — the decoder constructor would throw, and that
+        // throw used to escape into the packet handler.
+        RejectFormat(new AudioFormatInfo(44100, 2, 16, 1, 4, 192_000, (int)AudioTransportCodec.Opus, 480), "Opus at 44.1 kHz");
+
+        return "every format the sender emits is accepted; zero channels, absurd frame sizes, unknown codecs and illegal Opus rates are refused";
+    }
+
+    private static void AcceptFormat(AudioFormatInfo format, string what)
+    {
+        Check(format.IsUsable(out var why),
+            $"a format a real RemSound sends must be accepted — {what} was rejected as \"{why}\". "
+            + "This is the cross-port half: refusing it takes that peer's audio away with no error anywhere.");
+    }
+
+    private static void RejectFormat(AudioFormatInfo format, string what)
+    {
+        Check(!format.IsUsable(out _), $"an unusable format must be refused before anything acts on it — {what} was accepted");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // R5 — a malformed Format packet must not cost a working peer four seconds of audio
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// A bad Format packet arriving mid-stream must leave the existing session untouched.
+    ///
+    /// <para>The old code disposed the existing session BEFORE building its replacement. When the
+    /// replacement's constructor threw — which a corrupt Opus rate or channel count made easy — the
+    /// disposed session stayed in the table. Its decoder was gone so every audio packet dropped, and
+    /// the next GOOD format packet matched the disposed session's own format on the early-return
+    /// path, so it was never replaced. The peer stayed silent until the idle prune reaped it four
+    /// seconds later.</para>
+    ///
+    /// <para>Driven through the receiver's real packet entry point with real bytes on the wire, not
+    /// by calling an internal method — the ordering bug lived in the handler, so the handler is what
+    /// has to be exercised.</para>
+    ///
+    /// <para><b>Honest scope.</b> What this actually discriminates is the R4 validation: break that
+    /// and this goes red on the rejected-count assertion. It does NOT independently catch the R5
+    /// re-ordering, because with R4 in place the StreamSession constructor can no longer be made to
+    /// throw from a wire format at all — every value that used to reach it is now refused earlier.
+    /// The re-ordering was kept anyway as the second line of defence (it costs nothing and makes the
+    /// failure cheap if a future format field slips through), but it is deliberately recorded here as
+    /// uncovered rather than left looking tested. Verified by breaking both fixes and watching which
+    /// assertions moved.</para>
+    /// </summary>
+    private static string? AuditBadFormatKeepsTheExistingSession()
+    {
+        var peer = new IPEndPoint(IPAddress.Parse("192.168.77.10"), 47830);
+        using var receiver = new AudioReceiver();
+        receiver.SetAllowedSenders([peer]);
+        receiver.SetPlaybackEnabled(true);
+
+        const ushort streamId = 7;
+        var good = new AudioFormatInfo(48000, 2, 16, 1, 4, 192_000, (int)AudioTransportCodec.Opus, 480);
+
+        receiver.InjectExternalPacket(BuildFormatPacket(streamId, 1, good), FormatPacketLength(good), peer);
+        Check(receiver.ActiveFormatsFromAddress(peer.Address).Count == 1,
+            "a good format packet must open a session");
+
+        // Now the corrupt one: Opus at a sample rate libopus rejects. Same peer, same stream id, so
+        // it takes the format-CHANGE path — the one that disposed first and asked questions later.
+        var bad = new AudioFormatInfo(44100, 2, 16, 1, 4, 192_000, (int)AudioTransportCodec.Opus, 480);
+        receiver.InjectExternalPacket(BuildFormatPacket(streamId, 2, bad), FormatPacketLength(bad), peer);
+
+        var after = receiver.ActiveFormatsFromAddress(peer.Address);
+        Check(after.Count == 1,
+            $"a malformed format packet must not remove the working session (found {after.Count})");
+        Check(after[0].SampleRate == 48000 && after[0].FrameSamplesPerChannel == 480,
+            $"the session must still be the GOOD format, not replaced or half-replaced (got {after[0]})");
+        Check(receiver.FormatPacketsRejected >= 1,
+            "the rejected format must be counted, so a peer that has genuinely gone wrong is a number and not just silence");
+
+        // And a good packet afterwards must still be honoured — the old failure left a disposed
+        // session in place that matched every subsequent format and blocked its own replacement.
+        var changed = new AudioFormatInfo(48000, 2, 16, 1, 4, 192_000, (int)AudioTransportCodec.Opus, 960);
+        receiver.InjectExternalPacket(BuildFormatPacket(streamId, 3, changed), FormatPacketLength(changed), peer);
+        var final = receiver.ActiveFormatsFromAddress(peer.Address);
+        Check(final.Count == 1 && final[0].FrameSamplesPerChannel == 960,
+            "a good format packet after a bad one must still take effect");
+
+        return "a corrupt format is counted and dropped; the working session survives it and still accepts the next real change";
+    }
+
+    private static int FormatPacketLength(AudioFormatInfo format) =>
+        RemPacket.HeaderSize + RemPacket.FormatPayloadWithFingerprintSize;
+
+    private static byte[] BuildFormatPacket(ushort streamId, uint sequence, AudioFormatInfo format)
+    {
+        var packet = new byte[RemPacket.HeaderSize + RemPacket.FormatPayloadWithFingerprintSize];
+        RemPacket.WriteHeader(packet, RemPacketType.Format, streamId, sequence);
+        RemPacket.WriteFormatPayload(packet.AsSpan(RemPacket.HeaderSize), format, null);
+        return packet;
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // R2 — a plugin must get a claimed peer ONCE, not once per output lane
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// With two output lanes active, a claimed peer must reach the DAW at its real level.
+    ///
+    /// <para>The engine keeps a mirror replica of every stream per extra active output lane, so each
+    /// sound card can play it on its own clock. The speaker paths filter those by output lane.
+    /// <c>ReadClaimedPeer</c> does not filter by lane — a plugin's track has no output lane — so it
+    /// summed the primary AND its mirror and handed the DAW two copies: about 6 dB hot, and
+    /// comb-filtered as the two rings drifted apart. It only bit with both a WASAPI and an ASIO
+    /// output ticked, which is why it survived to here.</para>
+    ///
+    /// <para>Measured against the SAME peer read with one lane active, so the test is a comparison of
+    /// levels rather than a hard-coded number — it fails if the audio is doubled, and it would also
+    /// fail if a future change halved it.</para>
+    /// </summary>
+    private static string? AuditClaimedPeerIsNotDoubled()
+    {
+        var peer = new IPEndPoint(IPAddress.Parse("192.168.77.20"), 47830);
+        var instance = Guid.NewGuid();
+
+        var oneLane = ClaimedPeerPeak(peer, instance, bothLanes: false);
+        Check(oneLane > 0.2f, $"the claimed peer must reach the plugin at all (peak {oneLane:0.000})");
+
+        var twoLanes = ClaimedPeerPeak(peer, instance, bothLanes: true);
+        Check(twoLanes > 0.2f, $"the claimed peer must still reach the plugin with two outputs ticked (peak {twoLanes:0.000})");
+
+        // Doubling would land at ~2x. Allow a wide tolerance for drift-corrector differences between
+        // the two rings; anything approaching 1.5x is the bug.
+        Check(twoLanes < oneLane * 1.4f,
+            $"a claimed peer must reach the plugin ONCE however many outputs are ticked — with two lanes it "
+            + $"came out {twoLanes / oneLane:0.00}x louder, which is the primary and its mirror being summed "
+            + $"(one lane {oneLane:0.000}, two lanes {twoLanes:0.000})");
+
+        return $"a claimed peer reads at the same level with one output lane or two ({oneLane:0.000} vs {twoLanes:0.000}) — no mirror doubling";
+    }
+
+    private static float ClaimedPeerPeak(IPEndPoint peer, Guid instance, bool bothLanes)
+    {
+        var engine = new PlayoutEngine(new ReceiverDiagnostics());
+        engine.SetLaneActive(RenderRoute.WasapiLane, true);
+        engine.SetLaneActive(RenderRoute.AsioLane, bothLanes);
+        engine.SetMaxLatencyMs(RenderRoute.Mixed, 30);
+
+        var session = engine.GetOrCreateSession(peer, 1, 4 * 1024 * 1024);
+        FillSession(session, 0.4f);
+
+        var claims = new PluginPeerClaims();
+        engine.SetPluginPeerClaims(claims);
+        claims.Claim(peer.Address, instance);
+
+        const int frames = 480;
+        var destination = new float[frames * 2];
+        // First read primes the drift resampler's delay line; measure the second.
+        engine.ReadClaimedPeer(peer.Address, destination, frames);
+        Array.Clear(destination);
+        engine.ReadClaimedPeer(peer.Address, destination, frames);
+
+        var peak = 0f;
+        foreach (var f in destination) peak = Math.Max(peak, Math.Abs(f));
+        return peak;
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // S9 / R6 — comments and contracts that the audit found were claiming more than the code did
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// The two audio-thread taps that were running unguarded must be isolated from the audio path.
+    ///
+    /// <para>A recorder callback or a per-peer filter that threw used to unwind out of the render
+    /// read into NAudio's WasapiOut loop, which catches it and raises PlaybackStopped — so
+    /// MultiOutputPlayout logged <c>output "X" lost the device</c> and stopped the output. A recorder
+    /// bug presented as a hardware fault. The mixed taps either side were already wrapped; these two
+    /// were missed.</para>
+    /// </summary>
+    private static string? AuditRecorderCannotKillTheOutput()
+    {
+        var peer = new IPEndPoint(IPAddress.Parse("192.168.77.30"), 47830);
+        var engine = new PlayoutEngine(new ReceiverDiagnostics());
+        engine.SetLaneActive(RenderRoute.WasapiLane, true);
+        engine.SetLaneActive(RenderRoute.AsioLane, false);
+        engine.SetMaxLatencyMs(RenderRoute.Mixed, 30);
+
+        var session = engine.GetOrCreateSession(peer, 1, 4 * 1024 * 1024);
+        FillSession(session, 0.4f);
+
+        var calls = 0;
+        engine.SetRecordTap((_, _) => { calls++; throw new InvalidOperationException("recorder blew up"); }, raw: false);
+
+        var buffer = new byte[960 * 8];
+        var peak = 0f;
+        try
+        {
+            peak = PeakOfMix(engine, buffer);
+        }
+        catch (Exception ex)
+        {
+            throw new CheckFailed(
+                $"a throwing recorder tap escaped the render read as {ex.GetType().Name} — in a real session that "
+                + "reaches NAudio's render loop and is reported as the output losing its device");
+        }
+
+        Check(calls > 0, "the record tap must actually have been called, or this test proves nothing");
+        Check(peak > 0.05f, $"the audio must keep flowing through a failing recorder (peak {peak:0.000})");
+        return "a throwing per-peer record tap is contained; the mix keeps playing and the output is not reported as lost";
+    }
+}

@@ -32,9 +32,16 @@ public sealed class PluginBridgeClient : IDisposable
 
     // The ring between the bridge thread (writer) and the DAW's audio thread (reader). Sized for a
     // generous DAW buffer plus headroom, so a late reply has somewhere to land rather than being lost.
-    private readonly float[] ring;
-    private readonly object ringGate = new();
-    private int ringRead, ringWrite, ringCount;
+    //
+    // LOCK-FREE, and that is the point. This was a hand-rolled array guarded by a `lock (ringGate)`
+    // taken on BOTH sides — so the DAW's audio thread could block waiting for the bridge's network
+    // thread to finish a write, and if that thread were descheduled mid-write it would stall every
+    // plugin in the session, not just this one. The class summary above already promised the
+    // opposite: "The DAW's audio thread must never wait on a socket ... instead of a stall in
+    // somebody's session." AudioRingBuffer is the single-producer / single-consumer ring RemSound
+    // already uses between the network and render threads on the receive side — exactly this shape —
+    // and it drops oldest on overflow just as the hand-rolled one did. 2026-08-23 audit, finding P1.
+    private readonly AudioRingBuffer ring;
 
     private readonly byte[] sendScratch = new byte[PluginBridgeProtocol.MaxAudioBytes];
     private readonly byte[] requestScratch = new byte[sizeof(int)];
@@ -69,14 +76,14 @@ public sealed class PluginBridgeClient : IDisposable
 
     /// <summary>How much audio is waiting for the DAW right now, in frames. The number that explains
     /// a crackle: near zero means the app is not keeping up, and climbing means it is over-supplying.</summary>
-    public int RingFrames { get { lock (ringGate) { return ringCount / PluginBridgeProtocol.WireChannels; } } }
+    public int RingFrames => ring.BufferedBytes / (sizeof(float) * PluginBridgeProtocol.WireChannels);
 
     public PluginBridgeClient(int appPort = PluginBridgeProtocol.DefaultPort, Guid? id = null, int ringFrames = 8192)
     {
         instanceId = id ?? Guid.NewGuid();
         instanceHash = PluginBridgeProtocol.InstanceHash(instanceId);
         app = new IPEndPoint(IPAddress.Loopback, appPort);
-        ring = new float[ringFrames * PluginBridgeProtocol.WireChannels];
+        ring = new AudioRingBuffer(ringFrames * PluginBridgeProtocol.WireChannels * sizeof(float));
         link = new PluginBridgeLink(0);   // any free loopback port; the app replies to wherever we bind
         link.MessageReceived += OnMessage;
     }
@@ -96,7 +103,7 @@ public sealed class PluginBridgeClient : IDisposable
             link.Send(app, PluginBridgeMessage.ReleasePeer, instanceHash, previous, []);
         }
         receivingFrom = peer;
-        lock (ringGate) { ringRead = ringWrite = ringCount = 0; }
+        ring.Reset();
         Notable?.Invoke(peer is null
             ? (previous is null ? "not receiving anybody" : $"released {previous} - back to RemSound's own output")
             : $"now receiving {peer}" + (previous is null ? "" : $" (was {previous})"));
@@ -117,18 +124,10 @@ public sealed class PluginBridgeClient : IDisposable
         var wantedFloats = wanted * PluginBridgeProtocol.WireChannels;
         destination[..wantedFloats].Clear();
 
-        var filled = 0;
-        lock (ringGate)
-        {
-            var available = Math.Min(wantedFloats, ringCount);
-            for (var i = 0; i < available; i++)
-            {
-                destination[i] = ring[ringRead];
-                ringRead = (ringRead + 1) % ring.Length;
-            }
-            ringCount -= available;
-            filled = available / PluginBridgeProtocol.WireChannels;
-        }
+        // Lock-free consumer read. Any shortfall is already silence because we cleared above, and
+        // AudioRingBuffer zero-fills the tail as well; the return value counts only what genuinely
+        // came out of the ring, which is what the caller needs to know.
+        var filled = ring.ReadFloats(destination[..wantedFloats]) / PluginBridgeProtocol.WireChannels;
 
         if (filled < wanted) Interlocked.Increment(ref blocksStarved);
         else Interlocked.Increment(ref blocksServed);
@@ -183,22 +182,21 @@ public sealed class PluginBridgeClient : IDisposable
         }
     }
 
+    /// <summary>Bridge thread: top the ring up with a reply that just arrived. Lock-free producer
+    /// side — see the <c>ring</c> field. Overflow drops the OLDEST samples, which is what the
+    /// hand-rolled version did and the right trade: a ring that has overrun means we are behind, and
+    /// keeping stale audio would hold that lateness forever.
+    ///
+    /// <para>The payload is little-endian float, and so is every machine RemSound builds for
+    /// (win-x64), so the bytes go into the ring verbatim and come back out as floats. That is the
+    /// same assumption the receive path's ring already makes between the network and render
+    /// threads.</para></summary>
     private void WriteRing(ReadOnlySpan<byte> payload)
     {
-        var floats = payload.Length / sizeof(float);
-        lock (ringGate)
-        {
-            for (var i = 0; i < floats; i++)
-            {
-                // Full ring: drop the OLDEST sample, not the newest. A ring that has overrun means we
-                // are behind, and keeping stale audio would hold that lateness forever — better to
-                // lose a moment and stay current, which is the same trade the jitter buffer makes.
-                if (ringCount == ring.Length) { ringRead = (ringRead + 1) % ring.Length; ringCount--; }
-                ring[ringWrite] = BinaryPrimitives.ReadSingleLittleEndian(payload[(i * sizeof(float))..]);
-                ringWrite = (ringWrite + 1) % ring.Length;
-                ringCount++;
-            }
-        }
+        // Trim to whole floats: a truncated tail would shift every subsequent sample by a byte.
+        var usable = payload.Length - (payload.Length % sizeof(float));
+        if (usable <= 0) return;
+        ring.Write(payload[..usable]);
     }
 
     /// <summary>When the app was last heard from. Turns "it stopped working" into a time.</summary>

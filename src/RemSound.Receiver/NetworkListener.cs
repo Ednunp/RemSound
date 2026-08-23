@@ -112,17 +112,35 @@ internal sealed class NetworkListener : IDisposable
         var buffer = new byte[2048];
         EndPoint anyEndpoint = new IPEndPoint(IPAddress.Any, 0);
 
+        // Consecutive socket errors — see the matching note in AudioSender.InboundReceiveLoop. One is
+        // routine (an ICMP port-unreachable from a departed peer surfaces as WSAECONNRESET on the
+        // next receive); a PERSISTENT one used to spin this loop flat out with nothing written to the
+        // log at all, so a dead receive socket looked exactly like a quiet one.
+        // 2026-08-23 audit, finding S9.
+        var consecutiveErrors = 0;
         while (!token.IsCancellationRequested)
         {
             int received;
             try
             {
                 received = activeSocket.ReceiveFrom(buffer, 0, buffer.Length, SocketFlags.None, ref anyEndpoint);
+                consecutiveErrors = 0;
             }
             catch (SocketException ex) when (ex.SocketErrorCode == SocketError.Interrupted) { break; }
             catch (ObjectDisposedException) { break; }
-            catch (SocketException) { continue; }
             catch (OperationCanceledException) { break; }
+            catch (SocketException ex)
+            {
+                consecutiveErrors++;
+                if (consecutiveErrors == 1) continue;   // the routine single reset — no cost, no noise
+                // Report on a power-of-two ladder so a stuck socket is visible without flooding.
+                if ((consecutiveErrors & (consecutiveErrors - 1)) == 0)
+                {
+                    onDiagnostic($"receive socket error x{consecutiveErrors}: {ex.SocketErrorCode} — backing off; no audio can arrive while this persists");
+                }
+                if (token.WaitHandle.WaitOne(Math.Min(1000, consecutiveErrors * 10))) break;
+                continue;
+            }
 
             if (received <= 0) continue;
             if (anyEndpoint is not IPEndPoint remote) continue;

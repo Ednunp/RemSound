@@ -17,6 +17,25 @@ internal interface ICaptureBackend : IDisposable
 {
     bool IsRunning { get; }
 
+    /// <summary>
+    /// True when capture has DIED but the backend was never told to stop — the device was pulled
+    /// into exclusive mode by another app, the audio service restarted, the driver hiccuped, or a
+    /// per-application loopback client errored out. Distinct from <see cref="IsRunning"/> being
+    /// false, which means a deliberate stop.
+    ///
+    /// <para>Why this exists: both WASAPI backends used to record the error in their
+    /// RecordingStopped handler, log it, and then carry on reporting that they were capturing. The
+    /// app went on saying it was sending, the mix loop pulled silence out of a dead source for as
+    /// long as the session lasted, and nothing ever retried — the same "it died and we kept saying
+    /// it was fine" shape as the recording bug fixed in AudioRecorder. Surfacing it here hooks the
+    /// recovery the app ALREADY has: <c>CompositeCaptureBackend.IsRunning</c> folds this in, so the
+    /// main window's one-second tick sees the sender as not-running and re-applies, which reopens
+    /// the capture. A device that is genuinely gone drops out of the enumeration instead and the
+    /// spec set changes, so this does not spin on a permanently-absent device.
+    /// 2026-08-23 audit, findings S6 and S7.</para>
+    /// </summary>
+    bool HasFaulted { get; }
+
     /// <summary>Total capture callback count across all active sources (WASAPI) or the ASIO
     /// driver's input-callback count.</summary>
     long TotalCaptureCallbacks { get; }

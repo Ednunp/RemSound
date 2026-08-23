@@ -130,9 +130,16 @@ internal sealed class CompositeRenderBackend : IRenderBackend
         lock (gate)
         {
             if (started) return;
-            wasapi?.Start();
-            asio?.Start();
+            // `started` is set BEFORE either child starts, and each start is guarded. Previously
+            // both ran bare and `started = true` came after: if the ASIO start threw, the WASAPI
+            // producer was already running but `started` stayed false, so Stop() early-returned and
+            // that producer could never be stopped — a stuck output and a leaked task for the rest
+            // of the session. One lane failing must not strand the other. 2026-08-23 audit, R6.
             started = true;
+            try { wasapi?.Start(); }
+            catch (Exception ex) { onDiagnostic?.Invoke($"wasapi render failed to start: {ex.GetType().Name}: {ex.Message}"); }
+            try { asio?.Start(); }
+            catch (Exception ex) { onDiagnostic?.Invoke($"asio render failed to start: {ex.GetType().Name}: {ex.Message}"); }
             onDiagnostic?.Invoke($"composite render started (mode={ModeLabel()})");
         }
     }

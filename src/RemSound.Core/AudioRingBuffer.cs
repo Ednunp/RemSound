@@ -67,6 +67,15 @@ public sealed class AudioRingBuffer
         if (source.Length > available)
         {
             // Drop oldest to make room. Advance head by the deficit.
+            //
+            // This breaks the strict SPSC rule that only the consumer touches `head` — exactly as
+            // TrimFromProducer does, and for the same reason: the alternative is an unbounded queue
+            // or a lost write on a real-time producer path. The race is a lost update if the consumer
+            // advances head at the same instant, which makes the next `available` read too large and
+            // lets the consumer play a few stale bytes. It needs both sides to hit the same window
+            // while the ring is already full, so it is rare and self-corrects within one read.
+            // Written down because the trim path documented this and the overflow path did not.
+            // 2026-08-23 audit, finding R6.
             var deficit = source.Length - available;
             Volatile.Write(ref head, (currentHead + deficit) & 0x7FFFFFFF);
             Interlocked.Add(ref drops, deficit);

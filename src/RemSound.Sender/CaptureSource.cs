@@ -151,14 +151,27 @@ internal sealed class CaptureSource : IDisposable
         }
     }
 
+    /// <summary>
+    /// The capture stopped. An exception here means nobody asked it to — the device was taken, the
+    /// audio service restarted, or (for a per-application source) the process-loopback client
+    /// errored out and its thread ended. Flag it so <see cref="MixingEngine"/> can drop this source
+    /// and re-open it, instead of leaving a dead source in the mix quietly contributing silence for
+    /// the rest of the session. 2026-08-23 audit, findings S6 and S7.
+    /// </summary>
     private void OnRecordingStopped(object? sender, StoppedEventArgs e)
     {
         if (e.Exception is not null)
         {
             lastError = e.Exception.Message;
-            onDiagnostic?.Invoke($"capture stopped with error for \"{Name}\": {e.Exception.GetType().Name}: {e.Exception.Message}");
+            Faulted = true;
+            onDiagnostic?.Invoke($"capture DIED for \"{Name}\" (not a requested stop): {e.Exception.GetType().Name}: {e.Exception.Message}");
         }
     }
+
+    /// <summary>True when this source's capture stopped on its own with an error. The mixer reads it
+    /// to evict and re-open the source; nothing else clears it, because a faulted CaptureSource is
+    /// always thrown away rather than revived.</summary>
+    public bool Faulted { get; private set; }
 
     /// <summary>
     /// Down-mixes any channel layout to stereo. Mono is duplicated to L=R; stereo passes through;

@@ -113,6 +113,10 @@ internal sealed class HostCaptureBackend : ICaptureBackend
     // report the host rather than pretending to enumerate hardware. ----------------------------
 
     public bool IsRunning => running;
+
+    /// <summary>There is no device to lose — the host owns it, and if the DAW stops calling us there
+    /// is nothing here to re-open. Always false. See <see cref="ICaptureBackend.HasFaulted"/>.</summary>
+    public bool HasFaulted => false;
     public long TotalCaptureCallbacks => callbacks;
     public long TotalCaptureBytes => bytes;
     public string? FirstCaptureFormatDescription => $"{hostSampleRate:0} Hz, {Channels} ch, host-driven (DAW)";

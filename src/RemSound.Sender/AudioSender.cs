@@ -297,6 +297,12 @@ public sealed class AudioSender : IDisposable
         engine = new CompositeCaptureBackend(currentAudioMode, currentAsioDriverName, defaultLane.OnMixedSamples, asioLane.OnMixedSamples, persistentAsio, msg => diagnostic?.Invoke(msg), useTightLatencyWasapi: false);
     }
 
+    /// <summary>The persistent ASIO backend, or null when no ASIO driver is selected. Test seam only:
+    /// it lets the gate prove that stopping the sender PARKS this lane, which is the fix for "send
+    /// off but still transmitting" (2026-08-23 audit, S1). Constructing one does not open a driver,
+    /// so the gate can drive this on any machine.</summary>
+    internal AsioCaptureBackend? PersistentAsioForTest => persistentAsio;
+
     // Held so SetTightLatency can rebuild the composite with the same mode/driver.
     private AudioMode currentAudioMode;
     private string? currentAsioDriverName;
@@ -607,12 +613,24 @@ public sealed class AudioSender : IDisposable
         Interlocked.Exchange(ref packetsSent, 0);
         Interlocked.Exchange(ref bytesSent, 0);
         uptime.Restart();
+        // Unpark the ASIO lane if a previous Stop parked it (see Stop below). This re-points the
+        // persistent instance's callback at the lane the CURRENT mode wants; the composite's Start,
+        // a line below, restores its channel pairs via UpdateSources. Idempotent and cheap when the
+        // lane was never parked, and it touches no driver call in either case.
+        lock (configGate) EnsurePersistentAsioLocked();
         engine.Start(pendingSources);
     }
 
     public void Stop()
     {
         engine.Stop();
+        // The composite stops the WASAPI lane only — it deliberately never stops the borrowed ASIO
+        // child, because closing and reopening that driver is what hangs Audient for ~5 seconds.
+        // That part is right and must stay. But nothing else stood the lane down either: the
+        // callback still pointed at asioLane, and MainForm does not clear the peer list on a stop,
+        // so an ASIO lane kept capturing, encoding and TRANSMITTING with "Send my audio" off.
+        // Park it instead — Ed's own mechanism, no driver call at all. 2026-08-23 audit, S1.
+        lock (configGate) persistentAsio?.Park();
         uptime.Stop();
     }
 
@@ -643,17 +661,36 @@ public sealed class AudioSender : IDisposable
     {
         var buffer = new byte[2048];
         EndPoint anyEndpoint = new IPEndPoint(IPAddress.Any, 0);
+        // Consecutive socket errors. A single one is routine on Windows UDP — an ICMP port-unreachable
+        // from a peer that has gone away surfaces as WSAECONNRESET on the NEXT receive — so the common
+        // case must stay a bare `continue`. A PERSISTENT error is different: the old code spun this
+        // loop as fast as the CPU allowed, with no log line anywhere, so "the socket is broken and we
+        // are receiving nothing" looked exactly like "nobody is sending". Back off and say so.
+        // 2026-08-23 audit, finding S9.
+        var consecutiveErrors = 0;
         while (!token.IsCancellationRequested)
         {
             int received;
             try
             {
                 received = udp.Client.ReceiveFrom(buffer, 0, buffer.Length, SocketFlags.None, ref anyEndpoint);
+                consecutiveErrors = 0;
             }
             catch (SocketException ex) when (ex.SocketErrorCode == SocketError.Interrupted) { break; }
             catch (ObjectDisposedException) { break; }
-            catch (SocketException) { continue; }
             catch (OperationCanceledException) { break; }
+            catch (SocketException ex)
+            {
+                consecutiveErrors++;
+                if (consecutiveErrors == 1) continue;   // the routine single reset — no cost, no noise
+                // Report on a power-of-two ladder so a stuck socket is visible without flooding.
+                if ((consecutiveErrors & (consecutiveErrors - 1)) == 0)
+                {
+                    diagnostic?.Invoke($"sender inbound socket error x{consecutiveErrors}: {ex.SocketErrorCode} — backing off; relay traffic will not arrive while this persists");
+                }
+                if (token.WaitHandle.WaitOne(Math.Min(1000, consecutiveErrors * 10))) break;
+                continue;
+            }
 
             if (received <= 0) continue;
             if (anyEndpoint is not IPEndPoint remote) continue;
@@ -690,25 +727,44 @@ public sealed class AudioSender : IDisposable
     /// outside relay mode.</summary>
     public long InboundPackets => Interlocked.Read(ref inboundPackets);
 
+    /// <summary>
+    /// Shutdown. The ORDER here is the whole content of this method, so it is spelled out.
+    ///
+    /// <para>Stop first, and never let it throw past this point — it used to be an unguarded call,
+    /// so a backend that failed to stop skipped the socket close, the thread join and the qWAVE
+    /// detach that follow it (2026-08-23 audit, S9).</para>
+    ///
+    /// <para>Then the socket, and close it BEFORE joining the inbound thread. That thread blocks in
+    /// ReceiveFrom, which cancelling a token does not wake; closing the socket is what wakes it.
+    /// Cancelling and then joining, as this did, meant the join always burned its full 500 ms and
+    /// the thread only died later (2026-08-23 audit, S9). qWAVE is detached before the close because
+    /// its flow handle points into the kernel-side socket state.</para>
+    ///
+    /// <para>Then the engine, then the persistent ASIO driver, and ONLY THEN the lanes' ciphers.
+    /// That order is load-bearing: the ASIO driver's callback thread is what encrypts, so freeing
+    /// the AES-GCM state while the driver is still open is a use-after-free on a real-time thread.
+    /// The Stop above parks the lane, which closes the window; disposing in this order closes it
+    /// again for anyone who calls Dispose without Stop (2026-08-23 audit, S3).</para>
+    /// </summary>
     public void Dispose()
     {
-        Stop();
+        try { Stop(); }
+        catch (Exception ex) { diagnostic?.Invoke($"sender: stop during dispose threw {ex.GetType().Name}: {ex.Message}"); }
+
         try { inboundCts?.Cancel(); } catch { /* ignore */ }
+        try { networkPriority.Dispose(); } catch { /* ignore */ }
+        try { udp.Dispose(); } catch { /* ignore */ }
         try { inboundThread?.Join(500); } catch { /* ignore */ }
+        try { inboundCts?.Dispose(); } catch { /* ignore */ }
+        inboundCts = null;
+        inboundThread = null;
+
+        try { engine.Dispose(); } catch (Exception ex) { diagnostic?.Invoke($"sender: engine dispose threw {ex.GetType().Name}: {ex.Message}"); }
+        try { persistentAsio?.Dispose(); } catch (Exception ex) { diagnostic?.Invoke($"sender: asio dispose threw {ex.GetType().Name}: {ex.Message}"); }
+        persistentAsio = null;
+
         try { defaultLane.DisposeCrypto(); } catch { /* ignore */ }
         try { asioLane.DisposeCrypto(); } catch { /* ignore */ }
-        engine.Dispose();
-        // Dispose the persistent ASIO LAST, after the engine that was borrowing it. The
-        // composite's Dispose doesn't touch the persistent instance (it borrowed it); we
-        // own it here and close the driver as part of app shutdown.
-        try { persistentAsio?.Dispose(); } catch { /* ignore */ }
-        persistentAsio = null;
-        // Detach the qWAVE flow before closing the socket — the qwave handle holds a
-        // reference into the kernel-side socket state, and closing the socket first leaves
-        // the QOS flow handle pointing at freed state. Order matters even though both calls
-        // are wrapped in try/catch.
-        try { networkPriority.Dispose(); } catch { /* ignore */ }
-        udp.Dispose();
     }
 
     // === wire path (shared across all lanes) ===

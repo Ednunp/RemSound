@@ -97,7 +97,16 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
         }
     }
 
-    public bool IsRunning => started;
+    /// <summary>Running means "started AND the WASAPI lane is actually alive". Folding the fault in
+    /// here is what gives a dead capture a recovery route: the main window's one-second tick calls
+    /// EnsureRequestedAudioRunning, sees the sender as not-running, re-applies, and the restart
+    /// re-opens the device. Without it a faulted lane sat "running" and silent forever.
+    /// The ASIO child is excluded deliberately — it is legitimately open-and-parked when sending is
+    /// off, and reporting that as not-running would make the tick restart the sender every second.
+    /// 2026-08-23 audit, findings S6 and S7.</summary>
+    public bool IsRunning => started && !HasFaulted;
+
+    public bool HasFaulted => wasapi?.HasFaulted ?? false;
     public long TotalCaptureCallbacks => (wasapi?.TotalCaptureCallbacks ?? 0) + (asio?.TotalCaptureCallbacks ?? 0);
     public long TotalCaptureBytes => (wasapi?.TotalCaptureBytes ?? 0) + (asio?.TotalCaptureBytes ?? 0);
     public string? FirstCaptureFormatDescription => asio?.FirstCaptureFormatDescription ?? wasapi?.FirstCaptureFormatDescription;
@@ -283,24 +292,41 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
     /// backend shape during the window, just an in-place update with no rebuild at all. Holds gate.</summary>
     private void OnRebuildDue(object? state)
     {
-        lock (gate)
+        // THIS RUNS ON A THREAD-POOL THREAD, so nothing may escape it. An unhandled exception on a
+        // pool thread terminates the process — AppDomain.UnhandledException logs it but cannot stop
+        // it. Start() opens capture devices and MixingEngine.Start can throw, so a device that
+        // vanishes inside the 250 ms debounce window used to exit RemSound outright.
+        // PushModeWasapiBackend.Start already carries a catch for exactly this reasoning ("it could
+        // crash the whole app during device churn"); the timer path was missed.
+        // 2026-08-23 audit, finding S4.
+        try
         {
-            var specs = pendingRebuildSpecs;
-            pendingRebuildSpecs = null;
-            if (specs is null || !started) return;
-            var (newWasapi, newAsio) = SplitSpecs(specs);
-            var wouldBePush = IsPushEligible(newWasapi);
-            var isPush = wasapi is PushModeWasapiBackend;
-            if (wouldBePush != isPush)
+            lock (gate)
             {
-                onDiagnostic?.Invoke($"wasapi backend: applying coalesced rebuild → {newWasapi.Count} wasapi source(s)");
-                StopInternal();
-                Start(specs);
+                var specs = pendingRebuildSpecs;
+                pendingRebuildSpecs = null;
+                if (specs is null || !started) return;
+                var (newWasapi, newAsio) = SplitSpecs(specs);
+                var wouldBePush = IsPushEligible(newWasapi);
+                var isPush = wasapi is PushModeWasapiBackend;
+                if (wouldBePush != isPush)
+                {
+                    onDiagnostic?.Invoke($"wasapi backend: applying coalesced rebuild → {newWasapi.Count} wasapi source(s)");
+                    StopInternal();
+                    Start(specs);
+                }
+                else
+                {
+                    ApplyInPlace(newWasapi, newAsio);
+                }
             }
-            else
-            {
-                ApplyInPlace(newWasapi, newAsio);
-            }
+        }
+        catch (Exception ex)
+        {
+            // Leave the lane stopped rather than half-built. The device-change watcher re-applies
+            // when a usable device appears, which is the same recovery every other capture-open
+            // failure relies on.
+            onDiagnostic?.Invoke($"wasapi backend: coalesced rebuild failed: {ex.GetType().Name}: {ex.Message} — lane left stopped, will re-open on the next device change");
         }
     }
 

@@ -226,7 +226,11 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
     {
         // Single-source backend; live add/remove like MixingEngine V2 isn't applicable.
         // If the spec list shape is unchanged, no-op. Otherwise restart.
-        var noChange = activeSpec is { } s
+        // A faulted lane must NOT count as "no change" — that early return is what kept a dead
+        // capture on the same device alive-looking forever, because the spec set never changes when
+        // a device faults in place. 2026-08-23 audit, finding S6.
+        var noChange = !faulted
+            && activeSpec is { } s
             && specs.Count == 1
             && specs[0].DeviceId == s.DeviceId
             && specs[0].Kind == s.Kind;
@@ -242,6 +246,10 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
 
     private void StopInternal()
     {
+        // Clear the fault first: whatever happens below, this instance is being torn down or
+        // re-opened, so the old fault must not survive into the next attempt and re-trigger the
+        // re-apply tick forever.
+        faulted = false;
         if (capture is not null)
         {
             try { capture.DataAvailable -= OnDataAvailable; } catch { /* ignore */ }
@@ -318,9 +326,13 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
             else
             {
                 // Compute a generous upper bound on output frames (add a small pad for the
-                // resampler's lookahead). The resampler is fed exactly what it needs and tells us
-                // how many output frames it actually produced; any input we couldn't feed in this
-                // iteration is held in its internal state for next callback.
+                // resampler's lookahead). We ask for MORE output than this input can produce, so
+                // ResamplePrepare always asks for at least sourceFrames and the Math.Min below never
+                // actually truncates — which matters, because anything we did not feed would be
+                // DROPPED, not held: it stays in sourceFloatScratch, which the next callback
+                // overwrites. (This comment used to claim the resampler held it. It does not. The
+                // arithmetic is what makes the path safe, so do not shrink outBound without
+                // rechecking it. 2026-08-23 audit, finding S9.)
                 var outBound = (int)Math.Ceiling(sourceFrames * (double)MixSampleRate / sourceSampleRate) + 16;
                 if (resampledScratch.Length < outBound * sourceChannels)
                     resampledScratch = new float[outBound * sourceChannels];
@@ -394,12 +406,25 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
         }
     }
 
+    /// <summary>
+    /// The capture stopped. If it stopped WITH an exception nobody asked for it, so the lane is dead
+    /// — flag it. This used to log and return, leaving <see cref="IsRunning"/> true and the app
+    /// reporting that it was still sending while the device was gone. See
+    /// <see cref="ICaptureBackend.HasFaulted"/> for the recovery this hooks into.
+    /// 2026-08-23 audit, finding S6.
+    /// </summary>
     private void OnRecordingStopped(object? sender, StoppedEventArgs e)
     {
         if (e.Exception is not null)
         {
             lastError = e.Exception.Message;
-            onDiagnostic?.Invoke($"push-wasapi: capture stopped with error: {e.Exception.GetType().Name}: {e.Exception.Message}");
+            faulted = true;
+            onDiagnostic?.Invoke($"push-wasapi: capture DIED (not a requested stop): {e.Exception.GetType().Name}: {e.Exception.Message} — lane marked faulted, the app's re-apply tick will re-open it");
         }
     }
+
+    // Set when the capture stops without us asking. Cleared by StopInternal, so a deliberate stop or
+    // a successful re-open resets it. Volatile: written on the WASAPI thread, read from the UI thread.
+    private volatile bool faulted;
+    public bool HasFaulted => faulted;
 }

@@ -235,7 +235,11 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         try { o.Device.Dispose(); } catch { /* ignore */ }
     }
 
-    private async Task ProduceLoop(CancellationToken ct)
+    /// <summary>The producer tick that feeds every WASAPI output. NOT async, and it must stay that
+    /// way — see the matching note on MixingEngine.MixLoop. The MMCSS "Pro Audio" boost belongs to
+    /// this thread; an await would move the loop off it and leave it unboosted. Wait with
+    /// <c>ct.WaitHandle.WaitOne</c>, never <c>await Task.Delay</c>.</summary>
+    private void ProduceLoop(CancellationToken ct)
     {
         // Pro Audio MMCSS for the producer thread — it's the one feeding all WASAPI outputs.
         using var threadBoost = new WindowsAudioThreadBoost("Pro Audio");
@@ -298,7 +302,13 @@ internal sealed class MultiOutputPlayout : IRenderBackend
             catch (Exception ex)
             {
                 onDiagnostic?.Invoke($"producer loop error: {ex.GetType().Name}: {ex.Message}");
-                await Task.Delay(50, ct).ConfigureAwait(false);
+                // SYNCHRONOUS wait — see the matching change in MixingEngine.MixLoop. This was
+                // `await Task.Delay(50, ct)`, and because MMCSS characteristics are per-thread, the
+                // first await moved the loop off the "Pro Audio" thread the boost was applied to and
+                // left it unboosted for the rest of the session. This is the loop that feeds every
+                // WASAPI output device, so a silent demotion here is heard as the output turning
+                // lumpy hours into a session. 2026-08-23 audit, finding S5.
+                if (ct.WaitHandle.WaitOne(50)) break;
             }
         }
     }

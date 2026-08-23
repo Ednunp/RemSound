@@ -101,9 +101,43 @@ internal sealed class MixingEngine : ICaptureBackend
         get { lock (gate) return active.Count == 0 ? null : active[0].Source.CaptureFormatDescription; }
     }
 
+    /// <summary>The first NON-NULL error across every active source — not <c>active[0]</c>'s error,
+    /// which is what this used to return. With three sources ticked and the second one dead, the
+    /// old version reported null and the failure was invisible everywhere in the app.
+    /// 2026-08-23 audit, finding S6.</summary>
     public string? FirstCaptureLastError
     {
-        get { lock (gate) return active.Count == 0 ? null : active[0].Source.LastError; }
+        get
+        {
+            lock (gate)
+            {
+                foreach (var a in active)
+                {
+                    if (a.Source.LastError is { } err) return err;
+                }
+                return null;
+            }
+        }
+    }
+
+    /// <summary>True when any source in the mix has died on its own. See
+    /// <see cref="ICaptureBackend.HasFaulted"/>. Also true if the mix task itself has ended while
+    /// sources are still open, which would leave the lane silent with nothing noticing.</summary>
+    public bool HasFaulted
+    {
+        get
+        {
+            lock (gate)
+            {
+                if (active.Count == 0) return false;
+                if (mixTask is { IsCompleted: true }) return true;
+                foreach (var a in active)
+                {
+                    if (a.Source.Faulted) return true;
+                }
+                return false;
+            }
+        }
     }
 
     public IReadOnlyList<string> ActiveSourceNames
@@ -204,15 +238,24 @@ internal sealed class MixingEngine : ICaptureBackend
 
             var desiredKeys = specs.Select(s => SourceKey(s.DeviceId, s.Kind)).ToHashSet();
 
-            // Remove sources no longer wanted.
+            // Remove sources no longer wanted, AND any source that has died on its own. The dead
+            // ones are dropped here rather than skipped so the add loop below re-opens them: the
+            // spec set does not change when a device faults in place, so matching on the key alone
+            // meant a dead source stayed in `active` under its old key and was never reopened. That
+            // is what made a per-application capture stay dead until the user unticked and reticked
+            // it, despite the comment claiming "the next reconcile re-resolves the name".
+            // 2026-08-23 audit, findings S6 and S7.
             for (var i = active.Count - 1; i >= 0; i--)
             {
                 var a = active[i];
-                if (desiredKeys.Contains(SourceKey(a.Source.DeviceId, a.Source.Kind))) continue;
+                var faulted = a.Source.Faulted;
+                if (!faulted && desiredKeys.Contains(SourceKey(a.Source.DeviceId, a.Source.Kind))) continue;
                 try { mixer.RemoveMixerInput(a.Source.Provider); } catch { /* ignore */ }
                 DisposeEntry(a);
                 active.RemoveAt(i);
-                onDiagnostic?.Invoke($"mixer: removed source \"{a.Source.Name}\" ({a.Source.Kind})");
+                onDiagnostic?.Invoke(faulted
+                    ? $"mixer: dropped DEAD source \"{a.Source.Name}\" ({a.Source.Kind}) — will re-open below if still wanted"
+                    : $"mixer: removed source \"{a.Source.Name}\" ({a.Source.Kind})");
             }
 
             // Add new sources.
@@ -327,7 +370,11 @@ internal sealed class MixingEngine : ICaptureBackend
 
     private static string SourceKey(string deviceId, CaptureKind kind) => $"{deviceId}|{kind}";
 
-    private async Task MixLoop(CancellationToken ct)
+    /// <summary>The mix tick. NOT async, and it must stay that way: the MMCSS "Pro Audio" boost
+    /// below is a property of THIS thread, so any await would resume the loop on a different,
+    /// unboosted thread-pool thread and quietly cost the capture path its priority for the rest of
+    /// the session. Wait with <c>ct.WaitHandle.WaitOne</c>, never <c>await Task.Delay</c>.</summary>
+    private void MixLoop(CancellationToken ct)
     {
         // Pro Audio scheduling category if available; falls back gracefully if MMCSS isn't accessible.
         using var threadBoost = new WindowsAudioThreadBoost("Pro Audio");
@@ -397,7 +444,16 @@ internal sealed class MixingEngine : ICaptureBackend
             catch (Exception ex)
             {
                 onDiagnostic?.Invoke($"mix loop error: {ex.GetType().Name}: {ex.Message}");
-                await Task.Delay(50, ct).ConfigureAwait(false);
+                // SYNCHRONOUS wait, deliberately — this used to be `await Task.Delay(50, ct)`.
+                // MMCSS thread characteristics are per-thread, and the "Pro Audio" boost above was
+                // applied to the thread Task.Run started on. After an await, the loop resumes on
+                // whichever thread-pool thread picks up the continuation, so every iteration from
+                // then on ran UNBOOSTED for the rest of the session — and the using-block then
+                // reverted the characteristics from the wrong thread. One logged hiccup silently
+                // demoted the capture path for good, which is exactly the shape of a fault that
+                // only shows up hours in. WaitOne keeps the loop on its own boosted thread.
+                // 2026-08-23 audit, finding S5.
+                if (ct.WaitHandle.WaitOne(50)) break;
             }
         }
     }

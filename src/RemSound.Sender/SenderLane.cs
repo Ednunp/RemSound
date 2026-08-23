@@ -16,10 +16,19 @@ namespace RemSound.Sender;
 /// Threading: the hot-path methods (<see cref="OnMixedSamples"/> and below) are called from
 /// the capture engine's callback thread. Each lane has exactly one such thread feeding it.
 /// Cross-thread state read from AudioSender (codec, mute, opusFrameSamples, etc.) goes through
-/// volatile fields on the owner. Configuration mutations (<see cref="ConfigureCodec"/>,
-/// <see cref="OnPcmFrameSizeChanged"/>) come from the UI thread; they take the same
-/// configGate that AudioSender does to serialise streamId rotation against in-flight
-/// accumulator writes — see AudioSender for the gate.
+/// volatile fields on the owner.
+///
+/// Configuration mutations (<see cref="OnCodecChanged"/>, <see cref="OnPcmFrameSizeChanged"/>,
+/// <see cref="SetRoute"/>) come from the UI thread and take AudioSender's configGate. Note what that
+/// does and does NOT buy: the gate serialises those mutations against each other, not against the
+/// capture thread, because the capture thread never takes it. So a codec or send-rate change can zero
+/// frameAccumulatorWritten while the capture thread is mid-write into the accumulator. The worst case
+/// is one malformed frame at the changeover — a single tick, on a deliberate user action that already
+/// rotates the stream id and makes the receiver open a fresh session. That is an accepted cost, not a
+/// guarantee: this comment used to say the gate serialised "in-flight accumulator writes" and it never
+/// did. The Opus ENCODER swap is a different matter and IS properly guarded — see encoderGate, because
+/// freeing native libopus state under a live Encode is a hard crash rather than a tick.
+/// 2026-08-23 audit, finding S9.
 /// </summary>
 internal sealed class SenderLane
 {

@@ -238,8 +238,26 @@ internal sealed class StreamSession : IDisposable
 
     // === Opus ===
 
+    /// <summary>
+    /// Decode one Opus packet, using inband FEC to fill a single-packet gap when we see one.
+    ///
+    /// <para><b>Sequence bookkeeping runs on EVERY exit path.</b> It used to be a single assignment
+    /// at the very end, reached only after a fully successful decode — so a packet dropped for any
+    /// other reason (no decoder, decryption failed because the passwords differ, libopus threw, a
+    /// zero-length decode) left <c>expectedNextSequence</c> stale. The first good packet afterwards
+    /// then measured its gap against a stale expectation: during a password mismatch that is
+    /// thousands of packets, and when the password is corrected the recovery is counted as one huge
+    /// unrecovered gap. Worse, if the FEC decode succeeded and the real decode then threw, the same
+    /// gap was detected again on the next packet and the recovered frame was emitted TWICE.
+    /// 2026-08-23 audit, finding R6.</para>
+    /// </summary>
     private bool HandleOpus(uint sequence, ReadOnlySpan<byte> payload)
     {
+        // Whatever happens below, this packet's sequence is now the reference point. Set it up front
+        // so no early return can leave the gap detector reading from a stale one.
+        var previousExpected = expectedNextSequence;
+        expectedNextSequence = sequence + 1U;
+
         if (opusDecoder is null) return false;
 
         // Decrypt the Opus payload up front; both the FEC pass and the normal decode below use
@@ -261,7 +279,7 @@ internal sealed class StreamSession : IDisposable
         // it. Decode the FEC frame first (so audio plays in order), then the
         // current frame. Wrap-around with uint subtraction is intentional.
         bool useFecRecovery = false;
-        if (expectedNextSequence is uint expected)
+        if (previousExpected is uint expected)
         {
             uint gap = sequence - expected; // 0 = exactly expected, 1 = one missing, 2+ = multi-loss
             if (gap == 1)
@@ -306,8 +324,7 @@ internal sealed class StreamSession : IDisposable
         if (decoded <= 0) return false;
 
         EmitDecoded(shortScratch, decoded);
-        expectedNextSequence = sequence + 1U;
-        return true;
+        return true; // expectedNextSequence was advanced at the top — see the method summary.
     }
 
     private void EmitDecoded(ReadOnlySpan<short> shortScratch, int sampleCountPerChannel)

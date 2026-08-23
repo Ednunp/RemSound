@@ -221,6 +221,16 @@ public sealed class ProcessLoopbackCapture : IWaveIn
         }
     }
 
+    // Reused across every callback. This was `new byte[byteCount]` per packet — about 7.7 KB at the
+    // 20 ms buffer, so several hundred KB a second of Gen 0 garbage per captured app, on an audio
+    // thread, in a codebase whose stated rule is that nothing allocates on the audio path (.NET has
+    // no real-time GC; a collection stops every thread). Reuse is safe and is what NAudio's own
+    // WasapiCapture does: the buffer is handed to DataAvailable and the single consumer,
+    // CaptureSource, copies it straight into a BufferedWaveProvider before returning. Any future
+    // consumer must copy what it keeps — the same contract every other capture callback here has.
+    // 2026-08-23 audit, finding S8.
+    private byte[] captureScratch = [];
+
     private void RunCaptureLoop()
     {
         var frameBytes = CaptureFormat.BlockAlign; // 8 bytes (2ch * float)
@@ -241,11 +251,17 @@ public sealed class ProcessLoopbackCapture : IWaveIn
                 if (frames == 0) break;
 
                 var byteCount = frames * frameBytes;
-                var buffer = new byte[byteCount];
+                // Grow only when a bigger packet than we have ever seen arrives; steady state is
+                // allocation-free. See the captureScratch field comment.
+                if (captureScratch.Length < byteCount) captureScratch = new byte[byteCount];
+                var buffer = captureScratch;
                 const int AUDCLNT_BUFFERFLAGS_SILENT = 0x2;
                 if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0)
                     Marshal.Copy(dataPtr, buffer, 0, byteCount);
-                // else leave zeroed — WASAPI signalled a silent packet.
+                else
+                    // Reused buffer, so a silent packet has to be cleared rather than assumed zero —
+                    // it still holds the previous packet's audio, which would otherwise repeat.
+                    Array.Clear(buffer, 0, byteCount);
 
                 captureClient.ReleaseBuffer(frames);
                 DataAvailable?.Invoke(this, new WaveInEventArgs(buffer, byteCount));

@@ -172,6 +172,14 @@ internal static partial class SelfTest
         RunStep(results, "CROSS-PORT CONTRACT (the values other RemSounds depend on)", CrossPortContract);
         RunStep(results, "Password derivation (any password derives a key; cached; 100k for cross-port compat)", PasswordDerivation);
         RunStep(results, "Relay address-proof echo (AddrCheck round-trip)", RelayAddrCheckEcho);
+        // 2026-08-23 send/receive-path audit — one step per finding that can be pinned headlessly.
+        // See AUDIT-FINDINGS.md; each was written to fail against the code as it was.
+        RunStep(results, "AUDIT S1: sending off parks the ASIO lane (no delivery, driver stays open)", AuditAsioParkStopsDelivery);
+        RunStep(results, "AUDIT S5: the audio loops are not async (they keep their Pro Audio thread)", AuditAudioLoopsAreNotAsync);
+        RunStep(results, "AUDIT R4: Format packets fail closed, and every real sender format still passes", AuditFormatValidation);
+        RunStep(results, "AUDIT R5: a malformed Format packet doesn't cost a working peer its session", AuditBadFormatKeepsTheExistingSession);
+        RunStep(results, "AUDIT R2: a plugin gets a claimed peer once, not once per output lane", AuditClaimedPeerIsNotDoubled);
+        RunStep(results, "AUDIT R3: a throwing recorder tap can't be reported as a lost output device", AuditRecorderCannotKillTheOutput);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");
@@ -3655,7 +3663,8 @@ internal static partial class SelfTest
     /// home thread (the fix for the native crash-on-close).</summary>
     private static string? AsioApartmentThread()
     {
-        using var apt = new RemSound.Sender.AsioApartment("asio-selftest");
+        // Lives in Core since 2026-08-23 — BOTH ASIO backends use it now, capture and render (R1).
+        using var apt = new RemSound.Core.AsioApartment("asio-selftest");
         var state = ApartmentState.Unknown;
         int workThread = 0, workThread2 = 0;
         apt.Invoke(() => { state = Thread.CurrentThread.GetApartmentState(); workThread = Environment.CurrentManagedThreadId; });

@@ -343,6 +343,17 @@ internal sealed class SessionPlayout : IDisposable
     /// <summary>Ring capacity this session was sized to (bytes) — so a mirror replica for another
     /// output lane can be created with the same capacity.</summary>
     public int Capacity { get; }
+
+    /// <summary>True when this is a MIRROR replica rather than the primary — an extra copy of the
+    /// same stream, fed the same decoded bytes, that exists so a second output lane can play it on
+    /// its own clock. Both live in PlayoutEngine's snapshot.
+    ///
+    /// <para>Any read path that does NOT filter by <see cref="Route"/> must filter on this instead,
+    /// or it sums the primary and its mirror and gets the same audio twice. That is what
+    /// <c>ReadClaimedPeer</c> did: the fan-out landed 136 commits before the plugin's read path was
+    /// written, so the plugin summed both replicas and a claimed peer arrived in the DAW about 6 dB
+    /// hot and comb-filtered as the two rings drifted apart. 2026-08-23 audit, finding R2.</para></summary>
+    public bool IsMirror { get; init; }
     public int BufferedBytes => playout.BufferedBytes;
     public int BufferedMs => playout.BufferedBytes / MixBytesPerFrame * 1000 / MixSampleRate;
     public long UnderrunCount => playout.UnderrunCount;
@@ -453,14 +464,25 @@ internal sealed class SessionPlayout : IDisposable
     /// backlogs (multi-second pile-ups while no consumer exists); ordinary jitter is absorbed
     /// by the buffer + drift corrector + click-trim combo.
     /// </summary>
-    public void NoteFramesQueued(int targetLatencyMs)
+    public void NoteFramesQueued(int targetLatencyMs) => NoteFramesQueued(targetLatencyMs, _ => targetLatencyMs);
+
+    /// <summary>
+    /// As above, but each mirror arms against ITS OWN output lane's target rather than the primary's.
+    ///
+    /// <para>The mirrors used to be handed the primary's number. With two independent sliders — WASAPI
+    /// at 80 ms and ASIO at 20 ms, say — the ASIO mirror then waited for its ring to hold 80 ms before
+    /// it would start playing, and only afterwards did the depth corrector glide it down to the 20 ms
+    /// its own slider asked for. So the ASIO output started late and drifted to the right value
+    /// instead of simply arming at it. 2026-08-23 audit, finding R6.</para>
+    /// </summary>
+    public void NoteFramesQueued(int targetLatencyMs, Func<RenderRoute, int> targetForRoute)
     {
         NoteFramesQueuedLocal(targetLatencyMs);
         // Each mirror arms independently on its own ring (same bytes arrive at the same rate, so they
         // arm at ~the same moment). Forwarded here rather than called separately so the decode side
         // only ever touches the primary.
         var mir = mirrors;
-        for (var i = 0; i < mir.Length; i++) mir[i].NoteFramesQueuedLocal(targetLatencyMs);
+        for (var i = 0; i < mir.Length; i++) mir[i].NoteFramesQueuedLocal(targetForRoute(mir[i].Route));
     }
 
     private void NoteFramesQueuedLocal(int targetLatencyMs)
@@ -695,15 +717,35 @@ internal sealed class SessionPlayout : IDisposable
         ReadThroughResampler(output, outFrames);
         // Split-recording tap, RAW variant — grab this peer's block BEFORE pan/EQ (bypass recording).
         var tap = recordTap;
-        if (tap is not null && recordRaw) EmitRecordTap(tap, output, outFrames);
+        if (tap is not null && recordRaw) EmitRecordTapGuarded(tap, output, outFrames);
         // Per-peer pan + EQ: this peer's block is fully decoded and isolated here, immediately before
         // PlayoutEngine sums it into the mix — so shaping is per-peer and pre-mix, and being per-sample
         // it adds no buffering latency. Null (unshaped peer) skips the whole stage.
+        //
+        // GUARDED. Both this and the taps around it used to run bare on the render thread, so an
+        // exception from a recorder callback or a filter unwound through PlayoutEngine and
+        // LaneOutput.Read into NAudio's WasapiOut render loop — which catches it, raises
+        // PlaybackStopped, and makes MultiOutputPlayout log `output "X" lost the device`. A recorder
+        // bug therefore presented as a hardware fault AND killed the output. The mixed-mix taps
+        // either side of this are already wrapped with "recorder failure isolated from audio path";
+        // these were missed. 2026-08-23 audit, finding R3.
         var d = dsp;
-        d?.Process(output, outFrames);
+        if (d is not null)
+        {
+            try { d.Process(output, outFrames); }
+            catch { /* a bad filter must not take the audio device down; the block passes unshaped */ }
+        }
         // Split-recording tap, SHAPED variant — after pan/EQ (the default, "record what you hear").
-        if (tap is not null && !recordRaw) EmitRecordTap(tap, output, outFrames);
+        if (tap is not null && !recordRaw) EmitRecordTapGuarded(tap, output, outFrames);
         return outFrames;
+    }
+
+    /// <summary>Hand this peer's block to the recorder, isolating the audio path from anything the
+    /// recorder does with it. See the note in <see cref="ReadFloats"/> for why bare was wrong.</summary>
+    private void EmitRecordTapGuarded(Action<IPEndPoint, ReadOnlyMemory<float>> tap, Span<float> block, int frames)
+    {
+        try { EmitRecordTap(tap, block, frames); }
+        catch { /* recorder failure isolated from audio path */ }
     }
 
     /// <summary>Set the resampler rate to the feed-forward clock ratio plus the depth-feedback bias
@@ -817,6 +859,15 @@ internal sealed class SessionPlayout : IDisposable
             // has enough). Just produce output from buffered state.
             ResampleOutAndCopy(output, outFrames);
             bytesReadOutputForDriftEst += outFloats * sizeof(float);
+            // This IS real audio, so it counts as a non-empty read. Without this the early return
+            // skipped the concealment bookkeeping entirely, leaving a pending fade-in unresolved
+            // across it and the consecutive-empty counter stale. 2026-08-23 audit, finding R6.
+            consecutiveEmptyReads = 0;
+            if (inUnderrunConcealment)
+            {
+                ApplyFadeIn(output, outFrames, (ConcealmentArtifact)concealmentArtifactRaw);
+                inUnderrunConcealment = false;
+            }
             return;
         }
 

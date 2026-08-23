@@ -27,6 +27,21 @@ internal sealed class PeerRenderBridge
     private float[] hostOut = [];
     private double hostSampleRate = PluginBridgeProtocol.WireSampleRate;
 
+    // Resampled host-rate frames produced but not yet handed to the DAW.
+    //
+    // Why a carry is needed at all: the number of host frames a resampler returns for a given number
+    // of wire frames is not exact. Converting 48 kHz down to 44.1 kHz, one block's worth of wire
+    // audio comes back as hostFrames or hostFrames-1 depending on where the phase happens to sit.
+    // The old code cleared the block, wrote `produced` frames and left the remainder silent — so on
+    // the short blocks the DAW got a zeroed sample at the end, repeating at block rate. That is an
+    // audible tick, and one that would be blamed on the network rather than on arithmetic. Carrying
+    // the surplus into the next block makes the output continuous and self-correcting: ask for
+    // slightly more than the block needs, emit exactly the block, keep the rest.
+    // Only used on the resampling path — at 48 kHz the conversion is 1:1 and exact.
+    // 2026-08-23 audit, finding P2.
+    private float[] carry = [];
+    private int carryFrames;
+
     public PeerRenderBridge(PluginBridgeClient client)
     {
         this.client = client;
@@ -46,6 +61,11 @@ internal sealed class PeerRenderBridge
         var wireFloats = (int)Math.Ceiling(hostFloats * (PluginBridgeProtocol.WireSampleRate / Math.Max(1.0, hostSampleRate)) * 2) + Channels * 8;
         if (wireIn.Length < wireFloats) wireIn = new float[wireFloats];
         if (hostOut.Length < hostFloats + Channels * 8) hostOut = new float[hostFloats + Channels * 8];
+        // The carry holds at most one block plus the rounding surplus. Doubled so a block that
+        // produces a little over never has to reallocate on the audio thread.
+        if (carry.Length < hostFloats * 2 + Channels * 8) carry = new float[hostFloats * 2 + Channels * 8];
+        // A format change invalidates anything held at the old rate.
+        carryFrames = 0;
     }
 
     /// <summary>Fill one DAW block from the claimed peer. Audio thread; allocation-free.</summary>
@@ -58,16 +78,12 @@ internal sealed class PeerRenderBridge
         left[..hostFrames].Clear();
         right[..hostFrames].Clear();
 
-        var wireFrames = (int)Math.Ceiling(hostFrames * PluginBridgeProtocol.WireSampleRate / Math.Max(1.0, hostSampleRate));
-        if (wireIn.Length < wireFrames * Channels) return 0;
-
-        var got = client.ReadPeerBlock(wireIn.AsSpan(0, wireFrames * Channels), wireFrames);
-        if (got <= 0) return 0;
-
-        // Fast path: the host is already at our rate.
+        // Fast path: the host is already at our rate, so there is no rounding to absorb.
         if (Math.Abs(hostSampleRate - PluginBridgeProtocol.WireSampleRate) < 0.5)
         {
-            var direct = Math.Min(got, hostFrames);
+            if (wireIn.Length < hostFrames * Channels) return 0;
+            var direct = client.ReadPeerBlock(wireIn.AsSpan(0, hostFrames * Channels), hostFrames);
+            if (direct <= 0) return 0;
             for (var i = 0; i < direct; i++)
             {
                 left[i] = wireIn[i * Channels];
@@ -76,16 +92,46 @@ internal sealed class PeerRenderBridge
             return direct;
         }
 
-        var needed = resampler.ResamplePrepare(got, Channels, out var inBuf, out var inOffset);
-        var copy = Math.Min(needed, got);
-        for (var i = 0; i < copy * Channels; i++) inBuf[inOffset + i] = wireIn[i];
-        var produced = resampler.ResampleOut(hostOut, 0, copy, Math.Min(hostFrames, hostOut.Length / Channels), Channels);
-
-        for (var i = 0; i < produced; i++)
+        // Resampling path. Top the carry up to at least a full block before emitting, so a block is
+        // never one frame short of what the DAW asked for. See the `carry` field.
+        if (carryFrames < hostFrames)
         {
-            left[i] = hostOut[i * Channels];
-            right[i] = hostOut[i * Channels + 1];
+            // Ask for the shortfall plus a small pad, so rounding lands ABOVE the requirement and the
+            // surplus rolls into the next block rather than the deficit rolling into this one.
+            const int PadFrames = 2;
+            var hostShortfall = hostFrames - carryFrames + PadFrames;
+            var wireFrames = (int)Math.Ceiling(hostShortfall * PluginBridgeProtocol.WireSampleRate / Math.Max(1.0, hostSampleRate));
+            if (wireIn.Length >= wireFrames * Channels)
+            {
+                var got = client.ReadPeerBlock(wireIn.AsSpan(0, wireFrames * Channels), wireFrames);
+                if (got > 0)
+                {
+                    var needed = resampler.ResamplePrepare(got, Channels, out var inBuf, out var inOffset);
+                    var copy = Math.Min(needed, got);
+                    for (var i = 0; i < copy * Channels; i++) inBuf[inOffset + i] = wireIn[i];
+                    var room = Math.Min(hostOut.Length / Channels, (carry.Length / Channels) - carryFrames);
+                    var produced = room > 0 ? resampler.ResampleOut(hostOut, 0, copy, room, Channels) : 0;
+                    if (produced > 0)
+                    {
+                        Array.Copy(hostOut, 0, carry, carryFrames * Channels, produced * Channels);
+                        carryFrames += produced;
+                    }
+                }
+            }
         }
-        return produced;
+
+        // Emit whatever the carry can cover — a full block in steady state, less only when the app
+        // is genuinely starving us, which is left as silence rather than repeated audio.
+        var emit = Math.Min(hostFrames, carryFrames);
+        for (var i = 0; i < emit; i++)
+        {
+            left[i] = carry[i * Channels];
+            right[i] = carry[i * Channels + 1];
+        }
+        // Shift the surplus down for next time.
+        var remaining = carryFrames - emit;
+        if (remaining > 0) Array.Copy(carry, emit * Channels, carry, 0, remaining * Channels);
+        carryFrames = remaining;
+        return emit;
     }
 }

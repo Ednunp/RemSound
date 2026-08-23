@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-namespace RemSound.Sender;
+namespace RemSound.Core;
 
 /// <summary>
 /// A dedicated STA thread with a Windows message pump, used to own the ENTIRE lifecycle of one ASIO
@@ -15,8 +15,16 @@ namespace RemSound.Sender;
 /// <para>Route every AsioOut control call through <see cref="Invoke"/> and the driver gets a stable home
 /// thread and a live pump. The ASIO audio callback still runs on the driver's own real-time thread — that
 /// is unchanged; only the control calls move here.</para>
+///
+/// <para><b>Lives in Core because BOTH ASIO backends need it.</b> It was written for the capture side and
+/// stayed there, so the RENDER side (AsioRenderBackend, in the receiver) went on doing exactly what the
+/// paragraph above describes as the cause of the native crash: opening, initialising, stopping and
+/// disposing an AsioOut on whatever thread called in, normally the UI thread, with no pump and no bound.
+/// Same driver, same COM object, same failure mode. Moving this type to Core — it needs nothing but
+/// threading and user32, no NAudio — lets the render side use the identical mechanism instead of a second
+/// copy that could drift. 2026-08-23 audit, finding R1.</para>
 /// </summary>
-internal sealed class AsioApartment : IDisposable
+public sealed class AsioApartment : IDisposable
 {
     private readonly Thread thread;
     private readonly ManualResetEventSlim started = new(false);
@@ -50,9 +58,8 @@ internal sealed class AsioApartment : IDisposable
 
     /// <summary>Bounded variant: wait at most <paramref name="timeoutMs"/> for the work to finish.
     /// Returns false on timeout — the work is NOT cancelled (it may still complete later on the
-    /// apartment thread); the caller just stops waiting. Used by the ASIO close path so a driver that
-    /// wedges on Stop/Dispose can no longer hang a live driver-switch or the resume path — the caller
-    /// abandons the driver (the old park semantics) and the OS reclaims it at process exit.</summary>
+    /// apartment thread); the caller just stops waiting. Used by the ASIO close paths so a driver that
+    /// wedges on Stop/Dispose can no longer hang a live driver-switch, the resume path, or app exit.</summary>
     public bool Invoke(Action action, int timeoutMs)
     {
         if (shutdown || Thread.CurrentThread == thread) { action(); return true; }

@@ -1120,6 +1120,18 @@ public sealed class AudioReceiver : IDisposable
             return;
         }
 
+        // FAIL CLOSED on a format we cannot decode. Every field here arrives from the network in a
+        // packet that is neither encrypted nor authenticated, and until now none of them were
+        // range-checked before use. See AudioFormatInfo.IsUsable for what this rejects and why it is
+        // cross-port safe. Rate-limited because a spoofed or corrupted stream would otherwise write
+        // one line per packet. 2026-08-23 audit, finding R4.
+        if (!format.IsUsable(out var formatProblem))
+        {
+            Interlocked.Increment(ref packetsDropped);
+            NoteUnusableFormat(remote, formatProblem);
+            return;
+        }
+
         if (!IsSenderAllowed(remote))
         {
             // Sender isn't in the user's selected-peers set. Don't open a session, don't play
@@ -1162,39 +1174,57 @@ public sealed class AudioReceiver : IDisposable
             // sender still announces format.Lane on the wire for back-compat; the receiver ignores it
             // for routing.)
 
-            if (existing is null)
-            {
-                isNewSession = true;
-            }
-            else
-            {
-                // Same (endpoint, streamId), different format (codec change within the same lane).
-                // Replace the StreamSession but keep its SessionPlayout — buffered audio drains
-                // naturally and avoids a gap. Matches the behaviour the single-source code
-                // preserved for codec switches.
-                existing.Dispose();
-                isFormatChange = true;
-            }
+            isNewSession = existing is null;
+            isFormatChange = existing is not null;
 
             try
             {
+                // BUILD THE REPLACEMENT FIRST, dispose the old one only once it succeeded.
+                //
+                // This used to call existing.Dispose() before constructing, and on a constructor
+                // failure the catch removed the playout and rethrew — leaving `sessions[key]`
+                // holding a DISPOSED session. Its Opus decoder was gone, so every audio packet
+                // dropped; and the next GOOD format packet matched that disposed session's original
+                // format on the MatchesFormat early-return above, so it was never replaced. The peer
+                // stayed silent until PruneIdleSessions reaped it four seconds later. A single
+                // malformed format packet therefore cost four seconds of that peer's audio.
+                // 2026-08-23 audit, finding R5. The format validation in RemPacket.TryReadFormat
+                // (finding R4) makes reaching this catch much harder; this makes reaching it cheap.
+                //
                 // Arm against the target THIS session actually plays to (its own route's), not the
                 // engine-wide one — in BothIndependent those differ, and arming to the wrong one
                 // starts playback at the wrong depth. In single-slider mode every route resolves to
                 // the same shared value, so this is identical to the old call there.
-                newSession = new StreamSession(remote, streamId, format, sp, diagnostics, _ => sp.NoteFramesQueued(playoutEngine.TargetLatencyMsFor(sp.Route)), decryptor);
+                newSession = new StreamSession(remote, streamId, format, sp, diagnostics,
+                    _ => sp.NoteFramesQueued(
+                        playoutEngine.TargetLatencyMsFor(sp.Route),
+                        // Each mirror replica arms against ITS OWN output lane's slider, not the
+                        // primary's — see SessionPlayout.NoteFramesQueued (finding R6).
+                        mirrorRoute => playoutEngine.TargetLatencyMsFor(mirrorRoute)),
+                    decryptor);
             }
-            catch
+            catch (Exception ex)
             {
-                // The StreamSession ctor failed — most realistically because a corrupt/hostile Format
-                // announced an Opus sample rate/channel count the decoder rejects. We already registered
-                // the SessionPlayout in PlayoutEngine via GetOrCreateSession above; nothing was added to
-                // `sessions`, so PruneIdleSessions would never reap it and it would linger forever, summed
-                // on every render callback and poisoning the auto-tune's underrun stats. Reap it here,
-                // then let the exception propagate so the packet handler still logs it.
+                if (existing is not null)
+                {
+                    // Keep the working session exactly as it was. The sender re-announces its format
+                    // every 250 ms, so a one-off bad packet costs nothing at all now.
+                    diagnosticSink?.Invoke($"stream format rejected, keeping the existing session: {remote} stream={streamId} — {ex.GetType().Name}: {ex.Message}");
+                    return;
+                }
+                // No previous session to fall back on. GetOrCreateSession already registered a
+                // SessionPlayout in PlayoutEngine and nothing was added to `sessions`, so
+                // PruneIdleSessions would never reap it and it would linger forever, summed on every
+                // render callback and poisoning the auto-tune's underrun stats. Reap it here.
                 playoutEngine.RemoveSession(remote, streamId);
-                throw;
+                diagnosticSink?.Invoke($"stream session rejected (bad format): {remote} stream={streamId} — {ex.GetType().Name}: {ex.Message}");
+                Interlocked.Increment(ref packetsDropped);
+                return;
             }
+            // The replacement is live; now retire the one it replaces. Its SessionPlayout is kept
+            // (buffered audio drains naturally and avoids a gap), which is what the single-source
+            // code did for codec switches.
+            existing?.Dispose();
             sessions[key] = newSession;
 
             // Same-lane streamId rotation: drop other sessions from this peer that share the
@@ -1259,6 +1289,33 @@ public sealed class AudioReceiver : IDisposable
         {
             diagnosticSink?.Invoke($"stream format changed: {remote} stream={streamId} {format}");
         }
+    }
+
+    // Rate limit for the unusable-format line. A peer resends its format four times a second, and a
+    // spoofed or corrupted stream could arrive far faster than that; one line per packet would bury
+    // the log. First occurrence, then at most one every five seconds, with a count of the rest.
+    private long lastBadFormatLogTicks;
+    private long badFormatsSuppressed;
+    private long badFormatsTotal;
+
+    /// <summary>Cumulative Format packets rejected for announcing something undecodable. Surfaced so
+    /// a peer that has genuinely gone wrong is visible as a number rather than only as silence.</summary>
+    public long FormatPacketsRejected => Interlocked.Read(ref badFormatsTotal);
+
+    private void NoteUnusableFormat(IPEndPoint remote, string problem)
+    {
+        Interlocked.Increment(ref badFormatsTotal);
+        var now = Stopwatch.GetTimestamp();
+        var prev = Volatile.Read(ref lastBadFormatLogTicks);
+        if (prev != 0 && now - prev < Stopwatch.Frequency * 5)
+        {
+            Interlocked.Increment(ref badFormatsSuppressed);
+            return;
+        }
+        Volatile.Write(ref lastBadFormatLogTicks, now);
+        var suppressed = Interlocked.Exchange(ref badFormatsSuppressed, 0);
+        diagnosticSink?.Invoke($"format packet rejected from {remote}: {problem}"
+            + (suppressed > 0 ? $" ({suppressed} more suppressed in the last 5s)" : ""));
     }
 
     private long sessionsOpenedCount;

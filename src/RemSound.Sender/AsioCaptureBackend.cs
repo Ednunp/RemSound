@@ -53,7 +53,17 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     // WITHOUT the native crash we used to hit on "ASIO → none" and driver switches — see AsioApartment.
     // Created in the ctor so it can announce its own thread up/down through the same diagnostic sink.
     private readonly AsioApartment apartment;
-    private List<int> activeChannelPairIndices = [];
+    // VOLATILE, not lock-guarded, and that is load-bearing. The ASIO audio callback reads this list on
+    // the driver's real-time thread. It used to take `gate` to do so — but StopInternal holds `gate` for
+    // the WHOLE close, so a callback already in flight when a close began could not return until the
+    // close finished. That is the opposite of what the close needs: it unhooks the callback and sleeps
+    // 60 ms precisely to let an in-flight callback DRAIN, and the callback could not drain while the
+    // closing thread held the lock it was waiting on. The driver's own Stop typically waits for its
+    // callback thread, so the two could deadlock until the bounded Invoke gave up.
+    // The list is only ever REPLACED wholesale (UpdateSources, Start, StopInternal) and never mutated in
+    // place, so a volatile reference read is correct and needs no lock. Writers still hold `gate` to
+    // serialise against each other. 2026-08-23 audit, finding S2.
+    private volatile List<int> activeChannelPairIndices = [];
     private int recordChannelCount;
     private float[] mixScratch = new float[1024];
     private float[] interleavedScratch = new float[1024];
@@ -95,8 +105,64 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     /// composite is being rebuilt). Volatile write, so the audio thread picks the new
     /// callback up on its very next ASIO buffer.
     /// </summary>
-    public void SetCallback(Action<ReadOnlyMemory<float>> callback) =>
+    public void SetCallback(Action<ReadOnlyMemory<float>> callback)
+    {
         onMixedSamples = callback;
+        callbackDetached = false;
+    }
+
+    // True while the callback is the park no-op. Only exists so the gate can assert that STOPPING
+    // THE SENDER parks the lane — the bug was never in Park itself, it was that nothing called it.
+    private volatile bool callbackDetached;
+
+    /// <summary>True when this lane's callback has been parked to a no-op, so the driver's buffers
+    /// go nowhere. Test seam: lets the gate prove <c>AudioSender.Stop</c> actually parks, without a
+    /// real ASIO driver to open.</summary>
+    internal bool CallbackDetachedForTest => callbackDetached;
+
+    /// <summary>
+    /// Stop delivering audio WITHOUT touching the driver. This is Ed's park, from
+    /// "ASIO: park the driver on switch-away instead of closing it" — rewire the callback to a
+    /// no-op and drop to zero active pairs. No native call, so no close, no reopen, and none of
+    /// the five-second Audient hang that made keeping the driver open necessary in the first place.
+    ///
+    /// <para>Used when the user turns "Send my audio" off. Before this, stopping the sender stopped
+    /// only the WASAPI lane: the composite deliberately never stops the borrowed ASIO child, nothing
+    /// re-pointed its callback, and the peer list is not cleared on a stop either — so an ASIO lane
+    /// went on capturing, encoding, encrypting and TRANSMITTING to every armed peer with the send
+    /// toggle off. 2026-08-23 audit, finding S1.</para>
+    ///
+    /// <para>Both halves matter. The no-op callback stops delivery immediately (a volatile write, so
+    /// it takes effect on the very next buffer). The zero pairs make the callback early-out before
+    /// it does any mixing work at all. Unparking is automatic: the composite's Start calls
+    /// <see cref="UpdateSources"/> with the real specs, and <see cref="AudioSender"/> re-points the
+    /// callback for the current mode.</para>
+    /// </summary>
+    public void Park()
+    {
+        SetCallback(_ => { });
+        callbackDetached = true;   // set AFTER SetCallback, which clears it
+        lock (gate)
+        {
+            if (activeChannelPairIndices.Count == 0) return;
+            activeChannelPairIndices = [];
+        }
+        onDiagnostic?.Invoke("asio capture: parked — callback detached and zero active pairs; driver stays open");
+    }
+
+    /// <summary>True when the lane is parked: the driver is open but no channel pair is active, so
+    /// no audio is being delivered. Exposed so the gate can assert the park actually happened rather
+    /// than trusting that a method was called.</summary>
+    public bool IsParked
+    {
+        get { lock (gate) return asio is not null && activeChannelPairIndices.Count == 0; }
+    }
+
+    /// <summary>The callback the driver's thread would invoke, so the gate can drive it directly and
+    /// MEASURE whether audio still reaches the sender lane. Testing that Park() was called proves
+    /// nothing — the bug was that a live callback kept delivering after a stop, so the test has to
+    /// invoke the thing the driver invokes. Test seam only; nothing in the app reads this.</summary>
+    internal Action<ReadOnlyMemory<float>> CallbackForTest => onMixedSamples;
 
     public float TakeMaxRawCaptureStep() => rawCaptureStepProbe.TakeMax();
     public float TakeMaxRawCaptureStepCrossBuffer() => rawCaptureStepProbe.TakeMaxCrossBuffer();
@@ -104,6 +170,13 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     public long TakeCumulativeCaptureTicks() => Interlocked.Exchange(ref cumulativeCaptureTicks, 0);
 
     public bool IsRunning => asio is not null;
+
+    /// <summary>ASIO has no equivalent of WASAPI's "the capture stopped without being asked".
+    /// A driver-level failure surfaces as an exception out of a control call (handled in Start) or
+    /// out of the audio callback (handled there, rate-limited), not as a stopped-stream event. And
+    /// the lane is deliberately left open and parked when sending is off, which must never read as
+    /// a fault. Always false. See <see cref="ICaptureBackend.HasFaulted"/>.</summary>
+    public bool HasFaulted => false;
     public long TotalCaptureCallbacks => Interlocked.Read(ref callbackCount);
     public long TotalCaptureBytes => Interlocked.Read(ref bytesCaptured);
     public string? FirstCaptureFormatDescription => captureFormat;
@@ -127,7 +200,7 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     {
         lock (gate)
         {
-            if (IsRunning) StopInternal();
+            if (IsRunning) StopInternal(CloseTimeoutMs);
             if (specs.Count == 0) return;
 
             activeChannelPairIndices = ParseChannelPairIndices(specs);
@@ -182,7 +255,7 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
             {
                 lastError = ex.Message;
                 onDiagnostic?.Invoke($"asio capture start failed: {ex.GetType().Name}: {ex.Message}");
-                StopInternal();
+                StopInternal(CloseTimeoutMs);
             }
         }
     }
@@ -214,12 +287,36 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
         }
     }
 
+    /// <summary>How long to wait for a driver close before abandoning it, on the normal
+    /// (interactive) paths. NOT tuned to any one driver, and deliberately far above the worst real
+    /// close measured so far.
+    ///
+    /// <para>History, because the number matters. This was 8 s, chosen on the belief that "a healthy
+    /// close is ~5ms". Ed's own logs then showed 5 of 46 closes hitting the bound — and the timings
+    /// say the driver was never wedged: his Audient takes exactly 5.00 s inside Stop and 2.94 s
+    /// inside Dispose, which with the 60 ms drain sleep is 8.00 s against an 8000 ms cap. The close
+    /// completed cleanly in the same millisecond the caller gave up on it, and the caller then went
+    /// on to open a new driver while the old close was still running.</para>
+    ///
+    /// <para>Ed's point on reading that: 7.94 s is HIS driver, and another card could be slower
+    /// again. So the fix is not to tune a number to one Audient — it is to make the bound generous
+    /// enough that no healthy driver reaches it, and to LOG THE MEASURED CLOSE TIME every time so we
+    /// accumulate real figures for real drivers instead of guessing twice. The bound now exists only
+    /// for a driver that is genuinely never coming back. 2026-08-23 audit, finding S2.</para></summary>
+    private const int CloseTimeoutMs = 30_000;
+
+    /// <summary>Shutdown gets a much shorter bound. At process exit the OS reclaims the device
+    /// regardless, so waiting half a minute to quit is strictly worse than abandoning a slow close —
+    /// the opposite trade-off from an interactive stop, where abandoning early is what causes the
+    /// next open to find the card still held.</summary>
+    private const int ShutdownCloseTimeoutMs = 3_000;
+
     public void Stop()
     {
-        lock (gate) StopInternal();
+        lock (gate) StopInternal(CloseTimeoutMs);
     }
 
-    private void StopInternal()
+    private void StopInternal(int closeTimeoutMs)
     {
         var toClose = asio;
         if (toClose is not null)
@@ -230,23 +327,43 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
             // any native call that dies, and the callback is unhooked + drained before stop/dispose so the
             // close isn't racing a live buffer callback (a common trigger for the crash).
             //
-            // BOUNDED (review sweep): a driver that wedges inside Stop/Dispose used to hang the CALLER
-            // forever — and live driver-switches and the resume path close on the UI thread. 8 s is
-            // generous for a healthy close (Ed's Audient releases in ~5 ms); past that we abandon the
-            // driver (the old park semantics — the OS reclaims it at process exit) and move on.
+            // BOUNDED: a driver that wedges inside Stop/Dispose must not hang the CALLER forever —
+            // live driver-switches and the resume path close on the UI thread. See CloseTimeoutMs for
+            // why the bound is what it is and why the elapsed time below is logged unconditionally.
+            var closeStart = Stopwatch.GetTimestamp();
+            var stopMs = -1L;
             var closed = apartment.Invoke(() =>
             {
                 onDiagnostic?.Invoke("asio close: unhooking callback");
                 try { toClose.AudioAvailable -= OnAudioAvailable; } catch { /* ignore */ }
+                // Let an in-flight callback return before we touch the driver. This only actually
+                // works now that the callback no longer takes `gate` — see the field comment on
+                // activeChannelPairIndices.
                 System.Threading.Thread.Sleep(60);
                 onDiagnostic?.Invoke("asio close: stopping stream");
+                var stopStart = Stopwatch.GetTimestamp();
                 try { toClose.Stop(); } catch (Exception ex) { onDiagnostic?.Invoke($"asio close: stop threw {ex.GetType().Name}: {ex.Message}"); }
-                onDiagnostic?.Invoke("asio close: releasing driver (dispose)");
+                stopMs = (Stopwatch.GetTimestamp() - stopStart) * 1000 / Stopwatch.Frequency;
+                onDiagnostic?.Invoke($"asio close: releasing driver (dispose) — stop took {stopMs} ms");
+                var disposeStart = Stopwatch.GetTimestamp();
                 try { toClose.Dispose(); } catch (Exception ex) { onDiagnostic?.Invoke($"asio close: dispose threw {ex.GetType().Name}: {ex.Message}"); }
-                onDiagnostic?.Invoke("asio close: driver released cleanly");
-            }, timeoutMs: 8000);
+                var disposeMs = (Stopwatch.GetTimestamp() - disposeStart) * 1000 / Stopwatch.Frequency;
+                onDiagnostic?.Invoke($"asio close: driver released cleanly — stop {stopMs} ms, dispose {disposeMs} ms");
+            }, timeoutMs: closeTimeoutMs);
+            var elapsedMs = (Stopwatch.GetTimestamp() - closeStart) * 1000 / Stopwatch.Frequency;
             if (!closed)
-                onDiagnostic?.Invoke("asio close: TIMED OUT after 8s — abandoning the driver (parked; reclaimed at process exit)");
+            {
+                // Say what actually happened. The old wording ("abandoning the driver") read as though
+                // the driver had failed, when in every observed case it was still closing and went on
+                // to finish. Name the bound so the next person can see whether it was too tight.
+                onDiagnostic?.Invoke(
+                    $"asio close: gave up waiting after {elapsedMs} ms (bound {closeTimeoutMs} ms) — the close is STILL RUNNING on the "
+                    + "apartment thread and may yet finish; the card may be briefly unavailable to a re-open");
+            }
+            else
+            {
+                onDiagnostic?.Invoke($"asio close: complete in {elapsedMs} ms");
+            }
             asio = null;
         }
         uptime.Stop();
@@ -256,7 +373,9 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
 
     public void Dispose()
     {
-        Stop();
+        // Shutdown path: a short bound. See ShutdownCloseTimeoutMs — at exit the OS reclaims the
+        // device anyway, so a slow close must not hold the app's quit open for half a minute.
+        lock (gate) StopInternal(ShutdownCloseTimeoutMs);
         apartment.Dispose(); // shut down the dedicated ASIO thread last, after the driver is closed
     }
 
@@ -276,7 +395,45 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
 
     public int TakeMaxCallbackGapMs() => Interlocked.Exchange(ref maxCallbackGapMs, 0);
 
+    // Rate-limit for the callback-failure line below. An ASIO callback fires up to ~750 times a
+    // second; a fault that repeats every buffer would otherwise write 750 log lines a second and
+    // bury the very evidence we need. Log the first, then at most one a second.
+    private long lastCallbackErrorTicks;
+    private long callbackErrorsSuppressed;
+
+    /// <summary>
+    /// The event handler the driver calls. Its ONLY job is to make sure nothing escapes into the
+    /// driver's native real-time thread — an exception crossing that managed/native boundary is
+    /// undefined behaviour and has taken this process down before, with no managed stack to show
+    /// for it. Every other capture backend already wraps its callback body; this one did not.
+    /// Reachable in practice: <see cref="AudioSender.Dispose"/> frees the lane's AES-GCM cipher
+    /// while this callback can still be live, which throws ObjectDisposedException from inside
+    /// the encrypt. 2026-08-23 audit, finding S3.
+    /// </summary>
     private void OnAudioAvailable(object? sender, AsioAudioAvailableEventArgs e)
+    {
+        try
+        {
+            HandleAudioAvailable(e);
+        }
+        catch (Exception ex)
+        {
+            lastError = ex.Message;
+            var now = Stopwatch.GetTimestamp();
+            var prev = Volatile.Read(ref lastCallbackErrorTicks);
+            if (prev != 0 && now - prev < Stopwatch.Frequency)
+            {
+                Interlocked.Increment(ref callbackErrorsSuppressed);
+                return;
+            }
+            Volatile.Write(ref lastCallbackErrorTicks, now);
+            var suppressed = Interlocked.Exchange(ref callbackErrorsSuppressed, 0);
+            onDiagnostic?.Invoke($"asio capture: callback error: {ex.GetType().Name}: {ex.Message}"
+                + (suppressed > 0 ? $" ({suppressed} more suppressed in the last second)" : ""));
+        }
+    }
+
+    private void HandleAudioAvailable(AsioAudioAvailableEventArgs e)
     {
         Interlocked.Increment(ref callbackCount);
         // Capture-callback gap timing. First callback seeds the timestamp without recording a
@@ -315,9 +472,9 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
         Array.Clear(mixScratch, 0, stereoFloats);
 
         // Mix selected channel pairs into the stereo output. Each pair contributes its L/R to
-        // the mix bus.
-        List<int> pairs;
-        lock (gate) pairs = activeChannelPairIndices;
+        // the mix bus. Lock-free volatile read — see the field comment for why taking `gate` here
+        // was a deadlock against the close path.
+        var pairs = activeChannelPairIndices;
 
         if (pairs.Count == 0) return;
 
