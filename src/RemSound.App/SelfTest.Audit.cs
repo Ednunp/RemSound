@@ -333,33 +333,47 @@ internal static partial class SelfTest
     private static string? AuditRecorderCannotKillTheOutput()
     {
         var peer = new IPEndPoint(IPAddress.Parse("192.168.77.30"), 47830);
-        var engine = new PlayoutEngine(new ReceiverDiagnostics());
-        engine.SetLaneActive(RenderRoute.WasapiLane, true);
-        engine.SetLaneActive(RenderRoute.AsioLane, false);
-        engine.SetMaxLatencyMs(RenderRoute.Mixed, 30);
 
-        var session = engine.GetOrCreateSession(peer, 1, 4 * 1024 * 1024);
-        FillSession(session, 0.4f);
-
-        var calls = 0;
-        engine.SetRecordTap((_, _) => { calls++; throw new InvalidOperationException("recorder blew up"); }, raw: false);
-
-        var buffer = new byte[960 * 8];
-        var peak = 0f;
-        try
+        // ALL THREE CONFIGURATIONS. The record tap runs inside the per-session read, and which lane
+        // that read comes from depends entirely on what is ticked — so a guard proven only in the
+        // WASAPI-only case proves nothing about the other two, which is precisely the trap.
+        var totalCalls = 0;
+        foreach (var configuration in AudioConfigurations.All)
         {
-            peak = PeakOfMix(engine, buffer);
-        }
-        catch (Exception ex)
-        {
-            throw new CheckFailed(
-                $"a throwing recorder tap escaped the render read as {ex.GetType().Name} — in a real session that "
-                + "reaches NAudio's render loop and is reported as the output losing its device");
+            var engine = new PlayoutEngine(new ReceiverDiagnostics());
+            engine.SetIndependentLaneLatency(configuration.HasTwoLanes());
+            engine.SetLaneActive(RenderRoute.WasapiLane, configuration.UsesWasapi());
+            engine.SetLaneActive(RenderRoute.AsioLane, configuration.UsesAsio());
+            engine.SetMaxLatencyMs(RenderRoute.Mixed, 30);
+            engine.SetMaxLatencyMs(RenderRoute.WasapiLane, 30);
+            engine.SetMaxLatencyMs(RenderRoute.AsioLane, 30);
+
+            var session = engine.GetOrCreateSession(peer, 1, 4 * 1024 * 1024);
+            FillSession(session, 0.4f);
+
+            var calls = 0;
+            engine.SetRecordTap((_, _) => { calls++; throw new InvalidOperationException("recorder blew up"); }, raw: false);
+
+            var buffer = new byte[960 * 8];
+            var peak = 0f;
+            try
+            {
+                peak = PeakOfMix(engine, buffer);
+            }
+            catch (Exception ex)
+            {
+                throw new CheckFailed(
+                    $"in {configuration.Describe()}, a throwing recorder tap escaped the render read as {ex.GetType().Name} — "
+                    + "in a real session that reaches NAudio's render loop and is reported as the output losing its device");
+            }
+
+            Check(calls > 0, $"in {configuration.Describe()} the record tap must actually have been called, or this proves nothing");
+            Check(peak > 0.05f, $"in {configuration.Describe()} the audio must keep flowing through a failing recorder (peak {peak:0.000})");
+            totalCalls += calls;
         }
 
-        Check(calls > 0, "the record tap must actually have been called, or this test proves nothing");
-        Check(peak > 0.05f, $"the audio must keep flowing through a failing recorder (peak {peak:0.000})");
-        return "a throwing per-peer record tap is contained; the mix keeps playing and the output is not reported as lost";
+        return $"a throwing per-peer record tap is contained in all three configurations ({totalCalls} tap calls survived); "
+             + "the mix keeps playing and the output is never reported as lost";
     }
 
     // ---------------------------------------------------------------------------------------
@@ -592,30 +606,40 @@ internal static partial class SelfTest
             "a single-lane setup reports through the WASAPI backend");
 
         var engine = new PlayoutEngine(new ReceiverDiagnostics());
-        using var both = new CompositeRenderBackend(AudioMode.BothIndependent, "RemSound self-test — no such ASIO driver", engine);
 
-        // Nothing is open, so nothing may claim a figure. A backend that invents one here would
-        // invent one in the field too.
-        foreach (var route in new[] { RenderRoute.WasapiLane, RenderRoute.AsioLane, RenderRoute.Mixed })
+        // ALL THREE CONFIGURATIONS. With no device open nothing may claim a figure in any of them —
+        // a backend that invents one here would invent one in the field — and a lane that is not part
+        // of the configuration must never be answered for at all.
+        foreach (var configuration in AudioConfigurations.All)
         {
-            Check(both.ReportedOutputLatencyMsFor(route) == 0,
-                $"with no device open, {route} must report no output latency rather than a plausible-looking number");
-            Check(both.OutputQueueMsFor(route) == 0, $"with no device open, {route} must report no queued audio");
-        }
+            using var backend = new CompositeRenderBackend(
+                configuration.UsesAsio() ? AudioMode.BothIndependent : AudioMode.WasapiOnly,
+                configuration.UsesAsio() ? "RemSound self-test — no such ASIO driver" : null,
+                engine);
+            backend.SetOutputDevices([]);   // nothing ticked, so nothing is open
 
-        // The lanes must be answered SEPARATELY. A WASAPI-only backend must have nothing to say about
-        // the ASIO lane, and vice versa — that separation is what stops one lane's number being shown
-        // against the other when both are live.
-        using var wasapiOnly = new CompositeRenderBackend(AudioMode.WasapiOnly, null, engine);
-        Check(wasapiOnly.ReportedOutputLatencyMsFor(RenderRoute.AsioLane) == 0,
-            "a WASAPI-only setup must never answer for the ASIO lane");
-        Check(wasapiOnly.OutputQueueMsFor(RenderRoute.AsioLane) == 0,
-            "a WASAPI-only setup must never report an ASIO queue");
+            foreach (var route in new[] { RenderRoute.WasapiLane, RenderRoute.AsioLane, RenderRoute.Mixed })
+            {
+                Check(backend.ReportedOutputLatencyMsFor(route) == 0,
+                    $"in {configuration.Describe()}, {route} must report no output latency with nothing open — "
+                    + "a plausible-looking number in place of an unknown is the habit this whole change exists to break");
+                Check(backend.OutputQueueMsFor(route) == 0,
+                    $"in {configuration.Describe()}, {route} must report no queued audio with nothing open");
+            }
+
+            // A configuration without ASIO must have NOTHING to say about the ASIO lane, and vice
+            // versa. That separation is what stops one lane's number being shown against the other.
+            if (!configuration.UsesAsio())
+            {
+                Check(backend.ReportedOutputLatencyMsFor(RenderRoute.AsioLane) == 0,
+                    $"{configuration.Describe()} must never answer for the ASIO lane");
+            }
+        }
 
         // ASIO has no intermediate buffer at all — it pulls straight from the playout engine. That is
         // a real structural difference between the lanes, not a rounding one, so it is pinned.
         using var asioBackend = new AsioRenderBackend("RemSound self-test — no such ASIO driver", engine);
-        Check(asioBackend.OutputQueueMs == 0 && asioBackend.OutputQueueMsFor(RenderRoute.AsioLane) == 0,
+        Check(asioBackend.OutputQueueMsFor(RenderRoute.AsioLane) == 0,
             "ASIO pulls straight from the engine and must never report a device queue — if this ever "
             + "becomes non-zero, the ASIO path has grown a buffer nobody meant to add");
 
@@ -712,18 +736,14 @@ internal static partial class SelfTest
             // is how ASIO-only got missed — it was shown a WASAPI control it wasn't using, and a
             // test that looped over two modes sailed past it. Ed has had to point the three
             // configurations out more than once; this is the guard so it stops happening.
-            var configurations = new (string Name, bool Wasapi, bool Asio)[]
+            // The canonical list, not a hand-written one. A hand-written list is exactly how ASIO-only
+            // kept getting missed: three entries typed out look complete until somebody types two.
+            foreach (var configuration in AudioConfigurations.All)
             {
-                ("WASAPI only", true, false),
-                ("ASIO only", false, true),
-                ("both", true, true),
-            };
-            foreach (var (name, w, a) in configurations)
-            {
-                var label = MainForm.AutoTuneIntervalLabel(w, a);
+                var label = MainForm.AutoTuneIntervalLabel(configuration);
                 Check(label.Contains("jitter buffer", StringComparison.OrdinalIgnoreCase),
-                    $"in the \"{name}\" configuration the interval label reads \"{label}\" — it must say what it tunes");
-                if (w && a)
+                    $"in {configuration.Describe()} the interval label reads \"{label}\" — it must say what it tunes");
+                if (configuration.HasTwoLanes())
                 {
                     Check(label.Contains("WASAPI", StringComparison.OrdinalIgnoreCase) && label.Contains("ASIO", StringComparison.OrdinalIgnoreCase),
                         $"with BOTH lanes live the interval drives both auto-tunes, so it must name both — got \"{label}\"");
@@ -731,11 +751,11 @@ internal static partial class SelfTest
                 else
                 {
                     Check(!label.Contains("WASAPI", StringComparison.OrdinalIgnoreCase) && !label.Contains("ASIO", StringComparison.OrdinalIgnoreCase),
-                        $"in the \"{name}\" configuration only one jitter buffer is in play, so the label must NOT name a lane — "
+                        $"in {configuration.Describe()} only one jitter buffer is in play, so the label must NOT name a lane — "
                         + $"naming the one you are not using is exactly the ASIO-only bug. Got \"{label}\"");
                 }
             }
-            Check(MainForm.AutoTuneIntervalLabel(false, true) == MainForm.AutoTuneIntervalLabel(true, false),
+            Check(MainForm.AutoTuneIntervalLabel(AudioConfiguration.AsioOnly) == MainForm.AutoTuneIntervalLabel(AudioConfiguration.WasapiOnly),
                 "ASIO-only and WASAPI-only must read identically — one jitter buffer is one jitter buffer");
 
             // And the readout keeps the word, because for that box it is the correct one.

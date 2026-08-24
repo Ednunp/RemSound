@@ -162,6 +162,7 @@ internal static partial class SelfTest
         RunStep(results, "Plugin logging (silent when off, honest when on)", PluginLogging);
         RunStep(results, "Plugin logging reaches the app's own log file (the wiring, not just the events)", PluginLoggingInTheApp);
         RunStep(results, "Every wired event is claimed (no handler escapes the suites)", EveryWiredEventIsClaimed);
+        RunStep(results, "Every audio-axis test covers all THREE configurations (or says why not)", AudioConfigurationCoverage);
         foreach (var cfg in SuiteConfigs)
             RunStep(results, $"Control suite - {cfg.Name} (UI + accessibility + theme + effect)", () => RunControlSuite(cfg));
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);
@@ -3288,6 +3289,28 @@ internal static partial class SelfTest
         Check(both.IndexOf("12 ms", StringComparison.Ordinal) > both.IndexOf("45 ms", StringComparison.Ordinal),
             "the two lanes' figures must stand apart, not be averaged into one");
 
+        // ALL THREE CONFIGURATIONS. WASAPI-only and ASIO-only must read IDENTICALLY — one jitter
+        // buffer is one jitter buffer, and naming the lane you have when you only have one is noise.
+        // Only the both-lanes case names them. Enumerated rather than assumed, because ASIO-only is
+        // exactly the case that keeps getting collapsed into the two-lane branch.
+        foreach (var configuration in AudioConfigurations.All)
+        {
+            var text = MainForm.FormatMeasuredLatency(configuration.HasTwoLanes(), 30, 44.6, 10, 12.4);
+            if (configuration.HasTwoLanes())
+            {
+                Check(text.Contains("WASAPI") && text.Contains("ASIO"),
+                    $"in {configuration.Describe()} both lanes must be named (got: {text})");
+            }
+            else
+            {
+                Check(!text.Contains("WASAPI") && !text.Contains("ASIO"),
+                    $"in {configuration.Describe()} there is ONE jitter buffer, so no lane may be named (got: {text})");
+            }
+        }
+        Check(MainForm.FormatMeasuredLatency(AudioConfiguration.WasapiOnly.HasTwoLanes(), 30, 44.6, 10, 12.4)
+              == MainForm.FormatMeasuredLatency(AudioConfiguration.AsioOnly.HasTwoLanes(), 30, 44.6, 10, 12.4),
+            "WASAPI-only and ASIO-only must read identically — a single lane is a single lane whichever kind it is");
+
         // ONE LANE: no point naming a lane the user hasn't got.
         var single = MainForm.FormatMeasuredLatency(false, 30, 44.6, 0, 0);
         Check(!single.Contains("WASAPI") && !single.Contains("ASIO"), $"a single-slider setup shouldn't name lanes (got: {single})");
@@ -3480,6 +3503,28 @@ internal static partial class SelfTest
     private static string? LatencySliderReachesSessions()
     {
         var endpoint = new IPEndPoint(IPAddress.Loopback, 47832);
+
+        // ALL THREE CONFIGURATIONS, enumerated. A stream must land on a lane that is actually being
+        // rendered, in every one of them — that relationship (the slider writes here, the audio reads
+        // there) is exactly what the dead-slider bug broke. The rest of this test then goes deeper on
+        // the single-slider and two-slider paths.
+        //
+        // Written as a loop over the canonical list rather than three hand-written cases because the
+        // hand-written version is how ASIO-only kept getting missed: it looks complete until you count.
+        foreach (var configuration in AudioConfigurations.All)
+        {
+            var probe = new RemSound.Receiver.PlayoutEngine(new RemSound.Receiver.ReceiverDiagnostics());
+            probe.SetIndependentLaneLatency(configuration.HasTwoLanes());
+            probe.SetLaneActive(RenderRoute.WasapiLane, configuration.UsesWasapi());
+            probe.SetLaneActive(RenderRoute.AsioLane, configuration.UsesAsio());
+            var landed = probe.GetOrCreateSession(new IPEndPoint(IPAddress.Loopback, 47899), 9, capacityBytes: 256 * 1024);
+            var expected = configuration.SingleRoute() ?? RenderRoute.WasapiLane;   // both-lanes: primary is WASAPI, mirrored to ASIO
+            Check(landed.Route == expected,
+                $"in {configuration.Describe()} a stream must land on {expected} (got {landed.Route}) — a stream tagged for a "
+                + "lane nobody is rendering is silent, which is the shape of the dead-slider bug");
+            Check(probe.TargetLatencyMsFor(landed.Route) > 0,
+                $"in {configuration.Describe()} the lane a stream landed on must have a real target to read");
+        }
 
         // --- Single-slider mode (WasapiOnly and every other classic mode) ---
         var engine = new RemSound.Receiver.PlayoutEngine(new RemSound.Receiver.ReceiverDiagnostics());

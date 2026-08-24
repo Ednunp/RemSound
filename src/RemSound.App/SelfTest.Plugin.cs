@@ -96,7 +96,47 @@ internal static partial class SelfTest
         var backAgain = PeakOfMix(engine, buffer);
         Check(backAgain > 0.05f, $"releasing every claim must bring the audio back to the speakers (peak {backAgain:0.000})");
 
-        return "claims are reference-counted, lapse without a heartbeat, and a claimed peer is provably absent from the device mix";
+        // --- ALL THREE CONFIGURATIONS ------------------------------------------------------------
+        // Not optional here. The related doubling bug — a claimed peer summed twice — bit ONLY when
+        // both kinds of output were ticked, because that is when a stream gains a mirror replica. So
+        // a double-audio guard proven in one configuration proves nothing about the one where the bug
+        // actually lived. Each configuration gets its own engine, because what is ticked is what
+        // decides how many copies of a stream exist. 2026-08-24.
+        foreach (var configuration in AudioConfigurations.All)
+        {
+            var perConfig = new PlayoutEngine(new ReceiverDiagnostics());
+            perConfig.SetIndependentLaneLatency(configuration.HasTwoLanes());
+            perConfig.SetLaneActive(RenderRoute.WasapiLane, configuration.UsesWasapi());
+            perConfig.SetLaneActive(RenderRoute.AsioLane, configuration.UsesAsio());
+            perConfig.SetMaxLatencyMs(RenderRoute.Mixed, 30);
+            perConfig.SetMaxLatencyMs(RenderRoute.WasapiLane, 30);
+            perConfig.SetMaxLatencyMs(RenderRoute.AsioLane, 30);
+
+            var a = perConfig.GetOrCreateSession(andre, 1, 1024 * 1024);
+            var c = perConfig.GetOrCreateSession(chris, 2, 1024 * 1024);
+            FillSession(a, 0.5f);
+            FillSession(c, 0.25f);
+
+            var perConfigClaims = new PluginPeerClaims();
+            perConfig.SetPluginPeerClaims(perConfigClaims);
+            var mix = new byte[960 * 8];
+
+            var beforeAny = PeakOfMix(perConfig, mix);
+            Check(beforeAny > 0.05f, $"in {configuration.Describe()} the speakers must carry audio before any claim (peak {beforeAny:0.000})");
+
+            perConfigClaims.Claim(andre.Address, instance);
+            var afterClaim = PeakOfMix(perConfig, mix);
+            Check(afterClaim < beforeAny - 0.15f,
+                $"in {configuration.Describe()} the CLAIMED peer must leave the speakers — that is the double-audio bug, and it "
+                + $"hides in whichever configuration nobody tested (before {beforeAny:0.000}, after {afterClaim:0.000})");
+
+            perConfigClaims.ReleaseAll(instance);
+            var released = PeakOfMix(perConfig, mix);
+            Check(released > 0.05f, $"in {configuration.Describe()} releasing the claim must bring the peer back (peak {released:0.000})");
+        }
+
+        return "claims are reference-counted, lapse without a heartbeat, and a claimed peer is provably absent from the "
+             + "device mix in all three audio configurations";
     }
 
     /// <summary>THE WHOLE LOOP, end to end: a peer arriving over the network, claimed by a plugin

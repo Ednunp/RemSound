@@ -103,7 +103,7 @@ internal sealed class MultiOutputPlayout : IRenderBackend
     /// <summary>The WORST amount of audio queued in a device buffer right now, across the live
     /// outputs. See DriftResamplingProvider.BufferedMs — this is a real stage the estimate used to
     /// skip. Zero when nothing is open.</summary>
-    public double OutputQueueMs
+    private double WorstQueueMs
     {
         get
         {
@@ -120,16 +120,16 @@ internal sealed class MultiOutputPlayout : IRenderBackend
     /// sessions are tagged Mixed). It has nothing to say about the ASIO lane. See
     /// <see cref="IRenderBackend.ReportedOutputLatencyMsFor"/>.</summary>
     public double ReportedOutputLatencyMsFor(RenderRoute route) =>
-        route == RenderRoute.AsioLane ? 0 : ReportedOutputLatencyMs;
+        route == RenderRoute.AsioLane ? 0 : WorstReportedLatencyMs;
 
     /// <inheritdoc cref="ReportedOutputLatencyMsFor"/>
     public double OutputQueueMsFor(RenderRoute route) =>
-        route == RenderRoute.AsioLane ? 0 : OutputQueueMs;
+        route == RenderRoute.AsioLane ? 0 : WorstQueueMs;
 
-    /// <summary>The WORST reported latency among the live outputs, because a listener hears the
-    /// slowest one. Zero when nothing is open or no device would say. See
-    /// <see cref="IRenderBackend.ReportedOutputLatencyMs"/>.</summary>
-    public double ReportedOutputLatencyMs
+    /// <summary>The WORST reported latency among this backend's live outputs, because a listener
+    /// hears the slowest one. Private: the only way OUT of this class is per lane, so nobody can ask
+    /// a lane-free question. See <see cref="IRenderBackend.ReportedOutputLatencyMsFor"/>.</summary>
+    private double WorstReportedLatencyMs
     {
         get
         {

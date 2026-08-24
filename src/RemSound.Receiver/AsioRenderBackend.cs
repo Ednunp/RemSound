@@ -73,20 +73,17 @@ internal sealed class AsioRenderBackend : IRenderBackend
         set => reportedOutputLatencyStore = (float)value;
     }
 
-    /// <summary>The driver's own figure. See <see cref="IRenderBackend.ReportedOutputLatencyMs"/>.</summary>
-    public double ReportedOutputLatencyMs => reportedOutputLatencyMs;
-
     /// <summary>ASIO pulls straight from the playout engine — there is no intermediate buffer to
     /// queue in. Always zero. See <see cref="IRenderBackend.OutputQueueMs"/>.</summary>
-    public double OutputQueueMs => 0;
+    private const double NoQueue = 0;   // ASIO pulls straight from the engine — nothing is buffered here
 
     /// <summary>This backend IS the ASIO lane and has nothing to say about WASAPI. See
     /// <see cref="IRenderBackend.ReportedOutputLatencyMsFor"/>.</summary>
     public double ReportedOutputLatencyMsFor(RenderRoute route) =>
-        route == RenderRoute.AsioLane ? ReportedOutputLatencyMs : 0;
+        route == RenderRoute.AsioLane ? reportedOutputLatencyMs : 0;
 
     /// <inheritdoc cref="ReportedOutputLatencyMsFor"/>
-    public double OutputQueueMsFor(RenderRoute route) => 0;
+    public double OutputQueueMsFor(RenderRoute route) => NoQueue;
 
     public string ActiveDeviceSummary
     {

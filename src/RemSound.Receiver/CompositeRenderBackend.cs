@@ -125,41 +125,17 @@ internal sealed class CompositeRenderBackend : IRenderBackend
         }
     }
 
-    /// <summary>The output latency for whichever lane the listener is on. ASIO first when it is
-    /// running, since its whole point is that it is not penalised by WASAPI's buffering; otherwise
-    /// WASAPI. See <see cref="IRenderBackend.ReportedOutputLatencyMs"/>.</summary>
-    public double ReportedOutputLatencyMs
-    {
-        get
-        {
-            var a = asio?.ReportedOutputLatencyMs ?? 0;
-            if (a > 0) return a;
-            return wasapi?.ReportedOutputLatencyMs ?? 0;
-        }
-    }
-
-    /// <summary>The queue for whichever lane the listener is on — zero when that is ASIO, which has
-    /// none. See <see cref="IRenderBackend.OutputQueueMs"/>.</summary>
-    public double OutputQueueMs
-    {
-        get
-        {
-            if ((asio?.ReportedOutputLatencyMs ?? 0) > 0) return asio!.OutputQueueMs;
-            return wasapi?.OutputQueueMs ?? 0;
-        }
-    }
-
     /// <summary>Per-lane, because both lanes run AT THE SAME TIME and the readout reports them apart.
     /// Ed leaves both active and switches between them, so answering with one lane's figure for both
     /// would hide the very difference the box exists to show. See
     /// <see cref="IRenderBackend.ReportedOutputLatencyMsFor"/>. 2026-08-24.</summary>
     public double ReportedOutputLatencyMsFor(RenderRoute route) =>
-        ForLane(route, wasapi?.ReportedOutputLatencyMs ?? 0, asio?.ReportedOutputLatencyMs ?? 0);
+        ForLane(route, wasapi?.ReportedOutputLatencyMsFor(RenderRoute.WasapiLane) ?? 0, asio?.ReportedOutputLatencyMsFor(RenderRoute.AsioLane) ?? 0);
 
     /// <inheritdoc cref="ReportedOutputLatencyMsFor"/>
     public double OutputQueueMsFor(RenderRoute route) =>
         // ASIO pulls straight from the engine, so its queue is zero by construction.
-        ForLane(route, wasapi?.OutputQueueMs ?? 0, asio?.OutputQueueMs ?? 0);
+        ForLane(route, wasapi?.OutputQueueMsFor(RenderRoute.WasapiLane) ?? 0, asio?.OutputQueueMsFor(RenderRoute.AsioLane) ?? 0);
 
     /// <summary>The lane-picking rule, on its own so the gate can prove it actually PICKS.
     ///

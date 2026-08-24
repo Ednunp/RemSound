@@ -7044,13 +7044,10 @@ public sealed partial class MainForm : Form
     /// chosen at all, which is a different question — with a driver chosen but only ASIO outputs
     /// ticked you are in ASIO-only, every stream reads the ASIO jitter buffer, and the WASAPI one
     /// governs nothing.</para></summary>
-    private (bool Wasapi, bool Asio) ActiveOutputLanes()
-    {
-        var wasapi = receiveOutputDevicesList.CheckedItems.Count > 0;
-        var asio = settings.LoadAudioMode() == AudioMode.BothIndependent
-            && asioReceiveOutputDevicesList.CheckedItems.Count > 0;
-        return (wasapi, asio);
-    }
+    private AudioConfiguration ActiveAudioConfiguration() => AudioConfigurations.From(
+        wasapiOutputTicked: receiveOutputDevicesList.CheckedItems.Count > 0,
+        asioOutputTicked: settings.LoadAudioMode() == AudioMode.BothIndependent
+                          && asioReceiveOutputDevicesList.CheckedItems.Count > 0);
 
     /// <summary>
     /// Name the auto-tune interval after the jitter buffer(s) it is actually re-checking.
@@ -7068,8 +7065,7 @@ public sealed partial class MainForm : Form
     private void UpdateAutoTuneIntervalWording()
     {
         if (continuousIntervalLabel is null) return;
-        var (wasapi, asio) = ActiveOutputLanes();
-        var text = AutoTuneIntervalLabel(wasapi, asio);
+        var text = AutoTuneIntervalLabel(ActiveAudioConfiguration());
         if (continuousIntervalLabel.Text != text) continuousIntervalLabel.Text = text;
         var spoken = text.Replace("&", "");
         if (continuousIntervalBox.AccessibleName != spoken) continuousIntervalBox.AccessibleName = spoken;
@@ -7078,8 +7074,8 @@ public sealed partial class MainForm : Form
     /// <summary>Pure and testable: the interval label for a given configuration. Both lanes live →
     /// name both; anything else → just "jitter buffer". Kept pure so the gate can pin all THREE
     /// configurations without building a window.</summary>
-    internal static string AutoTuneIntervalLabel(bool wasapiActive, bool asioActive) =>
-        wasapiActive && asioActive
+    internal static string AutoTuneIntervalLabel(AudioConfiguration configuration) =>
+        configuration.HasTwoLanes()
             ? "Auto-tune interval for WASAPI and ASIO jitter buffer (Alt+&I)"
             : "Auto-tune interval for jitter buffer (Alt+&I)";
 
@@ -8407,7 +8403,10 @@ public sealed partial class MainForm : Form
                 // was — 2,541 of Ed's 2,547 samples read exactly 10.0 on a card whose real period was
                 // about 1.4 ms. ASIO drivers state their playback latency outright; WASAPI states its
                 // engine period, doubled because the device plays one buffer while we fill the next.
-                var reportedRenderMs = receiver.ReportedOutputLatencyMs;
+                // Asked FOR THE LANE THE LISTENER IS ON. There is no lane-free version to reach for
+                // any more — that shortcut is what produced the bug where the WASAPI line of the
+                // readout showed ASIO's numbers with both lanes live.
+                var reportedRenderMs = receiver.ReportedOutputLatencyMsFor(listeningRoute);
                 var renderBufferMs = reportedRenderMs > 0 ? reportedRenderMs : RenderBufferEstimateMs(lanePeriodMs);
                 // EVERY stage of the journey, or the total is a comfortable fiction.
                 // The output QUEUE — audio that has left the playout engine and is waiting in the
@@ -8416,7 +8415,7 @@ public sealed partial class MainForm : Form
                 // stage before it. Ed's 2026-08-23 log shows it sitting at 10 to 23 ms all session
                 // while the total ignored it. MEASURED, and zero on ASIO, which pulls straight from
                 // the engine — a real reason ASIO is tighter rather than a claim about it. 2026-08-24.
-                var outputQueueMs = receiver.OutputQueueMs;
+                var outputQueueMs = receiver.OutputQueueMsFor(listeningRoute);
                 var totalMs = captureBufferMs + senderAccumulatorMs + wireOneWayMs + diag.BufferAvgMs + outputQueueMs + renderBufferMs;
                 // PER-LANE totals for the readout. Capture, encode and wire are shared by both lanes;
                 // the queue depth and the output period are not — those are the two terms that make a

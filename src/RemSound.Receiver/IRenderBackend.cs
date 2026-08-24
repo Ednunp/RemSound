@@ -21,34 +21,17 @@ internal interface IRenderBackend : IDisposable
     IReadOnlyList<string> ActiveDeviceIds { get; }
 
     /// <summary>
-    /// How long audio waits in the OUTPUT device after this backend hands it over, in milliseconds,
-    /// as the device or driver reports it. Zero when it won't say.
+    /// These figures are ONLY available per output lane. There is deliberately no lane-free version.
     ///
-    /// <para>This replaces a clamp. The estimate used to take the measured render-callback gap,
-    /// double it, then clamp up to a floor of 10 ms — which pinned a fast card at 10 whatever the
-    /// truth was. Ed's 2026-08-23 log shows "render=10.0" on 2,541 of 2,547 samples on a card whose
-    /// real callback period was about 1.4 ms, so that figure was the floor and not a reading. ASIO
-    /// drivers state their playback latency outright; WASAPI states its engine period, doubled here
-    /// because the device plays one buffer while the app fills the next.</para>
+    /// <para>There was one, and it is what produced the bug Ed caught: a single property answering
+    /// "ASIO if it is running, otherwise WASAPI" meant that with both lanes live — which is how he
+    /// actually runs — the WASAPI line of the readout showed ASIO's numbers. Removing the convenient
+    /// one-value shortcut is what makes that mistake unavailable rather than merely discouraged:
+    /// you cannot ask "what is the output latency" without saying which lane you mean.</para>
     ///
-    /// <para>Read ONCE when a device is opened, never in a callback. 2026-08-24.</para>
-    /// </summary>
-    double ReportedOutputLatencyMs { get; }
-
-    /// <summary>Audio queued in the backend's own device buffers right now, in milliseconds — a
-    /// stage between the playout engine and the sound card that the latency estimate never counted.
-    /// MEASURED. Zero for ASIO, which pulls straight from the engine and has no such queue, and that
-    /// difference is a real part of why ASIO is tighter. 2026-08-24.</summary>
-    double OutputQueueMs { get; }
-
-    /// <summary>
-    /// The same two figures, PER OUTPUT LANE, because WASAPI and ASIO run at the same time and the
-    /// readout reports them apart.
-    ///
-    /// <para>Ed leaves both lanes active and switches between them, so a single blended figure — or
-    /// worse, one lane's figure shown against both — hides exactly the difference he is trying to
-    /// read. The lane-free properties above answer for whichever lane the listener is on and drive
-    /// the one-number status line; these drive the two-line readout. 2026-08-24.</para>
+    /// <para>Audio queued in the device buffer is MEASURED and is zero on ASIO, which pulls straight
+    /// from the playout engine — a real structural reason ASIO is tighter, not a claim about it.
+    /// 2026-08-24.</para>
     /// </summary>
     double ReportedOutputLatencyMsFor(RemSound.Core.RenderRoute route);
 
