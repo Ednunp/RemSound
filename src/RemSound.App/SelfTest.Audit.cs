@@ -643,7 +643,67 @@ internal static partial class SelfTest
             "ASIO pulls straight from the engine and must never report a device queue — if this ever "
             + "becomes non-zero, the ASIO path has grown a buffer nobody meant to add");
 
-        return "both lanes are answered independently; nothing is claimed with no device open; ASIO reports no device queue by construction";
+        // --- AND THE CALLER, not just the rule ----------------------------------------------------
+        // Everything above pins the formatter and the lane-picker given the right input. It says
+        // nothing about whether the app ASKS the right question — and that is where this bug actually
+        // lived: the readout passed "is an ASIO driver chosen" where it meant "are two lanes live".
+        // With a driver chosen and no ASIO output ticked, it named both lanes and showed a WASAPI
+        // line for a lane carrying nothing.
+        //
+        // Driven through the real window with the mode set to BothIndependent and NO outputs ticked,
+        // which is the ASIO-driver-chosen-but-nothing-selected state. A test of the formatter alone
+        // passes whether or not this is right, which is exactly why it needs its own check.
+        MainForm form;
+        try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+        catch (Exception ex) { return Skip($"headless main window could not be built: {ex.GetType().Name}: {ex.Message}"); }
+
+        using (form)
+        {
+            // The audio mode is DERIVED from whether an ASIO driver name is set — there is no
+            // SaveAudioMode, and a reflection call to one silently does nothing. Ask, then verify.
+            SetAsioDriverForTest(form, "RemSound self-test — no such ASIO driver");
+
+            var update = typeof(MainForm).GetMethod("UpdateMeasuredLatencyReadout", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new CheckFailed("UpdateMeasuredLatencyReadout not found — this check would prove nothing");
+            update.Invoke(form, null);
+
+            var readout = typeof(MainForm).GetField("measuredLatencyReadout", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(form) as Control;
+            Check(readout is not null, "the readout control must be reachable");
+            var shown = readout!.Text ?? "";
+            Check(!shown.Contains("WASAPI", StringComparison.OrdinalIgnoreCase) && !shown.Contains("ASIO", StringComparison.OrdinalIgnoreCase),
+                $"with an ASIO driver chosen but NO ASIO output ticked there is one lane, so the readout must not name lanes — "
+                + $"asking the audio MODE instead of the configuration is what made it name both. Got: \"{shown}\"");
+        }
+
+        return "both lanes are answered independently; nothing is claimed with no device open; ASIO reports no device queue "
+             + "by construction; and the readout asks the CONFIGURATION rather than the audio mode";
+    }
+
+    /// <summary>
+    /// Put a headless window into the ASIO-driver-chosen state, and PROVE it took.
+    ///
+    /// <para>There is no <c>SaveAudioMode</c>: the mode is derived from whether an ASIO driver name
+    /// is set. A reflection call to a method that does not exist silently does nothing, so two of my
+    /// own tests were switching mode by asking for a method that was deleted in 2026-05 and then
+    /// asserting against the unchanged default — passing whether the code was right or wrong. This
+    /// helper asks the right way and then CHECKS the mode actually moved, so the same silent no-op
+    /// cannot happen again. 2026-08-24.</para>
+    /// </summary>
+    private static void SetAsioDriverForTest(MainForm form, string? driverName)
+    {
+        var settings = typeof(MainForm).GetField("settings", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(form)
+            ?? throw new CheckFailed("the settings store is not reachable — the mode cannot be driven, so the test would prove nothing");
+        var save = settings.GetType().GetMethod("SaveAsioDriverName")
+            ?? throw new CheckFailed("SaveAsioDriverName not found — the audio mode is derived from it, so without it nothing can be driven");
+        save.Invoke(settings, [driverName]);
+
+        var load = settings.GetType().GetMethod("LoadAudioMode")
+            ?? throw new CheckFailed("LoadAudioMode not found");
+        var expected = string.IsNullOrWhiteSpace(driverName) ? AudioMode.WasapiOnly : AudioMode.BothIndependent;
+        var actual = load.Invoke(settings, [AudioMode.WasapiOnly]);
+        Check(Equals(actual, expected),
+            $"setting the ASIO driver to \"{driverName ?? "(none)"}\" must put the app in {expected} (got {actual}) — "
+            + "a test that thinks it switched mode and did not is worse than no test at all");
     }
 
     /// <summary>
@@ -670,16 +730,17 @@ internal static partial class SelfTest
         {
             var apply = typeof(MainForm).GetMethod("UpdateBothIndependentVisibility", BindingFlags.Instance | BindingFlags.NonPublic)
                 ?? throw new CheckFailed("UpdateBothIndependentVisibility not found — this test would check nothing");
-            var saveMode = typeof(MainForm).GetField("settings", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(form);
-            Check(saveMode is not null, "the settings object must be reachable to drive the mode switch");
-
             object? Field(string name) =>
                 typeof(MainForm).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(form);
 
             var checkedModes = 0;
             foreach (var mode in new[] { AudioMode.WasapiOnly, AudioMode.BothIndependent })
             {
-                saveMode!.GetType().GetMethod("SaveAudioMode")?.Invoke(saveMode, [mode]);
+                // Drive it the way the app actually works — and prove it took. This used to call a
+                // SaveAudioMode that was deleted in 2026-05, via a null-conditional that silently did
+                // nothing, so both passes ran against the unchanged default and the "both modes"
+                // in this test's name was a fiction.
+                SetAsioDriverForTest(form, mode == AudioMode.BothIndependent ? "RemSound self-test — no such ASIO driver" : null);
                 apply.Invoke(form, null);
                 checkedModes++;
 

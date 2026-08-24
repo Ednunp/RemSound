@@ -7711,8 +7711,14 @@ public sealed partial class MainForm : Form
         if (ShouldCommitLatencyFigure(committedAsioAchievedMs, achievedLatencyAsioMs))
             committedAsioAchievedMs = achievedLatencyAsioMs;
 
+        // THE CONFIGURATION, not the mode. This asked "is an ASIO driver chosen", which is a
+        // different question: with a driver chosen but only ASIO outputs ticked, the readout named
+        // both lanes and showed a WASAPI line for a lane carrying nothing. Exactly the fault Ed
+        // caught in the auto-tune interval label, still live here in the box he actually reads.
+        // Found on 2026-08-24 by checking his claim that no app code needed branching — it mostly
+        // did not, and this one did. See AudioConfiguration for why the mode is the wrong axis.
         var text = FormatMeasuredLatency(
-            settings.LoadAudioMode() == AudioMode.BothIndependent,
+            ActiveAudioConfiguration().HasTwoLanes(),
             receiver.TargetLatencyMsFor(RenderRoute.WasapiLane), committedWasapiAchievedMs,
             receiver.TargetLatencyMsFor(RenderRoute.AsioLane), committedAsioAchievedMs);
         // HOLD STILL WHILE IT IS BEING READ — the same rule RefreshStatusReadout already follows.
