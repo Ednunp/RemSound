@@ -558,6 +558,71 @@ internal static partial class SelfTest
     }
 
     /// <summary>
+    /// WASAPI and ASIO run AT THE SAME TIME, so neither lane may be reported with the other's output
+    /// figures.
+    ///
+    /// <para>Ed leaves both lanes active and switches between them, and the readout shows a line for
+    /// each. My first cut of the device-reported latency answered "ASIO if it is running, otherwise
+    /// WASAPI" from one property — so with both live, the WASAPI line would have shown ASIO's
+    /// numbers, hiding the very difference the box exists to show. Ed caught it before he tested it.
+    /// 2026-08-24.</para>
+    ///
+    /// <para>Driven through the real CompositeRenderBackend in the both-lanes configuration, with no
+    /// device open, so it runs anywhere: nothing is open, so every per-lane figure must be zero AND
+    /// the two lanes must be answered independently rather than one falling through to the other.</para>
+    /// </summary>
+    private static string? AuditOutputLatencyIsReportedPerLane()
+    {
+        // THE LANE-PICKING RULE, fed two DIFFERENT values. This is the assertion that actually bites:
+        // an earlier version of this test only checked that everything read zero with no device open,
+        // and a broken implementation that returned the same figure for both lanes sailed through it,
+        // because zero equals zero. Given 22 and 5 it cannot.
+        const double wasapiFigure = 22.0;
+        const double asioFigure = 5.0;
+        Check(CompositeRenderBackend.ForLane(RenderRoute.WasapiLane, wasapiFigure, asioFigure) == wasapiFigure,
+            "the WASAPI lane must be answered with the WASAPI figure");
+        Check(CompositeRenderBackend.ForLane(RenderRoute.AsioLane, wasapiFigure, asioFigure) == asioFigure,
+            "the ASIO lane must be answered with the ASIO figure — reporting one lane with the other's "
+            + "number hides the exact difference the readout exists to show, and both lanes run at once");
+        Check(CompositeRenderBackend.ForLane(RenderRoute.WasapiLane, wasapiFigure, asioFigure)
+              != CompositeRenderBackend.ForLane(RenderRoute.AsioLane, wasapiFigure, asioFigure),
+            "the two lanes must not resolve to the same value when their figures differ");
+        // Mixed is the single-lane world, where the WASAPI backend is the only one there is.
+        Check(CompositeRenderBackend.ForLane(RenderRoute.Mixed, wasapiFigure, asioFigure) == wasapiFigure,
+            "a single-lane setup reports through the WASAPI backend");
+
+        var engine = new PlayoutEngine(new ReceiverDiagnostics());
+        using var both = new CompositeRenderBackend(AudioMode.BothIndependent, "RemSound self-test — no such ASIO driver", engine);
+
+        // Nothing is open, so nothing may claim a figure. A backend that invents one here would
+        // invent one in the field too.
+        foreach (var route in new[] { RenderRoute.WasapiLane, RenderRoute.AsioLane, RenderRoute.Mixed })
+        {
+            Check(both.ReportedOutputLatencyMsFor(route) == 0,
+                $"with no device open, {route} must report no output latency rather than a plausible-looking number");
+            Check(both.OutputQueueMsFor(route) == 0, $"with no device open, {route} must report no queued audio");
+        }
+
+        // The lanes must be answered SEPARATELY. A WASAPI-only backend must have nothing to say about
+        // the ASIO lane, and vice versa — that separation is what stops one lane's number being shown
+        // against the other when both are live.
+        using var wasapiOnly = new CompositeRenderBackend(AudioMode.WasapiOnly, null, engine);
+        Check(wasapiOnly.ReportedOutputLatencyMsFor(RenderRoute.AsioLane) == 0,
+            "a WASAPI-only setup must never answer for the ASIO lane");
+        Check(wasapiOnly.OutputQueueMsFor(RenderRoute.AsioLane) == 0,
+            "a WASAPI-only setup must never report an ASIO queue");
+
+        // ASIO has no intermediate buffer at all — it pulls straight from the playout engine. That is
+        // a real structural difference between the lanes, not a rounding one, so it is pinned.
+        using var asioBackend = new AsioRenderBackend("RemSound self-test — no such ASIO driver", engine);
+        Check(asioBackend.OutputQueueMs == 0 && asioBackend.OutputQueueMsFor(RenderRoute.AsioLane) == 0,
+            "ASIO pulls straight from the engine and must never report a device queue — if this ever "
+            + "becomes non-zero, the ASIO path has grown a buffer nobody meant to add");
+
+        return "both lanes are answered independently; nothing is claimed with no device open; ASIO reports no device queue by construction";
+    }
+
+    /// <summary>
     /// The jitter-buffer controls must say "jitter buffer" in EVERY audio mode.
     ///
     /// <para>These controls rename themselves depending on whether an ASIO driver is chosen. The

@@ -41,6 +41,20 @@ internal interface IRenderBackend : IDisposable
     /// difference is a real part of why ASIO is tighter. 2026-08-24.</summary>
     double OutputQueueMs { get; }
 
+    /// <summary>
+    /// The same two figures, PER OUTPUT LANE, because WASAPI and ASIO run at the same time and the
+    /// readout reports them apart.
+    ///
+    /// <para>Ed leaves both lanes active and switches between them, so a single blended figure — or
+    /// worse, one lane's figure shown against both — hides exactly the difference he is trying to
+    /// read. The lane-free properties above answer for whichever lane the listener is on and drive
+    /// the one-number status line; these drive the two-line readout. 2026-08-24.</para>
+    /// </summary>
+    double ReportedOutputLatencyMsFor(RemSound.Core.RenderRoute route);
+
+    /// <inheritdoc cref="ReportedOutputLatencyMsFor"/>
+    double OutputQueueMsFor(RemSound.Core.RenderRoute route);
+
     void Start();
 
     void Stop();

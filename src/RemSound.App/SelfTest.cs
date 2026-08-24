@@ -184,6 +184,7 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT: the latency readout doesn't redraw (and speak) for wobble", AuditLatencyReadoutIgnoresWobble);
         RunStep(results, "AUDIT: the total-latency readout sits with the jitter-buffer controls in tab order", AuditLatencyReadoutSitsWithItsControls);
         RunStep(results, "AUDIT: the latency estimate uses the DEVICE'S figures, not constants", AuditLatencyUsesDeviceReportedFigures);
+        RunStep(results, "AUDIT: output latency is reported PER LANE (both run at once)", AuditOutputLatencyIsReportedPerLane);
         RunStep(results, "AUDIT: jitter-buffer wording, in all THREE audio configurations", AuditJitterBufferWordingInEveryMode);
 
         var failed = results.Count(r => r.Status == "FAIL");

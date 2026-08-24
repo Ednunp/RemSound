@@ -149,6 +149,28 @@ internal sealed class CompositeRenderBackend : IRenderBackend
         }
     }
 
+    /// <summary>Per-lane, because both lanes run AT THE SAME TIME and the readout reports them apart.
+    /// Ed leaves both active and switches between them, so answering with one lane's figure for both
+    /// would hide the very difference the box exists to show. See
+    /// <see cref="IRenderBackend.ReportedOutputLatencyMsFor"/>. 2026-08-24.</summary>
+    public double ReportedOutputLatencyMsFor(RenderRoute route) =>
+        ForLane(route, wasapi?.ReportedOutputLatencyMs ?? 0, asio?.ReportedOutputLatencyMs ?? 0);
+
+    /// <inheritdoc cref="ReportedOutputLatencyMsFor"/>
+    public double OutputQueueMsFor(RenderRoute route) =>
+        // ASIO pulls straight from the engine, so its queue is zero by construction.
+        ForLane(route, wasapi?.OutputQueueMs ?? 0, asio?.OutputQueueMs ?? 0);
+
+    /// <summary>The lane-picking rule, on its own so the gate can prove it actually PICKS.
+    ///
+    /// <para>This is a seam rather than an inline conditional because the bug it guards against is
+    /// invisible with no hardware attached: a version that returned the same figure for both lanes
+    /// passed a test that only checked "everything reads zero when nothing is open". Given two
+    /// different values it is obvious; given two zeroes it is not. So the test feeds it two different
+    /// values. 2026-08-24.</para></summary>
+    internal static double ForLane(RenderRoute route, double wasapiValue, double asioValue) =>
+        route == RenderRoute.AsioLane ? asioValue : wasapiValue;
+
     public void Start()
     {
         lock (gate)

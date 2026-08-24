@@ -7678,7 +7678,14 @@ public sealed partial class MainForm : Form
         if (!receiver.HasSessionsForRoute(route)) return 0;
         var period = receiver.MaxRenderCallbackGapMsFor(route);
         if (period <= 0) return fallbackTotalMs; // nothing measured for this lane yet
-        return sharedMs + receiver.CurrentBufferMsFor(route) + RenderBufferEstimateMs(period);
+        // THIS LANE'S OWN output figures. Both lanes run at the same time — Ed leaves both active and
+        // switches between them — so answering one lane with the other's numbers would hide exactly
+        // the difference this readout exists to show. The device's own figure where it gave one,
+        // otherwise the old estimate; plus the audio queued in that lane's device buffer, which is
+        // zero on ASIO because it pulls straight from the engine. 2026-08-24.
+        var reported = receiver.ReportedOutputLatencyMsFor(route);
+        var outputMs = reported > 0 ? reported : RenderBufferEstimateMs(period);
+        return sharedMs + receiver.CurrentBufferMsFor(route) + receiver.OutputQueueMsFor(route) + outputMs;
     }
 
     /// <summary>Fill the read-only measured-latency readout: what each lane is SET to, and what it is

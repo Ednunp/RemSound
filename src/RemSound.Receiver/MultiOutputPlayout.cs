@@ -116,6 +116,16 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         }
     }
 
+    /// <summary>This backend IS the WASAPI lane (and the only lane in a WASAPI-only setup, where
+    /// sessions are tagged Mixed). It has nothing to say about the ASIO lane. See
+    /// <see cref="IRenderBackend.ReportedOutputLatencyMsFor"/>.</summary>
+    public double ReportedOutputLatencyMsFor(RenderRoute route) =>
+        route == RenderRoute.AsioLane ? 0 : ReportedOutputLatencyMs;
+
+    /// <inheritdoc cref="ReportedOutputLatencyMsFor"/>
+    public double OutputQueueMsFor(RenderRoute route) =>
+        route == RenderRoute.AsioLane ? 0 : OutputQueueMs;
+
     /// <summary>The WORST reported latency among the live outputs, because a listener hears the
     /// slowest one. Zero when nothing is open or no device would say. See
     /// <see cref="IRenderBackend.ReportedOutputLatencyMs"/>.</summary>

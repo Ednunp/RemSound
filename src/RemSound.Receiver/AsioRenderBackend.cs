@@ -80,6 +80,14 @@ internal sealed class AsioRenderBackend : IRenderBackend
     /// queue in. Always zero. See <see cref="IRenderBackend.OutputQueueMs"/>.</summary>
     public double OutputQueueMs => 0;
 
+    /// <summary>This backend IS the ASIO lane and has nothing to say about WASAPI. See
+    /// <see cref="IRenderBackend.ReportedOutputLatencyMsFor"/>.</summary>
+    public double ReportedOutputLatencyMsFor(RenderRoute route) =>
+        route == RenderRoute.AsioLane ? ReportedOutputLatencyMs : 0;
+
+    /// <inheritdoc cref="ReportedOutputLatencyMsFor"/>
+    public double OutputQueueMsFor(RenderRoute route) => 0;
+
     public string ActiveDeviceSummary
     {
         get

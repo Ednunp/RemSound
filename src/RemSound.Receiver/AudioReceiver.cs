@@ -256,6 +256,14 @@ public sealed class AudioReceiver : IDisposable
     /// estimate used to skip entirely. See <see cref="IRenderBackend.OutputQueueMs"/>.</summary>
     public double OutputQueueMs => multiOutput.OutputQueueMs;
 
+    /// <summary>Both output figures PER LANE. WASAPI and ASIO run at the same time and the readout
+    /// reports them apart, so neither may be answered with the other's number.
+    /// See <see cref="IRenderBackend.ReportedOutputLatencyMsFor"/>. 2026-08-24.</summary>
+    public double ReportedOutputLatencyMsFor(RenderRoute route) => multiOutput.ReportedOutputLatencyMsFor(route);
+
+    /// <inheritdoc cref="ReportedOutputLatencyMsFor"/>
+    public double OutputQueueMsFor(RenderRoute route) => multiOutput.OutputQueueMsFor(route);
+
     public int SmoothnessValue => playoutEngine.SmoothnessValue;
     public ConcealmentArtifact ConcealmentArtifactValue => playoutEngine.ConcealmentArtifactValue;
 
