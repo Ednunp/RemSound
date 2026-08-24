@@ -64,6 +64,22 @@ internal sealed class AsioRenderBackend : IRenderBackend
 
     public bool IsRunning => asio is not null;
 
+    // The driver's own playback latency, read once at open. Volatile store so the UI thread can read
+    // it while the apartment thread writes it.
+    private volatile float reportedOutputLatencyStore;
+    private double reportedOutputLatencyMs
+    {
+        get => reportedOutputLatencyStore;
+        set => reportedOutputLatencyStore = (float)value;
+    }
+
+    /// <summary>The driver's own figure. See <see cref="IRenderBackend.ReportedOutputLatencyMs"/>.</summary>
+    public double ReportedOutputLatencyMs => reportedOutputLatencyMs;
+
+    /// <summary>ASIO pulls straight from the playout engine — there is no intermediate buffer to
+    /// queue in. Always zero. See <see cref="IRenderBackend.OutputQueueMs"/>.</summary>
+    public double OutputQueueMs => 0;
+
     public string ActiveDeviceSummary
     {
         get
@@ -164,6 +180,16 @@ internal sealed class AsioRenderBackend : IRenderBackend
                 asio.Init(broadcaster);
                 onDiagnostic?.Invoke("asio render open: starting stream (play)");
                 asio.Play();
+                // The DRIVER'S OWN figure for how long playback takes, in samples. This is the one
+                // number in the whole latency estimate that comes from the hardware rather than from
+                // us, and ASIO drivers generally include their converter path in it. Read once, here.
+                // 2026-08-24.
+                reportedOutputLatencyMs = asio.PlaybackLatency > 0
+                    ? asio.PlaybackLatency * 1000.0 / MixSampleRate
+                    : 0;
+                onDiagnostic?.Invoke(reportedOutputLatencyMs > 0
+                    ? $"asio render: driver reports {asio.PlaybackLatency} samples of playback latency = {reportedOutputLatencyMs:0.0} ms"
+                    : "asio render: driver did not report a playback latency — the estimate falls back to its own figure");
                 onDiagnostic?.Invoke($"asio render started \"{driverName}\" {MixSampleRate} Hz, {outputChannelCount} output channel(s); pairs={string.Join(",", activeChannelPairs)}");
             });
         }
@@ -199,6 +225,7 @@ internal sealed class AsioRenderBackend : IRenderBackend
             asio = null;
         }
         broadcaster = null;
+        reportedOutputLatencyMs = 0;   // belongs to the stream we just closed
     }
 
     public void Dispose()

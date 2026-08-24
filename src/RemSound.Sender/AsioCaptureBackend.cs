@@ -171,6 +171,19 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
 
     public bool IsRunning => asio is not null;
 
+    // Set from the driver's own reported buffer size when the stream opens; cleared on close.
+    // Volatile because the UI thread reads it while the apartment thread writes it at open.
+    private volatile float reportedInputLatencyMsStore;
+    private double reportedInputLatencyMs
+    {
+        get => reportedInputLatencyMsStore;
+        set => reportedInputLatencyMsStore = (float)value;
+    }
+
+    /// <summary>The driver's own buffer size, expressed in milliseconds. See
+    /// <see cref="ICaptureBackend.ReportedInputLatencyMs"/>.</summary>
+    public double ReportedInputLatencyMs => reportedInputLatencyMs;
+
     /// <summary>ASIO has no equivalent of WASAPI's "the capture stopped without being asked".
     /// A driver-level failure surfaces as an exception out of a control call (handled in Start) or
     /// out of the audio callback (handled there, rate-limited), not as a stopped-stream event. And
@@ -243,6 +256,16 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
                     onDiagnostic?.Invoke($"asio open: init record+playback ({recordChannelCount} ch @ {MixSampleRate} Hz)");
                     asio.InitRecordAndPlayback(null, recordChannelCount, MixSampleRate);
                     asio.AudioAvailable += OnAudioAvailable;
+                    // Ask the DRIVER how big its buffer is, instead of assuming. Audio accumulates for
+                    // exactly one buffer before the callback fires, so this IS the capture wait — no
+                    // doubling (the render side is different, see AsioRenderBackend). Read once, here,
+                    // off the audio thread. 2026-08-24.
+                    reportedInputLatencyMs = asio.FramesPerBuffer > 0
+                        ? asio.FramesPerBuffer * 1000.0 / MixSampleRate
+                        : 0;
+                    onDiagnostic?.Invoke(reportedInputLatencyMs > 0
+                        ? $"asio open: driver reports {asio.FramesPerBuffer} frames per buffer = {reportedInputLatencyMs:0.0} ms of capture latency"
+                        : "asio open: driver did not report a buffer size — capture latency will fall back to an estimate");
                     captureFormat = $"{MixSampleRate} Hz, {recordChannelCount} input channel(s), 32-bit float (ASIO)";
                     onDiagnostic?.Invoke("asio open: starting stream (play)");
                     asio.Play();
@@ -369,6 +392,7 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
         uptime.Stop();
         activeChannelPairIndices = [];
         recordChannelCount = 0;
+        reportedInputLatencyMs = 0;   // the driver's figure belongs to the stream we just closed
     }
 
     public void Dispose()

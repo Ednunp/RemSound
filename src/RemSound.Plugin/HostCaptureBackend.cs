@@ -117,6 +117,10 @@ internal sealed class HostCaptureBackend : ICaptureBackend
     /// <summary>There is no device to lose — the host owns it, and if the DAW stops calling us there
     /// is nothing here to re-open. Always false. See <see cref="ICaptureBackend.HasFaulted"/>.</summary>
     public bool HasFaulted => false;
+
+    /// <summary>The DAW owns the device and does not tell us its latency, so we do not claim one.
+    /// See <see cref="ICaptureBackend.ReportedInputLatencyMs"/>.</summary>
+    public double ReportedInputLatencyMs => 0;
     public long TotalCaptureCallbacks => callbacks;
     public long TotalCaptureBytes => bytes;
     public string? FirstCaptureFormatDescription => $"{hostSampleRate:0} Hz, {Channels} ch, host-driven (DAW)";

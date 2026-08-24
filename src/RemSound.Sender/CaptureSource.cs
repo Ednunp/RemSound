@@ -173,6 +173,11 @@ internal sealed class CaptureSource : IDisposable
     /// always thrown away rather than revived.</summary>
     public bool Faulted { get; private set; }
 
+    /// <summary>How long audio waits inside THIS source's device, as the device reports it. Zero for
+    /// a per-application capture, which has no device of its own — Windows mixes it for us and there
+    /// is nothing to ask. See <see cref="ICaptureBackend.ReportedInputLatencyMs"/>. 2026-08-24.</summary>
+    public double ReportedInputLatencyMs { get; init; }
+
     /// <summary>
     /// Down-mixes any channel layout to stereo. Mono is duplicated to L=R; stereo passes through;
     /// multi-channel (5.1, 7.1, etc.) takes the front L/R channels (a basic "front-pair" pick,

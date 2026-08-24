@@ -36,6 +36,22 @@ internal interface ICaptureBackend : IDisposable
     /// </summary>
     bool HasFaulted { get; }
 
+    /// <summary>
+    /// How long audio waits in the CAPTURE device before this backend sees it, in milliseconds, as
+    /// reported by the device itself. Zero when the device won't say.
+    ///
+    /// <para>This replaces a guess. The latency estimate used to add a flat 10 ms here — the buffer
+    /// size RemSound ASKS Windows for, not what the device delivers — on every machine, for every
+    /// device, and it only ever measured anything on ASIO. Ed's 2026-08-23 log shows "capture=10.0"
+    /// on all 2,547 samples of a WASAPI session, because neither WASAPI backend reported a period at
+    /// all. A constant that hides inside a total makes the total look measured when it isn't.</para>
+    ///
+    /// <para>Read ONCE when the device is opened, never in a callback: WASAPI states its engine
+    /// period, ASIO states its buffer size. Nothing here touches the audio path or costs anything
+    /// per sample. 2026-08-24.</para>
+    /// </summary>
+    double ReportedInputLatencyMs { get; }
+
     /// <summary>Total capture callback count across all active sources (WASAPI) or the ASIO
     /// driver's input-callback count.</summary>
     long TotalCaptureCallbacks { get; }

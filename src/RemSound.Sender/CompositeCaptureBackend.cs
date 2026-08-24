@@ -107,6 +107,19 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
     public bool IsRunning => started && !HasFaulted;
 
     public bool HasFaulted => wasapi?.HasFaulted ?? false;
+
+    /// <summary>The capture device latency for whichever lane is actually capturing. ASIO first when it
+    /// is running, since that is the lane the user is listening on; otherwise WASAPI. See
+    /// <see cref="ICaptureBackend.ReportedInputLatencyMs"/>.</summary>
+    public double ReportedInputLatencyMs
+    {
+        get
+        {
+            var a = asio?.ReportedInputLatencyMs ?? 0;
+            if (a > 0) return a;
+            return wasapi?.ReportedInputLatencyMs ?? 0;
+        }
+    }
     public long TotalCaptureCallbacks => (wasapi?.TotalCaptureCallbacks ?? 0) + (asio?.TotalCaptureCallbacks ?? 0);
     public long TotalCaptureBytes => (wasapi?.TotalCaptureBytes ?? 0) + (asio?.TotalCaptureBytes ?? 0);
     public string? FirstCaptureFormatDescription => asio?.FirstCaptureFormatDescription ?? wasapi?.FirstCaptureFormatDescription;

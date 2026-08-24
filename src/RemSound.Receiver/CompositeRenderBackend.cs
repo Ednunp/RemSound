@@ -125,6 +125,30 @@ internal sealed class CompositeRenderBackend : IRenderBackend
         }
     }
 
+    /// <summary>The output latency for whichever lane the listener is on. ASIO first when it is
+    /// running, since its whole point is that it is not penalised by WASAPI's buffering; otherwise
+    /// WASAPI. See <see cref="IRenderBackend.ReportedOutputLatencyMs"/>.</summary>
+    public double ReportedOutputLatencyMs
+    {
+        get
+        {
+            var a = asio?.ReportedOutputLatencyMs ?? 0;
+            if (a > 0) return a;
+            return wasapi?.ReportedOutputLatencyMs ?? 0;
+        }
+    }
+
+    /// <summary>The queue for whichever lane the listener is on — zero when that is ASIO, which has
+    /// none. See <see cref="IRenderBackend.OutputQueueMs"/>.</summary>
+    public double OutputQueueMs
+    {
+        get
+        {
+            if ((asio?.ReportedOutputLatencyMs ?? 0) > 0) return asio!.OutputQueueMs;
+            return wasapi?.OutputQueueMs ?? 0;
+        }
+    }
+
     public void Start()
     {
         lock (gate)

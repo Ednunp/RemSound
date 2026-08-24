@@ -120,6 +120,26 @@ internal sealed class MixingEngine : ICaptureBackend
         }
     }
 
+    /// <summary>The WORST capture latency among the mixed sources, because the mix waits for the
+    /// slowest one — a 10 ms mic and a 21 ms Realtek loopback summed together are 21 ms of wait, not
+    /// an average of the two. Zero when nothing is open or no source would say (per-application
+    /// captures have no device to ask). See <see cref="ICaptureBackend.ReportedInputLatencyMs"/>.</summary>
+    public double ReportedInputLatencyMs
+    {
+        get
+        {
+            lock (gate)
+            {
+                var worst = 0.0;
+                foreach (var a in active)
+                {
+                    if (a.Source.ReportedInputLatencyMs > worst) worst = a.Source.ReportedInputLatencyMs;
+                }
+                return worst;
+            }
+        }
+    }
+
     /// <summary>True when any source in the mix has died on its own. See
     /// <see cref="ICaptureBackend.HasFaulted"/>. Also true if the mix task itself has ended while
     /// sources are still open, which would leave the lane silent with nothing noticing.</summary>
@@ -333,7 +353,12 @@ internal sealed class MixingEngine : ICaptureBackend
         {
             using var enumerator = new MMDeviceEnumerator();
             device = enumerator.GetDevice(spec.DeviceId);
-            var src = new CaptureSource(device, spec.Kind, spec.Name, onDiagnostic);
+            // Ask the device how long audio waits in it, once, here — see DeviceLatencyProbe.
+            var reported = DeviceLatencyProbe.CaptureLatencyMs(device, CaptureSource.CaptureBufferMs);
+            onDiagnostic?.Invoke(reported > 0
+                ? $"mixer: \"{spec.Name}\" reports {reported:0.0} ms of capture latency (engine period {DeviceLatencyProbe.EnginePeriodMs(device):0.0} ms, we asked for {CaptureSource.CaptureBufferMs} ms)"
+                : $"mixer: \"{spec.Name}\" would not report its period — capture latency falls back to the {CaptureSource.CaptureBufferMs} ms estimate");
+            var src = new CaptureSource(device, spec.Kind, spec.Name, onDiagnostic) { ReportedInputLatencyMs = reported };
             SilentRenderKeepAlive? ka = null;
             if (spec.Kind == CaptureKind.Loopback)
             {

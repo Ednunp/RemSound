@@ -247,6 +247,15 @@ public sealed class AudioReceiver : IDisposable
     /// a WASAPI-sized number for audio that never goes near WASAPI (Ed, 2026-08-15).</summary>
     public int MaxRenderCallbackGapMsFor(RenderRoute route) => diagnostics.MaxRenderCallbackGapMsFor(route);
 
+    /// <summary>How long audio waits in the OUTPUT device, as the device or driver reports it. Zero
+    /// when nothing is open or it won't say, in which case the caller keeps its own estimate.
+    /// See <see cref="IRenderBackend.ReportedOutputLatencyMs"/> for why this replaced a clamp.</summary>
+    public double ReportedOutputLatencyMs => multiOutput.ReportedOutputLatencyMs;
+
+    /// <summary>Audio queued in the output device buffers right now. MEASURED — a stage the latency
+    /// estimate used to skip entirely. See <see cref="IRenderBackend.OutputQueueMs"/>.</summary>
+    public double OutputQueueMs => multiOutput.OutputQueueMs;
+
     public int SmoothnessValue => playoutEngine.SmoothnessValue;
     public ConcealmentArtifact ConcealmentArtifactValue => playoutEngine.ConcealmentArtifactValue;
 

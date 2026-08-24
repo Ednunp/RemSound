@@ -8377,7 +8377,14 @@ public sealed partial class MainForm : Form
                 // Second-highest of the window, not the peak: one OS hiccup must not inflate the
                 // figure for the next fifteen seconds. Same rule the auto-tune uses on its gaps.
                 var captureGapMs = SecondHighest(recentCaptureCbGaps);
-                var captureBufferMs = CaptureBufferEstimateMs(captureGapMs);
+                // THE DEVICE'S OWN FIGURE FIRST. Four of this estimate's five terms used to be
+                // constants dressed as measurements — Ed's 2026-08-23 log carries capture=10.0 on all
+                // 2,547 samples, because that is the buffer size we ASK Windows for and no WASAPI
+                // backend reported anything else. Both capture backends now read the device's engine
+                // period at open, and ASIO reads its driver's buffer size. Falls back to the old
+                // estimate when a device won't say, so unknown never masquerades as measured.
+                var reportedCaptureMs = sender.ReportedInputLatencyMs;
+                var captureBufferMs = reportedCaptureMs > 0 ? reportedCaptureMs : CaptureBufferEstimateMs(captureGapMs);
                 var senderAccumulatorMs = SenderAccumulatorEstimateMs();
                 var wireOneWayMs = LowestPeerRttMs() / 2.0;
                 // Which lane is the user actually listening on? ASIO runs its own backend at its own
@@ -8388,9 +8395,22 @@ public sealed partial class MainForm : Form
                     : RenderRoute.Mixed;
                 var lanePeriodMs = receiver.MaxRenderCallbackGapMsFor(listeningRoute);
                 if (lanePeriodMs <= 0) lanePeriodMs = diag.MaxRenderCallbackGapMs;
-                var renderBufferMs = RenderBufferEstimateMs(lanePeriodMs);
+                // Same again for the output. The old figure was a measured callback GAP doubled and
+                // then clamped up to a 10 ms floor, which pinned a fast card at 10 whatever the truth
+                // was — 2,541 of Ed's 2,547 samples read exactly 10.0 on a card whose real period was
+                // about 1.4 ms. ASIO drivers state their playback latency outright; WASAPI states its
+                // engine period, doubled because the device plays one buffer while we fill the next.
+                var reportedRenderMs = receiver.ReportedOutputLatencyMs;
+                var renderBufferMs = reportedRenderMs > 0 ? reportedRenderMs : RenderBufferEstimateMs(lanePeriodMs);
                 // EVERY stage of the journey, or the total is a comfortable fiction.
-                var totalMs = captureBufferMs + senderAccumulatorMs + wireOneWayMs + diag.BufferAvgMs + renderBufferMs;
+                // The output QUEUE — audio that has left the playout engine and is waiting in the
+                // device's own buffer, held there by the drift corrector at about 12 ms on a 10 ms
+                // card. A whole stage of the journey that was never counted, exactly like the capture
+                // stage before it. Ed's 2026-08-23 log shows it sitting at 10 to 23 ms all session
+                // while the total ignored it. MEASURED, and zero on ASIO, which pulls straight from
+                // the engine — a real reason ASIO is tighter rather than a claim about it. 2026-08-24.
+                var outputQueueMs = receiver.OutputQueueMs;
+                var totalMs = captureBufferMs + senderAccumulatorMs + wireOneWayMs + diag.BufferAvgMs + outputQueueMs + renderBufferMs;
                 // PER-LANE totals for the readout. Capture, encode and wire are shared by both lanes;
                 // the queue depth and the output period are not — those are the two terms that make a
                 // WASAPI journey and an ASIO journey genuinely different lengths.
@@ -8398,8 +8418,17 @@ public sealed partial class MainForm : Form
                 achievedLatencyWasapiMs = LaneLatencyMs(RenderRoute.WasapiLane, sharedMs, totalMs);
                 achievedLatencyAsioMs = LaneLatencyMs(RenderRoute.AsioLane, sharedMs, totalMs);
                 UpdateMeasuredLatencyReadout();
+                // Each term is tagged with WHERE IT CAME FROM. A total made of four constants and one
+                // measurement reads exactly like a total made of five measurements, which is how this
+                // estimate went a year without anyone noticing that capture and render were fixed
+                // numbers. "dev" = the device or driver said so, "est" = we worked it out, "meas" =
+                // we timed it ourselves. If a term reads est when you expected dev, that device
+                // declined to answer and the line above it at open time will say so. 2026-08-24.
+                var capSrc = reportedCaptureMs > 0 ? "dev" : "est";
+                var renSrc = reportedRenderMs > 0 ? "dev" : "est";
                 logFile.Event($"latency-probe estimated one-way ≈ {totalMs:0.0}ms " +
-                    $"(capture={captureBufferMs:0.0}, send-accum={senderAccumulatorMs:0.0}, wire={wireOneWayMs:0.0}, recv-queue={diag.BufferAvgMs}, render={renderBufferMs:0.0})");
+                    $"(capture={captureBufferMs:0.0}[{capSrc}], send-accum={senderAccumulatorMs:0.0}[est], wire={wireOneWayMs:0.0}[meas], " +
+                    $"recv-queue={diag.BufferAvgMs}[meas], out-queue={outputQueueMs:0.0}[meas], render={renderBufferMs:0.0}[{renSrc}])");
             }
 
             // If a new stream session opened since the last SNAP tick, flush the gap windows.

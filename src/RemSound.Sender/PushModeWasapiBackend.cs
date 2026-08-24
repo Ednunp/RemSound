@@ -202,6 +202,13 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
                     }
                 }
 
+                // Ask the DEVICE how long audio waits in it, rather than assuming the 10 ms we asked
+                // for. Once, here, off the audio thread — see DeviceLatencyProbe. 2026-08-24.
+                reportedInputLatencyMs = DeviceLatencyProbe.CaptureLatencyMs(device, CaptureBufferMs);
+                onDiagnostic?.Invoke(reportedInputLatencyMs > 0
+                    ? $"push-wasapi: \"{spec.Name}\" reports {reportedInputLatencyMs:0.0} ms of capture latency (engine period {DeviceLatencyProbe.EnginePeriodMs(device):0.0} ms, we asked for {CaptureBufferMs} ms)"
+                    : $"push-wasapi: \"{spec.Name}\" would not report its period — capture latency falls back to the {CaptureBufferMs} ms estimate");
+
                 activeSpec = spec;
                 capture.DataAvailable += OnDataAvailable;
                 capture.RecordingStopped += OnRecordingStopped;
@@ -250,6 +257,7 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
         // re-opened, so the old fault must not survive into the next attempt and re-trigger the
         // re-apply tick forever.
         faulted = false;
+        reportedInputLatencyMs = 0;   // belongs to the device we are closing
         if (capture is not null)
         {
             try { capture.DataAvailable -= OnDataAvailable; } catch { /* ignore */ }
@@ -427,4 +435,16 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
     // a successful re-open resets it. Volatile: written on the WASAPI thread, read from the UI thread.
     private volatile bool faulted;
     public bool HasFaulted => faulted;
+
+    // The device's own capture latency, read once at open. Volatile via a float store because the UI
+    // thread reads it while the opening thread writes it.
+    private volatile float reportedInputLatencyStore;
+    private double reportedInputLatencyMs
+    {
+        get => reportedInputLatencyStore;
+        set => reportedInputLatencyStore = (float)value;
+    }
+
+    /// <summary>The device's own figure. See <see cref="ICaptureBackend.ReportedInputLatencyMs"/>.</summary>
+    public double ReportedInputLatencyMs => reportedInputLatencyMs;
 }

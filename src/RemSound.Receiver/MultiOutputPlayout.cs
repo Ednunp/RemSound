@@ -43,6 +43,10 @@ internal sealed class MultiOutputPlayout : IRenderBackend
     private const int FrameMs = 10;
     private const int FrameBytes = MixSampleRate * MixBytesPerFrame * FrameMs / 1000; // 3840 bytes
     private const int OutputBufferMs = 100; // per-device BufferedWaveProvider capacity
+    /// <summary>The buffer size we ASK each output device for. Shared-mode WASAPI will not go below
+    /// the device's own engine period, so the real figure is the larger of the two — see
+    /// DeviceLatencyProbe. 2026-08-24.</summary>
+    private const int OutputRequestedLatencyMs = 5;
 
     // Source typed as IWaveProvider (rather than concrete PlayoutEngine) so the composite
     // backend can hand us a tee'd buffer instead of the engine directly. Single-backend usage
@@ -94,6 +98,38 @@ internal sealed class MultiOutputPlayout : IRenderBackend
     public IReadOnlyList<string> ActiveDeviceIds
     {
         get { lock (gate) return outputs.Keys.ToList(); }
+    }
+
+    /// <summary>The WORST amount of audio queued in a device buffer right now, across the live
+    /// outputs. See DriftResamplingProvider.BufferedMs — this is a real stage the estimate used to
+    /// skip. Zero when nothing is open.</summary>
+    public double OutputQueueMs
+    {
+        get
+        {
+            lock (gate)
+            {
+                var worst = 0.0;
+                foreach (var o in outputs.Values) if (o.Drift.BufferedMs > worst) worst = o.Drift.BufferedMs;
+                return worst;
+            }
+        }
+    }
+
+    /// <summary>The WORST reported latency among the live outputs, because a listener hears the
+    /// slowest one. Zero when nothing is open or no device would say. See
+    /// <see cref="IRenderBackend.ReportedOutputLatencyMs"/>.</summary>
+    public double ReportedOutputLatencyMs
+    {
+        get
+        {
+            lock (gate)
+            {
+                var worst = 0.0;
+                foreach (var o in outputs.Values) if (o.ReportedLatencyMs > worst) worst = o.ReportedLatencyMs;
+                return worst;
+            }
+        }
     }
 
     public void Start()
@@ -191,7 +227,13 @@ internal sealed class MultiOutputPlayout : IRenderBackend
                     // drift corrector keeps this buffer fed from its held card-sized cushion (≈12 ms
                     // on a typical card), so the smaller endpoint reserve doesn't risk underruns.
                     wasapi = new WasapiOut(device, AudioClientShareMode.Shared, useEventSync: true, latency: 5);
-                    var entry = new OutputEntry { Device = device, Output = wasapi, Buffer = buffer, Drift = drift, Name = name };
+                    // Ask the DEVICE how long playback takes, rather than doubling a callback gap and
+                    // clamping it up to 10 ms. Once, here, off the audio thread. 2026-08-24.
+                    var reportedMs = DeviceLatencyProbe.RenderLatencyMs(device, OutputRequestedLatencyMs);
+                    onDiagnostic?.Invoke(reportedMs > 0
+                        ? $"output \"{name}\" reports {reportedMs:0.0} ms of playback latency (engine period {DeviceLatencyProbe.EnginePeriodMs(device):0.0} ms, doubled for the buffer it plays while we fill the next)"
+                        : $"output \"{name}\" would not report its period — the latency estimate falls back to its own figure");
+                    var entry = new OutputEntry { Device = device, Output = wasapi, Buffer = buffer, Drift = drift, Name = name, ReportedLatencyMs = reportedMs };
                     // Notice the device dying mid-stream (USB card unplugged → WASAPI invalidates the
                     // endpoint and raises PlaybackStopped WITH an exception). Just flag it — never take
                     // the gate or dispose from here: this can fire on the device thread during our own
@@ -320,6 +362,9 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         public required BufferedWaveProvider Buffer { get; init; }
         public required DriftResamplingProvider Drift { get; init; }
         public required string Name { get; init; }
+        /// <summary>What this device says its playback latency is, read once at open. Zero when it
+        /// would not say. See IRenderBackend.ReportedOutputLatencyMs.</summary>
+        public double ReportedLatencyMs { get; init; }
         // Set true (off-thread, from WasapiOut.PlaybackStopped) when this device dies mid-stream —
         // typically a USB card unplugged, which invalidates the WASAPI endpoint. SetOutputDevices
         // reads it to know the entry is dead and must be torn down + re-opened rather than skipped.
@@ -379,6 +424,17 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         private readonly WdlResampler resampler;
 
         public WaveFormat WaveFormat => buffer.WaveFormat;
+
+        /// <summary>How much audio is sitting in THIS device's buffer right now, in milliseconds.
+        ///
+        /// <para>A whole stage of the journey that the latency estimate never counted. Audio leaves
+        /// PlayoutEngine, waits HERE while the drift corrector holds the cushion at its target
+        /// (about 12 ms on a 10 ms card), and only then reaches the sound card. Ed's 2026-08-23 log
+        /// shows this sitting at 10 to 23 ms all session while the estimate ignored it entirely —
+        /// the same class of omission as the capture stage that was found missing before.
+        /// MEASURED, not derived. ASIO has no equivalent: it pulls straight from the engine, which
+        /// is a real reason ASIO is tighter and not just a claim. 2026-08-24.</summary>
+        public double BufferedMs => buffer.BufferedBytes / (double)MixBytesPerFrame * 1000.0 / MixSampleRate;
 
         // Drift measurement. producerFedBytes is incremented by the producer thread in Feed;
         // deviceDrainedBytes is incremented by the render thread (us) in Read. Their ratio over

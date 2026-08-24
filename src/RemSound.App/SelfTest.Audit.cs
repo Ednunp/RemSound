@@ -502,6 +502,62 @@ internal static partial class SelfTest
     }
 
     /// <summary>
+    /// The latency estimate must prefer the DEVICE'S OWN figure over its own guesses, and must never
+    /// dress an unknown as a measurement.
+    ///
+    /// <para>Four of the estimate's five terms were constants. Capture added a flat 10 ms — the size
+    /// RemSound asks Windows for, not what the device delivers — on all 2,547 samples of Ed's
+    /// 2026-08-23 WASAPI session, because no WASAPI backend reported a period at all. Render took a
+    /// callback gap, doubled it, then clamped up to a 10 ms floor, so 2,541 of those samples read
+    /// exactly 10.0 on a card whose real period was about 1.4 ms.</para>
+    ///
+    /// <para>The rules pinned here: a device that states its period wins; a device that stays silent
+    /// leaves the old estimate alone rather than contributing a zero; the output figure is doubled
+    /// and the input is not; and asking for a smaller buffer than the device's period does not get
+    /// you a smaller number, because Windows will not go below it. That last one is why a Realtek can
+    /// legitimately report HIGHER than the constant it replaces — right beats flattering.</para>
+    /// </summary>
+    private static string? AuditLatencyUsesDeviceReportedFigures()
+    {
+        // 100-ns conversion, since every WASAPI period arrives in those units.
+        Check(Math.Abs(DeviceLatency.HnsToMs(100_000) - 10.0) < 0.001, "100,000 hundred-ns units is 10 ms");
+        Check(DeviceLatency.HnsToMs(0) == 0 && DeviceLatency.HnsToMs(-5) == 0, "no period reported must stay zero, not go negative");
+
+        // ASIO states a buffer size in frames; that IS the capture wait.
+        Check(Math.Abs(DeviceLatency.FramesToMs(64, 48000) - 1.3333) < 0.01, "64 frames at 48 kHz is about 1.33 ms");
+        Check(DeviceLatency.FramesToMs(0, 48000) == 0, "no buffer size reported must stay zero");
+
+        // UNKNOWN MUST STAY UNKNOWN. Returning 0 is what makes the caller keep its own estimate;
+        // returning a plausible-looking number instead is the exact habit this whole change exists
+        // to break.
+        Check(DeviceLatency.CaptureMs(0, 10) == 0, "a device that won't state a period must yield 0, not the requested size");
+        Check(DeviceLatency.RenderMs(0, 5) == 0, "same on the output side");
+
+        // The device wins when it is slower than what we asked for — Windows will not go below its
+        // engine period in shared mode.
+        Check(Math.Abs(DeviceLatency.CaptureMs(21.3, 10) - 21.3) < 0.001,
+            "a 21.3 ms device period beats the 10 ms we asked for — the number going UP is correct, not a regression");
+        // And what we asked for wins when the device is faster, because we asked for a bigger buffer.
+        Check(Math.Abs(DeviceLatency.CaptureMs(3.0, 10) - 10.0) < 0.001,
+            "asking for 10 ms on a 3 ms device gets 10 ms of buffering, not 3");
+
+        // Output is doubled, input is not: the device plays one buffer while we fill the next.
+        Check(Math.Abs(DeviceLatency.RenderMs(10.0, 5) - 20.0) < 0.001, "output latency is two periods");
+        Check(Math.Abs(DeviceLatency.CaptureMs(10.0, 5) - 10.0) < 0.001, "input latency is ONE period — no doubling");
+        Check(DeviceLatency.RenderMs(10.0, 5) > DeviceLatency.CaptureMs(10.0, 5),
+            "the same device must report more latency on output than on input");
+
+        // NO FLOOR. The old code clamped the output up to 10 ms; a genuinely fast card must be
+        // allowed to say so, which is the whole point on an ASIO interface.
+        Check(DeviceLatency.RenderMs(1.4, 1) < 10.0,
+            $"a fast card must be allowed to report under 10 ms — got {DeviceLatency.RenderMs(1.4, 1):0.00} ms; "
+            + "the old clamp floor is exactly what made every reading say 10.0");
+
+        return "the device's own figure wins; silence leaves the estimate alone rather than reporting zero; "
+             + "output is doubled and input is not; and a fast card is no longer clamped up to 10 ms";
+    }
+
+    /// <summary>
     /// The jitter-buffer controls must say "jitter buffer" in EVERY audio mode.
     ///
     /// <para>These controls rename themselves depending on whether an ASIO driver is chosen. The

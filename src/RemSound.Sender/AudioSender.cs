@@ -506,6 +506,11 @@ public sealed class AudioSender : IDisposable
     /// receiver can't detect (because no packets are lost — they just contain audio with
     /// holes in it).</summary>
     public int TakeMaxCaptureCallbackGapMs() => engine.TakeMaxCallbackGapMs();
+
+    /// <summary>How long audio waits in the CAPTURE device, as the device itself reports it. Zero
+    /// when nothing is open or the device won't say, in which case the caller keeps its own estimate.
+    /// See <see cref="ICaptureBackend.ReportedInputLatencyMs"/> for why this replaced a constant.</summary>
+    public double ReportedInputLatencyMs => engine.ReportedInputLatencyMs;
     public string? CaptureFormatDescription => engine.FirstCaptureFormatDescription;
     public string? LastCaptureError => engine.FirstCaptureLastError;
     public AudioTransportCodec Codec => codec;
