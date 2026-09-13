@@ -3861,8 +3861,8 @@ public sealed partial class MainForm : Form
 
         // === Layout ===
         // Tab order (row order = add order): 0 "Peers" header; 1 connected peers; 2 details box; 3 rename;
-        // 4 add-by-IP; 5 discovered; 6 remembered; 7 lock toggle; 8 status. The "Peers" header is a
-        // visual grouping only. Add-by-IP sits with the connected-peer actions, per Ed's requested order.
+        // 4 discovered; 5 remembered; 6 add-by-IP; 7 lock toggle; 8 status. The "Peers" header is a
+        // visual grouping only. Add-by-IP comes after the lists, per Ed's revised order (2026-07-08).
         panel.RowCount = 9;
 
         var peersHeader = Theme.SectionHeader("Peers");
