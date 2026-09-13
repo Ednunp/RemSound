@@ -20,7 +20,7 @@ namespace RemSound.App;
 /// Two kinds of option:
 ///   * "do-and-exit" commands (--help, --version, --devices, --list-profiles, --list-named-peers,
 ///     --selftest, --perftest, --diagnostics, --log, --close, and the developer and publishing verbs
-///     --plugin-window, --latency-lab and --sign-update) print to the calling terminal (and/or a
+///     --plugin-window and --sign-update) print to the calling terminal (and/or a
 ///     file) and terminate the process; --plugin-window shows a window instead of printing.
 ///   * "launch options" (--profile, --connect, --minimized) modify a normal GUI start.
 /// <c>--config-dir</c> (<see cref="TryGetConfigDir"/>) applies to both. Program handles --silent,
@@ -96,11 +96,6 @@ internal static class CommandLine
                     // the real app-plugin bridge, so its controls can be tried with a screen reader
                     // outside a host. If it isn't readable as a plain window it won't be readable inside a host.
                     return ShowPluginWindow();
-                case "--latency-lab":
-                    // Diagnostic harness (2026-08-14 latency-slider field report): drives the real
-                    // playout with realtime-paced sender/device shapes and MEASURES whether the
-                    // buffered depth converges to a raised target. Developer tool, ~8 min runtime.
-                    return WithConsole(() => LatencyLab.Run(args));
                 case "--diagnostics": case "--diag":
                     return WithConsole(() => RunDiagnostics(ValueAfter(args, raw)));
                 case "--log":

@@ -349,7 +349,7 @@ internal sealed class PlayoutEngine : IWaveProvider
     /// the auto-tune with it — updated a value nothing consumed, while the real target sat on
     /// LaneLatency's 30 ms default for the whole session: raise and lower equally inert. Only
     /// BothIndependent worked, because there the slider writes WasapiLane, which IS what its sessions
-    /// read. Measured before/after by <c>--latency-lab classic</c> and pinned by the gate. The lane
+    /// read. Measured before and after with the latency lab (since removed) and pinned by the gate. The lane
     /// tag says which DEVICE a session renders through; it was never meant to pick a latency knob.</summary>
     private volatile bool independentLanes;
 

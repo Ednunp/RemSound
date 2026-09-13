@@ -24,9 +24,9 @@ namespace RemSound.Core;
 /// rather than a hope. That's the "look ahead before moving" — it looks at margin that went unused,
 /// which is the only honest way to know what's spare without first taking it away.</para>
 ///
-/// <para>Pure and parameterless-by-design so the scoring harness (--latency-lab tune) and the gate can
-/// drive it directly: every number lives in <see cref="Policy"/>, and none of them were chosen by
-/// intuition — they're whatever the harness showed settles fastest without buying dropouts.</para>
+/// <para>Pure and parameterless-by-design so the gate can drive it directly: every number lives in
+/// <see cref="Policy"/>, and none of them were chosen by intuition — they're whatever the scoring harness
+/// (the latency lab, removed 2026-09-13) showed settles fastest without buying dropouts.</para>
 /// </summary>
 public static class AutoTuneDescent
 {

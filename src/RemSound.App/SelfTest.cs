@@ -3511,7 +3511,7 @@ internal static partial class SelfTest
     /// it must NEVER take the target below the measured need, however inviting the low-water mark
     /// looks — that's the line between "converges quickly" and "sheds the cushion and clicks". Speed
     /// is pinned too, because the whole point was that a silly value used to take twenty-plus ticks
-    /// to unwind (Ed, 2026-08-15). Scored end-to-end against the old crawl by --latency-lab tune.</summary>
+    /// to unwind (Ed, 2026-08-15). Scored end-to-end against the old crawl by the latency lab (removed 2026-09-13).</summary>
     private static string? AutoTuneDescentPolicy()
     {
         // SAFETY — the floor is the measurement, and nothing argues it down.
@@ -4220,8 +4220,8 @@ internal static partial class SelfTest
     /// while a device is ticked), but the single slider writes RenderRoute.Mixed, and the render path
     /// resolved its target per-lane — so in every classic mode the slider (and the auto-tune) wrote a
     /// value nothing read, leaving the real target on the 30 ms default for the whole session. Raise
-    /// and lower both inert; only BothIndependent worked. Measured end-to-end by
-    /// <c>--latency-lab classic</c> (stalled -0.15ms/s → +2.07ms/s after the fix); pinned here as the
+    /// and lower both inert; only BothIndependent worked. Measured end-to-end by the latency lab, since
+    /// removed (stalled -0.15ms/s → +2.07ms/s after the fix); pinned here as the
     /// fast, deterministic invariant: what the slider sets IS what the session's route reads, and a
     /// lower reaches the session. Also checks the two-slider mode keeps its lanes genuinely separate.</summary>
     private static string? LatencySliderReachesSessions()

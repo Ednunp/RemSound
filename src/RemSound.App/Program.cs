@@ -159,7 +159,7 @@ internal static class Program
 
         // Command-line interface (Sensor-Readout-style). "Do-and-exit" commands (--help, --version,
         // --devices, --list-profiles, --list-named-peers, --selftest, --perftest, --diagnostics, --log,
-        // --close, and the developer verbs --plugin-window, --latency-lab and --sign-update) run here —
+        // --close, and the developer verbs --plugin-window and --sign-update) run here —
         // before the single-instance lock and before the main window — and terminate the process.
         // Otherwise we collect launch overrides (--profile / --connect / --minimized) and continue the
         // normal GUI start below, applying them as we resolve the profile.
