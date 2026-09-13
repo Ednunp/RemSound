@@ -224,6 +224,8 @@ internal static partial class SelfTest
         RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);
         RunStep(results, "Service startup volume (boot-once decision + settings round-trip)", ServiceStartupVolume);
         RunStep(results, "Update install window (same-day, wraparound, retry timing)", UpdateInstallWindow);
+        RunStep(results, "Update checks are armed at start-up from the frequency setting", AuditUpdateCheckArmedAtStartup);
+        RunStep(results, "Each update frequency sets its interval (hourly, 6-hourly, daily, never)", AuditUpdateCheckFrequencies);
         RunStep(results, "Release signing (verify, tamper, key-embed match)", ReleaseSigning);
         RunStep(results, "Updater refuses an unsigned or badly-signed release (enforcement flow)", UpdaterRefusesUnsignedRelease);
         RunStep(results, "CROSS-PORT CONTRACT (the values other RemSounds depend on)", CrossPortContract);

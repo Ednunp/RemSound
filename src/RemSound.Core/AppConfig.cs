@@ -310,12 +310,6 @@ public sealed class AppConfig
     /// UPnP — RemSound just doesn't open anything.</summary>
     public bool UpnpEnabled { get; set; }
 
-    /// <summary>UTC timestamp of the last successful update check. Used by the background
-    /// update timer to space out polls across launches — if you set the frequency to
-    /// "every 24 hours" and re-launch the app three times that day, it still hits the API
-    /// only once. Null on a fresh install.</summary>
-    public DateTime? LastUpdateCheckUtc { get; set; }
-
     /// <summary>Most-recently-opened profile paths, newest first, capped at
     /// <see cref="MaxRecentProfiles"/>. Populated by <see cref="NoteRecentProfile"/> every
     /// time a profile is loaded, surfaced in the File → Recent profiles submenu. Stored as

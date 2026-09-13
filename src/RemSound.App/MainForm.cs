@@ -3485,14 +3485,6 @@ public sealed partial class MainForm : Form
     private async void CheckForUpdatesInBackground()
     {
         var result = await updater.CheckForUpdateAsync().ConfigureAwait(true);
-        // Persist the timestamp so cross-launch scheduling can space the next poll out.
-        try
-        {
-            var cfg = AppConfig.Load();
-            cfg.LastUpdateCheckUtc = DateTime.UtcNow;
-            cfg.Save();
-        }
-        catch { /* timestamp persistence is best-effort */ }
         // Background polls stay silent on both UpToDate and UpdateCheckFailed — the user
         // delegated scheduling to the timer and a failure here isn't actionable from where
         // they are. The next poll re-checks. The failure detail has already gone to the log
@@ -3536,13 +3528,6 @@ public sealed partial class MainForm : Form
             logFile.Event($"updater: startup check threw unexpectedly: {ex.GetType().Name}: {ex.Message}");
             return;
         }
-        try
-        {
-            var cfg = AppConfig.Load();
-            cfg.LastUpdateCheckUtc = DateTime.UtcNow;
-            cfg.Save();
-        }
-        catch { /* harmless */ }
         // Log each outcome distinctly so a failed check (TLS error, network down, GitHub
         // 5xx) doesn't get filed as "up to date" — that's the misclassification Tech Singer's
         // log from 2026-05-28 demonstrated, where a Win7 SSL handshake failure quietly logged
@@ -3715,6 +3700,11 @@ public sealed partial class MainForm : Form
         updateCheckTimer.Interval = intervalMs;
         updateCheckTimer.Start();
     }
+
+    /// <summary>Gate seams: whether the background update poll is armed and how often, and a re-apply after the
+    /// frequency setting changes.</summary>
+    internal (bool Running, int IntervalMs) UpdateCheckTimerForTest => (updateCheckTimer.Enabled, updateCheckTimer.Interval);
+    internal void ApplyUpdateCheckTimerForTest() => ApplyUpdateCheckTimer();
 
     /// <summary>Connectivity tab — peer lists (connected/discovered/remembered), the peer
     /// details box, rename peer, add by IP and the peer-address lock. Wires per-list
