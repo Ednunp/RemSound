@@ -1,8 +1,8 @@
 namespace RemSound.Core;
 
 /// <summary>What audio gets captured by the recorder. Selected in the Recording settings
-/// dialog and saved per profile. Defaults to <see cref="ReceivedOnly"/> which is the most
-/// common "I want a copy of what my collaborator just played me" case.</summary>
+/// dialog and saved per profile. <see cref="RecordingSettings.Source"/> defaults to
+/// <see cref="Both"/>: the whole two-way exchange in one file.</summary>
 public enum RecordingSource
 {
     /// <summary>Record only audio coming from connected peers (everything that would play
@@ -17,9 +17,10 @@ public enum RecordingSource
     Both = 2,
 }
 
-/// <summary>Output container format the recorder writes to disk. The format dictates the
-/// shape of <see cref="RecordingSettings.AudioAttributes"/> — uncompressed formats take
-/// bit-depth, compressed formats take a bitrate, mono/stereo applies to all of them.</summary>
+/// <summary>Output container format the recorder writes to disk. Each format has its own settings
+/// on <see cref="RecordingSettings"/>: a bit depth for WAV and FLAC (plus FLAC's compression level),
+/// a bitrate for MP3 and Ogg-Opus. Mono/stereo (<see cref="RecordingChannelMode"/>) applies to all of
+/// them.</summary>
 public enum RecordingFileFormat
 {
     /// <summary>RIFF WAVE, PCM. Lossless, large. Writer: in-process custom WAV writer with
@@ -47,16 +48,15 @@ public enum RecordingChannelMode
 
 /// <summary>All the user-selectable knobs for a recording. Stored on <see cref="Profile"/>.
 ///
-/// The <see cref="AudioAttributes"/> field is a flat int that means different things per
-/// format — <see cref="WavBitsPerSample"/> for WAV, <see cref="Mp3BitrateKbps"/> for MP3
-/// — kept as one slot rather than a separate field per format because (a) only one is
-/// active at a time and (b) it keeps the profile JSON narrow. The format enum decides
-/// which interpretation applies.
+/// Each format keeps its own field — <see cref="WavBitsPerSample"/>, <see cref="Mp3BitrateKbps"/>,
+/// <see cref="OggOpusBitrateKbps"/>, <see cref="FlacBitsPerSample"/> and
+/// <see cref="FlacCompressionLevel"/> — and <see cref="FileFormat"/> decides which of them apply.
 ///
-/// Path policy: <see cref="Folder"/> is stored verbatim. When empty, recordings go to
-/// the default location (<c>&lt;exe&gt;\recordings\&lt;machine&gt;\</c>). When set, it
-/// IS the folder — no per-machine subfolder is appended. Each recording session creates
-/// a new file inside the folder, named with a UTC timestamp and the format extension.
+/// Path policy: <see cref="Folder"/> is stored verbatim. When empty, recordings go under
+/// <see cref="DefaultFolder"/> (<c>&lt;exe&gt;\recordings\</c>); when set, it IS the base folder —
+/// no per-machine subfolder is appended. Either way each recording goes into a <c>yyyy-MM-dd</c>
+/// subfolder and is named from its LOCAL start time: one file with the machine name in it, or, with
+/// <see cref="SplitTracks"/>, a folder of tracks. RecordingController (App) builds the names.
 /// </summary>
 public sealed class RecordingSettings
 {
@@ -95,9 +95,10 @@ public sealed class RecordingSettings
     public int FlacCompressionLevel { get; set; } = 5;
 
     /// <summary>Absolute path to the folder recordings get written into. Empty / null
-    /// means "use the default <c>&lt;exe&gt;\recordings\&lt;machine&gt;\</c>". Persisted
+    /// means "use <see cref="DefaultFolder"/>" (<c>&lt;exe&gt;\recordings\</c>). Persisted
     /// verbatim — if a saved profile points at a folder that doesn't exist on the loading
-    /// machine, the recorder falls back to the default and notes it in the diagnostics.</summary>
+    /// machine, the recorder creates it when a recording starts rather than falling back to the
+    /// default.</summary>
     public string? Folder { get; set; }
 
     /// <summary>When true, a recording is written as a FOLDER of separate tracks instead of one mixed

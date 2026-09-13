@@ -5,8 +5,9 @@ namespace RemSound.Core;
 
 /// <summary>
 /// A saved snapshot of every user-controllable RemSound setting. Replaces the old
-/// machine-wide "settings" file. Profiles live as one JSON file per profile under
-/// <c>&lt;exe&gt;\profiles\&lt;machine name&gt;\&lt;title&gt;.json</c> and are portable —
+/// machine-wide "settings" file. Profiles live as one JSON file per profile, by default under
+/// <c>&lt;exe&gt;\user settings and logs\profiles\&lt;machine name&gt;\&lt;title&gt;.json</c>
+/// (see <see cref="ProfileStore"/>), and are portable —
 /// copying a profile JSON to another machine's profiles folder makes it appear in that
 /// machine's selection list. Device IDs stored in a profile (sound cards, ASIO drivers)
 /// that don't exist on the loading machine are silently ignored on apply, so a profile
@@ -23,17 +24,17 @@ public sealed class Profile
     /// <summary>Display title and filename stem (sanitised). Required.</summary>
     public string Title { get; set; } = "";
 
-    /// <summary>If true, this profile is loaded for use but the app never writes the user's
-    /// in-session changes back to disk: Ctrl+S / File → Save politely refuses (with a "use
-    /// Save As instead" message), and FormClosing skips its usual "save changes?" prompt
-    /// entirely. Whatever the user fiddled with this session is kept in memory until the
-    /// app closes and then discarded; the file on disk stays exactly as it was. Off by
-    /// default. Toggled per-profile via File → Lock profile (read-only). Use case: a
-    /// "default" profile you want to live in and toggle send/receive on without the close
-    /// prompt blocking shutdown — important for users who can't reach the prompt because
-    /// they're remote, or because the screen reader has crashed, or because the laptop is
-    /// hibernating. The flag is the *only* property the lock-toggle writes back to disk;
-    /// any other in-session edits stay session-only. 2026-05-22.</summary>
+    /// <summary>If true, this profile is protected against ACCIDENTAL saves: closing the app or
+    /// switching profile never asks "save changes?", so whatever the user changed this session is
+    /// discarded on close and the file on disk stays as it was. A DELIBERATE Ctrl+S / File → Save
+    /// still goes through, after a one-time warning the user can silence
+    /// (<see cref="AppConfig.SaveOnReadOnlyWarningSuppressed"/>), and the saved file stays locked. Off
+    /// by default. Toggled per-profile via File → Lock profile (read-only); the toggle writes back
+    /// only this flag, so any other in-session edits stay session-only. Use case: a "default" profile
+    /// you want to live in and toggle send/receive on without the close prompt blocking shutdown —
+    /// important for users who can't reach the prompt because they're remote, or because the screen
+    /// reader has crashed, or because the laptop is hibernating. 2026-05-22; deliberate saves go
+    /// through since 2026-05-23.</summary>
     public bool ReadOnly { get; set; }
 
     /// <summary>The profile's encryption password, stored LIGHTLY SCRAMBLED on disk (via
@@ -76,14 +77,13 @@ public sealed class Profile
     /// runs alongside either way. On a machine too old for process loopback this is forced back to
     /// "devices" on load.</summary>
     public string WasapiSendMode { get; set; } = "devices";
-    /// <summary>SERVICE profiles only (ServiceProfileDialog / ServiceSendHost): when true (the default)
-    /// in "applications" send mode every app's audio is sent — i.e. exactly the same result as sending
-    /// the whole system's default output. When false, only the apps named in
-    /// <see cref="SelectedSendApplications"/> are sent. VESTIGIAL as of 2026-07-17: neither the main
-    /// window NOR the service honours this any more — applications mode always means the specific ticked
-    /// apps in both, and whole-system audio is devices mode's job. The "send all applications" option was
-    /// removed from both UIs and both send-spec builders ignore this flag. Kept only so existing profile
-    /// files still deserialize; the service now writes it false on save. Do not add new reads.</summary>
+    /// <summary>VESTIGIAL since 2026-07-17 — nothing reads it. It was the service's "send all
+    /// applications" switch: true (still the property default) meant applications mode sent every app,
+    /// the same result as sending the whole system's default output. That option has gone from the main
+    /// window and the service alike; applications mode now always means the apps ticked in
+    /// <see cref="SelectedSendApplications"/>, and whole-system audio is devices mode's job. Kept only so
+    /// existing profile files still deserialize. The service config dialog writes it false on every
+    /// save, so no profile it saves carries a stale true. Do not add new reads.</summary>
     public bool SendAllApplications { get; set; } = true;
     /// <summary>In "applications" send mode: the process
     /// names (lower-case, no path/extension, e.g. "vlc", "firefox") whose audio to send. Tracked by
@@ -102,9 +102,12 @@ public sealed class Profile
     /// tripwire self-test documents this and will flag any change in its behaviour.</summary>
     public int AudioPort { get; set; } = 47830;
     public int CodecRaw { get; set; } = (int)AudioTransportCodec.Pcm;
-    /// <summary>Opus frame size in samples-per-channel at 48 kHz. 120 = 2.5 ms, 240 = 5 ms,
-    /// 480 = 10 ms (default), 960 = 20 ms. Renamed from <c>OpusFrameMilliseconds</c> in the
-    /// v3.0 wire-format refactor (2026-05-23). The JSON key is kept as
+    /// <summary>Opus frame size in samples-per-channel at 48 kHz: 120 = 2.5 ms, 240 = 5 ms,
+    /// 480 = 10 ms, 960 = 20 ms. The codec list offers only 960 ("broadcast quality") and 120 ("live
+    /// latency"), and saves one of those. The property default is still 480, from before that list; a
+    /// profile holding 480 is shown and sent as the 960 choice (MainForm.ResolveCodecIndex). Renamed
+    /// from <c>OpusFrameMilliseconds</c> in the v3.0 wire-format refactor (2026-05-23). The JSON key
+    /// is kept as
     /// <c>OpusFrameMilliseconds</c> for back-compat with v2.x profile files; on read,
     /// <see cref="RemSoundSettingsStore.LoadOpusFrameSamplesPerChannel"/> disambiguates the
     /// legacy integer-ms encoding (5/10/20) from the new sample-count encoding
@@ -164,17 +167,19 @@ public sealed class Profile
     /// <c>profile-switch</c>, <c>update</c>) and valued with the absolute filesystem path to the user's chosen
     /// WAV. Per-profile (moved here from AppConfig 2026-05-28) so a "live monitoring" profile
     /// can have one set of custom sounds and a "recording" profile a different set. Missing
-    /// keys mean "use the default sound shipped in the sounds\ folder next to RemSound.exe".
+    /// keys mean "use the default sound shipped in the <c>default sounds\</c> folder next to
+    /// RemSound.exe" (<see cref="AppConfig.SoundsDirectory"/>).
     /// Empty dictionary on a fresh profile.</summary>
     public Dictionary<string, string> CustomCuePaths { get; set; } = new();
     public int MaxLatencyMs { get; set; } = 80;
     public int Smoothness { get; set; } = 3;
     public bool ContinuousAutoTuneEnabled { get; set; }
     public int ContinuousAutoTuneIntervalSec { get; set; } = 5;
-    /// <summary>Per-route latency for the ASIO lane in AudioMode.BothIndependent. Default
-    /// 10 ms because BothIndependent's value proposition is letting ASIO run at its native
-    /// low latency; users who pick that mode almost always want ASIO closer to 10 than 80.
-    /// Ignored in every classic mode.</summary>
+    /// <summary>Per-route latency for the ASIO lane, used when an ASIO driver is chosen
+    /// (AudioMode.BothIndependent). Default 10 ms because the ASIO lane's value proposition is
+    /// running at its native low latency; users who choose a driver almost always want ASIO closer to
+    /// 10 than 80. Ignored when no driver is chosen (WasapiOnly), where <see cref="MaxLatencyMs"/>
+    /// governs the only route.</summary>
     public int MaxLatencyMsAsio { get; set; } = 10;
     /// <summary>Continuous auto-tune toggle for the ASIO lane (BothIndependent only).
     /// Defaults false to match the WASAPI-lane default — symmetric off-by-default avoids

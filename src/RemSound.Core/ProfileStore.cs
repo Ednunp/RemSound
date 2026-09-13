@@ -3,8 +3,9 @@ using System.Text.Json;
 namespace RemSound.Core;
 
 /// <summary>
-/// File-backed store for <see cref="Profile"/> instances. One profile = one JSON file
-/// under <c>&lt;exe&gt;\profiles\&lt;machine name&gt;\&lt;title&gt;.json</c>.
+/// File-backed store for <see cref="Profile"/> instances. One profile = one JSON file, by default
+/// under <c>&lt;exe&gt;\user settings and logs\profiles\&lt;machine name&gt;\&lt;title&gt;.json</c>
+/// (<see cref="AppConfig.ProfilesBaseDirectory"/>), or directly in a folder the user chose.
 ///
 /// Profile names are user-supplied "plain English" strings; the store sanitises them
 /// for the filesystem (replaces invalid chars with underscores) but keeps the original
@@ -49,9 +50,12 @@ public sealed class ProfileStore
     /// <summary>Folder this store reads from and writes into.</summary>
     public string BaseDirectory => baseDir;
 
-    /// <summary>Reserved title of the send-only Windows service's profile. It lives in the same folder
-    /// as normal profiles (so the service loads it via <see cref="Load"/>), but it's edited only through
-    /// the Service menu's config dialog and hidden from the normal picker by <see cref="ListProfileTitles"/>.</summary>
+    /// <summary>Reserved title of the send-only Windows service's profile. The profile itself is not
+    /// kept in a profiles folder any more: since 2026-07-12 it lives in <see cref="ServiceStore"/>
+    /// (ProgramData), where the SYSTEM service can read it, and carries this title. The title is still
+    /// needed here for the copy the earlier design left in the user's profiles folder:
+    /// <see cref="ListProfileTitles"/> hides it from the picker, and the Service menu's config dialog
+    /// migrates it into ServiceStore and then deletes it.</summary>
     public const string ReservedServiceProfileTitle = "RemSound service";
 
     /// <summary>Returns the user-facing titles of every profile in the folder, sorted
