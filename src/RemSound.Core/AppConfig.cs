@@ -21,11 +21,9 @@ public enum UpdateCheckFrequency
 /// folder, logging, cues, keyboard shortcuts, the remembered peers and applications, update
 /// behaviour and so on. Profiles are per-setup; this file is per-installation.
 ///
-/// If the file is missing or malformed, <see cref="Load"/> returns defaults. Older layouts
-/// (<c>&lt;exe&gt;\remsound.config.json</c>, then <c>&lt;exe&gt;\config\global config.json</c>) are
-/// moved here once by <see cref="MigrateLegacyLayoutIfNeeded"/>. Keys an older build wrote that this
-/// one no longer has — <c>BothModeWarningSuppressed</c>, retired with the WASAPI+ASIO latency popup
-/// on 2026-05-11, for one — are ignored on load.
+/// If the file is missing or malformed, <see cref="Load"/> returns defaults. Keys an older build wrote
+/// that this one no longer has — <c>BothModeWarningSuppressed</c>, retired with the WASAPI+ASIO latency
+/// popup on 2026-05-11, for one — are ignored on load.
 /// </summary>
 public sealed class AppConfig
 {
@@ -112,10 +110,6 @@ public sealed class AppConfig
     /// lived in the in-memory settings cache, which silently forgot the list on every app exit. Null =
     /// none yet. Cleared from Preferences → General.</summary>
     public List<string>? RememberedApplications { get; set; }
-
-    /// <summary>Legacy flat name map (friendly name only). Kept so pre-registry configs still deserialise;
-    /// migrated into <see cref="NamedPeers"/> on load, then no longer written.</summary>
-    public Dictionary<string, string> PeerFriendlyNames { get; set; } = new();
 
     /// <summary>If true (the default), RemSound plays the startup cue once, right after this
     /// copy wins the single-instance takeover and before the profile loads. Machine-wide (not
@@ -217,9 +211,7 @@ public sealed class AppConfig
     /// <see cref="Profile"/>, so a shortcut set on one profile didn't apply on another (issue #14).
     /// They now live here — one set shared by every profile, loaded/saved via
     /// <see cref="RemSoundSettingsStore"/>'s Load*/Save* hotkey methods. Null = use the built-in default
-    /// for that action. The old per-profile <see cref="HotkeyRecord"/> fields on <see cref="Profile"/>
-    /// are kept so old profile JSONs still deserialise and are READ exactly once — by MainForm's one-time
-    /// shortcut-import offer for v4.4 upgraders — but are never written or otherwise consulted.</summary>
+    /// for that action.</summary>
     public HotkeyRecord? ReceiveMuteHotkey { get; set; }
     public HotkeyRecord? SendMuteHotkey { get; set; }
     public HotkeyRecord? TrayHotkey { get; set; }
@@ -238,19 +230,6 @@ public sealed class AppConfig
     /// switch. Machine-wide and unset by default; NOT stored in any profile (unlike the shaping
     /// values). The user binds it in Keyboard shortcuts.</summary>
     public HotkeyRecord? ToggleAllPeerShapingHotkey { get; set; }
-
-    /// <summary>True once the one-time "your keyboard shortcuts are now shared across profiles" notice
-    /// has been shown (to an upgrader), or silently marked done on a fresh install that had nothing to
-    /// reset. Stops the notice re-appearing. v4.4. (Superseded by the import offer below; kept so the
-    /// flag on an existing v4.4 config still deserialises.)</summary>
-    public bool KeyboardShortcutsGlobalNoticeShown { get; set; }
-
-    /// <summary>True once the one-time "bring your keyboard shortcuts across?" import offer has been
-    /// resolved (the user chose to import from a profile, or to start fresh). Deliberately SEPARATE from
-    /// <see cref="KeyboardShortcutsGlobalNoticeShown"/> so that users who already updated to v4.4 (and
-    /// were reset) are STILL offered the chance to import their old per-profile shortcuts — which remain
-    /// readable in their profile files.</summary>
-    public bool KeyboardShortcutsImportOffered { get; set; }
 
     /// <summary>If true, the "Use Windows default output" follower at the top of the received-sound
     /// output list is ticked at startup, so received sound plays to whatever Windows currently calls
@@ -316,17 +295,11 @@ public sealed class AppConfig
 
     /// <summary>If true, RemSound opens the About box (which leads with the latest release
     /// notes) once on the first launch AFTER an update has been installed, so the user sees
-    /// "what's new" without going looking. Detected by comparing the running version against
-    /// <see cref="LastWhatsNewVersion"/> at launch, so it only fires when the version actually
-    /// changed, never on an ordinary relaunch. On by default — it's a
+    /// "what's new" without going looking. Detected by a one-shot marker the updater writes only after
+    /// a successful update, so it never fires on an ordinary relaunch. On by default — it's a
     /// discoverability aid (see what changed), not a data-persistence toggle, so the usual
     /// "auto-options default off" rule doesn't really apply; users can untick it.</summary>
     public bool ShowWhatsNewAfterUpdate { get; set; } = true;
-
-    /// <summary>The app version recorded at the last launch. Used only to detect "the version
-    /// changed since last run" for <see cref="ShowWhatsNewAfterUpdate"/>. Null until first
-    /// recorded, so a fresh install never counts as an update.</summary>
-    public string? LastWhatsNewVersion { get; set; }
 
     /// <summary>If true, RemSound tries to open the audio port (UDP 47830) on the local router
     /// using UPnP / NAT-PMP / PCP, so peers on the public internet can reach this machine
@@ -418,10 +391,8 @@ public sealed class AppConfig
 
     /// <summary>The single per-user folder next to the exe — <c>&lt;exe&gt;\user settings and logs\</c> —
     /// that holds EVERYTHING this machine's user owns: the global config file, the <c>profiles\</c>
-    /// subfolder and <c>logs\</c> (it also held a <c>sounds\</c> folder until v3.9.1; cues now ship in
-    /// <see cref="SoundsDirectory"/>). 2026-06-10: consolidated here from the loose files
-    /// / the earlier <c>config\</c> folder so the install root stays tidy and the auto-updater can
-    /// exclude one folder to leave ALL user state (including custom cue WAVs) untouched.</summary>
+    /// subfolder and <c>logs\</c>. One folder keeps the install root tidy and lets the auto-updater
+    /// exclude it, leaving all user state untouched. Shipped cues live in <see cref="SoundsDirectory"/>.</summary>
     public const string UserDataFolderName = "user settings and logs";
 
     /// <summary>Process-wide override for <see cref="UserDataDirectory"/>. Null = the default
@@ -432,7 +403,7 @@ public sealed class AppConfig
     private static string? _userDataDirectoryOverride;
 
     /// <summary>Redirect every user-state folder to <paramref name="path"/> for this process only.
-    /// Call before <see cref="MigrateLegacyLayoutIfNeeded"/> / any config read. Idempotent.</summary>
+    /// Call before any config read. Idempotent.</summary>
     public static void SetUserDataDirectoryOverride(string path)
     {
         if (!string.IsNullOrWhiteSpace(path)) _userDataDirectoryOverride = Path.GetFullPath(path);
@@ -520,105 +491,10 @@ public sealed class AppConfig
     /// for anyone who already had the old one.</summary>
     public static string SoundsDirectory => Path.Combine(AppContext.BaseDirectory, "default sounds");
 
-    /// <summary>The OLD per-user sounds folder (<c>...\user settings and logs\sounds\</c>), now
-    /// defunct after sounds moved to the install-side <see cref="SoundsDirectory"/>. Kept only so the
-    /// startup migration can delete the orphan. Do NOT read cues from here.</summary>
-    public static string LegacyUserSoundsDirectory => Path.Combine(UserDataDirectory, "sounds");
-
     /// <summary>The base profiles folder (ProfileStore appends the per-machine subfolder).</summary>
     public static string ProfilesBaseDirectory => Path.Combine(UserDataDirectory, "profiles");
 
     private static string ConfigPath => Path.Combine(UserDataDirectory, "global config.json");
-
-    /// <summary>What <see cref="MigrateLegacyLayoutIfNeeded"/> relocated this launch. True only on the
-    /// one launch where an older layout was found and moved — the caller uses it to show a one-time
-    /// "everything moved" notice.</summary>
-    public readonly record struct LayoutMigrationResult(bool MovedAnything);
-
-    /// <summary>
-    /// One-time, idempotent consolidation of EVERY older layout into
-    /// <c>&lt;exe&gt;\user settings and logs\</c>. Handles all the field permutations, each move guarded
-    /// by "source exists AND destination doesn't" so it's safe to run every launch and never clobbers
-    /// already-migrated data:
-    ///   * global config: <c>&lt;exe&gt;\remsound.config.json</c> (oldest) OR
-    ///                     <c>&lt;exe&gt;\config\global config.json</c> (the 2026-06-07 interim layout)
-    ///   * profiles:       <c>&lt;exe&gt;\config\profiles\</c> (interim) OR <c>&lt;exe&gt;\profiles\</c> (oldest)
-    ///   * logs:           <c>&lt;exe&gt;\logs\</c>
-    /// → all under <c>...\user settings and logs\</c>. (Sounds are NOT part of this folder any more —
-    /// the shipped defaults live install-side in <see cref="SoundsDirectory"/>; Program deletes the
-    /// two orphaned old sounds folders on startup.) Runs BEFORE anything reads config/profiles/
-    /// logs. A custom <see cref="ProfilesDirectory"/> is untouched. Directory moves fall back to
-    /// copy-then-delete across a volume boundary.
-    /// </summary>
-    public static LayoutMigrationResult MigrateLegacyLayoutIfNeeded()
-    {
-        var moved = false;
-        try
-        {
-            Directory.CreateDirectory(UserDataDirectory);
-            var root = AppContext.BaseDirectory;
-            var interimConfigDir = Path.Combine(root, "config");
-
-            // Global config — interim location wins over the oldest loose file.
-            if (!File.Exists(ConfigPath))
-            {
-                var interimGlobal = Path.Combine(interimConfigDir, "global config.json");
-                var oldestGlobal = Path.Combine(root, "remsound.config.json");
-                if (File.Exists(interimGlobal)) { File.Move(interimGlobal, ConfigPath); moved = true; }
-                else if (File.Exists(oldestGlobal)) { File.Move(oldestGlobal, ConfigPath); moved = true; }
-            }
-
-            // Profiles — interim location wins over the oldest.
-            if (!Directory.Exists(ProfilesBaseDirectory))
-            {
-                var interimProfiles = Path.Combine(interimConfigDir, "profiles");
-                var oldestProfiles = Path.Combine(root, "profiles");
-                if (Directory.Exists(interimProfiles)) { MoveDirectoryResilient(interimProfiles, ProfilesBaseDirectory); moved = true; }
-                else if (Directory.Exists(oldestProfiles)) { MoveDirectoryResilient(oldestProfiles, ProfilesBaseDirectory); moved = true; }
-            }
-
-            // Logs (only ever lived loose in the root).
-            var oldLogs = Path.Combine(root, "logs");
-            if (Directory.Exists(oldLogs) && !Directory.Exists(LogsDirectory)) { MoveDirectoryResilient(oldLogs, LogsDirectory); moved = true; }
-
-            // Remove the now-empty 2026-06-07 interim config\ folder.
-            try
-            {
-                if (Directory.Exists(interimConfigDir) && Directory.GetFileSystemEntries(interimConfigDir).Length == 0)
-                    Directory.Delete(interimConfigDir);
-            }
-            catch { /* leave it if it isn't empty / can't be removed */ }
-        }
-        catch
-        {
-            // Best-effort: a failed move (permissions, file in use) just means the app falls
-            // back to defaults / an empty profiles list rather than crashing on launch.
-        }
-        return new LayoutMigrationResult(moved);
-    }
-
-    /// <summary>Move a directory, falling back to recursive copy-then-delete when a plain
-    /// <see cref="Directory.Move"/> can't cross a volume boundary (e.g. the user-data folder is a
-    /// junction onto another drive). Copy uses overwrite:false so an already-present destination
-    /// file is never clobbered.</summary>
-    private static void MoveDirectoryResilient(string source, string dest)
-    {
-        try { Directory.Move(source, dest); }
-        catch (IOException)
-        {
-            CopyDirectoryRecursive(source, dest);
-            try { Directory.Delete(source, recursive: true); } catch { /* copy succeeded; leaving the source is harmless */ }
-        }
-    }
-
-    private static void CopyDirectoryRecursive(string source, string dest)
-    {
-        Directory.CreateDirectory(dest);
-        foreach (var file in Directory.GetFiles(source))
-            File.Copy(file, Path.Combine(dest, Path.GetFileName(file)), overwrite: false);
-        foreach (var dir in Directory.GetDirectories(source))
-            CopyDirectoryRecursive(dir, Path.Combine(dest, Path.GetFileName(dir)));
-    }
 
     /// <summary>Reads the app config from disk. Always returns a non-null instance — a missing
     /// or malformed file becomes a defaults-only AppConfig rather than throwing.</summary>

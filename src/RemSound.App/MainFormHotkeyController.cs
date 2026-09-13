@@ -184,43 +184,6 @@ internal sealed class MainFormHotkeyController : IDisposable
         RegisterToggleAllPeerShapingHotkey();
     }
 
-    /// <summary>Re-read every hotkey from the (now machine-wide) settings store and re-register it.
-    /// Used after the one-time upgrade import writes a fresh set of shortcuts into the global config,
-    /// so the just-imported bindings take effect immediately without relaunching.</summary>
-    public void ReloadAndReRegisterAll()
-    {
-        sendMuteHotkey = settingsStore.LoadSendMuteHotkey();
-        receiveMuteHotkey = settingsStore.LoadReceiveMuteHotkey();
-        trayHotkey = settingsStore.LoadTrayHotkey();
-        volumeUpHotkey = settingsStore.LoadVolumeUpHotkey();
-        volumeDownHotkey = settingsStore.LoadVolumeDownHotkey();
-        toggleRecordingHotkey = settingsStore.LoadToggleRecordingHotkey();
-        remoteVolumeUpHotkey = settingsStore.LoadRemoteVolumeUpHotkey();
-        remoteVolumeDownHotkey = settingsStore.LoadRemoteVolumeDownHotkey();
-        remoteMuteToggleHotkey = settingsStore.LoadRemoteMuteToggleHotkey();
-        systemVolumeUpHotkey = settingsStore.LoadSystemVolumeUpHotkey();
-        systemVolumeDownHotkey = settingsStore.LoadSystemVolumeDownHotkey();
-        systemMuteToggleHotkey = settingsStore.LoadSystemMuteToggleHotkey();
-        quickProfileSwitchHotkey = settingsStore.LoadQuickProfileSwitchHotkey();
-        speakStatusLineHotkey = settingsStore.LoadSpeakStatusLineHotkey();
-        toggleAllPeerShapingHotkey = settingsStore.LoadToggleAllPeerShapingHotkey();
-        RegisterSendMuteHotkey();
-        RegisterReceiveMuteHotkey();
-        RegisterTrayHotkey();
-        RegisterVolumeUpHotkey();
-        RegisterVolumeDownHotkey();
-        RegisterToggleRecordingHotkey();
-        RegisterRemoteVolumeUpHotkey();
-        RegisterRemoteVolumeDownHotkey();
-        RegisterRemoteMuteToggleHotkey();
-        RegisterSystemVolumeUpHotkey();
-        RegisterSystemVolumeDownHotkey();
-        RegisterSystemMuteToggleHotkey();
-        RegisterQuickProfileSwitchHotkey();
-        RegisterSpeakStatusLineHotkey();
-        RegisterToggleAllPeerShapingHotkey();
-    }
-
     /// <summary>Build the keyboard-shortcuts window WITHOUT showing it, so the accessibility, theme
     /// and control audits can reach it. It was built inline and shown in one step, which made it
     /// invisible to every test — caught by the "every window is reachable" guard, 2026-08-15. Same

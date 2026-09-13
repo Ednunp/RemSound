@@ -1054,13 +1054,6 @@ public sealed partial class MainForm : Form
         // it. Set before any list is built so names show from the first render.
         var startupCfg = AppConfig.Load();
         namedPeers = new Dictionary<string, NamedPeer>(startupCfg.NamedPeers ?? new(), StringComparer.OrdinalIgnoreCase);
-        // Migrate the legacy flat friendly-name map (pre-registry configs) into the book, once.
-        if (namedPeers.Count == 0 && startupCfg.PeerFriendlyNames is { Count: > 0 } legacy)
-        {
-            foreach (var (k, v) in legacy)
-                if (!string.IsNullOrWhiteSpace(v)) namedPeers[k] = new NamedPeer { MachineName = k, FriendlyName = v };
-            if (namedPeers.Count > 0) SaveNamedPeers();
-        }
         PeerListItem.DisplayNameProvider = ResolvePeerDisplayName;
 
         // --- Set accessibility names ---
@@ -1840,14 +1833,10 @@ public sealed partial class MainForm : Form
     /// <summary>
     /// Runs the post-launch notices one at a time — each ShowDialog blocks until the user closes it,
     /// so the next never opens on top of a still-open one. Order: the what's-new About box (after an
-    /// update), then the Realtek-ASIO compatibility warning. The config-migration notice is handled
-    /// separately in Program.Main (shown before the profile picker), so it's already outside this
-    /// sequence and can't stack with these.
+    /// update), then the Realtek-ASIO compatibility warning.
     /// </summary>
     private void RunStartupNotices()
     {
-        if (IsDisposed) return;
-        MaybeOfferKeyboardShortcutImport();
         if (IsDisposed) return;
         MaybeShowWhatsNewAfterUpdate();
         if (IsDisposed) return;
@@ -1960,127 +1949,11 @@ public sealed partial class MainForm : Form
         }
     }
 
-    /// <summary>One-time upgrade flow (replaces the v4.4 reset notice): keyboard shortcuts moved from
-    /// per-profile to machine-wide storage (issue #14). Offers upgraders the choice of copying their
-    /// shortcuts from one of their existing profiles (still readable in the profile files) or starting
-    /// fresh. Only offered to people coming straight from a PRE-v4.4 version (where shortcuts were still
-    /// per-profile), to spare them the reset — anyone who already went through v4.4's reset is left
-    /// alone (re-offering would only annoy them), as is a fresh install or a user with no saved shortcuts
-    /// to import. Runs BEFORE <see cref="MaybeShowWhatsNewAfterUpdate"/>, which overwrites the
-    /// LastWhatsNewVersion we read to tell upgraders apart from fresh installs.</summary>
-    private void MaybeOfferKeyboardShortcutImport()
-    {
-        if (IsDisposed) return;
-        AppConfig cfg;
-        try { cfg = AppConfig.Load(); }
-        catch { return; }
-        if (cfg.KeyboardShortcutsImportOffered) return;
-
-        // Leave the v4.4 crowd alone. v4.4's reset set KeyboardShortcutsGlobalNoticeShown for everyone
-        // who ran it; those people have already re-done their shortcuts, so re-offering an import would
-        // only annoy them. We only want to catch people coming straight from a PRE-v4.4 version (where
-        // shortcuts were still per-profile), before they lose anything.
-        if (cfg.KeyboardShortcutsGlobalNoticeShown) { MarkShortcutImportOffered(); return; }
-
-        // Only relevant to upgraders (a previous version ran here, so LastWhatsNewVersion is set) who
-        // actually have old per-profile shortcuts to bring across.
-        var isUpgrade = !string.IsNullOrEmpty(cfg.LastWhatsNewVersion);
-        if (!isUpgrade) { MarkShortcutImportOffered(); return; }
-
-        var titles = ProfilesWithSavedShortcuts();
-        if (titles.Count == 0) { MarkShortcutImportOffered(); return; }
-
-        logFile.Event($"keyboard shortcuts: offering import from {titles.Count} profile(s) with saved shortcuts");
-        try
-        {
-            using var dlg = new KeyboardShortcutImportDialog(titles);
-            var result = ForegroundDialog.Show(owner => dlg.ShowDialog(owner));
-            if (result != DialogResult.OK) return;  // dismissed (Escape) — offer again next launch
-
-            if (dlg.ChosenProfileTitle is { } title)
-            {
-                var imported = ImportShortcutsFromProfile(title);
-                logFile.Event($"keyboard shortcuts: imported {imported} shortcut(s) from profile \"{title}\"");
-                hotkeyController.ReloadAndReRegisterAll();
-            }
-            else
-            {
-                logFile.Event("keyboard shortcuts: user chose to start fresh with the defaults");
-            }
-            MarkShortcutImportOffered();
-        }
-        catch (Exception ex)
-        {
-            logFile.Event($"keyboard shortcuts import failed: {ex.GetType().Name}: {ex.Message}");
-        }
-    }
-
-    private static void MarkShortcutImportOffered()
-    {
-        try { var c = AppConfig.Load(); c.KeyboardShortcutsImportOffered = true; c.Save(); }
-        catch { /* harmless — at worst the offer shows again next launch */ }
-    }
-
-    /// <summary>Titles of profiles that have at least one customised keyboard shortcut saved in their
-    /// file (the only ones worth importing — unchanged shortcuts were stored as null).</summary>
-    private List<string> ProfilesWithSavedShortcuts()
-    {
-        var result = new List<string>();
-        if (profileStore is null) return result;
-        try
-        {
-            foreach (var title in profileStore.ListProfileTitles())
-            {
-                try
-                {
-                    if (profileStore.Load(title) is { } p && ProfileHasAnyShortcut(p)) result.Add(title);
-                }
-                catch { /* skip an unreadable profile */ }
-            }
-        }
-        catch { /* enumeration failed — offer nothing */ }
-        return result;
-    }
-
-    private static bool ProfileHasAnyShortcut(Profile p) =>
-        p.ReceiveMuteHotkey is not null || p.SendMuteHotkey is not null || p.TrayHotkey is not null
-        || p.VolumeUpHotkey is not null || p.VolumeDownHotkey is not null || p.ToggleRecordingHotkey is not null
-        || p.RemoteVolumeUpHotkey is not null || p.RemoteVolumeDownHotkey is not null || p.RemoteMuteToggleHotkey is not null
-        || p.SystemVolumeUpHotkey is not null || p.SystemVolumeDownHotkey is not null || p.SystemMuteToggleHotkey is not null
-        || p.QuickProfileSwitchHotkey is not null || p.SpeakStatusLineHotkey is not null;
-
-    /// <summary>Copy a profile's saved (non-null) keyboard shortcuts into the machine-wide store, via the
-    /// settings store's now-global Save* methods. Returns how many were copied; shortcuts the profile
-    /// never customised (null) are left at the global default.</summary>
-    private int ImportShortcutsFromProfile(string title)
-    {
-        if (profileStore is null || profileStore.Load(title) is not { } p) return 0;
-        var n = 0;
-        void Copy(HotkeyRecord? rec, Action<HotkeyInfo> save) { if (rec is not null) { save(rec.ToHotkeyInfo()); n++; } }
-        Copy(p.ReceiveMuteHotkey, settings.SaveReceiveMuteHotkey);
-        Copy(p.SendMuteHotkey, settings.SaveSendMuteHotkey);
-        Copy(p.TrayHotkey, settings.SaveTrayHotkey);
-        Copy(p.VolumeUpHotkey, settings.SaveVolumeUpHotkey);
-        Copy(p.VolumeDownHotkey, settings.SaveVolumeDownHotkey);
-        Copy(p.ToggleRecordingHotkey, settings.SaveToggleRecordingHotkey);
-        Copy(p.RemoteVolumeUpHotkey, settings.SaveRemoteVolumeUpHotkey);
-        Copy(p.RemoteVolumeDownHotkey, settings.SaveRemoteVolumeDownHotkey);
-        Copy(p.RemoteMuteToggleHotkey, settings.SaveRemoteMuteToggleHotkey);
-        Copy(p.SystemVolumeUpHotkey, settings.SaveSystemVolumeUpHotkey);
-        Copy(p.SystemVolumeDownHotkey, settings.SaveSystemVolumeDownHotkey);
-        Copy(p.SystemMuteToggleHotkey, settings.SaveSystemMuteToggleHotkey);
-        Copy(p.QuickProfileSwitchHotkey, settings.SaveQuickProfileSwitchHotkey);
-        Copy(p.SpeakStatusLineHotkey, settings.SaveSpeakStatusLineHotkey);
-        return n;
-    }
-
     /// <summary>Show the About box once after a SUCCESSFUL in-app update, if the user opted in. Driven by
     /// a one-shot marker the updater writes only on success (<see cref="RemSoundUpdater.WhatsNewMarkerName"/>
     /// via <see cref="WhatsNewMarker"/>) — NOT by a running-version-vs-saved-version compare, which could
     /// re-fire after a FAILED update when its best-effort flag save lost a race during the update churn
-    /// (that was the bug). The marker is consumed (deleted) here exactly once. Separately records
-    /// LastWhatsNewVersion as the "a version has run here" signal the keyboard-shortcut import offer uses
-    /// to tell an upgrade from a fresh install. 2026-06-23.</summary>
+    /// (that was the bug). The marker is consumed (deleted) here exactly once. 2026-06-23.</summary>
     private void MaybeShowWhatsNewAfterUpdate()
     {
         if (IsDisposed) return;
@@ -2108,19 +1981,6 @@ public sealed partial class MainForm : Form
         if (justUpdated && !WhatsNewMarker.Consume(AppContext.BaseDirectory))
         {
             logFile.Event("what's new: could not delete the update marker (will re-show next launch)");
-        }
-
-        // Record "a version has run on this machine" for the upgrade-vs-fresh-install detection used by
-        // MaybeOfferKeyboardShortcutImport. Best-effort; no longer drives the what's-new popup.
-        if (cfg.LastWhatsNewVersion != current)
-        {
-            try
-            {
-                var fresh = AppConfig.Load();
-                fresh.LastWhatsNewVersion = current;
-                fresh.Save();
-            }
-            catch { /* harmless */ }
         }
     }
 
@@ -5968,15 +5828,13 @@ public sealed partial class MainForm : Form
         UpdatePeerDetails();
     }
 
-    /// <summary>Writes the in-memory named-peers book to the machine-wide config, and clears the legacy
-    /// flat map so it isn't written back.</summary>
+    /// <summary>Writes the in-memory named-peers book to the machine-wide config.</summary>
     private void SaveNamedPeers()
     {
         try
         {
             var cfg = AppConfig.Load();
             cfg.NamedPeers = new Dictionary<string, NamedPeer>(namedPeers, StringComparer.OrdinalIgnoreCase);
-            cfg.PeerFriendlyNames = new();
             cfg.Save();
         }
         catch (Exception ex) { logFile.Event($"named peers: failed to save: {ex.Message}"); }
@@ -9726,13 +9584,12 @@ public sealed partial class MainForm : Form
             // exactly as if the user had typed it into the manual-peer field. Discovered peers
             // (no longer reachable / different IP) just fail gracefully — no popup.
             ReconnectSavedPeers(p.SelectedConnectedPeers);
-            // Per-peer pan/EQ: adopt this profile's saved shaping + the two master enables. The peer
+            // Per-peer pan/EQ: adopt this profile's saved shaping and its master switch. The peer
             // picker and the DSP re-apply on the next tick (once the peers above have reconnected);
             // clearing the signature makes RefreshPanEqPeerList rebuild and re-push for this profile.
             peerShaping = p.PeerShaping is null ? new() : new(p.PeerShaping);
             loadingPanEqControls = true;
-            // Single master switch now. Migrate older profiles: either legacy flag being on turns it on.
-            try { enableAllPeerShapingBox.Checked = p.EnableAllPeerShaping || p.EnablePanForPeers || p.EnableEqForPeers; }
+            try { enableAllPeerShapingBox.Checked = p.EnableAllPeerShaping; }
             finally { loadingPanEqControls = false; }
             lastPanEqPeerSignature = "";
         }
@@ -11257,10 +11114,7 @@ public sealed partial class MainForm : Form
         // Opus 120 (2.5 ms — live latency) = index 2. Anything else (including the retired
         // 10 ms middle (480) and the never-exposed 5 ms (240)) collapses to index 1
         // (broadcast quality / 20 ms), the safer default — losing a little latency is the
-        // less surprising outcome on upgrade than losing loss tolerance. v2.x profiles that
-        // saved OpusFrameMilliseconds=10 (which the settings store migrates to 480 samples
-        // via the <120 sentinel) land here on the broadcast side; users who specifically
-        // want low latency re-pick "live latency" from the dropdown.
+        // less surprising outcome on upgrade than losing loss tolerance.
         return opusFrameSamples switch
         {
             120 => 2,

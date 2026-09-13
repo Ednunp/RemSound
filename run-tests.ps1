@@ -222,8 +222,8 @@ else {
         if (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) { Pass "GUI cold-started and stayed up (minimized to tray)" }
         else { Fail "GUI exited or crashed during cold start" }
 
-        # The process creates its user-data folder at the --config-dir override
-        # (AppConfig.MigrateLegacyLayoutIfNeeded), so the override folder existing afterwards proves it
+        # The process creates its user-data folder at the --config-dir override (the profile store
+        # makes its folder there on start), so the override folder existing afterwards proves it
         # honoured --config-dir and left the real settings alone. (Cue sounds are never in that folder:
         # the shipped defaults live in 'default sounds\' next to the exe.)
         if (Test-Path -LiteralPath $testCfg) { Pass "ran against the isolated --config-dir folder (real settings untouched)" }

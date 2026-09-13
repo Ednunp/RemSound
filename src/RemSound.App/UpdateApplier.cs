@@ -46,9 +46,9 @@ internal static class UpdateApplier
         var resumeProfile = GetArg(args, "--resume-profile");
         var noRestart = Array.Exists(args, a => string.Equals(a, "--update-no-restart", StringComparison.OrdinalIgnoreCase));
 
-        // Log to a single file in the install root (NOT the "user settings and logs" folder — the
-        // updater runs before the new version's folder-migration, so it must not pre-create that
-        // folder). Persists for diagnosis; survives the temp stage being cleaned up.
+        // Log to a single file in the install root (NOT the "user settings and logs" folder, which
+        // belongs to the user and which the updater leaves alone). Persists for diagnosis; survives
+        // the temp stage being cleaned up.
         var logPath = string.IsNullOrWhiteSpace(target)
             ? Path.Combine(Path.GetTempPath(), "RemSound-updater.log")
             : Path.Combine(target, "updater.log");

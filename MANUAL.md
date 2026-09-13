@@ -226,7 +226,7 @@ Item| Shortcut| What it does
 
 **Keyboard access:** the tray icon is reachable through standard Windows shortcuts — **Windows + B** moves focus to the notification area, arrow keys navigate, Enter activates, and the application context-menu key (or Shift+F10) opens the right-click menu without a mouse.
 
-**Important warnings always come to the front.** Even when RemSound is hidden in the tray, a warning it needs you to read — such as the “your files have moved” notice, a microphone-blocked warning, or an update prompt — pops up in front of whatever you're doing, with focus, so your screen reader reads it straight away. RemSound stays in the tray; only the warning comes forward.
+**Important warnings always come to the front.** Even when RemSound is hidden in the tray, a warning it needs you to read — such as a microphone-blocked warning or an update prompt — pops up in front of whatever you're doing, with focus, so your screen reader reads it straight away. RemSound stays in the tray; only the warning comes forward.
 
 ### Only one copy of RemSound runs at a time
 

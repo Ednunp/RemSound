@@ -46,7 +46,6 @@ internal static partial class SelfTest
         // interactive control in each, so these are covered by construction rather than by listing. --
         new("RemSound.App/AboutDialog.cs", "Dialog control suite"),
         new("RemSound.App/AddBandDialog.cs", "Dialog control suite"),
-        new("RemSound.App/KeyboardShortcutImportDialog.cs", "Dialog control suite"),
         new("RemSound.App/ManualPeerPrompt.cs", "Dialog control suite"),
         new("RemSound.App/PreferencesDialog.cs", "Dialog control suite + cue coverage"),
         new("RemSound.App/ProfilePasswordDialog.cs", "Dialog control suite"),

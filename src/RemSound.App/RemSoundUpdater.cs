@@ -332,9 +332,7 @@ internal sealed class RemSoundUpdater
     }
 
     /// <summary>Best-effort cleanup of leftover update artefacts, called on a normal launch. The
-    /// in-app installer can't delete the temp stage it's running from, so the next launch clears it;
-    /// this also sweeps away relics of the OLD (pre-3.6) batch updater that staged into the install
-    /// folder (the <c>_update</c> tree, <c>_apply-update.cmd</c>, <c>_update-helper.log</c>).</summary>
+    /// in-app installer can't delete the temp stage it's running from, so the next launch clears it.</summary>
     public static void CleanUpUpdateStages()
     {
         try
@@ -342,15 +340,6 @@ internal sealed class RemSoundUpdater
             var parent = UpdateStageParentDir;
             if (Directory.Exists(parent))
                 foreach (var dir in Directory.GetDirectories(parent)) TryDeleteDirectory(dir);
-        }
-        catch { /* best-effort */ }
-
-        try
-        {
-            var installDir = AppContext.BaseDirectory;
-            TryDeleteDirectory(Path.Combine(installDir, "_update"));
-            TryDelete(Path.Combine(installDir, "_apply-update.cmd"));
-            TryDelete(Path.Combine(installDir, "_update-helper.log"));
         }
         catch { /* best-effort */ }
     }

@@ -292,7 +292,6 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT: --close asks the running copy to close before ending it", AuditCloseFromTheCommandLineAsksFirst);
         RunStep(results, "AUDIT: --list-profiles finds the profiles the app saved", AuditListProfilesFindsSavedProfiles);
         RunStep(results, "AUDIT: a profile holding a retired concealment tone loads as noise burst", AuditRetiredConcealmentTonesLoadAsNoiseBurst);
-        RunStep(results, "AUDIT: old sound folders keep people's own sounds", AuditOldSoundFoldersKeepPeoplesOwnSounds);
         RunStep(results, "AUDIT: keeping the machine awake belongs to the process, not one thread", AuditKeepAwakeBelongsToTheProcess);
         RunStep(results, "AUDIT: the plugin files are gathered after the plugin builds, and --help is current", AuditPluginFilesAreGatheredAfterThePluginBuilds);
         RunStep(results, "AUDIT: settings changed in a dialog are all recorded, and the checks never touch this PC's start-up entry", AuditDialogChangesAreRecorded);
@@ -315,6 +314,8 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT: the missing-manual message speaks to users, not builders", AuditHelpMessageSpeaksToUsers);
         RunStep(results, "AUDIT: Preferences messages name controls that exist", AuditPreferencesMessagesNameRealControls);
         RunStep(results, "AUDIT: the jitter buffer box has one name, whatever it starts as", AuditJitterBufferHasOneName);
+        RunStep(results, "AUDIT: an old profile with retired settings still opens, and saving drops them", AuditOldProfileWithRetiredSettingsStillOpens);
+        RunStep(results, "AUDIT: an old global config with retired settings still opens", AuditOldConfigWithRetiredSettingsStillOpens);
         RunStep(results, "AUDIT: re-opening an output is not network jitter (both output kinds)", AuditOutputReopenIsNotJitter);
         RunStep(results, "AUDIT: a settling WASAPI endpoint is not taken as a clock", AuditSettlingEndpointIsNotTakenAsAClock);
         RunStep(results, "AUDIT: after a wake the report bursts and splits network gaps from render gaps", AuditPostWakeBurstSplitsNetworkFromRender);
@@ -1378,21 +1379,7 @@ internal static partial class SelfTest
             ["EnableAllPeerShaping"] = "control-owned: shaping master switch (pinned by MainWindowProfileRoundTrip)",
             ["AudioPort"] = "DEAD FIELD: nothing reads it (the live port is the RemPacket constant). Wiring a custom-port UI to it requires adding real persistence first",
             ["SendAllApplications"] = "vestigial (send-all removed 2026-07-17); kept for old JSON only",
-            ["EnablePanForPeers"] = "legacy pre-collapse switch; one-way migrated into EnableAllPeerShaping",
-            ["EnableEqForPeers"] = "legacy pre-collapse switch; one-way migrated into EnableAllPeerShaping",
         };
-        // The 14 per-profile hotkey fields: legacy since v4.4 (hotkeys are machine-wide in AppConfig now).
-        // They exist ONLY so old profile JSON deserialises for the one-time shortcut-import offer.
-        foreach (var legacyHotkey in new[]
-        {
-            "ReceiveMuteHotkey", "SendMuteHotkey", "TrayHotkey", "VolumeUpHotkey", "VolumeDownHotkey",
-            "ToggleRecordingHotkey", "RemoteVolumeUpHotkey", "RemoteVolumeDownHotkey", "RemoteMuteToggleHotkey",
-            "SystemVolumeUpHotkey", "SystemVolumeDownHotkey", "SystemMuteToggleHotkey",
-            "QuickProfileSwitchHotkey", "SpeakStatusLineHotkey",
-        })
-        {
-            declared[legacyHotkey] = "legacy v4.4 per-profile hotkey — kept only for the one-time import of old JSON";
-        }
 
         var store = new RemSoundSettingsStore("RemSound");
         var backup = new Profile();
@@ -4737,7 +4724,6 @@ internal static partial class SelfTest
             ("About", () => new AboutDialog()),
             ("Add EQ band", () => new AddBandDialog()),
             ("Rename peer", () => new RenamePeerDialog("TestMachine", null)),
-            ("Keyboard shortcut import", () => new KeyboardShortcutImportDialog(Array.Empty<string>())),
             ("Update install notice", () => new UpdateInstallNoticeDialog(
                 new UpdateInfo("v9.9", new Version(9, 9, 0), "https://example.invalid/x.zip", "notes", "https://example.invalid/rel"))),
             // The inline-built dialogs, via their Build seams — previously invisible to this audit,

@@ -26,8 +26,7 @@ namespace RemSound.App;
 /// <c>--config-dir</c> (<see cref="TryGetConfigDir"/>) applies to both. Program handles --silent,
 /// --foreground, --await-pid, --uninstall, --apply-update and the service verbs itself.
 ///
-/// Wired into <see cref="Program"/> right after the legacy-layout migration and before the
-/// single-instance guard. The do-and-exit commands need no window and no instance lock.
+/// Wired into <see cref="Program"/> before the single-instance guard. The do-and-exit commands need no window and no instance lock.
 /// </summary>
 internal static class CommandLine
 {
@@ -45,7 +44,7 @@ internal static class CommandLine
     private const int ATTACH_PARENT_PROCESS = -1;
 
     /// <summary>The folder given after <c>--config-dir</c>, or null. Read at the very start of
-    /// <see cref="Program"/> - before the layout migration and any config/profile/log/sound access -
+    /// <see cref="Program"/> - before any config/profile/log access -
     /// so it can redirect ALL user state via <see cref="AppConfig.SetUserDataDirectoryOverride"/>.
     /// Applies to every command (e.g. <c>--selftest --config-dir</c>, <c>--diagnostics --config-dir</c>)
     /// and to a normal GUI launch, so a test can exercise a real build without touching live settings.</summary>

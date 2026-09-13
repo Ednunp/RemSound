@@ -499,57 +499,6 @@ internal static partial class SelfTest
     }
 
     /// <summary>
-    /// OLD SOUND FOLDERS KEEP PEOPLE'S OWN SOUNDS.
-    ///
-    /// <para>2026-09-13 review (Legacy #5, #6). Every launch deleted two old sounds folders outright, contents and all — and
-    /// the per-user one is documented as having held people's own cue WAVs. Now only copies of shipped sounds go, and a
-    /// folder only once that leaves it empty. The one-time folder notice also claimed cue sounds had been moved.</para>
-    /// </summary>
-    private static string? AuditOldSoundFoldersKeepPeoplesOwnSounds()
-    {
-        var root = Path.Combine(Path.GetTempPath(), "remsound-oldsounds-" + Guid.NewGuid().ToString("N"));
-        var mixed = Path.Combine(root, "mixed");
-        var onlyShipped = Path.Combine(root, "shipped");
-        var shipped = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "connect.wav", "record start.wav" };
-        try
-        {
-            Directory.CreateDirectory(mixed);
-            Directory.CreateDirectory(onlyShipped);
-            foreach (var name in new[] { "connect.wav", "connect.wav.sfk", "record start.sfk", "my own cue.wav", "notes.txt" })
-                File.WriteAllText(Path.Combine(mixed, name), "x");
-            foreach (var name in new[] { "connect.wav", "connect.sfk" })
-                File.WriteAllText(Path.Combine(onlyShipped, name), "x");
-
-            var removed = Program.RemoveShippedCueCopies(mixed, shipped);
-            Check(File.Exists(Path.Combine(mixed, "my own cue.wav")), "a sound somebody put in an old sounds folder must survive");
-            Check(File.Exists(Path.Combine(mixed, "notes.txt")), "anything that isn't a shipped sound must survive");
-            Check(Directory.Exists(mixed), "a folder still holding somebody's files must stay");
-            Check(removed == 3 && !File.Exists(Path.Combine(mixed, "connect.wav")) && !File.Exists(Path.Combine(mixed, "connect.wav.sfk"))
-                  && !File.Exists(Path.Combine(mixed, "record start.sfk")),
-                $"copies of shipped sounds and their peak files must go (removed {removed})");
-
-            Program.RemoveShippedCueCopies(onlyShipped, shipped);
-            Check(!Directory.Exists(onlyShipped), "a folder holding only shipped copies must go once they are removed");
-        }
-        finally { try { Directory.Delete(root, recursive: true); } catch { /* temp */ } }
-
-        var names = Program.ShippedCueFileNames();
-        Check(Directory.Exists(AppConfig.SoundsDirectory)
-              && Directory.EnumerateFiles(AppConfig.SoundsDirectory).All(f => names.Contains(Path.GetFileName(f))),
-            "every sound in today's default sounds folder must count as shipped");
-        Check(names.Contains("connect.wav"), "the earliest builds' cue names must count as shipped");
-
-        var src = FindSourceRoot();
-        if (src is null) return Skip("the rule holds, but the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
-        var program = File.ReadAllText(Path.Combine(src, "src", "RemSound.App", "Program.cs"));
-        Check(!program.Contains("Your cue sounds", StringComparison.Ordinal),
-            "the one-time folder notice must not claim cue sounds were moved — they never were");
-        Check(SourceMethodBody(program, "private static void RemoveLegacySoundFolders()").Contains("RemoveShippedCueCopies(", StringComparison.Ordinal),
-            "launch must tidy the old folders through the rule above, not delete them outright");
-        return "own sounds and their folder survive; shipped copies and their peak files go; an emptied folder goes";
-    }
-
-    /// <summary>
     /// KEEPING THE MACHINE AWAKE BELONGS TO THE PROCESS, NOT ONE THREAD.
     ///
     /// <para>2026-09-13 review (Service #14). "System required" was set with SetThreadExecutionState, which belongs to the

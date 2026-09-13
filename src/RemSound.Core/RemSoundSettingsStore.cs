@@ -153,13 +153,9 @@ public sealed class RemSoundSettingsStore
 
     /// <summary>Loads the Opus frame size in samples-per-channel at 48 kHz. Default 480 = 10 ms, the
     /// size from before the codec list offered only 960 and 120; MainForm.ResolveCodecIndex shows
-    /// anything but 120 as the 960 choice.
-    /// Migration path: profiles written by v2.x stored milliseconds (5/10/20) in the same JSON
-    /// field; values &lt; 120 are interpreted as legacy ms and converted (×48 → samples). The
-    /// ranges don't overlap (max legitimate ms = 60, min legitimate samples = 120), so the
-    /// disambiguation is unambiguous.</summary>
+    /// anything but 120 as the 960 choice.</summary>
     public int LoadOpusFrameSamplesPerChannel(int defaultValue = 480) =>
-        Try(() => Load()?.OpusFrameSamplesPerChannel is int v ? NormalizeOpusFrameSamples(v) : (int?)null) ?? defaultValue;
+        Try(() => Load()?.OpusFrameSamplesPerChannel is int v ? v : (int?)null) ?? defaultValue;
 
     /// <summary>Saves the Opus frame size in samples-per-channel at 48 kHz. Accepts
     /// 120/240/480/960; anything else collapses to 480 (= 10 ms). The codec list only ever saves 960
@@ -176,16 +172,6 @@ public sealed class RemSoundSettingsStore
             _ => 480,
         };
         Save(s);
-    }
-
-    /// <summary>Disambiguates a persisted Opus frame-size value between the legacy v2.x
-    /// integer-milliseconds storage (5/10/20) and the v3.x samples-per-channel storage
-    /// (120/240/480/960). Values &lt; 120 are legacy ms; ≥ 120 are samples. See
-    /// <see cref="LoadOpusFrameSamplesPerChannel"/>.</summary>
-    private static int NormalizeOpusFrameSamples(int persisted)
-    {
-        if (persisted < 120) return persisted * 48; // legacy ms → samples at 48 kHz
-        return persisted;
     }
 
     public bool LoadContinuousAutoTuneEnabled(bool defaultValue = false) =>
@@ -552,9 +538,8 @@ public sealed class RemSoundSettingsStore
         if (profile is null) throw new ArgumentNullException(nameof(profile));
         cache = new Settings
         {
-            // Keyboard shortcuts are no longer per-profile (v4.4) — they live in AppConfig now and are
-            // not carried through the profile cache. Profile's HotkeyRecord fields remain only so old
-            // profile JSONs still deserialise; they're ignored.
+            // Keyboard shortcuts are not per-profile (since v4.4) — they live in AppConfig and are not
+            // carried through the profile cache.
             AcceptRemoteVolumeCommands = profile.AcceptRemoteVolumeCommands,
             MaxLatencyMs = profile.MaxLatencyMs,
             Codec = profile.Codec,
@@ -666,9 +651,8 @@ public sealed class RemSoundSettingsStore
         public bool? AcceptRemoteVolumeCommands { get; set; }
         public int? MaxLatencyMs { get; set; }
         public AudioTransportCodec? Codec { get; set; }
-        // Renamed 2026-05-23 (v3.0). Was OpusFrameMilliseconds; value semantic shifted to
-        // samples-per-channel at 48 kHz. The cache is in-memory only — no JSON migration is
-        // needed here; on-disk migration happens in Profile via [JsonPropertyName].
+        // Renamed 2026-05-23 (v3.0). Was OpusFrameMilliseconds; the value is samples-per-channel at
+        // 48 kHz. The cache is in-memory only; on disk the profile keeps the old JSON key.
         public int? OpusFrameSamplesPerChannel { get; set; }
         public bool? ContinuousAutoTuneEnabled { get; set; }
         public int? ContinuousAutoTuneIntervalSec { get; set; }

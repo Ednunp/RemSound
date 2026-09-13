@@ -106,14 +106,8 @@ public sealed class Profile
     /// 480 = 10 ms, 960 = 20 ms. The codec list offers only 960 ("broadcast quality") and 120 ("live
     /// latency"), and saves one of those. The property default is still 480, from before that list; a
     /// profile holding 480 is shown and sent as the 960 choice (MainForm.ResolveCodecIndex). Renamed
-    /// from <c>OpusFrameMilliseconds</c> in the v3.0 wire-format refactor (2026-05-23). The JSON key
-    /// is kept as
-    /// <c>OpusFrameMilliseconds</c> for back-compat with v2.x profile files; on read,
-    /// <see cref="RemSoundSettingsStore.LoadOpusFrameSamplesPerChannel"/> disambiguates the
-    /// legacy integer-ms encoding (5/10/20) from the new sample-count encoding
-    /// (120/240/480/960) using a sentinel: any persisted value &lt; 120 is treated as ms and
-    /// multiplied by 48. v2.x readers loading a v3.x profile see e.g. 480 and clamp it to
-    /// their accept-list (which only knows 10 or 20), defaulting silently to 10 ms.</summary>
+    /// from <c>OpusFrameMilliseconds</c> in the v3.0 wire-format refactor (2026-05-23); the JSON key is
+    /// still <c>OpusFrameMilliseconds</c>, the name every profile file uses.</summary>
     [JsonPropertyName("OpusFrameMilliseconds")]
     public int OpusFrameSamplesPerChannel { get; set; } = 480;
     public int SendRateRaw { get; set; } = (int)SendRate.Standard;
@@ -230,54 +224,11 @@ public sealed class Profile
     /// bypassed individually via <see cref="RemSound.Core.PeerShaping.Enabled"/>.</summary>
     public bool EnableAllPeerShaping { get; set; }
 
-    /// <summary>Legacy separate master switches (pre-collapse). Kept only so older profile JSON still
-    /// deserialises and migrates: on load, either being true turns the single master switch on.</summary>
-    public bool EnablePanForPeers { get; set; }
-    public bool EnableEqForPeers { get; set; }
-
     /// <summary>Per-peer pan + EQ, keyed by the SAME peer-entry string used in
     /// <see cref="SelectedConnectedPeers"/> (user text / discovery label / address:port). A peer with
     /// no entry gets centre pan and flat EQ. Empty on a fresh profile.</summary>
     public Dictionary<string, PeerShaping> PeerShaping { get; set; } = new();
 
-    // === Hotkeys ===
-    public HotkeyRecord? ReceiveMuteHotkey { get; set; }
-    public HotkeyRecord? SendMuteHotkey { get; set; }
-    public HotkeyRecord? TrayHotkey { get; set; }
-    public HotkeyRecord? VolumeUpHotkey { get; set; }
-    public HotkeyRecord? VolumeDownHotkey { get; set; }
-    /// <summary>Global hotkey for start / stop recording. Toggles the same action as the
-    /// Record menu's "Start recording / Stop recording" item and the in-app Ctrl+R, but
-    /// works system-wide (RemSound doesn't need keyboard focus). Default unset — recording
-    /// is uncommon enough that we don't claim a default chord that might clash with the
-    /// user's other tools.</summary>
-    public HotkeyRecord? ToggleRecordingHotkey { get; set; }
-    /// <summary>Hotkey that sends a "raise volume" command to every connected peer that has
-    /// "Accept remote volume commands" enabled. The local volume slider on this machine is
-    /// NOT touched. Use case: I'm NVDA-Remote'd into another machine and want to nudge the
-    /// listening volume on the laptop I'm physically at without breaking out of the session.</summary>
-    public HotkeyRecord? RemoteVolumeUpHotkey { get; set; }
-    /// <summary>Mirror of RemoteVolumeUpHotkey for "lower volume" commands.</summary>
-    public HotkeyRecord? RemoteVolumeDownHotkey { get; set; }
-    /// <summary>Hotkey that sends a "toggle receive mute" command to every connected peer.</summary>
-    public HotkeyRecord? RemoteMuteToggleHotkey { get; set; }
-    /// <summary>Hotkey that sends a "raise Windows default-output-device volume by one step"
-    /// command to every connected peer that has Accept remote volume commands enabled. Each
-    /// press bumps the receiving peer's Windows master volume by the OS native step (~2%) —
-    /// same as pressing the keyboard volume key on the receiver. System-wide on the receiver:
-    /// affects every app on that machine including its screen reader.</summary>
-    public HotkeyRecord? SystemVolumeUpHotkey { get; set; }
-    /// <summary>Mirror of SystemVolumeUpHotkey for the down direction.</summary>
-    public HotkeyRecord? SystemVolumeDownHotkey { get; set; }
-    /// <summary>Hotkey that sends a "toggle Windows default-output-device mute" command to
-    /// every connected peer.</summary>
-    public HotkeyRecord? SystemMuteToggleHotkey { get; set; }
-    /// <summary>Global hotkey that opens the Quick profile switch popup — a list of all profiles you
-    /// can arrow through and press Enter to switch to, from anywhere in Windows. Unset by default.</summary>
-    public HotkeyRecord? QuickProfileSwitchHotkey { get; set; }
-    /// <summary>Optional global hotkey that speaks the connection status line aloud through the active
-    /// screen reader (issue #13). Unset by default. Screen-reader specific.</summary>
-    public HotkeyRecord? SpeakStatusLineHotkey { get; set; }
     /// <summary>When true, this machine honours incoming Control packets from connected
     /// peers — adjusts the local volume slider or toggles mute. Default false: receiving
     /// remote control is opt-in even though the audio allow-list already gates who's
