@@ -40,11 +40,11 @@ Inside RemSound there's just one main decision: which quality and delay you want
 ## How to install it
 
 1. Go to the [latest release](https://github.com/Ednunp/RemSound/releases/latest).
-2. Download the file called `RemSound-v3.3.zip` (the version number changes over time — pick whichever is newest).
+2. Download the zip file named like `RemSound-vX.Y.zip`, where X.Y is the version number. Beside it is a file with the same name ending in `.sig`. You don't need that one: it is a signature that RemSound's built-in updater uses to check an update is genuine.
 3. Extract the zip into a folder of your choice.
 4. Double-click `RemSound.exe` and away you go.
 
-The first time you launch, RemSound will offer to install Microsoft's .NET 10 Desktop Runtime if you don't already have it. Free, just say yes.
+RemSound runs on Microsoft's free .NET 10 Desktop Runtime. Most up-to-date Windows machines already have it. If Windows says .NET is missing when you start RemSound, open the `Install Scripts` folder next to `RemSound.exe` and double-click `Install .NET for RemSound.cmd`. It installs the runtime for you, and then RemSound will start.
 
 After that, RemSound updates itself. Help → Check for updates pulls the next version, or you can tick a box in Preferences and let it install updates quietly in the background.
 
