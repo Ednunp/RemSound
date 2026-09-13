@@ -15,8 +15,7 @@ namespace RemSound.Receiver;
 ///         other. Neither backend pays the classic-Both master-producer tee's ~5–10 ms
 ///         buffer headroom — each lane runs at its native callback rate.</item>
 /// </list>
-/// The legacy <c>AudioMode.Both</c> tee mode and <c>AudioMode.AsioOnly</c> values are no
-/// longer reachable from the UI and are not produced here.
+/// BothIndependent without a driver name runs as WasapiOnly.
 /// </summary>
 internal sealed class CompositeRenderBackend : IRenderBackend
 {
@@ -46,24 +45,12 @@ internal sealed class CompositeRenderBackend : IRenderBackend
         this.source = source;
         this.onDiagnostic = onDiagnostic;
         this.asioDriverName = asioDriverName;
-        this.mode = mode;
 
-        // Coerce legacy enum values (AsioOnly, Both) into a reachable mode. Anything non-
-        // WASAPI without a driver demotes to WasapiOnly; anything non-WASAPI with a driver
-        // is treated as BothIndependent (the only ASIO-using render mode now).
-        if (mode != RemSound.Core.AudioMode.WasapiOnly)
-        {
-            if (string.IsNullOrEmpty(asioDriverName))
-            {
-                this.mode = mode = RemSound.Core.AudioMode.WasapiOnly;
-            }
-            else if (mode != RemSound.Core.AudioMode.BothIndependent)
-            {
-                this.mode = mode = RemSound.Core.AudioMode.BothIndependent;
-            }
-        }
+        // The ASIO lane needs a driver name; without one there is no ASIO lane to build.
+        var usesAsio = mode != RemSound.Core.AudioMode.WasapiOnly && !string.IsNullOrEmpty(asioDriverName);
+        this.mode = usesAsio ? RemSound.Core.AudioMode.BothIndependent : RemSound.Core.AudioMode.WasapiOnly;
 
-        if (mode == RemSound.Core.AudioMode.WasapiOnly)
+        if (!usesAsio)
         {
             // MultiOutputPlayout reads PlayoutEngine directly — no master producer, no tee.
             // Sessions in WasapiOnly mode are all on RenderRoute.Mixed (the legacy single-knob
@@ -244,12 +231,9 @@ internal sealed class CompositeRenderBackend : IRenderBackend
         try { asio?.Dispose(); } catch { /* ignore */ }
     }
 
-    private string ModeLabel() => mode switch
-    {
-        RemSound.Core.AudioMode.WasapiOnly => "fast (WASAPI direct)",
-        RemSound.Core.AudioMode.BothIndependent => "independent lanes (WASAPI + ASIO, no mix)",
-        _ => mode.ToString(),
-    };
+    private string ModeLabel() => mode == RemSound.Core.AudioMode.BothIndependent
+        ? "independent lanes (WASAPI + ASIO, no mix)"
+        : "fast (WASAPI direct)";
 
     /// <summary>
     /// What the render log says it started. The MODE alone is not enough — saying only the mode

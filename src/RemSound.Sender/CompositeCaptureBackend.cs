@@ -13,11 +13,9 @@ namespace RemSound.Sender;
 ///         selected (or none is installed). Lowest latency for WASAPI-only setups.</item>
 ///   <item>BothIndependent: WASAPI child + persistent ASIO child running side by side. Each
 ///         delivers samples to its own callback; there is no mix loop, no shared buffer, no
-///         tee. ASIO keeps its native sub-5 ms pipeline; WASAPI keeps its WASAPI-event rate.
-///         The legacy <c>AudioMode.Both</c> tee-style mode and <c>AudioMode.AsioOnly</c> are
-///         no longer reachable from the UI; their enum values remain in
-///         <see cref="AudioMode"/> for back-compat but produce nothing here.</item>
+///         tee. ASIO keeps its native sub-5 ms pipeline; WASAPI keeps its WASAPI-event rate.</item>
 /// </list>
+/// BothIndependent without a driver name or a borrowed ASIO instance runs as WasapiOnly.
 /// </summary>
 internal sealed class CompositeCaptureBackend : ICaptureBackend
 {
@@ -71,32 +69,20 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
         this.onAsioLaneSamples = onAsioLaneSamples;
         this.onDiagnostic = onDiagnostic;
         this.asioDriverName = asioDriverName;
-        this.mode = mode;
         this.useTightLatencyWasapi = useTightLatencyWasapi;
 
-        // Legacy enum values (AsioOnly, Both) are no longer produced by the UI but might
-        // arrive here from in-flight callers. Coerce them into reachable modes: a non-WASAPI
-        // request without a driver demotes to WasapiOnly; a non-WASAPI request with a driver
-        // is treated as BothIndependent (the only ASIO-using mode now).
-        if (mode != AudioMode.WasapiOnly)
-        {
-            if (string.IsNullOrEmpty(asioDriverName) || injectedAsio is null)
-            {
-                this.mode = mode = AudioMode.WasapiOnly;
-            }
-            else if (mode != AudioMode.BothIndependent)
-            {
-                this.mode = mode = AudioMode.BothIndependent;
-            }
-        }
+        // The ASIO lane needs both a driver name and the persistent instance AudioSender lends us.
+        // Without either there is nothing for it to capture from, so the composite runs WASAPI-only.
+        var usesAsio = mode != AudioMode.WasapiOnly && !string.IsNullOrEmpty(asioDriverName) && injectedAsio is not null;
+        this.mode = usesAsio ? AudioMode.BothIndependent : AudioMode.WasapiOnly;
 
         // Always build the WASAPI lane (it is the WasapiOnly callback path, and the WASAPI
         // lane in BothIndependent). Push-mode swap, if applicable, happens in Start().
         wasapi = new MixingEngine(onMixedSamples, msg => onDiagnostic?.Invoke($"wasapi: {msg}"));
 
         // Borrow the persistent ASIO instance only in BothIndependent. AudioSender already
-        // pointed its callback at the right lane via SetCallback before constructing us.
-        if (mode == AudioMode.BothIndependent)
+        // pointed its callback at the ASIO lane via SetCallback before constructing us.
+        if (usesAsio)
         {
             asio = injectedAsio;
         }
@@ -354,12 +340,9 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
         rebuildTimer?.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
     }
 
-    private string ModeLabel() => mode switch
-    {
-        AudioMode.WasapiOnly => "fast (WASAPI direct)",
-        AudioMode.BothIndependent => "independent lanes (WASAPI + ASIO, no mix)",
-        _ => mode.ToString(),
-    };
+    private string ModeLabel() => mode == AudioMode.BothIndependent
+        ? "independent lanes (WASAPI + ASIO, no mix)"
+        : "fast (WASAPI direct)";
 
     public void Stop()
     {

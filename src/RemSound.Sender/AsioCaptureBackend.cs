@@ -33,8 +33,8 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     private const int MixChannels = 2;
 
     // Volatile-published callback. The ASIO audio thread reads this every callback to
-    // decide where to deliver samples; AudioSender swaps it on mode changes so the same
-    // open driver can keep running while routing changes between Mixed / AsioLane / no-op.
+    // decide where to deliver samples; AudioSender swaps it so the same open driver can keep
+    // running while delivery moves between the ASIO lane and a no-op (parked, or being released).
     // Volatile is sufficient for reference assignment on .NET (atomic, with memory barrier).
     private volatile Action<ReadOnlyMemory<float>> onMixedSamples;
     // Raw-capture step probe — measures discontinuities in the ASIO buffer exactly as the
@@ -99,11 +99,10 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
 
     /// <summary>
     /// Swap the callback that captured audio is delivered to. Used by AudioSender to keep
-    /// one persistent AsioCaptureBackend instance alive across audio-mode changes — the
-    /// driver stays open, the callback gets rewired to the lane appropriate for the new
-    /// mode (Mixed in AsioOnly, AsioLane in BothIndependent, or a no-op while the
-    /// composite is being rebuilt). Volatile write, so the audio thread picks the new
-    /// callback up on its very next ASIO buffer.
+    /// one persistent AsioCaptureBackend instance alive across capture-engine rebuilds — the
+    /// driver stays open and the callback is pointed at the ASIO lane, or at a no-op while the
+    /// instance is being released (see also <see cref="Park"/>). Volatile write, so the audio
+    /// thread picks the new callback up on its very next ASIO buffer.
     /// </summary>
     public void SetCallback(Action<ReadOnlyMemory<float>> callback)
     {

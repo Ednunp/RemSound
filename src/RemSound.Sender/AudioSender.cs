@@ -361,9 +361,7 @@ public sealed class AudioSender : IDisposable
     ///   * BothIndependent: WASAPI MixingEngine + persistent AsioCaptureBackend running side by
     ///     side, each on its own SenderLane (own streamId, own UDP stream). No mix loop, no tee.
     ///     Each lane keeps its native latency.
-    /// Legacy <c>AudioMode.AsioOnly</c> and <c>AudioMode.Both</c> are tolerated (the composite
-    /// coerces them) but no UI path produces them any more. If running, previously-pending
-    /// sources are re-applied automatically.
+    /// If running, previously-pending sources are re-applied automatically.
     /// </summary>
     public void SetAudioMode(AudioMode mode, string? asioDriverName)
     {
@@ -375,9 +373,7 @@ public sealed class AudioSender : IDisposable
             // BothIndependent: defaultLane carries the WASAPI lane, asioLane carries the ASIO
             // lane. SetRoute rotates each lane's streamId so the receiver opens a fresh
             // session under the new Lane tag — old session drains naturally on its 4-second
-            // prune. Legacy AsioOnly / Both can't be produced by the UI any more; if they
-            // arrive (in-flight callers, future call sites) we treat them as BothIndependent
-            // for routing purposes so the streams still carry distinct Lane tags.
+            // prune.
             if (mode != AudioMode.WasapiOnly)
             {
                 defaultLane.SetRoute(RenderRoute.WasapiLane);
@@ -409,8 +405,8 @@ public sealed class AudioSender : IDisposable
     /// (no ASIO) or when the user picks a different driver. The persistent instance is
     /// loaned to the composite via the constructor; the composite borrows but doesn't
     /// dispose, so the underlying ASIO driver handle stays open across engine rebuilds.
-    /// Caller must hold <see cref="configGate"/>. The callback is also rewired here based
-    /// on which lane should receive ASIO audio in the new mode.
+    /// Caller must hold <see cref="configGate"/>. The callback is also pointed at the ASIO
+    /// lane here, which is what unparks it after a <see cref="Stop"/>.
     /// </summary>
     private void EnsurePersistentAsioLocked()
     {
@@ -450,15 +446,9 @@ public sealed class AudioSender : IDisposable
             persistentAsioDriverName = currentAsioDriverName;
         }
 
-        // Wire the callback to the right lane for the current mode. WasapiOnly never reaches
-        // here (willUseAsio is false above). BothIndependent is the only ASIO-using mode the
-        // UI can produce, and it routes ASIO into the dedicated AsioLane. Legacy AsioOnly is
-        // tolerated by sending into defaultLane (which carries RenderRoute.Mixed in non-
-        // BothIndependent setups).
-        persistentAsio.SetCallback(
-            currentAudioMode == AudioMode.BothIndependent
-                ? asioLane.OnMixedSamples
-                : defaultLane.OnMixedSamples);
+        // ASIO audio always goes to the dedicated ASIO lane: WasapiOnly never reaches here
+        // (willUseAsio is false above), so this is BothIndependent.
+        persistentAsio.SetCallback(asioLane.OnMixedSamples);
     }
 
     /// <summary>Close an outgoing ASIO backend WITHOUT making the caller wait. The caller here is the

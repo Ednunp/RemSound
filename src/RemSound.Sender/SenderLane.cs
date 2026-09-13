@@ -6,15 +6,14 @@ namespace RemSound.Sender;
 /// <summary>
 /// One outbound audio stream's worth of state. Each lane owns its own streamId, audio
 /// sequence counter, frame accumulator, Opus encoder, format-resend timer and PCM frame id.
-/// AudioSender holds one or more of these — in the three classic modes (WasapiOnly,
-/// AsioOnly, Both) there is exactly one lane and behaviour is identical to the pre-refactor
-/// monolithic AudioSender. The BothIndependent mode (Stage 4) instantiates two: a WASAPI
-/// lane fed by the WASAPI capture child and an ASIO lane fed by the ASIO capture child, each
-/// producing its own UDP stream on its own streamId, multiplexed by the receiver's
-/// (endpoint, streamId) keying.
+/// AudioSender holds three: the default lane, fed by the WASAPI capture child; the ASIO lane,
+/// fed by the ASIO capture child in BothIndependent; and the plugin lane, fed DAW track blocks
+/// from the plugin bridge. Each lane that is fed produces its own UDP stream on its own
+/// streamId, multiplexed by the receiver's (endpoint, streamId) keying.
 ///
 /// Threading: the hot-path methods (<see cref="OnMixedSamples"/> and below) are called from
-/// the capture engine's callback thread. Each lane has exactly one such thread feeding it.
+/// the thread that feeds the lane — a capture callback or mix tick, or the plugin bridge's
+/// receive thread. Each lane has exactly one such thread feeding it.
 /// Cross-thread state read from AudioSender (codec, mute, opusFrameSamples, etc.) goes through
 /// volatile fields on the owner.
 ///
