@@ -129,12 +129,11 @@ internal static class CommandLine
         return null;
     }
 
-    /// <summary>Where the release-signing PRIVATE key lives on the publisher's machine (chosen by
-    /// Ed, 2026-07-27). Overridable via REMSOUND_SIGNING_KEY for a future move. The key is never
-    /// in the repo or a release; the matching public key is embedded (UpdateSignature).</summary>
-    private static string SigningKeyPath =>
-        Environment.GetEnvironmentVariable("REMSOUND_SIGNING_KEY")
-        ?? @"D:\Dropbox\proj\rsound key\remsound-signing-key.pem";
+    /// <summary>Where the release-signing PRIVATE key is, as the release script gives it in REMSOUND_SIGNING_KEY
+    /// (build-release.ps1 -SigningKey). Deliberately no default: the key's folder on the publisher's machine used
+    /// to be written here, so every copy of RemSound carried it (Ed, 2026-09-13). The key is never in the repo or
+    /// a release; the matching public key is embedded (UpdateSignature).</summary>
+    private static string? SigningKeyPath => Environment.GetEnvironmentVariable("REMSOUND_SIGNING_KEY");
 
     /// <summary>--sign-update &lt;zip&gt;: write &lt;zip&gt;.sig (base64 ECDSA P-256 / SHA-256 over the
     /// zip bytes) and self-check it against the EMBEDDED public key before reporting success — so a
@@ -147,15 +146,21 @@ internal static class CommandLine
             Console.WriteLine($"sign-update: zip not found: [{zipPath}]");
             return 2;
         }
-        if (!File.Exists(SigningKeyPath))
+        var keyPath = SigningKeyPath;
+        if (string.IsNullOrWhiteSpace(keyPath))
         {
-            Console.WriteLine($"sign-update: signing key not found at [{SigningKeyPath}] (set REMSOUND_SIGNING_KEY to override)");
+            Console.WriteLine("sign-update: no signing key given - set REMSOUND_SIGNING_KEY to the private key file (build-release.ps1 does this)");
+            return 3;
+        }
+        if (!File.Exists(keyPath))
+        {
+            Console.WriteLine($"sign-update: signing key not found at [{keyPath}] (from REMSOUND_SIGNING_KEY)");
             return 3;
         }
         try
         {
             var bytes = File.ReadAllBytes(zipPath);
-            var signature = UpdateSignature.SignWithKey(bytes, File.ReadAllText(SigningKeyPath));
+            var signature = UpdateSignature.SignWithKey(bytes, File.ReadAllText(keyPath));
             if (!UpdateSignature.Verify(bytes, signature))
             {
                 Console.WriteLine("sign-update: FAILED self-check — the private key does not match the public key embedded in this build. Update UpdateSignature.PublicKeyPem or restore the right key file.");
@@ -172,6 +177,9 @@ internal static class CommandLine
             return 5;
         }
     }
+
+    /// <summary>Gate seam: the signing verb itself, driven in-process.</summary>
+    internal static int SignUpdateForTest(string? zipPath) => SignUpdate(zipPath);
 
     /// <summary>Show the plugin editor panel standalone (see PluginEditorPanel.ShowStandalone).
     /// A UI verb, so it must NOT attach a console — that would flash a window at a blind user.</summary>

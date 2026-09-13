@@ -179,6 +179,10 @@ if ($dev.Code -eq 0 -and $dev.Text.Length -gt 0) { Pass "--devices ran and produ
 Write-Host "`nIn-app self-test:" -ForegroundColor Cyan
 # --silent: the gate must be SILENT. The self-test drives controls that play cue sounds, and
 # without this every gate run chimed at whoever was at the screen (Ed, 2026-08-15).
+# The release-signing steps compare the publisher's private key with the public key built into RemSound. RemSound no
+# longer knows where that key lives (2026-09-13), so hand it over when it is on this machine.
+$defaultSigningKey = 'D:\Dropbox\proj\rsound key\remsound-signing-key.pem'
+if (-not $env:REMSOUND_SIGNING_KEY -and (Test-Path -LiteralPath $defaultSigningKey)) { $env:REMSOUND_SIGNING_KEY = $defaultSigningKey }
 $st = Invoke-RsCli @('--selftest', '--silent')
 foreach ($line in ($st.Text -split "`r?`n")) {
     if ($line -match '\[(PASS|FAIL|SKIP)\]|^RESULT:') { Write-Host "  $($line.Trim())" }

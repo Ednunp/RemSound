@@ -13,8 +13,9 @@
 # Never hand-zip publish/ again. Run this. If it aborts, the release does not ship.
 #
 # Usage:
-#   powershell -ExecutionPolicy Bypass -File build-release.ps1 -Tag v<Version>
+#   powershell -ExecutionPolicy Bypass -File build-release.ps1 -Tag v<Version> [-SigningKey <private key file>]
 #   (for example -Tag v6.0 when src\RemSound.App\RemSound.App.csproj has <Version>6.0</Version>)
+#   -SigningKey defaults to the key's usual place on Ed's machine. RemSound itself carries no key path.
 #
 # The -Tag value must match the GitHub release tag. The zip is named RemSound-<Tag>.zip
 # because the in-app updater downloads exactly that asset name (AssetNameTemplate in
@@ -25,7 +26,11 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     # Accepts two-part (v3.0) or three-part (v3.0.1 hot-fix) tags.
     [ValidatePattern('^v[0-9]+\.[0-9]+(\.[0-9]+)?$')]
-    [string]$Tag
+    [string]$Tag,
+
+    # The release-signing PRIVATE key (outside the repo). Handed to RemSound in REMSOUND_SIGNING_KEY when it
+    # signs; the path used to be built into RemSound, so every copy carried it (2026-09-13).
+    [string]$SigningKey = 'D:\Dropbox\proj\rsound key\remsound-signing-key.pem'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -244,7 +249,8 @@ if ($leaked.Count -gt 0) {
 
 # 6. SIGN the zip (2026-07-27). The updater REFUSES any release without a valid signature, so an
 #    unsigned zip would be rejected by every 5.6+ install - failing the pipeline here is the kind
-#    failure. --sign-update signs with the private key (outside the repo) and self-checks against
+#    failure. --sign-update signs with the private key this script names in REMSOUND_SIGNING_KEY
+#    (-SigningKey, outside the repo) and self-checks against
 #    the public key embedded in the build, so a key/embed mismatch also stops the release.
 #    It signs with THIS run's build: the RemSound.exe in the staging folder the zip was just made
 #    from. Never publish\RemSound.exe - that is a hand-test copy, which can be stale (an older
@@ -252,6 +258,7 @@ if ($leaked.Count -gt 0) {
 #    above, so anything the exe writes into staging as it starts cannot reach it, and staging is
 #    deleted straight after.
 $sigPath = "$zipPath.sig"
+$env:REMSOUND_SIGNING_KEY = $SigningKey
 & (Join-Path $staging 'RemSound.exe') --sign-update $zipPath | Write-Host
 $signExit = $LASTEXITCODE
 Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue

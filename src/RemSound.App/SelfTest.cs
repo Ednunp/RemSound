@@ -227,6 +227,8 @@ internal static partial class SelfTest
         RunStep(results, "Update checks are armed at start-up from the frequency setting", AuditUpdateCheckArmedAtStartup);
         RunStep(results, "Each update frequency sets its interval (hourly, 6-hourly, daily, never)", AuditUpdateCheckFrequencies);
         RunStep(results, "Release signing (verify, tamper, key-embed match)", ReleaseSigning);
+        RunStep(results, "No copy of RemSound carries the signing key's folder", AuditNoCopyCarriesTheSigningKeyFolder);
+        RunStep(results, "The release script hands RemSound the signing key", AuditReleaseScriptHandsOverTheSigningKey);
         RunStep(results, "Updater refuses an unsigned or badly-signed release (enforcement flow)", UpdaterRefusesUnsignedRelease);
         RunStep(results, "CROSS-PORT CONTRACT (the values other RemSounds depend on)", CrossPortContract);
         RunStep(results, "Password derivation (any password derives a key; cached; 100k for cross-port compat)", PasswordDerivation);
@@ -3001,7 +3003,7 @@ internal static partial class SelfTest
             embedded.ImportFromPem(UpdateSignature.PublicKeyPem); // throws (= test fails) if the constant is mangled
         }
 
-        var realKeyPath = Environment.GetEnvironmentVariable("REMSOUND_SIGNING_KEY") ?? @"D:\Dropbox\proj\rsound key\remsound-signing-key.pem";
+        var realKeyPath = Environment.GetEnvironmentVariable("REMSOUND_SIGNING_KEY");   // run-tests.ps1 passes it when the key is on this machine
         if (!File.Exists(realKeyPath))
             // Honest SKIP, not a caveat-PASS: the crypto mechanics above passed, but this step's
             // headline job — proving the on-disk private key matches the EMBEDDED public key — did
@@ -3042,7 +3044,7 @@ internal static partial class SelfTest
 
         // A genuine signature by the embedded release key → accepted. Only producible with the
         // on-disk private key (Ed's box / this session); elsewhere the accept branch is noted skipped.
-        var realKeyPath = Environment.GetEnvironmentVariable("REMSOUND_SIGNING_KEY") ?? @"D:\Dropbox\proj\rsound key\remsound-signing-key.pem";
+        var realKeyPath = Environment.GetEnvironmentVariable("REMSOUND_SIGNING_KEY");   // run-tests.ps1 passes it when the key is on this machine
         if (!File.Exists(realKeyPath))
             return "no-sig + wrong-key + garbage all refused (genuine-accept branch needs the publisher key — noted)";
         var good = UpdateSignature.SignWithKey(zip, File.ReadAllText(realKeyPath));
