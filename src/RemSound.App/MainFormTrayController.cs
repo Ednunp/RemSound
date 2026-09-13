@@ -153,8 +153,8 @@ internal sealed class MainFormTrayController : IDisposable
     /// by the shell, so chopping ourselves keeps the truncation point visible.</summary>
     public void SetTooltip(string text)
     {
-        // Same anti-duplicate rule as the ctor: avoid a single-word "RemSound" tooltip on
-        // the "RemSound" process, since some screen readers render that as "RemSound RemSound".
+        // An empty tooltip becomes "RemSound — running" rather than a single-word "RemSound" on the
+        // "RemSound" process, since some screen readers render that as "RemSound RemSound".
         if (string.IsNullOrEmpty(text)) text = "RemSound — running";
         if (text.Length > MaxTooltipLength)
         {
@@ -243,7 +243,7 @@ internal sealed class MainFormTrayController : IDisposable
         owner.Hide();
         if (wasVisible && playCue) (owner as MainForm)?.PlayWindowVisibilityCue(show: false);
         // Refresh the tooltip BEFORE showing the icon so the shell's NIM_ADD call carries
-        // the current live state (peer count, send / receive routing, recording timer),
+        // the current live state (peer count, send / receive routing, recording state),
         // not a stale "starting up" string set earlier. The shell tends to cache hover
         // text from NIM_ADD time and is slow to update on subsequent NIM_MODIFY calls —
         // computing the right text now means the first hover already reads correctly.

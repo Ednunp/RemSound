@@ -10,9 +10,9 @@ namespace RemSound.App;
 
 /// <summary>
 /// The PEER half of the main window — state, discovery/selection reconciliation, arming, naming and
-/// the remembered-peers plumbing — split out of MainForm.cs verbatim in the 2026-07-26 review's
-/// god-object shrink (same partial-class pattern Andre's SensorReadout form uses). Pure code motion:
-/// same class, same members, no behaviour change — the compiler proves it. The shared arming/address
+/// the remembered-peers plumbing — split out of MainForm.cs in the 2026-07-26 review's god-object
+/// shrink (same partial-class pattern Andre's SensorReadout form uses). The move itself was pure code
+/// motion; the code has been changed in place since. The shared arming/address
 /// LOGIC these methods lean on (PeerArming, PeerAddress) lives in Core; the send-spec builder
 /// (CaptureSpecBuilder) stays in App by necessity — it depends on App's AudioDefaultFollower and the
 /// Sender's app enumerator — but is likewise shared with the service.

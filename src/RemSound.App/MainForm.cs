@@ -13,9 +13,10 @@ namespace RemSound.App;
 ///
 /// UX shape (matches the older RSound app the user asked us to preserve):
 ///   * Auto-connects on Shown — no Connect button. Discovery starts immediately.
-///   * "Connectivity and transport" button opens a settings + peers dialog.
-///   * Main form keeps just: mode (send/receive), receive device, volume,
-///     send capture devices (CheckedListBox + status label), other actions, status.
+///   * A menu bar (File, Record, Service, DAW plugin, Options, Help) over the tabs: Connectivity
+///     (peer lists), Audio inputs and outputs (send / receive, device lists, volume), Audio profile
+///     (codec, jitter buffers, auto-tune) and the optional Volume, pan and EQ for peers tab, with a
+///     status footer below.
 ///   * Every CheckedListBox has an adjacent status label that announces
 ///     the focused item, its checked state, position, and "Press Space to toggle".
 ///   * Knob changes flow live to the audio engine — no engine restarts.
@@ -107,16 +108,14 @@ public sealed partial class MainForm : Form
     private readonly AccessibleCheckBox receiveAudioCheckbox = new() { Text = "Receive audio", AutoSize = true };
     private readonly AccessibleCheckBox sendMyAudioCheckbox = new() { Text = "Send my audio", AutoSize = true };
     private readonly TrackBar volumeBar = new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Value = 100, Width = 200 };
-    // Receive output device. Pre-selected to the system default at startup; user can override
-    // for the session. Selection is NOT persisted — next session starts on default again.
+    // Receive output devices. Ticks are saved on the profile and put back when it loads
+    // (ApplyPendingProfileToControls); the "Use Windows default" row is a machine-wide preference.
     private readonly CheckedListBox receiveOutputDevicesList = new() { CheckOnClick = true, Width = 430, Height = 90 };
     private readonly Label receiveOutputDevicesStatusLabel = new() { AutoSize = true, Text = "No output device selected." };
     // Capture devices the user has ticked for sending. Two lists — render-side outputs (loopback
     // capture: system audio / soundcard playback) and capture-side inputs (mics, line-ins). Both
-    // are summed into one outgoing stream by the sender's MixingEngine. Intentionally NOT
-    // persisted: every session starts with everything unticked and no audio sent. The user
-    // re-ticks once per session. Stops any device-routing surprise (a card unplugged between
-    // runs, IDs changing, etc.).
+    // are summed into one outgoing stream by the sender's MixingEngine. Ticks are saved on the
+    // profile and put back when it loads; a device the profile names that isn't present is skipped.
     private readonly CheckedListBox sendOutputDevicesList = new() { CheckOnClick = true, Width = 430, Height = 90 };
     private readonly Label sendOutputDevicesStatusLabel = new() { AutoSize = true, Text = "No output device selected." };
     private readonly CheckedListBox sendInputDevicesList = new() { CheckOnClick = true, Width = 430, Height = 90 };
@@ -127,7 +126,7 @@ public sealed partial class MainForm : Form
     // checkbox. Windows 10 build 19041+ only: on older Windows the chooser row is hidden and the mode
     // is forced to "devices". The app list is tracked by process NAME (so a selection survives an app
     // restart) and reconciled on sendAppsReconcileTimer so apps dropping in and out don't pile up.
-    // Unlike the device lists this selection IS persisted — per profile (WasapiSendMode /
+    // Like the device lists, this selection is saved per profile (WasapiSendMode /
     // SelectedSendApplications) — matching how Ed wants a profile to remember its whole send setup.
     // There is deliberately NO "send all applications" option here (Ed removed it 2026-07-16): picking
     // the applications mode means picking specific apps; whole-system audio is what devices mode is for.
@@ -162,10 +161,10 @@ public sealed partial class MainForm : Form
     // The two sendModeList rows, in order. Index 0 = whole audio devices (classic), 1 = applications.
     private const int SendModeDevicesIndex = 0;
     private const int SendModeApplicationsIndex = 1;
-    // ASIO-side lists. Always present in the form but hidden when ASIO is disabled. The two
+    // ASIO-side lists. Always present in the form but hidden while no ASIO driver is chosen. The two
     // lists are independent of the WASAPI ones — the user can tick any combination across all
-    // five lists. Sender mixes WASAPI capture + ASIO capture into one outgoing stream;
-    // receiver fans rendered audio to WASAPI outputs + ASIO outputs in parallel. This lets
+    // five lists. The sender sends WASAPI capture and ASIO capture as two separate lanes, each its
+    // own stream, and the receiver renders the two lanes independently. This lets
     // someone use a WASAPI mic and an ASIO instrument input together, or send out to a WASAPI
     // headset alongside ASIO studio monitors.
     private readonly CheckedListBox asioSendDevicesList = new() { CheckOnClick = true, Width = 430, Height = 90 };
@@ -176,7 +175,7 @@ public sealed partial class MainForm : Form
     // The device lists can get long; this is the quick reset when you've lost track of what's on.
     private readonly Button uncheckAllDevicesButton = new() { AutoSize = true, Anchor = AnchorStyles.Left };
     // Labels paired with the ASIO lists; held as fields so the layout can show/hide them as a
-    // unit when the user toggles "Enable ASIO".
+    // unit when an ASIO driver is chosen or cleared.
     private MnemonicLabel? asioSendDevicesLabel;
     private MnemonicLabel? asioReceiveOutputDevicesLabel;
     // Mnemonic label for the driver picker, held as a field so we can show/hide it together
@@ -185,7 +184,8 @@ public sealed partial class MainForm : Form
     // (the driver picker is omitted entirely in that case).
     private MnemonicLabel? asioDriverLabel;
     // Tabbed UI scaffolding — 2026-05-06 refactor. The form's content panel is now a TabControl
-    // with four logical sections; status (healthLabel/statusLabel) sits in a footer below the
+    // with three tabs plus the optional Volume, pan and EQ tab; status (healthLabel/statusLabel)
+    // sits in a footer below the
     // tabs so the user always sees connection health regardless of which tab is active.
     //
     // Navigation (the standard Windows / NVDA-friendly pattern):
@@ -201,8 +201,8 @@ public sealed partial class MainForm : Form
     // would go to that control instead of cycling the next tab). Ed reported "bounces
     // about" with the previous always-auto-focus design; removed the handler.
     //
-    // Alt+letter shortcuts are gated per-tab inside ProcessCmdKey so a shortcut never
-    // auto-jumps the user across tabs.
+    // Alt+letter shortcuts reach only the controls on the visible tab — WinForms scopes mnemonics
+    // that way (see ProcessCmdKey's summary) — so a shortcut never auto-jumps the user across tabs.
     // TabControl + TabPage accessibility: deliberately default everything (no AccessibleName,
     // no AccessibleRole, no SelectedIndexChanged hook). Andre's working accessible-readout
     // app uses just `new TabPage(text)` and that's it — NVDA reads the active tab name
@@ -292,17 +292,12 @@ public sealed partial class MainForm : Form
     private readonly Label healthLabel = new() { Text = "Health: disconnected", AutoSize = true };
     private readonly Label statusLabel = new() { Text = "Disconnected", AutoSize = true };
 
-    // --- Audio profile tab controls (Phase 2 refactor: these were previously in the
-    // Connectivity & transport dialog as "dialog*" mirrors of hidden form-fields. Now they
-    // are the canonical UI live on the Audio profile tab, no mirrors required.) ---
+    // --- Audio profile tab controls ---
     private readonly ComboBox codecBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 360, AccessibleName = "Audio codec (Alt+C)" };
     private readonly ListBox sendRateBox = new() { Width = 240, Height = 40, IntegralHeight = false, AccessibleName = "Packet size (Alt+P)" };
     // Min 1 ms is intentionally aggressive — for LAN/localhost users who want to push it.
     // Values below ~10 ms cause audible crackling on any network with real jitter.
     private readonly NumericUpDown maxLatencyBox = new() { Minimum = 1, Maximum = 500, Increment = 1, Value = 80, Width = 90, AccessibleName = "Audio jitter buffer in milliseconds (Alt+L)" };
-    // One-shot "Tune latency for best sound" button retired — continuous auto-tune covers
-    // the same job, and the manual button confused users by sitting next to the auto-tune
-    // checkbox doing almost the same thing in a less convenient one-shot shape.
     private readonly AccessibleCheckBox continuousTuneBox = new() { Text = "Continuous auto-tune jitter buffer", AutoSize = true };
     private readonly ComboBox continuousIntervalBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90, AccessibleName = "Auto-tune interval for jitter buffer (Alt+N)" };
     // Label for continuousIntervalBox. Held as a field (rather than a local in
@@ -435,7 +430,7 @@ public sealed partial class MainForm : Form
     private const int LocalAudioPort = RemPacket.DefaultPort;
     // The Enable-logs UI is in PreferencesDialog now. Runtime state is logFile.Enabled.
 
-    // --- Continuous auto-tune state (mirror controls live in the dialog) ---
+    // --- Continuous auto-tune state (the controls live on the Audio profile tab) ---
     private readonly System.Windows.Forms.Timer continuousTuneTimer = new();
     private readonly Queue<int> recentMaxGaps = new();
     // Last observed value of receiver.SessionsOpenedCount. When this number increases between
@@ -473,8 +468,6 @@ public sealed partial class MainForm : Form
     /// can be shed without first taking it away and listening for the damage. Same window and same
     /// per-second sampler as the gap queues, so all three age out together.</summary>
     private readonly Queue<int> recentMinBuffers = new();
-    /// <summary>Consecutive auto-tune ticks with no tune-blocking short-reads. One quiet tick is
-    /// luck; several in a row is a pattern, and only a pattern earns a big evidence-backed step.</summary>
     /// <summary>Per-LANE auto-tune memory. The WASAPI and ASIO lanes tune independently — different
     /// hardware, different natural latency, different distress — so each needs its OWN clean-tick run
     /// and its OWN learned floor. Sharing them (which the first cut of the creep did, 2026-08-15, and
@@ -577,7 +570,7 @@ public sealed partial class MainForm : Form
     private readonly LaneTuneMemory mixedTuneMemory = new();
     private readonly LaneTuneMemory wasapiTuneMemory = new();
     private readonly LaneTuneMemory asioTuneMemory = new();
-    /// <summary>The memory belonging to a lane. Mixed is the classic single-slider world.</summary>
+    /// <summary>The memory belonging to a lane. Mixed is the one route used when no ASIO driver is chosen.</summary>
     private LaneTuneMemory TuneMemoryFor(RenderRoute route) => route switch
     {
         RenderRoute.WasapiLane => wasapiTuneMemory,
@@ -600,7 +593,7 @@ public sealed partial class MainForm : Form
     private readonly Dictionary<string, bool> peerConnectedState = new(StringComparer.OrdinalIgnoreCase);
     private CuePlayer? connectSound;
     private CuePlayer? disconnectSound;
-    // Recording start/stop cues. Played via SoundPlayer to the default Windows output —
+    // Recording start/stop cues. Played via CuePlayer to the default Windows output —
     // same path as connect/disconnect. They don't pass through our recording taps (those
     // sit on the internal sender mix bus and receiver render path), so they don't appear
     // in normal recordings. A user who has a WASAPI loopback of the same output device as
@@ -608,8 +601,8 @@ public sealed partial class MainForm : Form
     // anything the recorder is doing.
     private CuePlayer? recordStartSound;
     private CuePlayer? recordStopSound;
-    // Profile-save and profile-switch cues, added 2026-05-28 alongside the move of all
-    // default WAVs into a sounds\ subfolder. Save fires after a successful File → Save /
+    // Profile-save and profile-switch cues, added 2026-05-28 alongside the move of all default
+    // WAVs into their own folder (now "default sounds\"). Save fires after a successful File → Save /
     // Save As; Profile fires immediately after a profile finishes loading in MainForm.
     private CuePlayer? saveSound;
     private CuePlayer? profileSwitchSound;
@@ -622,9 +615,8 @@ public sealed partial class MainForm : Form
     private CuePlayer? receiveOffSound;
     private CuePlayer? hideSound;
     private CuePlayer? showSound;
-    // Labels for the three send/receive device lists, captured at layout time so they can be
-    // re-titled when the user toggles between WASAPI mode (Windows devices) and ASIO mode
-    // (driver channel pairs). null until BuildLayout has run.
+    // Labels for the three WASAPI send/receive device lists, captured at layout time so
+    // ApplyAsioMode can set their visibility along with the lists. null until BuildLayout has run.
     private MnemonicLabel? sendOutputDevicesLabel;
     private MnemonicLabel? sendInputDevicesLabel;
     private MnemonicLabel? receiveOutputDevicesLabel;
@@ -682,7 +674,7 @@ public sealed partial class MainForm : Form
 
     // Receive-output device IDs the user/profile selected — kept even while a device is unplugged,
     // so a card that returns is silently re-ticked and re-opened (issue #5: recover after USB
-    // unplug). Receive-only: the send lists deliberately don't persist selection (AudioDeviceCatalog).
+    // unplug). Receive-only: a send device that returns is not re-ticked automatically.
     private readonly HashSet<string> rememberedReceiveOutputIds = new(StringComparer.OrdinalIgnoreCase);
     // Debounce timer for ASIO driver listbox selection. See SelectedIndexChanged handler
     // wiring for the full rationale. 300 ms is long enough to coalesce arrow-key bursts
@@ -784,11 +776,10 @@ public sealed partial class MainForm : Form
 
     // Profile system (2026-05-02). The active profile (if any) was selected at app start and
     // populated `settings` with its values BEFORE the constructor body runs (see ApplyProfile
-    // below). Control-level state (device ticks, send/receive checkboxes, audio port, volume
-    // slider, ticked peers) is applied later in OnShown via ApplyPendingProfileToControls()
-    // because the device lists aren't populated until then. NextProfileTitleToLoad is read by
-    // Program.cs after the form closes; non-null means "user clicked Switch in Manage profiles —
-    // re-launch the form under that profile."
+    // below). Control-level state (device ticks, send/receive checkboxes, volume slider, ticked
+    // peers) is applied later in OnShown via ApplyPendingProfileToControls() because the device
+    // lists aren't populated until then. NextProfileTitleToLoad is read by Program.cs after the form
+    // closes; non-null means "the user switched profile — re-launch the form under that profile."
     private ProfileStore? profileStore;
     // Headless/test construction: when true the constructor builds the full window (every tab, control
     // and menu) but SKIPS the calls that touch the OS — registering global hotkeys, starting the status /
@@ -814,7 +805,7 @@ public sealed partial class MainForm : Form
     // lightly scrambled — see RemSoundCrypto.Obfuscate). "" = no password set. Two peers can
     // exchange audio only when their profile passwords match. Set from the loaded profile in
     // the constructor, changed via File → Change this profile's password, and carried back into
-    // every save by BuildCurrentProfile. 2026-05-31 (always-on encryption, in development).
+    // every save by BuildCurrentProfile. 2026-05-31 (always-on encryption).
     private string currentProfilePassword = "";
     // The AES key + fingerprint derived from currentProfilePassword, cached so the slow key
     // derivation only runs when the password actually changes. Pushed down to the sender and
@@ -1173,7 +1164,7 @@ public sealed partial class MainForm : Form
             asioDriverChangeDebounce.Stop();
             var selected = asioDriverBox.SelectedItem as string;
             // Translate the "(none)" sentinel into a real null at the settings boundary so
-            // the rest of the app sees the legacy "no ASIO driver chosen" shape.
+            // the rest of the app sees null for "no ASIO driver chosen".
             var newDriver = string.Equals(selected, NoAsioDriverSentinel, StringComparison.Ordinal) ? null : selected;
             var previousDriver = settings.LoadAsioDriverName();
             settings.SaveAsioDriverName(newDriver);
@@ -1284,8 +1275,7 @@ public sealed partial class MainForm : Form
         sender.StartReceiving();
         // Tight-latency mode is now sender-side only (per-callback PCM emission in ASIO mode).
         // The receiver-side hook was removed in the 2026-05-06 cleanup since the resampler is
-        // no longer in the receive path. The dialog checkbox label still says "Lock to audio
-        // clock" but only affects the sender now.
+        // no longer in the receive path.
         // Lock to audio clock is always on now (no longer a user option) — put the sender into
         // tight-latency mode unconditionally.
         sender.SetTightLatency(true);
@@ -1302,7 +1292,7 @@ public sealed partial class MainForm : Form
         // ASIO sender = always 48 kHz on the wire. Nothing for the user to toggle.
         receiver.SetSmoothness(settings.LoadSmoothness());
         receiver.SetConcealmentArtifact(settings.LoadConcealmentArtifact());
-        // Continuous auto-tune state — UI lives in the Connectivity & transport dialog.
+        // Continuous auto-tune state — UI lives on the Audio profile tab.
         continuousTuneEnabled = settings.LoadContinuousAutoTuneEnabled();
         continuousTuneIntervalSec = settings.LoadContinuousAutoTuneIntervalSec();
 
@@ -1311,10 +1301,10 @@ public sealed partial class MainForm : Form
         // a new value into a NumericUpDown that already shows "80" produces "8010" instead of
         // "10". The Enter event fires when the control receives focus (keyboard or click); we
         // post a select-all to it so the cursor lands on a fully-selected value, and any
-        // typed digits replace the selection. Applies to both the form and dialog instances.
+        // typed digits replace the selection.
         SelectAllOnFocus(maxLatencyBox);
-        // Push the slider's value to the receiver. In classic modes that's the Mixed route
-        // (legacy behaviour); in BothIndependent the slider drives the WasapiLane route. The
+        // Push the slider's value to the receiver. With no ASIO driver (WasapiOnly) that's the
+        // Mixed route; in BothIndependent the slider drives the WasapiLane route. The
         // ASIO-lane initial push happens later in WireBothIndependentControls once the
         // companion control has been created and its loaded value applied.
         receiver.SetMaxLatencyMsFor(MaxLatencyBoxRoute, (int)maxLatencyBox.Value);
@@ -1358,10 +1348,10 @@ public sealed partial class MainForm : Form
         sender.Diagnostic = msg => logFile.Event($"sender: {msg}");
         receiver.Diagnostic = msg => logFile.Event($"receiver: {msg}");
 
-        // Pre-load all cue sounds so the first playback isn't delayed by file I/O. Default
-        // WAVs are deployed to a sounds\ subfolder under RemSound.exe (see RemSound.App
-        // .csproj Content rules); the per-cue custom-path overrides in AppConfig.CustomCuePaths
-        // are honoured by TryLoadCueSound when set.
+        // Resolve every cue's sound file up front. CuePlayer reads the file when it plays, so this
+        // is path resolution, not a pre-load. Default WAVs ship as numbered variants in the
+        // "default sounds\" folder next to RemSound.exe (see RemSound.App .csproj Content rules);
+        // a custom path set for a cue is honoured by TryLoadCueSound when the file exists.
         TryLoadCueSound(CueId.Connect, "connect.wav", out connectSound);
         TryLoadCueSound(CueId.Disconnect, "disconnect.wav", out disconnectSound);
         TryLoadCueSound(CueId.RecordStart, "record start.wav", out recordStartSound);
@@ -1483,7 +1473,7 @@ public sealed partial class MainForm : Form
         // call SaveProfileAs() / UpdateExistingProfile() / hotkeyController.ShowKeyboardShortcutsDialog
         // / trayController.Minimize() directly. See BuildFileMenu.
 
-        // --- Settings shared with dialog ---
+        // --- Audio profile tab settings ---
         codecBox.SelectedIndexChanged += (_, _) =>
         {
             if (codecBox.SelectedItem is CodecChoice item)
@@ -1500,9 +1490,9 @@ public sealed partial class MainForm : Form
         {
             // Track when the user (vs continuous auto-tune) moved the slider, so the auto-tune
             // can defer to the user's intent for a few seconds before adjusting again.
-            // suppressUserSliderMoveTracking is set by both continuous auto-tune AND the manual
-            // one-shot tune button while they're driving the slider — anything where the user
-            // didn't physically move the control. We use the same flag to take the soft path
+            // suppressUserSliderMoveTracking is set by continuous auto-tune while it drives the
+            // slider — anything where the user didn't physically move the control. We use the
+            // same flag to take the soft path
             // through the receiver: auto-tune lowers don't drain (drift corrector handles it),
             // so the slider can drift down silently when conditions improve. Manual user
             // lowers still drain, since the user is asking for an immediate, responsive change.
@@ -1520,10 +1510,10 @@ public sealed partial class MainForm : Form
                 if (!continuousTuneEnabled) MarkProfileDirty();
             }
             settings.SaveMaxLatencyMs((int)maxLatencyBox.Value);
-            // Route the value to whichever route this slider is currently driving. In every
-            // classic mode that's Mixed (the legacy behaviour — single-knob world). In
-            // BothIndependent it's WasapiLane: the slider has been re-labeled "WASAPI
-            // latency" and the user is adjusting only the WASAPI side of the wire.
+            // Route the value to whichever route this slider is currently driving. With no
+            // ASIO driver (WasapiOnly) that's Mixed, the only route. In BothIndependent it's
+            // WasapiLane: the slider has been re-labelled "WASAPI jitter buffer" and the user is
+            // adjusting only the WASAPI side of the wire.
             var sliderRoute = MaxLatencyBoxRoute;
             if (fromAutoTune)
             {
@@ -1678,7 +1668,7 @@ public sealed partial class MainForm : Form
             // so the receiver is already up and a plugin that was waiting gets audio on its first ask.
             ApplyPluginLinkSetting();
             // Apply control-state portion of the loaded profile (device ticks, send/receive
-            // checkboxes, audio port, volume, ticked peers). Done here AFTER device lists are
+            // checkboxes, volume, ticked peers). Done here AFTER device lists are
             // populated by LoadAudioDevices(). Settings-shaped fields (codec, hotkeys, etc.)
             // were already pushed into the in-memory settings cache in the constructor.
             ApplyPendingProfileToControls();
@@ -1759,8 +1749,8 @@ public sealed partial class MainForm : Form
             }
 
             // Kick off UPnP discovery if the user has the box ticked. Off by default; the
-            // mapper itself coalesces redundant Start() calls so a re-enter via Shown after
-            // a sleep cycle is harmless. Run on a thread-pool thread because
+            // mapper itself coalesces redundant Start() calls (a wake calls Refresh() instead,
+            // not this). Run on a thread-pool thread because
             // NatUtility.StartDiscovery() (Mono.Nat 3.0.4) sets up SSDP sockets on every
             // network interface and CAN BLOCK FOR TENS OF SECONDS, or indefinitely, on
             // unusual network setups (multiple adapters, VPNs, hostile firewalls, routers
@@ -2139,16 +2129,17 @@ public sealed partial class MainForm : Form
     private void BuildLayout()
     {
         // === Menu bar + tabbed root layout ===
-        // Top: MenuStrip with the File menu (replaces the old Profiles & preferences tab —
-        // profile-management actions and the cross-cutting preferences live here now).
-        // Middle: TabControl with 3 pages (Connectivity, Audio I/O, Audio profile).
+        // Top: MenuStrip — File, Record, Service, DAW plugin, Options, Help (it replaced the old
+        // Profiles & preferences tab; profile-management actions and preferences live here now).
+        // Middle: TabControl with 3 pages (Connectivity, Audio I/O, Audio profile), plus the
+        // optional Volume, pan and EQ page.
         // Bottom: status footer (healthLabel + statusLabel), always visible.
         //
         // 2026-05-08 refactor: dropped the fourth tab. Save / Save as / Open / Rename /
-        // Min-to-tray / Keyboard shortcuts / Preferences / Exit now live in the menu bar
-        // with single-press accelerators (Ctrl+S / Ctrl+K / Ctrl+P / Alt+M) instead of
-        // requiring a Tab-stop journey to a dedicated tab. Mute cues + Accept remote vol +
-        // Startup behaviour are now under File → Preferences (Ctrl+P).
+        // Min-to-tray / Keyboard shortcuts / Preferences / Exit now live in the menu bar,
+        // several with single-press accelerators (Ctrl+O / Ctrl+S / Ctrl+K / Ctrl+P), instead of
+        // requiring a Tab-stop journey to a dedicated tab. Mute cues, Accept remote vol and
+        // Startup behaviour are in Options → Preferences (Ctrl+P).
         var rootLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -2198,11 +2189,10 @@ public sealed partial class MainForm : Form
         MainMenuStrip = menu;
     }
 
-    /// <summary>Build the File menu and wire each item to its action. Single-press
-    /// accelerators are set via ShortcutKeys on the menu items so they fire from anywhere
-    /// in the form. Alt+M (Minimise) is NOT set as a ShortcutKeys binding — it goes through
-    /// ProcessCmdKey instead, gated per-tab so the Audio I/O tab's Alt+M (Audio mode) wins
-    /// when that tab is active.</summary>
+    /// <summary>Build the menu bar (File, Record, Service, DAW plugin, Options, Help) and wire
+    /// each item to its action. Single-press accelerators are set via ShortcutKeys on the menu
+    /// items so they fire from anywhere in the form. Minimise to tray has none — it is Alt+F, N,
+    /// or the "Show or hide window" hotkey.</summary>
     private MenuStrip BuildFileMenu()
     {
         var menu = new MenuStrip { Dock = DockStyle.Top };
@@ -2269,7 +2259,7 @@ public sealed partial class MainForm : Form
         //
         // CheckOnClick = true makes WinForms flip the .Checked state on every click and
         // NVDA reads "Lock profile read-only, checked / not checked". The mnemonic Alt+F, L
-        // doesn't collide with any existing File-menu letter (O / R / S / A / M / N / X
+        // doesn't collide with any other File-menu letter (W / O / R / S / A / M / P / N / X
         // are in use).
         lockProfileMenuItem = new ToolStripMenuItem("&Lock profile (read-only)")
         {
@@ -2284,7 +2274,7 @@ public sealed partial class MainForm : Form
         };
 
         // Change this profile's encryption password. Alt+F, P — 'p' is free in the File menu
-        // (O / R / S / A / M / L / N / X are taken). Opens a small dialog showing the current
+        // (W / O / R / S / A / M / L / N / X are taken). Opens a small dialog showing the current
         // password (in plain text, so a screen reader can read it) with OK / Cancel.
         var changePasswordItem = new ToolStripMenuItem("Change this profile's &password...")
         {
@@ -2329,9 +2319,8 @@ public sealed partial class MainForm : Form
         // === Options menu (new, 2026-05-15) ===
         // Holds all the "configure the app" entry points that used to be scattered across
         // the File menu (Keyboard shortcuts, Preferences) and the Record menu (Recording
-        // settings). Startup behaviour is also here as its own top-level item rather than
-        // hiding inside Preferences as it did before. Reads as a natural sequence:
-        // recording-specific → input config → startup → general prefs.
+        // settings). Reads as a natural sequence: recording-specific → input config →
+        // passwords and named peers → install → general prefs.
         //
         // Mnemonic Alt+O — natural for "Options". Required moving the Record menu off of
         // Alt+O (it's now Alt+K — see comment in BuildRecordMenu); the trade reads more
@@ -2362,7 +2351,8 @@ public sealed partial class MainForm : Form
         prefsItem.Click += (_, _) => OpenPreferencesDialog();
 
         // Password manager — list every profile with its password, edit any of them in one place.
-        // 'w' mnemonic (pass&words) is free in the Options menu (s / K / t / P are taken).
+        // 'w' mnemonic (pass&words) is free in the Options menu (S / K / N / I or U / P are taken,
+        // plus E or D when the Realtek item is shown).
         var profilePasswordsItem = new ToolStripMenuItem("Profile pass&words...")
         {
             AccessibleName = "Profile passwords",
@@ -2458,10 +2448,10 @@ public sealed partial class MainForm : Form
 
         var recordMenu = BuildRecordMenu();
 
-        // Order: File / Record / Options / Help. Options sits between Record and Help per
-        // user request — left-to-right reads file-management → recording-tasks → config →
-        // help, which is the natural sequence for someone walking the menu bar with Alt
-        // and the arrow keys.
+        // Order: File / Record / Service / DAW plugin / Options / Help. Options sits just before
+        // Help per user request — left-to-right reads file-management → recording-tasks → the
+        // service and the plugin → config → help, which is the natural sequence for someone
+        // walking the menu bar with Alt and the arrow keys.
         menu.Items.Add(fileMenu);
         menu.Items.Add(recordMenu);
         // The Service menu is shown on EVERY Windows now (2026-07-14) so a Win7 user can actually try it —
@@ -2480,16 +2470,6 @@ public sealed partial class MainForm : Form
         return menu;
     }
 
-    /// <summary>The DAW plugin menu: put the VST plugin on this machine, take it off again, and
-    /// decide whether a peer's pan and EQ come with it.
-    ///
-    /// <para>Its own menu at Ed's request rather than buried in the Service menu — the plugin is a
-    /// separate way of using RemSound, not a variation on the background service, and a user looking
-    /// for it should find it by name.</para>
-    ///
-    /// <para>Alt+G, not the obvious Alt+D: the gate caught that D already belongs to the Discovered
-    /// peers list, and a CONTROL's mnemonic beats a menu's — so Alt+D would have silently stopped
-    /// opening this menu. G was free.</para></summary>
     /// <summary>Open or close the plugin link to match the setting. Idempotent — safe to call from
     /// startup and from the menu item, which is the point: one code path decides whether the port is
     /// open, so the menu can never disagree with reality.</summary>
@@ -2584,6 +2564,16 @@ public sealed partial class MainForm : Form
             .ToList();
     }
 
+    /// <summary>The DAW plugin menu: put the VST plugin on this machine, take it off again, and
+    /// decide whether a peer's pan and EQ come with it.
+    ///
+    /// <para>Its own menu at Ed's request rather than buried in the Service menu — the plugin is a
+    /// separate way of using RemSound, not a variation on the background service, and a user looking
+    /// for it should find it by name.</para>
+    ///
+    /// <para>Alt+G, not the obvious Alt+D: the gate caught that D already belongs to the Discovered
+    /// peers list, and a CONTROL's mnemonic beats a menu's — so Alt+D would have silently stopped
+    /// opening this menu. G was free.</para></summary>
     private ToolStripMenuItem BuildDawPluginMenu()
     {
         var pluginMenu = new ToolStripMenuItem("DAW plu&gin (Alt+G)") { AccessibleName = "DAW plugin menu" };
@@ -2699,8 +2689,9 @@ public sealed partial class MainForm : Form
         });
         serviceMenu.DropDownOpening += (_, _) =>
         {
-            // Never let a status-query failure crash the menu (and with it the app). The menu only appears
-            // on Win10+ where the service assembly loads fine, but a defensive net here is cheap insurance.
+            // Never let a status-query failure crash the menu (and with it the app). The menu is shown on
+            // every Windows (see where it is added to the menu bar), so this query is where a service
+            // assembly that cannot load would surface.
             try
             {
                 var state = ServiceControl.Query();
@@ -2876,14 +2867,14 @@ public sealed partial class MainForm : Form
         }
     }
 
-    /// <summary>Install or remove the VST plugin, and say plainly what happened. No elevation is
-    /// involved (per-user VST3 folder), so there is no UAC prompt and nothing to explain about
-    /// administrator rights.</summary>
     /// <summary>Refreshes the DAW plugin menu's state, as opening it does. Held so the gate can run
     /// the real thing.</summary>
     private Action? refreshDawPluginMenu;
     internal void RefreshDawPluginMenuForTest() => refreshDawPluginMenu?.Invoke();
 
+    /// <summary>Install or remove the VST plugin, and say plainly what happened. No elevation is
+    /// involved (per-user VST3 folder), so there is no UAC prompt and nothing to explain about
+    /// administrator rights.</summary>
     private void RunPluginInstallAction(bool install)
     {
         var (ok, message) = install ? PluginInstaller.Install() : PluginInstaller.Uninstall();
@@ -3232,7 +3223,7 @@ public sealed partial class MainForm : Form
     {
         if (recordingController.IsRecording)
         {
-            // Stop the recorder FIRST, then play the cue. SoundPlayer goes through the
+            // Stop the recorder FIRST, then play the cue. CuePlayer goes through the
             // default Windows output device — separate from the internal taps the recorder
             // listens on — so the cue isn't in the file regardless of ordering, but
             // stopping first means a user with a WASAPI-loopback-of-default-output capture
@@ -3550,8 +3541,8 @@ public sealed partial class MainForm : Form
         var appearanceCfg = AppConfig.Load();
         logFile.Event($"appearance applied: theme={appearanceCfg.ThemeMode}, tabs=[{string.Join(", ", mainTabControl.TabPages.Cast<TabPage>().Select(t => t.Text))}], discovered-list={appearanceCfg.ShowDiscoveredPeers}, remembered-list={appearanceCfg.ShowRememberedPeers}");
         // The Preferences dialog includes per-cue Browse buttons that can change custom
-        // WAV paths in AppConfig.CustomCuePaths. Reload the cached SoundPlayer instances
-        // here unconditionally — cheap, only six small files, and guarantees the next
+        // WAV paths. Reload the cached CuePlayer instances here unconditionally — cheap (fourteen
+        // cues, and CuePlayer reads its file only when it plays), and guarantees the next
         // play uses whatever the user just picked without waiting for the next launch.
         ReloadAllCueSounds();
     }
@@ -3865,12 +3856,10 @@ public sealed partial class MainForm : Form
         updateCheckTimer.Start();
     }
 
-    /// <summary>Connectivity tab — peer lists (connected/discovered/remembered), manual-add,
-    /// logging toggle and write-logs-now. Wires per-list ItemCheck/KeyDown handlers, status
-    /// labels, and binds the lists to the existing peer-state dictionaries via the Sync*
-    /// helpers below. Phase 2 of the 2026-05-06 refactor; previously these controls lived
-    /// inside ShowConnectivityTransportDialog and the form had a "Connectivity and transport"
-    /// bridge button.</summary>
+    /// <summary>Connectivity tab — peer lists (connected/discovered/remembered), the peer
+    /// details box, rename peer, add by IP and the peer-address lock. Wires per-list
+    /// ItemCheck/KeyDown handlers, status labels, and binds the lists to the existing peer-state
+    /// dictionaries via the Sync* helpers below.</summary>
     private void BuildConnectivityTab()
     {
         var panel = new TableLayoutPanel
@@ -3998,7 +3987,7 @@ public sealed partial class MainForm : Form
             }
         };
 
-        // === Manual add + Write logs now ===
+        // === Manual add ===
         manualAddButton.Click += async (_, _) =>
         {
             var entry = ManualPeerPrompt.Show(this);
@@ -4007,8 +3996,8 @@ public sealed partial class MainForm : Form
             SyncAllPeerLists();
             BeginInvoke(() => FocusListControl(connectedPeersList));
         };
-        // Logging controls retired from this tab 2026-05-08 — they now live in the
-        // Preferences dialog (File → Preferences, Ctrl+P) as the last two items.
+        // Logging controls retired from this tab 2026-05-08 — they live in Preferences
+        // (Options → Preferences, Ctrl+P), on its Logging tab.
 
         // === Layout ===
         // Tab order (row order = add order): 0 "Peers" header; 1 connected peers; 2 details box; 3 rename;
@@ -4306,7 +4295,7 @@ public sealed partial class MainForm : Form
         // Setting SelectedIndex on an empty ListBox throws ArgumentOutOfRangeException. On Windows 10+ the
         // branch is skipped anyway (process-loopback IS supported), which hid the bug — but on Windows 7
         // (unsupported) it crashed the app at launch (issue #22). When the list is empty there's nothing to
-        // reset; it's created selecting Devices, and this runs again (line ~3611) once the list is built.
+        // reset; it's created selecting Devices, and WireSendModeControls runs this again once the list is built.
         if (!supported && sendModeList.Items.Count > 0 && sendModeList.SelectedIndex != SendModeDevicesIndex)
         {
             suppressSendAppEvents = true;
@@ -4590,17 +4579,15 @@ public sealed partial class MainForm : Form
     }
 
     /// <summary>Audio profile tab — split into two GroupBox sections so NVDA announces the
-    /// section name when focus first crosses into it. Send-side group: codec, packet size,
-    /// lock to audio clock. Receive-side group: latency + auto-tune controls, buffer
-    /// smoothness, artefact. Inside each group, focus traversal is the natural top-to-bottom
-    /// order; crossing the boundary triggers NVDA's grouping-name announcement on the first
-    /// child of the entered group. GroupBox `Text` is also the accessible name (single-source
-    /// label rule); no `&` mnemonic since GroupBox isn't focusable. Phase 3 of the refactor;
-    /// previously these controls lived inside ShowConnectivityTransportDialog as "dialog*"
-    /// mirrors of hidden form-fields.</summary>
+    /// section name when focus first crosses into it. The high-priority-mode checkbox sits above
+    /// both groups. Send-side group: codec, packet size. Receive-side group: jitter buffer +
+    /// auto-tune controls, total latency readout, buffer smoothness, artefact. Inside each group,
+    /// focus traversal is the natural top-to-bottom order; crossing the boundary triggers NVDA's
+    /// grouping-name announcement on the first child of the entered group. GroupBox `Text` is also
+    /// the accessible name (single-source label rule); no `&` mnemonic since GroupBox isn't focusable.</summary>
     private void BuildAudioProfileTab()
     {
-        // Outer layout: one column, three rows. Row 0 is the Full-CPU-speed checkbox — the
+        // Outer layout: one column, three rows. Row 0 is the high-priority-mode checkbox — the
         // first thing the user lands on when they Tab into the tab, deliberately ungrouped
         // and at the top so it can't be missed. Rows 1 and 2 are the existing Audio send
         // parameters / Audio receive parameters GroupBoxes. AutoScroll on so the tab page
@@ -5242,10 +5229,9 @@ public sealed partial class MainForm : Form
         public override string ToString() => $"{Band.StartHz:0} Hz to {Band.EndHz:0} Hz, {FormatGainDbPrecise(Band.GainDb)}";
     }
 
-    /// <summary>Send-side controls: codec + packet size on row 0, lock-to-audio-clock on
-    /// row 1. The codec and packet-size combo share a row because they're tightly coupled
-    /// (changing the codec resets the meaningful packet sizes). Lock-to-clock is a sender-
-    /// side toggle whose label varies by audio mode (WASAPI vs ASIO vs Both).</summary>
+    /// <summary>Send-side controls: codec + packet size on row 0. The codec and packet-size combo
+    /// share a row because they're tightly coupled (changing the codec resets the meaningful packet
+    /// sizes). Lock to audio clock is always on and has no control (see the note at the end).</summary>
     private void BuildAudioSendGroupContents(GroupBox group)
     {
         var panel = new TableLayoutPanel
@@ -5300,10 +5286,10 @@ public sealed partial class MainForm : Form
         group.Controls.Add(panel);
     }
 
-    /// <summary>Receive-side controls: latency spinner + tune button + continuous-tune toggle
-    /// + interval combo on row 0; smoothness list on row 1; artefact combo (with hint) on
-    /// row 2. Tab order within the group flows naturally top-down. The tune-button hookup
-    /// uses TuneLatencyAsync via the cancellation token field.</summary>
+    /// <summary>Receive-side controls: the ASIO jitter buffer + auto-tune on row 0 (shown only
+    /// with an ASIO driver chosen); the WASAPI jitter buffer + auto-tune + interval combo on row 1;
+    /// the total latency readout on row 2; the smoothness list on row 3; the artefact list (with
+    /// hint) on row 4. Tab order within the group follows the order the controls are added.</summary>
     private void BuildAudioReceiveGroupContents(GroupBox group)
     {
         var panel = new TableLayoutPanel
@@ -5322,7 +5308,7 @@ public sealed partial class MainForm : Form
         // a user picks the new mode for) and takes Alt+I for its jitter buffer and Alt+T for its
         // auto-tune — when the user enters BothIndependent the WASAPI row's labels mutate to
         // "WASAPI jitter buffer (Alt+W)" / "Continuous auto-tune WASAPI (Alt+Y)", surrendering T to
-        // ASIO. The shared interval takes Alt+N. In every classic mode this row is hidden via
+        // ASIO. The shared interval takes Alt+N. With no ASIO driver this row is hidden via
         // UpdateBothIndependentVisibility and the WASAPI row keeps the unqualified
         // "Audio jitter buffer (Alt+L)" labels. KeyboardShortcutsGoWhereTheySay walks all three
         // configurations, so a letter reused here fails the gate.
@@ -5345,7 +5331,7 @@ public sealed partial class MainForm : Form
         panel.Controls.Add(asioLatencyLabel, 0, 0);
         panel.Controls.Add(asioDelayContainer, 1, 0);
 
-        // === Row 1: WASAPI / classic latency row ===
+        // === Row 1: WASAPI latency row ===
         // Labels and mnemonics mutate based on audio mode — see UpdateBothIndependentVisibility.
         //   No ASIO:        "Audio jitter buffer (Alt+L)" / "Continuous auto-tune jitter buffer (Alt+T)"
         //   WASAPI+ASIO:    "WASAPI jitter buffer (Alt+W)" / "Continuous auto-tune WASAPI (Alt+Y)"
@@ -5358,9 +5344,8 @@ public sealed partial class MainForm : Form
         continuousTuneBox.Text = "Continuous auto-tune jitter buffer (Alt+&T)";
         continuousTuneBox.AccessibleName = "Continuous auto-tune jitter buffer";
         continuousTuneBox.Checked = continuousTuneEnabled;
-        // 3 seconds added 2026-05-06 alongside the lookback shortening — the new combination
-        // lets users dial in tighter latency on calm networks much faster (each tick samples
-        // then potentially lowers, so 3s ticks × 5ms/tick = 1.7ms/sec descent).
+        // 3 seconds added 2026-05-06 alongside the lookback shortening. The interval sets how
+        // often the tuner re-checks; the size of any step it takes is AutoTuneDescent's decision.
         continuousIntervalBox.Items.Clear();
         continuousIntervalBox.Items.AddRange(new object[] { "3 seconds", "5 seconds", "10 seconds", "15 seconds", "30 seconds" });
         continuousIntervalBox.SelectedIndex = continuousTuneIntervalSec switch { 3 => 0, 5 => 1, 15 => 3, 30 => 4, _ => 2 };
@@ -5370,9 +5355,9 @@ public sealed partial class MainForm : Form
         // in BothIndependent mode when only ASIO auto-tune was ticked, even though the
         // timer was running and the interval was being honoured for the ASIO lane.
         continuousIntervalBox.Enabled = AnyAutoTuneEnabled();
-        // Label text is set by UpdateBothIndependentVisibility — it differs between classic
-        // modes (single lane → "Auto-tune interval for jitter buffer") and BothIndependent
-        // (two lanes → "Auto-tune interval for WASAPI and ASIO jitter buffer") to make explicit that the same
+        // Label text is set by UpdateAutoTuneIntervalWording (via UpdateBothIndependentVisibility) —
+        // it follows the output lanes in use: one lane → "Auto-tune interval for jitter buffer", both
+        // → "Auto-tune interval for WASAPI and ASIO jitter buffer", to make explicit that the same
         // dropdown drives both lanes' tick cadence in the latter case.
         continuousIntervalLabel = new Label { AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(8, 6, 0, 0) };
         var delayContainer = new FlowLayoutPanel
@@ -5410,7 +5395,7 @@ public sealed partial class MainForm : Form
             LogUiChange("auto-tune interval", $"{continuousTuneIntervalSec}s");
         };
 
-        // === Row 1: Buffer smoothness ===
+        // === Buffer smoothness list (its label and the list go in row 3 below) ===
         smoothnessBox.Items.Clear();
         smoothnessBox.Items.Add("10 — smoothest, no clicks, longest delay");
         smoothnessBox.Items.Add("9");
@@ -5504,7 +5489,8 @@ public sealed partial class MainForm : Form
         group.Controls.Add(panel);
     }
 
-    /// <summary>Calls all three peer-list sync helpers in one go. Wired into the existing
+    /// <summary>Calls the three peer-list sync helpers, then refreshes the pan/EQ peer list and the
+    /// status readout, in one go. Wired into the existing
     /// status timer (1 Hz) so the Connectivity tab stays current with discovery / heartbeat
     /// state without needing its own dedicated timer.</summary>
     private void SyncAllPeerLists()
@@ -6190,25 +6176,6 @@ public sealed partial class MainForm : Form
         }
         finally { suppressRememberedCheck = false; }
     }
-
-    /// <summary>Profiles &amp; preferences tab — list of saved profiles with inline Switch /
-    /// Rename / Delete buttons + Save / Save-as + the mute-cues checkbox + remote-volume
-    /// opt-in + Keyboard-shortcuts + Minimise-to-tray. Phase 4 of the refactor; the old
-    /// "Manage profiles" dialog (and the ProfileManagementDialog.cs file) is gone.</summary>
-    // BuildProfilesPrefsTab and its companion UI methods (UpdateCurrentProfileLabel,
-    // RefreshProfilesList, SwitchSelectedProfile, RenameSelectedProfile,
-    // DeleteSelectedProfile) were deleted on 2026-05-08 when the fourth tab was retired.
-    // The same actions now live on the File menu:
-    //   * Switch profile        →  File → Open profile          (OpenProfileFromPicker)
-    //   * Rename profile        →  File → Rename current profile (RenameCurrentProfile)
-    //   * Save / Save as        →  File → Save / Save as
-    //   * Delete profile        →  removed from app UI; users can delete via the OS file
-    //                              picker's right-click menu (File → Open profile shows the
-    //                              folder; right-click any entry → Delete).
-    //   * Mute cues / Accept remote / Startup behaviour → File → Preferences (Ctrl+P).
-    //   * Keyboard shortcuts    →  File → Keyboard shortcuts (Ctrl+K).
-    //   * Minimise to tray      →  File → Minimise to tray (Alt+M, gated per-tab so the
-    //                              Audio I/O tab's Audio mode mnemonic wins on that tab).
 
     // FocusFirstControlOnActiveTab was removed in the arrow-key fix. The original intent —
     // landing on something useful after a tab change — turned out to defeat the standard
@@ -6986,15 +6953,14 @@ public sealed partial class MainForm : Form
             var outputs = AudioDeviceCatalog.LoadOutputs();
             var inputs = AudioDeviceCatalog.LoadInputs();
 
-            // All three lists start UNCHECKED every session. No persisted selection — by design.
-            // The user re-ticks once per session, avoiding the "wrong-device-still-selected"
-            // failure mode after a card unplug or ID change.
+            // All three lists are built unticked here. The active profile's saved ticks are put back
+            // later, from Shown, by ApplyPendingProfileToControls once every list exists.
             sendOutputDevicesSignature = SyncDeviceCheckedListBox(sendOutputDevicesList, WithDefaultFollower(outputs, DefaultLoopbackSendFollower));
             sendInputDevicesSignature = SyncDeviceCheckedListBox(sendInputDevicesList, WithDefaultFollower(inputs, DefaultInputFollower));
             receiveOutputDevicesSignature = SyncDeviceCheckedListBox(receiveOutputDevicesList, WithDefaultFollower(outputs, DefaultOutputFollower));
-            // Re-tick the "Use Windows default" followers from the saved preference. They don't ride the
-            // per-session "all unticked" rule above — a follower can never go stale (it always resolves
-            // to the current default), so persisting it is the whole point of the feature.
+            // Re-tick the "Use Windows default" followers from the saved preference. They are a
+            // machine-wide preference rather than part of the profile — a follower can never go stale
+            // (it always resolves to the current default), so remembering it is the whole point.
             RestoreDefaultFollowerChecks();
 
             // Ground-truth log so we can definitively see the device list and initial check state
@@ -7046,7 +7012,7 @@ public sealed partial class MainForm : Form
     {
         // WASAPI lists are always populated from the Windows audio device catalogue — they're
         // visible regardless of ASIO state. ASIO lists are populated from the chosen driver's
-        // channel-pair info, but only if ASIO is enabled with a valid driver; otherwise empty.
+        // channel-pair info, but only when an ASIO driver is chosen (and not disabled); otherwise empty.
         IReadOnlyList<AudioDeviceChoice> wasapiOutputs;
         IReadOnlyList<AudioDeviceChoice> wasapiInputs;
         IReadOnlyList<AudioDeviceChoice> asioInputChoices = [];
@@ -7155,8 +7121,9 @@ public sealed partial class MainForm : Form
 
         // Opening some ASIO drivers is not a passive metadata read. On Andre's Realtek
         // driver (rthdasio64.dll), every AsioOut construction leaks Event+Mutant handles.
-        // The 3-second device refresh timer only needs stable channel metadata, so probe
-        // once per selected driver and reuse the result until the driver changes or resume
+        // The device-list refresh (a 750 ms debounce after each Windows endpoint change) only
+        // needs stable channel metadata, so probe once per selected driver and reuse the result
+        // until the driver changes or resume
         // forces a backend refresh.
         var info = AsioDeviceProbe.ProbeDriverInfo(driverName);
         cachedAsioProbeDriverName = driverName;
@@ -7652,13 +7619,6 @@ public sealed partial class MainForm : Form
         UpdateAutoTuneIntervalWording();
     }
 
-    /// <summary>Which of the three real audio configurations is live, from the TICKED OUTPUTS.
-    ///
-    /// <para>This is the axis that matters, and it is NOT the audio-mode setting. There are three:
-    /// WASAPI only, ASIO only, and both. The mode flag only says whether an ASIO driver has been
-    /// chosen at all, which is a different question — with a driver chosen but only ASIO outputs
-    /// ticked you are in ASIO-only, every stream reads the ASIO jitter buffer, and the WASAPI one
-    /// governs nothing.</para></summary>
     /// <summary>
     /// Record a control the user just changed — and the audio CONFIGURATION it happened in.
     ///
@@ -7741,6 +7701,13 @@ public sealed partial class MainForm : Form
         return parts.Count > 0 ? string.Join(", ", parts) : "(unavailable)";
     }
 
+    /// <summary>Which of the three real audio configurations is live, from the TICKED OUTPUTS.
+    ///
+    /// <para>This is the axis that matters, and it is NOT the audio-mode setting. There are three:
+    /// WASAPI only, ASIO only, and both. The mode flag only says whether an ASIO driver has been
+    /// chosen at all, which is a different question — with a driver chosen but only ASIO outputs
+    /// ticked you are in ASIO-only, every stream reads the ASIO jitter buffer, and the WASAPI one
+    /// governs nothing.</para></summary>
     private AudioConfiguration ActiveAudioConfiguration() => AudioConfigurations.From(
         wasapiOutputTicked: receiveOutputDevicesList.CheckedItems.Count > 0,
         asioOutputTicked: settings.LoadAudioMode() == AudioMode.BothIndependent
@@ -7895,8 +7862,8 @@ public sealed partial class MainForm : Form
     /// <summary>A receive-output card that was unplugged drops out of the WASAPI list (and its tick
     /// with it). When it returns, re-tick it from <see cref="rememberedReceiveOutputIds"/> so audio
     /// resumes automatically (issue #5). Only RE-ticks present-but-unticked remembered devices; it
-    /// never unticks — that's a deliberate user action handled in the ItemCheck handler. Receive-only
-    /// on purpose: the send lists keep their "re-tick each session" behaviour (see AudioDeviceCatalog).</summary>
+    /// never unticks — that's a deliberate user action handled in the ItemCheck handler. Receive
+    /// outputs only: a send device that returns is not re-ticked automatically.</summary>
     private void ReapplyRememberedReceiveOutputs()
     {
         if (rememberedReceiveOutputIds.Count == 0) return;
@@ -7918,16 +7885,6 @@ public sealed partial class MainForm : Form
         if (changed) logFile.Event("receive output: re-ticked a returning device from the remembered selection");
     }
 
-    /// <summary>
-    /// Applies the audio-backend mode derived from the current ASIO driver choice. Two effective
-    /// modes after the 2026-05-11 cleanup:
-    ///   * WasapiOnly:      no ASIO driver selected. WASAPI lists shown, ASIO lists hidden,
-    ///                      fast path active.
-    ///   * BothIndependent: an ASIO driver is selected. All five lists shown; WASAPI and ASIO
-    ///                      run as two parallel lanes each at their own native latency.
-    /// On every call, list visibility is refreshed and any ticks in now-hidden lists are wiped
-    /// so they don't contribute ghost specs to the next ApplyAudioRuntime push.
-    /// </summary>
     /// <summary>True if this audio-mode runs an ASIO backend: BothIndependent does, WasapiOnly does not. The mode is derived
     /// from whether a driver is chosen (RemSoundSettingsStore.LoadAudioMode), which never yields the retired AsioOnly or
     /// Both values.</summary>
@@ -7935,7 +7892,7 @@ public sealed partial class MainForm : Form
 
     // ===================== BothIndependent companion controls =====================
     //
-    // The ASIO-lane latency row created in BuildAudioReceiveGroupContents. These four refs
+    // The ASIO-lane latency row created in BuildAudioReceiveGroupContents. These three refs
     // live at class scope so UpdateBothIndependentVisibility can hide/show the row whenever
     // the audio mode changes, and so WireBothIndependentControls can attach event handlers
     // once the form is built.
@@ -8003,11 +7960,11 @@ public sealed partial class MainForm : Form
 
     /// <summary>
     /// Toggles visibility of the BothIndependent-only ASIO row and rewrites the WASAPI row's
-    /// labels and mnemonics based on the current audio mode. In classic modes the WASAPI row
-    /// reverts to its unqualified "Audio jitter buffer (Alt+L)" / "Continuous auto-tune jitter buffer (Alt+T)"
+    /// labels and mnemonics based on the current audio mode. With no ASIO driver (WasapiOnly) the
+    /// WASAPI row keeps its unqualified "Audio jitter buffer (Alt+L)" / "Continuous auto-tune jitter buffer (Alt+T)"
     /// shape and the ASIO row is hidden. In BothIndependent the ASIO row is shown above the
-    /// WASAPI row (first in tab order) and the WASAPI row's labels become "WASAPI latency
-    /// (Alt+W)" / "Continuous auto-tune WASAPI (Alt+Y)" so the two sets of mnemonics don't
+    /// WASAPI row (first in tab order) and the WASAPI row's labels become "WASAPI jitter buffer
+    /// (Alt+W)" / "Continuous auto-tune WASAPI jitter buffer (Alt+Y)" so the two sets of mnemonics don't
     /// collide. Idempotent — call from anywhere the audio mode might have changed.
     /// </summary>
     private void UpdateBothIndependentVisibility()
@@ -8052,7 +8009,7 @@ public sealed partial class MainForm : Form
 
     // Tracks the last time the user moved the ASIO slider — auto-tune defers tuning for one
     // tick afterward so the user's deliberate change isn't immediately overridden. Parallels
-    // lastUserSliderMoveUtc which serves the same role for the WASAPI / classic slider.
+    // lastUserSliderMoveUtc which serves the same role for the WASAPI slider.
     private DateTime lastUserAsioSliderMoveUtc = DateTime.MinValue;
 
 
@@ -8061,6 +8018,16 @@ public sealed partial class MainForm : Form
     // directly from settings.LoadAudioMode(), which itself reads back the ASIO driver name
     // ("none" → WasapiOnly, anything else → BothIndependent).
 
+    /// <summary>
+    /// Applies the audio-backend mode derived from the current ASIO driver choice. Two effective
+    /// modes after the 2026-05-11 cleanup:
+    ///   * WasapiOnly:      no ASIO driver selected. WASAPI lists shown, ASIO lists hidden,
+    ///                      fast path active.
+    ///   * BothIndependent: an ASIO driver is selected. All five lists shown; WASAPI and ASIO
+    ///                      run as two parallel lanes each at their own native latency.
+    /// On every call, list visibility is refreshed and any ticks in now-hidden lists are wiped
+    /// so they don't contribute ghost specs to the next ApplyAudioRuntime push.
+    /// </summary>
     private void ApplyAsioMode()
     {
         var requestedMode = settings.LoadAudioMode();
@@ -8139,7 +8106,7 @@ public sealed partial class MainForm : Form
         finally { suppressDeviceCheckChange = false; }
         // Always re-apply send sources and receive outputs after a mode change. The new
         // composite instance was built fresh — even if no ticks got wiped (e.g. WasapiOnly →
-        // Both, where existing WASAPI ticks survive), the new backend has empty internal state
+        // BothIndependent, where existing WASAPI ticks survive), the new backend has empty internal state
         // and needs the current spec/device list pushed to it. Without this, a user mid-session
         // who picks a different audio mode would silently lose their receive output and have
         // to re-tick to get audio back.
@@ -8349,8 +8316,8 @@ public sealed partial class MainForm : Form
     // ShowBothModeWarning + its TaskDialog retired 2026-05-11. The popup warned about the
     // ~45 ms latency penalty of classic mixed-Both mode. Classic Both is no longer reachable
     // from the UI (only WasapiOnly and BothIndependent are produced now, both fast-path), so
-    // the warning has nothing to fire on. AppConfig.BothModeWarningSuppressed is kept on disk
-    // for backward-compat — old config files still deserialise, new code just ignores it.
+    // the warning has nothing to fire on. AppConfig.BothModeWarningSuppressed has gone too; an old
+    // config file that still carries the key loads with it ignored.
 
     /// <summary>
     /// Confirmation popup after Save (Ctrl+S / File → Save) overwrites the current profile.
@@ -8946,11 +8913,7 @@ public sealed partial class MainForm : Form
             return;
         }
 
-        // (The per-minute HandleTypeProbe walk that lived here — added 2026-06-07 to name the leaking
-        // handle type in the Realtek/WASAPI investigation — was retired in the 2026-07-19 legacy sweep
-        // with that investigation closed. Git history has it if a handle hunt ever needs it back.)
-
-        // SNAP latency columns: in classic modes the legacy MaxLatencyMs / TargetLatencyMs
+        // SNAP latency columns: with no ASIO driver (WasapiOnly) the MaxLatencyMs / TargetLatencyMs
         // pair holds the only route's value (Mixed). In BothIndependent we map them to the
         // WASAPI lane (= the lane the existing slider drives) and emit the ASIO lane in the
         // appended ASIO columns. That keeps the existing columns meaningful — they still
@@ -9031,7 +8994,6 @@ public sealed partial class MainForm : Form
             // resolution rather than guessing from a 1 Hz buffer reading. Look for:
             //   bufMin near 0 or  maxGapMs > 30  →  network burstiness or thread starvation
             //   bufAvg << target                 →  clock drift, adaptive rate should compensate
-            //   inputRate drifting from 48000    →  adaptive rate is actively compensating
             //   maxReadMs much bigger than 15    →  WASAPI is gulping more than expected
             var diag = receiver.IsRunning ? receiver.TakeDiagnosticsSnapshot() : default;
             // Pull sendCbGapMs unconditionally so it always resets cleanly between log emissions.
@@ -9073,10 +9035,8 @@ public sealed partial class MainForm : Form
                 var ovfBytes = receiver.RingbufferOverflowDropBytes;
                 var pktRej = receiver.PacketsRejectedMalformed;
                 // Diag legend (post-Phase-3 cleanup):
-                //   driftDrop / driftRep = Phase-2 drift correction counters. Each event = one
-                //     stereo frame dropped (sender clock faster) or repeated (sender clock
-                //     slower) = 21 µs of audio at 48 kHz with crossfade smoothing, designed to
-                //     be inaudible. Healthy: one or the other slowly climbing at a few/sec rate.
+                //   filtErr = the LP-filtered drift error in frames — where the buffer sits against
+                //     its target on average (negative = below, positive = above).
                 //   trimB / trimN / drainB / ovfB = the click-trim safety net + drain on knob
                 //     change + ringbuffer overflow. All should stay near zero in normal
                 //     operation now that the drift corrector handles steady drift.
@@ -9084,11 +9044,6 @@ public sealed partial class MainForm : Form
                 //     >0 = real anomalous samples in RemSound's output. ~0 = clean output.
                 //   sampleStepMax = raw peak step magnitude (false-positive prone on bright
                 //     music; informational only).
-                // driftDrops / driftReps / driftAccumulator readings removed 2026-05-23 along
-                // with their dead accessors. The Phase-4 fixed-ratio resampler design never
-                // increments those counters; the columns were always zero. filteredErrorFrames
-                // below is the still-useful "where the buffer is sitting on average" signal —
-                // computed every Read by the active LP filter.
                 var concealNow = receiver.ConcealmentFires;
                 var shortReadNow = receiver.ShortReadFires;
                 var concealDelta = concealNow - prevDiagConceal; prevDiagConceal = concealNow;
@@ -9124,9 +9079,6 @@ public sealed partial class MainForm : Form
                 var rxNetGapMs = receiver.TakeMaxInterPacketGapMs();
                 // Handed on, never re-read: this accessor resets as it reads. See NoteLongRunNetGap.
                 NoteLongRunNetGap(rxNetGapMs);
-                // fanCacheMs reading + column removed 2026-05-23. The FanOutSource was retired
-                // mid-May (each lane reads its own filtered PlayoutEngine source directly); the
-                // measurement always returned 0 and surfaced an unhelpful diag column.
                 // GC pressure delta. .NET's GC.CollectionCount is cumulative; subtracting the
                 // previous tick gives the per-second collection count per generation. Gen-0
                 // collections are cheap (microseconds); Gen-1 takes longer; Gen-2 / LOH can
@@ -9340,10 +9292,12 @@ public sealed partial class MainForm : Form
             }
 
             // Synthesised end-to-end one-way latency estimate. Sums:
-            //   * sender_accumulator: half the codec frame size (avg packet wait)
+            //   * capture: the peer's announced capture latency, else this device's, else an estimate
+            //   * sender_accumulator: half the codec frame size (avg packet wait; measured when it can be)
             //   * wire_one_way: lowest active peer's heartbeat RTT / 2
             //   * receiver_queue: bufAvg from diag (the real measured queue depth, 0 on send-only)
-            //   * render_buffer: rough estimate per audio mode
+            //   * output_queue: audio waiting in the output device's own buffer (measured)
+            //   * render_buffer: the output's reported latency, else its measured render period doubled
             // Logged whenever either side is active so we capture the latency picture even when
             // the local machine is send-only.
             // EACH ROUTE'S MEASURED RENDER PERIOD, READ EXACTLY ONCE PER TICK AND SHARED.
@@ -9829,20 +9783,21 @@ public sealed partial class MainForm : Form
             : $"{AppName} — Active profile: {loadedTitle}{readOnlySuffix}";
     }
 
-    /// <summary>Update existing profile button. Overwrites the active profile with current
-    /// state. No prompt — user explicitly chose this button to commit. Hidden when no
-    /// profile is loaded.</summary>
+    /// <summary>File → Save (Ctrl+S) for a loaded profile, reached through SaveOrSaveAs. Overwrites
+    /// the active profile with current state — no name prompt. SaveOrSaveAs sends the blank
+    /// template to Save as instead.</summary>
     private void UpdateExistingProfile()
     {
         if (profileStore is null || string.IsNullOrEmpty(currentProfileTitle))
         {
-            // Defensive — button should be hidden in this case.
+            // Defensive — SaveOrSaveAs sends the blank template to Save as, so this shouldn't happen.
             return;
         }
         SaveProfileTo(currentProfileTitle);
     }
 
-    /// <summary>Save profile as button. Always prompts for a (new) name. From a blank
+    /// <summary>File → Save as, and File → Save on the blank template. Always prompts for a (new)
+    /// name. From a blank
     /// template this is the only way to create the first profile; from a loaded profile this
     /// forks a copy under a new name and switches to that copy as the active profile.</summary>
     private void SaveProfileAs()
@@ -9984,7 +9939,7 @@ public sealed partial class MainForm : Form
 
     /// <summary>Common save body — gathers all current state into a Profile and writes it.
     /// On success, becomes the active profile (sets currentProfileTitle, updates window
-    /// title, refreshes button visibility, and shows a confirmation popup).</summary>
+    /// title, and shows a confirmation popup).</summary>
     private void SaveProfileTo(string title) => SaveProfileTo(title, showConfirmation: true);
 
     private void SaveProfileTo(string title, bool showConfirmation) => SaveProfileTo(title, showConfirmation, playCue: true);
@@ -9999,7 +9954,7 @@ public sealed partial class MainForm : Form
             // Save cue (2026-05-28): fires after any successful save — Save AND Save As, since
             // both routes funnel through this single method. Honours the EnableSaveCue per-
             // profile flag; the cue is silent if the user has unticked it in Preferences or if
-            // sounds\save.wav doesn't exist and no custom override has been set. Auto-save passes
+            // no save sound ships in default sounds\ and no custom override has been set. Auto-save passes
             // playCue: false so it never interrupts the user with a save sound.
             if (playCue && settings.LoadEnableSaveCue()) saveSound?.Play();
             unsavedChanges = false;
@@ -10584,21 +10539,16 @@ public sealed partial class MainForm : Form
         }
     }
 
-    // OpenManageProfilesDialog and ProfileManagementDialog removed in Phase 4 of the
-    // 2026-05-06 UI refactor. Profile management lives inline on the Profiles & preferences
-    // tab — see BuildProfilesPrefsTab + SwitchSelectedProfile / RenameSelectedProfile /
-    // DeleteSelectedProfile.
-
-    /// <summary>Builds the live tooltip shown over the system-tray icon — sums up peer count
-    /// and send / receive routing into a single readable line. Kept under the 127-character
+    /// <summary>Builds the live tooltip shown over the system-tray icon — sums up recording state,
+    /// peer count and send / receive routing into a single readable line. Kept under the 127-character
     /// NotifyIcon limit by construction; the tray controller truncates with an ellipsis as a
     /// belt-and-braces if a future addition ever pushes it over.
     ///
     /// Examples:
     ///   * RemSound — not connected
-    ///   * RemSound — recording for 2:34 — not connected
-    ///   * RemSound — 2 peers, sending (WASAPI), receiving (WASAPI)
-    ///   * RemSound — recording for 1:23:45, 2 peers, sending (WASAPI), receiving (WASAPI)
+    ///   * RemSound — recording — not connected
+    ///   * RemSound, 2 peers, sending (WASAPI), receiving (WASAPI)
+    ///   * RemSound, recording, 2 peers, sending (WASAPI), receiving (WASAPI)
     /// </summary>
     private string BuildTrayTooltip()
     {
@@ -10719,17 +10669,13 @@ public sealed partial class MainForm : Form
     }
 
     /// <summary>Load one cue sound. Resolution order:
-    /// (1) if the active profile has a custom path for <paramref name="cueId"/> AND the
-    ///     referenced file exists, use that — the user-supplied override.
-    /// (2) otherwise the default WAV in <c>sounds\</c> next to RemSound.exe, named
-    ///     <paramref name="defaultFileName"/>.
-    /// (3) otherwise null — the cue silently doesn't play. New cues without a shipped
-    ///     default WAV (e.g. save.wav and profile.wav before the project owner supplies
-    ///     them) land here and the rest of the app keeps working.
-    ///
-    /// Custom paths are per-profile (changed from machine-wide in v3.0.3 development) so
-    /// each profile can carry its own cue palette. The settings cache mirrors the active
-    /// profile's CustomCuePaths dictionary and is the runtime source of truth.</summary>
+    /// (1) if a custom path is set for <paramref name="cueId"/> AND the referenced file exists,
+    ///     use that — the user-supplied override. The active profile's custom path comes first;
+    ///     the machine-wide cues (send/receive, hide/show) keep theirs in AppConfig.
+    /// (2) otherwise the shipped default in <c>default sounds\</c> next to RemSound.exe: the
+    ///     numbered variant chosen machine-wide, or the first one (CueSounds.ResolveDefaultPath,
+    ///     given <paramref name="defaultFileName"/>).
+    /// (3) otherwise null — the cue silently doesn't play and the rest of the app keeps working.</summary>
     private void TryLoadCueSound(string cueId, string defaultFileName, out CuePlayer? player, AppConfig? cfg = null)
     {
         player = null;
@@ -10776,9 +10722,9 @@ public sealed partial class MainForm : Form
         }
     }
 
-    /// <summary>Re-load all cue sounds. Called by PreferencesDialog after the user picks a
-    /// new custom WAV for any cue — re-runs <see cref="TryLoadCueSound"/> for the lot so
-    /// the cached SoundPlayer instances point at the right file from the next play onward.
+    /// <summary>Re-load all cue sounds. Called when the Preferences dialog closes, where the user
+    /// may have picked a new custom WAV for any cue — re-runs <see cref="TryLoadCueSound"/> for the
+    /// lot so the cached CuePlayer instances point at the right file from the next play onward.
     /// </summary>
     public void ReloadAllCueSounds()
     {
@@ -11200,11 +11146,6 @@ public sealed partial class MainForm : Form
         return min == double.MaxValue ? 0 : min;
     }
 
-    /// <summary>Rough render-side buffer estimate. WASAPI shared-mode is ~10 ms typical.
-    /// BothIndependent has no tee — both lanes run at their native callback rate — so the
-    /// worse of the two governs perceived delay. ASIO depends on driver buffer settings
-    /// we don't query, but is always lower than WASAPI in practice, so the WASAPI estimate
-    /// is what governs in both modes.</summary>
     /// <summary>How long decoded audio sits in the OUTPUT device before it reaches the speakers.
     ///
     /// <para>Was a hardcoded <c>10</c>. A constant dressed as a measurement is worse than no
@@ -11223,8 +11164,6 @@ public sealed partial class MainForm : Form
         return Math.Clamp(period * 2.0, 10, 200);
     }
 
-    /// <summary>How long audio waits in the CAPTURE device before the app sees it. Was missing from
-    /// the latency estimate entirely — a whole stage of the journey simply not counted.</summary>
     /// <summary>Second-highest reading in a window, falling back to the only one when that is all
     /// there is. A single transient spike is not evidence; two are.</summary>
     private static int SecondHighest(Queue<int> window)
@@ -11238,6 +11177,8 @@ public sealed partial class MainForm : Form
         return window.Count >= 2 ? second : peak;
     }
 
+    /// <summary>How long audio waits in the CAPTURE device before the app sees it. Was missing from
+    /// the latency estimate entirely — a whole stage of the journey simply not counted.</summary>
     private static double CaptureBufferEstimateMs(int measuredCallbackGapMs)
     {
         // MEASURED when we have it. Audio accumulates in the device for one callback period before
@@ -11267,7 +11208,7 @@ public sealed partial class MainForm : Form
         AudioTransportRules.EffectiveOpusFrameSamples(codec, opusFrameSamples, rate);
 
     /// <summary>
-    /// Short codec label for the per-peer line in the connectivity dialog. e.g. "PCM",
+    /// Short codec label for the per-peer line in the Connectivity tab's peer list. e.g. "PCM",
     /// "Opus 10ms", "Opus 20ms", "Opus 2.5ms". Input is samples-per-channel at 48 kHz; the
     /// label derives ms from samples / 48 with up to one decimal place. Uses the same
     /// EffectiveOpusFrameSamples the encoder uses so the label reflects the actually-encoded
@@ -11344,13 +11285,6 @@ public sealed partial class MainForm : Form
 
     // ===================== Auto-tune =====================
 
-    /// <summary>(Re)configures the continuous-tune timer based on the current checkbox / combo
-    /// state held in <see cref="continuousTuneEnabled"/> / <see cref="continuousTuneIntervalSec"/>.
-    /// Called whenever either changes (in the dialog) or at startup. The timer fires when
-    /// either lane has auto-tune enabled — in classic modes that's just the single WASAPI/
-    /// Mixed flag; in BothIndependent either WASAPI or ASIO being on is enough to keep the
-    /// timer running. The per-route filtering inside the tick gates which sliders actually
-    /// move.</summary>
     /// <summary>True if either lane's continuous auto-tune is enabled. Used by the shared
     /// interval combo's Enabled state — the combo governs both lanes' tick rates, so it
     /// should be usable as long as at least one lane wants ticking. Reading from the live
@@ -11363,6 +11297,13 @@ public sealed partial class MainForm : Form
         return continuousTuneEnabled || asioOn;
     }
 
+    /// <summary>(Re)configures the continuous-tune timer based on the current checkbox / combo
+    /// state held in <see cref="continuousTuneEnabled"/> / <see cref="continuousTuneIntervalSec"/>.
+    /// Called whenever a lane's auto-tune checkbox or the interval changes (on the Audio profile
+    /// tab), when the ASIO driver changes, and at startup. The timer fires when either lane has
+    /// auto-tune enabled — with no ASIO driver that's just the single WASAPI (Mixed) flag; in
+    /// BothIndependent either WASAPI or ASIO being on is enough to keep the timer running. The
+    /// per-route filtering inside the tick gates which sliders actually move.</summary>
     private void ApplyContinuousTuneTimer()
     {
         continuousTuneTimer.Stop();
@@ -11400,22 +11341,22 @@ public sealed partial class MainForm : Form
         DiagnosticsGate.Enabled = logFile.Enabled || continuousTuneEnabled || asioContinuous;
     }
 
-    /// <summary>Which route the legacy "Audio latency / WASAPI latency" slider operates on.
-    /// In classic modes that's the Mixed route (only sessions in play). In BothIndependent
-    /// the slider has been relabeled to "WASAPI latency" and drives the WasapiLane route.</summary>
+    /// <summary>Which route the main jitter-buffer slider (maxLatencyBox) operates on. With no ASIO
+    /// driver (WasapiOnly) that's the Mixed route, the only one in play. In BothIndependent the
+    /// slider is relabelled "WASAPI jitter buffer" and drives the WasapiLane route.</summary>
     private RenderRoute MaxLatencyBoxRoute =>
         settings.LoadAudioMode() == AudioMode.BothIndependent ? RenderRoute.WasapiLane : RenderRoute.Mixed;
 
     /// <summary>
-    /// Continuous-tune tick. Computes a recommended target from the rolling max-gap window and
+    /// Continuous-tune tick. Computes a recommended target from the rolling arrival-gap window and
     /// adjusts the slider, with several robustness rules learned from real-world testing:
     ///
-    ///   1. **Max over a long lookback window.** Earlier we used p95 of the recent few seconds,
-    ///      but with very few samples that's mathematically the same as the max anyway, and
-    ///      bad events aged out of the window in seconds — so auto-tune could drop the target
-    ///      below the level that had just earned the user a pop. Now we take the worst gap
-    ///      across the last <see cref="LookbackSeconds"/> seconds, so a bad event keeps target
-    ///      elevated long enough to cover the long-tail of the same disturbance.
+    ///   1. **Second-highest over a lookback window.** Earlier we used p95 of the recent few
+    ///      seconds, and bad events aged out of the window in seconds — so auto-tune could drop the
+    ///      target below the level that had just earned the user a pop. Now we take the
+    ///      second-highest gap across the last <c>LookbackSeconds</c> seconds (the only reading
+    ///      when there is just one), so jitter that persists keeps the target elevated long enough
+    ///      to cover the long tail of the same disturbance.
     ///   2. **Cap auto-tune recommendations at <see cref="AutoTuneRecommendationCapMs"/>.** Beyond
     ///      that the user is in "I want a huge buffer for terrible network" territory — they can
     ///      drag the slider there manually; the auto-tuner shouldn't go there on its own.
@@ -11425,8 +11366,9 @@ public sealed partial class MainForm : Form
     ///      proportionally when that evidence isn't there yet. Replaced a fixed 5 ms per tick, which
     ///      made a silly starting value take twenty-plus ticks to unwind a distance the tuner had
     ///      already measured in one (Ed, 2026-08-15).
-    ///   4. **Skip tuning while underruns are growing.** If the buffer is currently underrunning,
-    ///      the system isn't in steady state. Tuning now would react to broken stats.
+    ///   4. **Underruns raise, never lower.** A tick that saw new tune-blocking underruns on its
+    ///      lane moves the target up toward the higher of the measured need and the lane's learned
+    ///      floor (both capped), or holds if it is already there. It never lowers on that tick.
     ///   5. **Skip if the user just touched the slider** — see <see cref="lastUserSliderMoveUtc"/>.
     /// </summary>
     private void ContinuousTuneTick()
@@ -11445,8 +11387,8 @@ public sealed partial class MainForm : Form
         var intervalSec = continuousTuneIntervalSec;
         if (DateTime.UtcNow - lastSourceChangeUtc < TimeSpan.FromSeconds(intervalSec)) return;
 
-        // Dispatch per route. Classic modes drive only the Mixed route (the legacy single-knob
-        // world). BothIndependent ticks both routes — each respecting its own enable flag,
+        // Dispatch per route. With no ASIO driver (WasapiOnly) only the Mixed route is driven, from
+        // the one slider. BothIndependent ticks both routes — each respecting its own enable flag,
         // slider, last-user-move timestamp and underrun delta — so the WASAPI lane's distress
         // can't make the ASIO lane's auto-tune defer (and vice versa).
         if (settings.LoadAudioMode() == AudioMode.BothIndependent)
@@ -11490,21 +11432,21 @@ public sealed partial class MainForm : Form
     private long lastObservedUnderrunCountAsio;
     private bool suppressUserAsioSliderMoveTracking;
     // Per-route "device-gulp underruns at last tick" — the inaudible, more-buffer-won't-fix
-    // partial short-reads the cause-aware skip gate deliberately ignores. Tracked only so the
+    // partial short-reads the cause-aware underrun count deliberately leaves out. Tracked only so the
     // auto-tune log can show how many were ignored; shared between Mixed and the WASAPI lane the
     // same way lastObservedUnderrunCount is.
     private long lastObservedDeviceGulpCount;
     private long lastObservedDeviceGulpCountAsio;
 
     /// <summary>
-    /// Per-route auto-tune tick body. Same algorithm as the pre-2026-05-11 single-route
-    /// version, generalised to operate on a route + slider pair passed by the caller. The
-    /// gap and render-callback histories (<see cref="recentMaxGaps"/> /
-    /// <see cref="recentRenderCbGaps"/>) are still shared across routes — the network signal
-    /// is one signal, both lanes ride the same UDP socket — but the underrun delta, the
-    /// last-user-slider-move timestamp, and the slider itself are per-route so each lane
-    /// settles at its own native latency. Logs include the route name so the diagnostic
-    /// trail makes which lane was tuned obvious.
+    /// Per-route auto-tune tick body, operating on a route + slider pair passed by the caller.
+    /// The arrival-gap history (<see cref="recentMaxGaps"/>) is shared across routes — a packet
+    /// arrives from the network once and is fanned out to both lanes. The render-callback and
+    /// low-water windows, the clean-tick run and the learned floor are per lane
+    /// (<see cref="LaneTuneMemory"/>), falling back to the machine-wide windows only until a lane
+    /// has readings of its own; the underrun delta, the last-user-slider-move timestamp and the
+    /// slider itself are per route too, so each lane settles at its own native latency. Logs
+    /// include the route name so the diagnostic trail makes which lane was tuned obvious.
     /// </summary>
     private void TickRoute(
         RenderRoute route,
@@ -11533,6 +11475,14 @@ public sealed partial class MainForm : Form
         // only place the baseline moves. Returning early without reading them let underruns pile up
         // and land as one enormous delta on the next tick that did run — which now RAISES the buffer,
         // on evidence from a stretch the tuner was not even watching.
+        //
+        // The CAUSE-AWARE kind (2026-06-13): only tune-blocking underruns count — the full-empty /
+        // producer-starved short-reads that genuinely mean "the buffer is too thin". A steady trickle
+        // of inaudible device-gulp partials — a chunky onboard-Realtek render callback asking for an
+        // oversized block on an otherwise on-target ring — is counted separately and deliberately
+        // left out, so it neither raises the buffer nor holds it. The recommendation below still folds
+        // in the render-callback gap, so the target never settles below what the device structurally
+        // needs.
         var currentUnderruns = route == RenderRoute.Mixed ? receiver.TuneBlockingUnderruns : receiver.TuneBlockingUnderrunsFor(route);
         var currentDeviceGulps = route == RenderRoute.Mixed ? receiver.DeviceGulpUnderruns : receiver.DeviceGulpUnderrunsFor(route);
         var underrunDelta = currentUnderruns - lastObservedUnderruns;
@@ -11558,14 +11508,6 @@ public sealed partial class MainForm : Form
         // saving it up to ambush the user a second after they let go of the slider.
         if (DateTime.UtcNow - lastUserMoveUtc < TimeSpan.FromSeconds(intervalSec)) return;
 
-        // Per-route underrun delta — but the CAUSE-AWARE kind (2026-06-13). We gate on
-        // tune-blocking underruns only: the full-empty / producer-starved short-reads that
-        // genuinely mean "the buffer is too thin". A steady trickle of inaudible device-gulp
-        // partials — a chunky onboard-Realtek render callback asking for an oversized block on an
-        // otherwise on-target ring — is deliberately NOT counted here, so it can no longer pin the
-        // target high forever by making every tick skip. The recommendation below still folds in
-        // the render-callback gap, so even when we're free to lower we can never lower below what
-        // the device structurally needs; it just settles to that floor instead of overshooting up.
         // MEASURE FIRST, then decide. This block used to sit below the underrun branch, so a raise
         // had nothing to aim at except the learned floor's 3 ms crawl — while the recommendation that
         // knew the real answer was computed a few lines later and thrown away on that path.
@@ -11613,11 +11555,9 @@ public sealed partial class MainForm : Form
         // (the counters were read at the top, before any early return — see there for why)
         if (underrunDelta > 0)
         {
-            // Route label slots into the message body when present, omitted entirely in classic
-            // modes so the legacy "continuous auto-tune: skipping (N new underruns...)" wording
-            // is preserved bit-for-bit. The trailing-space + colon ordering is what gave the
-            // pre-fix line its weird "continuous auto-tune : skipping" formatting when the
-            // label was empty. devGulp shows how many inaudible device-gulp partials were ignored
+            // Route label slots into the message prefix when present and is omitted when there is
+            // none (WasapiOnly's Mixed route), so the prefix never reads "continuous auto-tune :".
+            // devGulp shows how many inaudible device-gulp partials were ignored
             // this tick — a high devGulp with a small underrunDelta is the Realtek fingerprint.
             var prefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
             memory.CleanTicks = 0; // this lane's buffer ran short — its evidence for shedding is void
@@ -11740,9 +11680,6 @@ public sealed partial class MainForm : Form
         var logPrefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
         logFile.Event($"{logPrefix}: gap-max={gapPeak}ms gap-used={observedGap}ms renderCb={observedRenderCb}ms over {sampleCount}s recommended={recommended}ms capped={capped}ms lowWater={lowWater}ms cleanTicks={memory.CleanTicks} learnedFloor={memory.Creep.DiscoveredFloorMs}ms prev={current}ms applied={clamped}ms frame={frameMs}ms devGulp={deviceGulpDelta}");
     }
-
-    // UpdateTuneButtonEnabled + TuneLatencyAsync retired alongside the one-shot Tune button.
-    // The continuous auto-tune toggle on the Audio profile tab is the live successor.
 
     // ===================== Accessibility helpers (CheckedListBox status labels) =====================
 
@@ -11966,8 +11903,8 @@ public sealed partial class MainForm : Form
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         // Skip the prompt during profile-switch handoff or forced reload — those are
-        // controlled close paths where the user has already confirmed their intent via the
-        // management dialog, and the MainForm gets reconstructed under the new profile
+        // controlled close paths where the user has already confirmed their intent (opening,
+        // switching or creating a profile), and the MainForm gets reconstructed under the new profile
         // immediately afterwards.
         //
         // Also skip the prompt when the active profile is read-only — the whole point of
