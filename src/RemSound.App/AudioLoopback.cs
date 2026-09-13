@@ -7,8 +7,9 @@ namespace RemSound.App;
 
 /// <summary>
 /// A localhost audio loopback used by the self-test, the diagnostics report and the perf check:
-/// capture the default output (as loopback) → encode → send to 127.0.0.1 → receive → decode, for a
-/// few seconds, with the receiver rendering to nothing (so no sound is ever produced). Exposes the
+/// capture the first active output Windows lists (not necessarily the default) as loopback → encode →
+/// send to 127.0.0.1 → receive → decode, for a few seconds, with the receiver rendering to nothing (so
+/// no sound is ever produced). Exposes the
 /// runtime counters afterwards. Shared so all three callers exercise the identical real audio path.
 /// </summary>
 internal static class AudioLoopback

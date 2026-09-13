@@ -236,8 +236,9 @@ internal static class AppInstaller
 
         // Hand over cleanly. We can't just launch the installed exe and exit: the single-instance
         // lock would still be held for the instant it takes us to shut down, and the new copy would
-        // see "already running". So a tiny batch waits for THIS process to exit (lock released), then
-        // starts the installed copy. Then we exit decisively.
+        // see "already running". So the installed copy is started now with --await-pid and our process
+        // id, and waits for THIS process to exit (lock released) before it takes the lock. Then we exit
+        // decisively.
         try { StartRelaunchAfterExit(installedExe, target); } catch { /* fall through — worst case the user starts it from the shortcut */ }
         Environment.Exit(0);
     }
@@ -591,7 +592,7 @@ internal static class AppInstaller
         return total;
     }
 
-    // ---------------- batch handoff / removal ----------------
+    // ---------------- relaunch / batch removal ----------------
 
     /// <summary>Launch the installed copy and hand it our foreground right. We start it DIRECTLY (not
     /// via a detached helper) while THIS process is still alive and frontmost, so we can call
@@ -625,10 +626,6 @@ internal static class AppInstaller
     [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
     private static extern bool AllowSetForegroundWindow(int dwProcessId);
 
-    /// <summary>Spawn a hidden batch that waits for RemSound to close, then removes the install folder,
-    /// retrying a few times in case a copy is slow to release its files, then deletes itself. The two
-    /// flags decide independently whether the "user settings and logs" folder (profiles + config +
-    /// logs) and the "recordings" folder go too; whichever aren't removed are kept in place.</summary>
     /// <summary>
     /// Is this folder one we are willing to point <c>rd /s /q</c> at?
     ///
@@ -694,6 +691,10 @@ internal static class AppInstaller
         return true;
     }
 
+    /// <summary>Spawn a hidden batch that waits for RemSound to close, then removes the install folder,
+    /// retrying a few times in case a copy is slow to release its files, then deletes itself. The two
+    /// flags decide independently whether the "user settings and logs" folder (profiles + config +
+    /// logs) and the "recordings" folder go too; whichever aren't removed are kept in place.</summary>
     private static void StartDeleteAfterExit(string installFolder, bool removeProfilesConfigLogs, bool removeRecordings)
     {
         // Refuse before writing a script that deletes a tree. Both callers already turn a throw here

@@ -18,11 +18,11 @@ namespace RemSound.App;
 /// Pipeline:
 ///   1. Sender / receiver audio threads call <see cref="WriteSent"/> /
 ///      <see cref="WriteReceived"/> — each appends to a pre-allocated lock-free SPSC ring
-///      buffer (one per direction) using nothing but a memcpy, an atomic add on the write
+///      buffer (one per direction and route tag) using nothing but a memcpy, an atomic add on the write
 ///      head, and an event Set. Zero allocations, zero locks, zero signaling primitives
 ///      that could contend with disk I/O. Audio threads NEVER touch the disk and never
 ///      touch the file writers.
-///   2. A single background writer thread waits on the wake-up event, drains both rings,
+///   2. A single background writer thread waits on the wake-up event, drains the rings,
 ///      mixes the two directions when source mode is "Both", and feeds the resulting
 ///      samples to the format writer.
 ///   3. <see cref="Stop"/> drains anything still in the rings, closes the file, and
@@ -44,9 +44,9 @@ namespace RemSound.App;
 /// Channel-mode downmix happens at the writer-thread layer (one place to do it cleanly)
 /// rather than at each enqueue point.
 ///
-/// Lifecycle: one AudioRecorder per recording session. The MainForm creates a fresh one
-/// on Start and disposes it on Stop. Reconfiguring mid-session is not supported — the user
-/// stops, edits settings, and starts again.
+/// Lifecycle: one AudioRecorder per recording file. <see cref="RecordingController"/> creates a
+/// fresh one on Start (one per track for a split recording) and stops and disposes it on Stop.
+/// Reconfiguring mid-session is not supported — the user stops, edits settings, and starts again.
 /// </summary>
 internal sealed class AudioRecorder : IDisposable
 {
@@ -87,10 +87,11 @@ internal sealed class AudioRecorder : IDisposable
     //
     // Pre-2026-05-15 there was one ring per direction and both lanes' samples were appended one after
     // the other — twice the audio at half the wall-clock duration. The fix gave the WASAPI and ASIO
-    // lanes a ring each and folded Mixed into the WASAPI one, reasoning that the classic modes only
-    // ever have one tap firing. The DAW plugin lane broke that reasoning: in the two-lane mode it sends
-    // on Mixed while the WASAPI capture lane sends on WasapiLane, so two audio threads wrote the one
-    // ring at once whenever you recorded your send while a DAW was sending too (2026-09-13 review,
+    // lanes a ring each and folded Mixed into the WASAPI one, reasoning that whenever Mixed is in use
+    // (a single-lane set-up) it is the only tap firing. The DAW plugin lane broke that reasoning: in the
+    // two-lane mode it sends on Mixed while the WASAPI capture lane sends on WasapiLane, so two audio
+    // threads wrote the one ring at once whenever you recorded your send while a DAW was sending too
+    // (2026-09-13 review,
     // finding 5). The sender's three lanes always hold three DIFFERENT route tags — PluginSend's own
     // test pins that — so one ring per tag gives every sending lane a ring of its own in every mode.
     //
@@ -153,10 +154,6 @@ internal sealed class AudioRecorder : IDisposable
     /// to this recorder since is being dropped.</summary>
     public string? FaultReason { get; private set; }
 
-    /// <summary>Is the writer still there to take audio? False means the file has stopped growing
-    /// whatever the rest of the app believes.</summary>
-    public bool WriterAlive => FaultReason is null && writerThread is { IsAlive: true };
-
     /// <summary>Constructs the recorder, opens the output file, and starts the writer
     /// thread. If anything fails the constructor throws and no cleanup is needed (no
     /// file has been opened yet).</summary>
@@ -208,9 +205,8 @@ internal sealed class AudioRecorder : IDisposable
 
     /// <summary>Tap target for sender-side audio. Discarded silently if this recorder's
     /// source mode is "received only". The <paramref name="lane"/> identifies which
-    /// SenderLane the samples came from so the writer thread can keep WASAPI-lane and
-    /// ASIO-lane streams separate (and mix them at drain time). RenderRoute.Mixed (the
-    /// classic-mode case) routes to the WASAPI slot as the canonical "single lane".
+    /// SenderLane the samples came from; each route tag has a ring of its own
+    /// (<see cref="RingIndex"/>), and the writer thread sums the rings at drain time.
     /// Lock-free, allocation-free; safe to call from the audio thread.</summary>
     public void WriteSent(ReadOnlyMemory<float> stereoFloats, RenderRoute lane)
     {
@@ -671,6 +667,28 @@ internal sealed class AudioRecorder : IDisposable
         void Write(ReadOnlySpan<float> samples);
     }
 
+    /// <summary>The largest data chunk a WAV can describe, and the reason a long recording has to be
+    /// STOPPED rather than allowed to run past it.
+    ///
+    /// <para>The RIFF size and data-chunk-size fields are both unsigned 32-bit. Past 4 GB they wrap,
+    /// and <c>(uint)dataBytesWritten</c> truncated silently — the file kept growing while its header
+    /// described a different, wrong length, so a player would read part of it and stop. How long that
+    /// takes depends on the format: at 48 kHz stereo about 3 hours of 32-bit float, 4 hours of 24-bit
+    /// or 6 hours of 16-bit, and twice as long in mono: well
+    /// inside a long rehearsal or an overnight, and exactly the kind of failure you discover when you
+    /// open the file. Nothing guarded it (found 2026-08-24).</para>
+    ///
+    /// <para>Stopping is the right answer here rather than carrying on. Everything up to the limit is
+    /// a valid, complete, playable WAV — Dispose patches the header — and the user is TOLD through the
+    /// same route as any other writer death, so they can start a fresh file. Carrying on would trade a
+    /// clean recording for a longer, corrupt one. (The real fix for takes this long is
+    /// RF64, or recording in FLAC, which has no such limit.)</para></summary>
+    private const long WavMaxDataBytes = uint.MaxValue - 1024;
+
+    /// <summary>Gate seam: shrink the WAV size cap so the limit can be reached in a test rather than
+    /// after hours of recording. Zero means use the real one.</summary>
+    internal static long WavDataCapForTest;
+
     /// <summary>WAV writer with crash-resilient periodic header updates.
     ///
     /// NAudio's stock WaveFileWriter writes the RIFF / data-chunk size fields ONCE at file
@@ -701,27 +719,6 @@ internal sealed class AudioRecorder : IDisposable
     /// For 32-bit IEEE float we use the slightly-longer 18-byte fmt chunk variant with
     /// format code 3 and a trailing cbSize=0 field, so the data chunk starts at offset 46.
     /// </summary>
-    /// <summary>The largest data chunk a WAV can describe, and the reason a long recording has to be
-    /// STOPPED rather than allowed to run past it.
-    ///
-    /// <para>The RIFF size and data-chunk-size fields are both unsigned 32-bit. Past 4 GB they wrap,
-    /// and <c>(uint)dataBytesWritten</c> truncated silently — the file kept growing while its header
-    /// described a different, wrong length, so a player would read part of it and stop. At 48 kHz
-    /// stereo that is about 3 hours of 32-bit float, 4 hours of 24-bit or 6 hours of 16-bit: well
-    /// inside a long rehearsal or an overnight, and exactly the kind of failure you discover when you
-    /// open the file. Nothing guarded it (found 2026-08-24).</para>
-    ///
-    /// <para>Stopping is the right answer here rather than carrying on. Everything up to the limit is
-    /// a valid, complete, playable WAV — Dispose patches the header — and the user is TOLD through the
-    /// same route as any other writer death, so they can start a fresh file. Carrying on would trade a
-    /// clean three-hour recording for a corrupt four-hour one. (The real fix for takes this long is
-    /// RF64, or recording in FLAC, which has no such limit.)</para></summary>
-    private const long WavMaxDataBytes = uint.MaxValue - 1024;
-
-    /// <summary>Gate seam: shrink the WAV size cap so the limit can be reached in a test rather than
-    /// in three hours. Zero means use the real one.</summary>
-    internal static long WavDataCapForTest;
-
     private sealed class WavFormatWriter : IFormatWriter
     {
         private const int HeaderRefreshSeconds = 5;
@@ -788,6 +785,8 @@ internal sealed class AudioRecorder : IDisposable
             var cap = WavDataCapForTest > 0 ? WavDataCapForTest : WavMaxDataBytes;
             if (dataBytesWritten + (long)samples.Length * 4 > cap)
             {
+                // 384,000 bytes a second is 48 kHz 32-bit stereo. 16-bit, 24-bit and mono files hold more
+                // time in the same bytes, so for those formats this figure is an underestimate.
                 var hours = dataBytesWritten / 384000.0 / 3600.0;
                 throw new IOException(
                     $"this WAV has reached the {cap / 1024 / 1024 / 1024.0:0.0} GB a WAV file can describe "

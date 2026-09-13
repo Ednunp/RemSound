@@ -18,9 +18,13 @@ namespace RemSound.App;
 /// copy, or launch straight into a profile / connection without touching the UI.
 ///
 /// Two kinds of option:
-///   * "do-and-exit" commands (--help, --version, --devices, --selftest, --diagnostics, --log,
-///     --close) print to the calling terminal (and/or a file) and terminate the process.
+///   * "do-and-exit" commands (--help, --version, --devices, --list-profiles, --list-named-peers,
+///     --selftest, --perftest, --diagnostics, --log, --close, and the developer and publishing verbs
+///     --plugin-window, --latency-lab and --sign-update) print to the calling terminal (and/or a
+///     file) and terminate the process; --plugin-window shows a window instead of printing.
 ///   * "launch options" (--profile, --connect, --minimized) modify a normal GUI start.
+/// <c>--config-dir</c> (<see cref="TryGetConfigDir"/>) applies to both. Program handles --silent,
+/// --foreground, --await-pid, --uninstall, --apply-update and the service verbs itself.
 ///
 /// Wired into <see cref="Program"/> right after the legacy-layout migration and before the
 /// single-instance guard. The do-and-exit commands need no window and no instance lock.
@@ -89,9 +93,9 @@ internal static class CommandLine
                 case "--perftest": case "--perf-test":
                     return WithConsole(() => RunPerfTest(args));
                 case "--plugin-window":
-                    // Shows the PLUGIN's window with no DAW involved, so its controls can be tested
-                    // with a screen reader before any plugin plumbing exists. If it isn't readable
-                    // as a plain window it won't be readable inside a host.
+                    // Shows the PLUGIN's window with no DAW involved, linked to a running RemSound over
+                    // the real app-plugin bridge, so its controls can be tried with a screen reader
+                    // outside a host. If it isn't readable as a plain window it won't be readable inside a host.
                     return ShowPluginWindow();
                 case "--latency-lab":
                     // Diagnostic harness (2026-08-14 latency-slider field report): drives the real
@@ -175,11 +179,6 @@ internal static class CommandLine
         }
     }
 
-    // ---------------- console plumbing ----------------
-
-    /// <summary>Attach to the calling terminal (when launched from one), point Console.Out at the
-    /// real stdout handle (works for an interactive console AND a redirected pipe), run the command,
-    /// and return its exit code. A WinExe has no console of its own, hence the attach dance.</summary>
     /// <summary>Show the plugin editor panel standalone (see PluginEditorPanel.ShowStandalone).
     /// A UI verb, so it must NOT attach a console — that would flash a window at a blind user.</summary>
     private static int ShowPluginWindow()
@@ -207,6 +206,11 @@ internal static class CommandLine
         return 0;
     }
 
+    // ---------------- console plumbing ----------------
+
+    /// <summary>Attach to the calling terminal (when launched from one), point Console.Out at the
+    /// real stdout handle (works for an interactive console AND a redirected pipe), run the command,
+    /// and return its exit code. A WinExe has no console of its own, hence the attach dance.</summary>
     private static int WithConsole(Func<int> body)
     {
         try { AttachConsole(ATTACH_PARENT_PROCESS); } catch { /* no parent console - fine */ }

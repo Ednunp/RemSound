@@ -10,9 +10,10 @@ namespace RemSound.App;
 /// re-enumerating every tick whether or not anything changed, RemSound re-reads the device lists
 /// only when Windows actually tells us the device set changed.
 ///
-/// The callbacks arrive on a COM thread, so the consumer (<see cref="MainForm"/>) marshals to the
-/// UI thread and debounces — a single hot-plug typically fires several of these in quick
-/// succession (state-changed + added + default-changed), which collapse into one refresh.
+/// The callbacks arrive on a COM thread. It has two users, and both debounce: <see cref="MainForm"/>
+/// marshals to the UI thread and refreshes its device lists, and the service's
+/// <see cref="ServiceSendHost"/> re-opens capture — a single hot-plug typically fires several of these
+/// in quick succession (state-changed + added + default-changed), which collapse into one refresh.
 ///
 /// Property-value changes (volume nudges, format tweaks) are deliberately ignored: they fire
 /// constantly and never change the device <em>set</em>, so reacting to them would defeat the

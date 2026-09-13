@@ -174,11 +174,12 @@ internal static class Program
         // a no-op once they're gone. 2026-06-08.
         CleanUpLegacyRootSounds();
 
-        // Command-line interface (Sensor-Readout-style). "Do-and-exit" commands (--devices,
-        // --selftest, --diagnostics, --version, --log, --close, --help) run here — before the
-        // single-instance lock and before any window — and terminate the process. Otherwise we
-        // collect launch overrides (--profile / --connect / --minimized) and continue the normal
-        // GUI start below, applying them as we resolve the profile.
+        // Command-line interface (Sensor-Readout-style). "Do-and-exit" commands (--help, --version,
+        // --devices, --list-profiles, --list-named-peers, --selftest, --perftest, --diagnostics, --log,
+        // --close, and the developer verbs --plugin-window, --latency-lab and --sign-update) run here —
+        // before the single-instance lock and before the main window — and terminate the process.
+        // Otherwise we collect launch overrides (--profile / --connect / --minimized) and continue the
+        // normal GUI start below, applying them as we resolve the profile.
         var cliExit = CommandLine.Process(args, out var cli);
         if (cliExit is { } cliCode) Environment.Exit(cliCode);
         if (cli.StartMinimized) MainForm.startNextInstanceMinimized = true;
@@ -317,7 +318,7 @@ internal static class Program
             //       startup profile.
             //
             //   (b) AppConfig.StartWithProfileTitle — the persistent "Start with a specific
-            //       profile" preference set via the Startup behaviour dialog. Loaded if (a)
+            //       profile" preference set in Preferences. Loaded if (a)
             //       didn't fire. Combined with the Windows auto-start registry entry and the
             //       StartMinimised flag, it lets the user boot a machine and have RemSound
             //       up and streaming with no clicks.

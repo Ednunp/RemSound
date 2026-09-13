@@ -3,7 +3,8 @@ using RemSound.Core;
 namespace RemSound.App;
 
 /// <summary>
-/// Default cue-sound resolution. The cue WAVs ship as numbered variants in <c>sounds\</c> -
+/// Default cue-sound resolution. The cue WAVs ship as numbered variants in <c>default sounds\</c>
+/// (<see cref="AppConfig.SoundsDirectory"/>) -
 /// "connect 1.wav", "connect 2.wav", ... - and the user picks which one is the default for each
 /// cue in Preferences (stored machine-wide in <see cref="AppConfig.DefaultCueSounds"/>). This
 /// helper discovers the variants for a cue and resolves which one is the active default.
@@ -24,7 +25,7 @@ internal static class CueSounds
     /// <summary>The variant filenames available for a cue, sorted by their trailing number. The
     /// base name comes from <paramref name="defaultFileName"/> (the historical single name, e.g.
     /// "connect.wav" -> base "connect"), matched against "connect.wav" and "connect &lt;n&gt;.wav"
-    /// in <c>sounds\</c>. Returns filenames only (no path); empty when none are present.</summary>
+    /// in <c>default sounds\</c>. Returns filenames only (no path); empty when none are present.</summary>
     public static IReadOnlyList<string> Variants(string defaultFileName)
     {
         var baseName = Path.GetFileNameWithoutExtension(defaultFileName);

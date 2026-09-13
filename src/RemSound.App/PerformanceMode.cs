@@ -7,7 +7,8 @@ namespace RemSound.App;
 /// "Full CPU speed" mode for the current profile. When enabled, pulls every documented
 /// Windows lever to keep our process running at full clock — no EcoQoS downclocking, no
 /// migration to E-cores, no deep-C-state idling, 1 ms scheduler quantum, High priority
-/// class. Every mechanism is scoped to this process: nothing affects other apps,
+/// class, normal memory priority, a locked working-set floor. Every mechanism is scoped to
+/// this process: nothing affects other apps,
 /// and nothing here changes the system power plan (which is global) or anyone else's
 /// scheduling. Untoggling reverses every change cleanly.
 ///
@@ -41,13 +42,21 @@ namespace RemSound.App;
 ///         which belongs to the THREAD that calls it: the service switches this mode on and off
 ///         from different threads, so switching it off could leave "system required" set on
 ///         another thread for good. A power request belongs to the process. 2026-09-13 review.</item>
+///   <item><b>Memory priority = Normal</b>. Windows can demote a process that looks idle, and a
+///         demoted process has its pages trimmed first; this asserts the normal priority.</item>
+///   <item><b>Minimum working set locked (32 MB)</b>, so Windows can't trim the process during a
+///         quiet spell and stall the first frames that follow it. Released when the mode is
+///         switched off.</item>
 /// </list>
 ///
 /// Trade-offs the user should know about:
 /// <list type="bullet">
-///   <item>Laptop on battery: faster drain while RemSound is open with this on. Worth
-///         the energy for a "live session" profile; not worth it for a "background
-///         listening" one. That's why this lives on the Profile, not on AppConfig.</item>
+///   <item>Laptop on battery: faster drain while this is engaged. The app engages it only while
+///         audio is moving and releases it after a quiet hold-down
+///         (<see cref="MainForm.PriorityModeHoldDown"/>, 30 s); the service engages it whenever it
+///         is sending. Worth the energy for a "live session" profile; not worth it for a
+///         "background listening" one. That's why the app's switch lives on the Profile, not on
+///         AppConfig.</item>
 ///   <item>Desktop on mains: usually a couple of watts more, no practical downside.</item>
 /// </list>
 ///

@@ -60,9 +60,8 @@ internal sealed class RecordingController
     public bool IsRecording => active is not null || meRecorder is not null || peerTracks is not null;
 
     /// <summary>UTC clock at which the current recording started, or null when nothing is
-    /// recording. Captured by <see cref="Start"/> and cleared by <see cref="Stop"/>. Used
-    /// by the system-tray tooltip builder in MainForm to surface "recording for MM:SS"
-    /// alongside the peer count. 2026-05-28.</summary>
+    /// recording. Captured by <see cref="Start"/> and cleared by <see cref="Stop"/>. Nothing
+    /// reads it at present.</summary>
     public DateTime? RecordingStartedUtc { get; private set; }
 
     /// <summary>Optional callback fired when the user starts or stops a recording. The
@@ -84,7 +83,6 @@ internal sealed class RecordingController
         + (meRecorder?.DroppedSampleFrames ?? 0)
         + (peerTracks?.Values.Sum(t => t.Recorder.DroppedSampleFrames) ?? 0);
 
-    /// <summary>Every recorder currently running, so the caller can watch their health.</summary>
     /// <summary>Gate seam: arm the next write on every live recorder to fail, so the death of a
     /// writer can be tested instead of hoped about.</summary>
     internal void FailNextWriteForTest()
@@ -92,6 +90,7 @@ internal sealed class RecordingController
         foreach (var r in LiveRecorders()) r.FailNextWriteForTest = true;
     }
 
+    /// <summary>Every recorder currently running.</summary>
     private IEnumerable<AudioRecorder> LiveRecorders()
     {
         if (active is not null) yield return active;
@@ -151,9 +150,9 @@ internal sealed class RecordingController
         RecordingStateChanged?.Invoke(true);
     }
 
-    /// <summary>Stop the currently-running recording. Unhooks taps, flushes the writer
-    /// queue, closes the file, and surfaces the resulting path in a brief MessageBox
-    /// so the user knows where the file landed.</summary>
+    /// <summary>Stop the currently-running recording. Unhooks taps, drains each recorder's
+    /// queue and closes its file, then raises <see cref="RecordingStateChanged"/>. The
+    /// finished path and size go to the diagnostic log only.</summary>
     public void Stop()
     {
         if (!IsRecording) return;
@@ -259,7 +258,7 @@ internal sealed class RecordingController
         diagnostic($"recording: started multi-track → {folder} ({(peerTracks?.Count ?? 0)} peer track(s){(meRecorder is not null ? " + your send" : "")}, source={s.Source}, format={s.FileFormat}, bypass={s.BypassShaping})");
     }
 
-    // Audio thread. Route each peer's block to that peer's recorder. peerRecorders is fully built at
+    // Audio thread. Route each peer's block to that peer's recorder. peerTracks is fully built at
     // Start and only replaced with null at Stop, so a plain volatile read is safe.
     private void OnPeerRecordBlock(IPEndPoint peer, ReadOnlyMemory<float> block)
     {

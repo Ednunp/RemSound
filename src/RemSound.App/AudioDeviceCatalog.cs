@@ -8,9 +8,9 @@ namespace RemSound.App;
 /// for loopback capture) and input (capture — mics, line-ins) devices. Used by the App to
 /// populate the two send-device check-lists.
 ///
-/// Selection state is intentionally NOT persisted: every session starts with all checkboxes
-/// unticked and nothing being sent. The user re-ticks once per session. Stops the
-/// "wrong-device-still-checked" surprise after a card unplug, ID change, etc.
+/// Selection state is not kept here: the ticked device ids are saved on the <see cref="Profile"/>
+/// (<c>SelectedWasapiSendOutputs</c>, <c>SelectedWasapiSendInputs</c> and the other Selected device
+/// lists) and ticked again when that profile loads.
 /// </summary>
 internal static class AudioDeviceCatalog
 {

@@ -51,11 +51,11 @@ internal sealed class RemSoundUpdater
 
     public string CurrentVersion => Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.0.0";
 
-    /// <summary>Hit the GitHub Releases API, parse the latest release, return a struct
-    /// describing what was found. Returns null if the request fails (network down, rate
-    /// limited, repo not found) or if the latest version is not newer than the running
-    /// assembly. Caller decides whether to surface "you're up to date" vs silently doing
-    /// nothing — both paths get null back.</summary>
+    /// <summary>Hit the GitHub Releases API, pick the highest RemSound client release and compare
+    /// it with the running assembly. Returns <see cref="UpdateAvailable"/> when it is newer,
+    /// <see cref="UpToDate"/> when it is not, and <see cref="UpdateCheckFailed"/> when the check
+    /// could not complete (network down, rate limited, repo not found, no usable release or asset).
+    /// Never throws; the caller picks what to tell the user for each outcome.</summary>
     public async Task<UpdateCheckResult> CheckForUpdateAsync(CancellationToken token = default)
     {
         try
@@ -355,9 +355,6 @@ internal sealed class RemSoundUpdater
         catch { /* best-effort */ }
     }
 
-    /// <summary>Parses a release tag like <c>v1.2</c> or <c>1.2.3</c> into a <see cref="Version"/>.
-    /// Leading "v" is stripped. Missing minor/build parts get filled with zeros so the result
-    /// always compares meaningfully against <see cref="Assembly.GetName"/>.Version.</summary>
     /// <summary>True if <paramref name="tag"/> is a RemSound client release tag — e.g.
     /// <c>v1.6</c>, <c>1.6</c>, <c>1.6.0</c> — rather than something else hosted in the same
     /// GitHub repo, notably the relay server's <c>server-vX.Y</c> releases. Test: after an
@@ -371,6 +368,9 @@ internal sealed class RemSoundUpdater
         return trimmed.Length > 0 && char.IsDigit(trimmed[0]);
     }
 
+    /// <summary>Parses a release tag like <c>v1.2</c> or <c>1.2.3</c> into a <see cref="Version"/>.
+    /// Leading "v" is stripped. Missing minor/build parts get filled with zeros so the result
+    /// always compares meaningfully against <see cref="Assembly.GetName"/>.Version.</summary>
     public static Version ParseTag(string tag)
     {
         if (string.IsNullOrWhiteSpace(tag)) return new Version(0, 0, 0);

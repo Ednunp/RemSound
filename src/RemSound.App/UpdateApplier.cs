@@ -23,6 +23,8 @@ namespace RemSound.App;
 /// Invoked by Program.Main when the command line carries <c>--apply-update</c>. Args:
 ///   --apply-update --update-source &lt;dir&gt; --update-target &lt;dir&gt; --update-wait-pid &lt;pid&gt;
 ///   --update-stage-root &lt;dir&gt; [--resume-profile &lt;title&gt;] [--update-no-restart]
+/// Nothing passes --update-no-restart today; with it the files are swapped (or rolled back) and
+/// RemSound is not started again.
 /// </summary>
 internal static class UpdateApplier
 {
@@ -205,6 +207,10 @@ internal static class UpdateApplier
         catch (Exception ex) { log($"could not write resume sentinel: {ex.Message}"); }
     }
 
+    /// <summary>Start RemSound.exe from <paramref name="target"/> with <c>--foreground</c>.
+    /// <paramref name="profile"/> is not used here: after a successful swap the profile reaches the new copy
+    /// through the resume sentinel written just before, and after a rollback no sentinel is written, so the
+    /// old version opens the way it normally starts.</summary>
     private static void RestartApp(string target, string? profile, Action<string> log)
     {
         try
@@ -230,7 +236,7 @@ internal static class UpdateApplier
     private static extern bool AllowSetForegroundWindow(int dwProcessId);
 
     /// <summary>Best-effort temp cleanup. We're running FROM the stage, so we can't delete our own
-    /// exe's folder here — the restarted app finishes that on startup (see Program.CleanUpUpdateStages).</summary>
+    /// exe's folder here — the restarted app finishes that on startup (see <see cref="RemSoundUpdater.CleanUpUpdateStages"/>).</summary>
     private static void CleanupStage(string? stageRoot, Action<string> log)
     {
         if (string.IsNullOrWhiteSpace(stageRoot)) return;
