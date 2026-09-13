@@ -91,6 +91,7 @@ internal static partial class SelfTest
         // configuration at all. ---------------------------------------------------------------------
         new("ServiceProfileIsolation", "the service profile is a separate store; the service never renders"),
         new("ServiceSendHostStream", "the service is WASAPI send-only and has no output lane"),
+        new("AuditPushModeReadsIntegerCapture", "pure sample-format arithmetic on the push-mode capture class, fed bytes directly; it names the class, and no output configuration or audio device is involved"),
         new("AuditServiceSendsAnApplicationStartedLater", "it names the WASAPI send mode only to choose specific applications; the service never opens ASIO and never renders, so there is no output configuration to vary"),
         new("ServiceSenderParity", "compares service and app SENDER settings; the receive configuration is not in scope"),
 

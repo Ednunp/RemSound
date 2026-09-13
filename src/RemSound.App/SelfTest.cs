@@ -290,6 +290,18 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT: old sound folders keep people's own sounds", AuditOldSoundFoldersKeepPeoplesOwnSounds);
         RunStep(results, "AUDIT: keeping the machine awake belongs to the process, not one thread", AuditKeepAwakeBelongsToTheProcess);
         RunStep(results, "AUDIT: the plugin files are gathered after the plugin builds, and --help is current", AuditPluginFilesAreGatheredAfterThePluginBuilds);
+        RunStep(results, "AUDIT: settings changed in a dialog are all recorded, and the checks never touch this PC's start-up entry", AuditDialogChangesAreRecorded);
+        RunStep(results, "AUDIT: the long-run report counts frames sent on a send-only machine", AuditLongRunCountsSendOnlyFrames);
+        RunStep(results, "AUDIT: re-opening an output follows the one pinned rule", AuditOutputReopenUsesTheRule);
+        RunStep(results, "AUDIT: the plugin log line has one writer", AuditPluginLogLineHasOneWriter);
+        RunStep(results, "AUDIT: the status line gives no shared buffer figure", AuditStatusLineHasNoSharedBuffer);
+        RunStep(results, "AUDIT: the service dialog stores nothing for lock to audio clock", AuditServiceDialogStoresNoLockToClock);
+        RunStep(results, "AUDIT: a failed service query reads as not installed only when it is not", AuditServiceQueryFailureMapping);
+        RunStep(results, "AUDIT: profile and service files are written crash-safely", AuditProfileWritesAreCrashSafe);
+        RunStep(results, "AUDIT: heartbeats log failures, not every ping", AuditHeartbeatLogsOnlyWhatMatters);
+        RunStep(results, "AUDIT: the plugin link forgets a DAW once its last plugin goes", AuditPluginBridgeForgetsFinishedDaws);
+        RunStep(results, "AUDIT: the post-decode step probe is fed for Opus streams", AuditOpusStepProbeIsFed);
+        RunStep(results, "AUDIT: tight-latency capture reads integer PCM", AuditPushModeReadsIntegerCapture);
         RunStep(results, "AUDIT: re-opening an output is not network jitter (both output kinds)", AuditOutputReopenIsNotJitter);
         RunStep(results, "AUDIT: a settling WASAPI endpoint is not taken as a clock", AuditSettlingEndpointIsNotTakenAsAClock);
         RunStep(results, "AUDIT: after a wake the report bursts and splits network gaps from render gaps", AuditPostWakeBurstSplitsNetworkFromRender);
@@ -4817,15 +4829,21 @@ internal static partial class SelfTest
     /// <summary>Every dialog the app can show, constructible headlessly. ONE list, shared by the
     /// presence audit and the control suite — two lists would drift and a dialog would fall out of
     /// one of them unnoticed.</summary>
-    internal static (string Name, Func<Form> Make)[] DialogFactories() => new (string Name, Func<Form> Make)[]
+    /// <param name="settings">The profile settings the Preferences dialog is given. The dialog suite passes its own, so it can
+    /// see what the dialog changes in them; a fresh store when omitted.</param>
+    internal static (string Name, Func<Form> Make)[] DialogFactories(RemSoundSettingsStore? settings = null) => new (string Name, Func<Form> Make)[]
         {
             ("Recording settings", () => new RecordingSettingsDialog(new RecordingSettings())),
             // A REAL profile store with a saved profile: with an empty one, ticking "Start with a
             // specific profile" correctly shows "you have no saved profiles yet" — a modal that hangs
             // a headless run forever. The fix is an honest environment, not skipping the control.
             ("Preferences", () => new PreferencesDialog(
-                new RemSoundSettingsStore("RemSound"), StoreWithOneProfileForTest(),
-                () => false, _ => { }, () => { }, () => 0, () => { }, () => { }, () => { }, () => { }, () => { }, _ => { },
+                settings ?? new RemSoundSettingsStore("RemSound"), StoreWithOneProfileForTest(),
+                // Logging persists the way the main window's callback does, so the suite sees the box change something
+                // and holds it to saying so.
+                () => AppConfig.Load().LoggingEnabled,
+                enabled => { var c = AppConfig.Load(); c.LoggingEnabled = enabled; c.Save(); },
+                () => { }, () => 0, () => { }, () => { }, () => { }, () => { }, () => { }, _ => { },
                 () => (default(RouterMappingStatus), (IPEndPoint?)null, ""),
                 _ => { }, _ => { })),
             ("Service profile", () => new ServiceProfileDialog(RemSound.Core.Profile.NewBlank(), false)),

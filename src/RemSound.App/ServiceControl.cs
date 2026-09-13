@@ -81,9 +81,18 @@ public static class ServiceControl
                 _ => ServiceState.Unknown,
             };
         }
-        catch (InvalidOperationException) { return ServiceState.NotInstalled; } // no such service
-        catch { return ServiceState.Unknown; }
+        catch (Exception ex) { return StateForQueryFailure(ex); }
     }
+
+    /// <summary>Pure, testable: what a failed status query means. Only "the service does not exist" (Windows error 1060) is
+    /// NotInstalled. Every other failure, access denied among them, is Unknown — it used to read as NotInstalled too, which
+    /// offered to install a service that was already there. 2026-09-13 review.</summary>
+    internal static ServiceState StateForQueryFailure(Exception ex) =>
+        ex is InvalidOperationException { InnerException: Win32Exception { NativeErrorCode: ErrorServiceDoesNotExist } }
+            ? ServiceState.NotInstalled
+            : ServiceState.Unknown;
+
+    private const int ErrorServiceDoesNotExist = 1060;
 
     public static bool IsInstalled() => Query() != ServiceState.NotInstalled;
 
@@ -186,7 +195,7 @@ public static class ServiceControl
     /// <summary>Installs the service. Must be run elevated. Copies the program to the service's OWN folder
     /// (<see cref="ServiceStore.BinDirectory"/>) and registers it to run from THERE — never from the app's
     /// install folder or a dev working copy — so it can't lock those files or block the app's auto-updater.
-    /// Also grants the machine's authenticated users start/stop rights, so the service can be stopped with
+    /// Also grants the installing user start/stop rights, so the service can be stopped with
     /// a plain <c>sc stop</c> (no admin, no app). Returns 0 on success. Idempotent-ish: already-installed
     /// reports success.</summary>
     public static int DoInstall()
@@ -438,7 +447,7 @@ public static class ServiceControl
         CopyDir(sourceDir, destDir, skipDirs);
     }
 
-    /// <summary>Adds an ACE granting Authenticated Users start + stop + query on the service, so the
+    /// <summary>Adds an ACE granting the installing user start + stop + query on the service, so the
     /// service can be stopped/started without administrator rights (a plain <c>sc stop RemSoundService</c>
     /// or the app's Service menu without a UAC prompt). Reads the current security descriptor and inserts
     /// the ACE, so nothing already granted is lost. Best-effort — a failure just leaves the default

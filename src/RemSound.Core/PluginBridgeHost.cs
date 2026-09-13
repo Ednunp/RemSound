@@ -714,9 +714,48 @@ public sealed class PluginBridgeHost : IDisposable
             if (!instances.Remove(hash, out var instance)) return;
             claims.ReleaseAll(instance.Id);
             DropShared(instance.Id);
+            PruneGroupLocked(instance.Group);
             Notable?.Invoke($"plugin {Short(instance.Id)} closed cleanly"
                 + (instance.ClaimedPeers.Length == 0 ? "" : $" - {Describe(instance.ClaimedPeers)} back on the speakers"));
         }
+    }
+
+    /// <summary>A DAW's bookkeeping goes when its last instance does. The process-id → group map and the per-group block
+    /// counters were never pruned, so every DAW process ever seen stayed in memory, and a new process that reused an old
+    /// id joined the dead one's group. 2026-09-13 review.</summary>
+    private void PruneGroupLocked(Guid group)
+    {
+        foreach (var other in instances.Values)
+            if (other.Group == group) return;
+        blockCounters.Remove(group);
+        foreach (var (pid, g) in hostGroups.ToList())
+            if (g == group) hostGroups.Remove(pid);
+    }
+
+    /// <summary>Gate seams: a hello carrying a process id, a clean goodbye, the start of a block count, and the sizes of the
+    /// two maps that must not outlive the DAWs they describe.</summary>
+    internal void HelloForTest(int hash, int processId)
+    {
+        var instance = Touch(hash);
+        Span<byte> pid = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(pid, processId);
+        NoteHostProcess(instance, pid);
+    }
+
+    internal void GoodbyeForTest(int hash) => Forget(hash);
+
+    internal void StartBlockCountForTest(int hash)
+    {
+        lock (gate)
+        {
+            if (instances.TryGetValue(hash, out var instance) && !blockCounters.ContainsKey(instance.Group))
+                blockCounters[instance.Group] = new BlockCounter();
+        }
+    }
+
+    internal (int HostGroups, int BlockCounters) GroupBookkeepingForTest
+    {
+        get { lock (gate) return (hostGroups.Count, blockCounters.Count); }
     }
 
     private void SweepLocked()
@@ -743,6 +782,7 @@ public sealed class PluginBridgeHost : IDisposable
             instances.Remove(hash);
             claims.ReleaseAll(instance.Id);
             DropShared(instance.Id);
+            PruneGroupLocked(instance.Group);
             // No goodbye: the DAW was killed, or crashed. Worth a line - it is the difference between
             // "the plugin misbehaved" and "the host died", which look identical from the outside.
             Notable?.Invoke($"plugin {Short(instance.Id)} went quiet and timed out (no goodbye - the DAW probably closed abruptly)"

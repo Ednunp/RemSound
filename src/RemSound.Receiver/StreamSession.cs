@@ -391,6 +391,9 @@ internal sealed class StreamSession : IDisposable
         Span<byte> floatScratch = floatBytes <= 16 * 1024 ? stackalloc byte[floatBytes] : new byte[floatBytes];
         var floatSpan = MemoryMarshal.Cast<byte, float>(floatScratch);
         for (var i = 0; i < floatCount; i++) floatSpan[i] = shortScratch[i] / 32768f;
+        // The post-decode step probe, fed on the Opus path too: its log columns read 0 for every Opus stream, and Opus is
+        // the codec most people send. 2026-09-13 review.
+        postDecodeStepProbe.ScanStereo(floatSpan);
 
         sessionPlayout.Write(floatScratch);
         onFramesQueued(sampleCountPerChannel);

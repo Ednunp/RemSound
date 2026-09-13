@@ -106,7 +106,7 @@ internal static class ProfilePasswordManagerDialog
                 var profile = JsonSerializer.Deserialize<Profile>(File.ReadAllText(path));
                 if (profile is null) continue;
                 profile.Password = RemSoundCrypto.Obfuscate(now);
-                File.WriteAllText(path, JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true }));
+                ProfileStore.WriteProfileFile(path, profile);
                 changedAny = true;
             }
             catch

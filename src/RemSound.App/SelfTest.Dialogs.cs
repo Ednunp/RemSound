@@ -48,9 +48,18 @@ internal static partial class SelfTest
         var scratch = Path.Combine(Path.GetTempPath(), "remsound-dialog-suite-" + Guid.NewGuid().ToString("N"));
         using var scope = AppConfig.UseThrowawayUserDataDirectory(scratch);
 
+        // The suite's own profile settings and a stand-in for the Windows start-up entry, so everything a control can change
+        // is visible to the snapshot below — and this machine's REAL start-up entry is never touched. 2026-09-13 review.
+        var auditSettings = new RemSoundSettingsStore("RemSound");
+        var realRunValueBefore = StartupAutoStart.RealRegistryValueForTest();
+        var restoreAutoStartMemory = StartupAutoStart.UseMemoryForTest;
+        StartupAutoStart.UseMemoryForTest = true;
+        StartupAutoStart.MemoryValueForTest = null;
+
         var restoreMuted = CuePlayer.GloballyMuted;
         var restoreChecks = CheckSoundService.Suppressed;
         var restoreSink = UiChangeLog.Sink;
+        var restoreKeyClicks = KeyClickService.Enabled;
         CuePlayer.GloballyMuted = true;
         CheckSoundService.Suppressed = true;
         try
@@ -72,7 +81,7 @@ internal static partial class SelfTest
 
             UiChangeLog.Sink = (what, value) => { lock (dialogLogCapture) dialogLogCapture.Add($"{what} → {value}"); };
 
-            foreach (var (name, make) in DialogFactories())
+            foreach (var (name, make) in DialogFactories(auditSettings))
             {
                 // Name it BEFORE touching it: if a dialog blocks (a modal opened by a control we
                 // drove, a driver probe), the last line of output names the culprit instead of
@@ -112,13 +121,13 @@ internal static partial class SelfTest
                         // persist on change (Preferences, the big one) prove themselves right here; the
                         // rest persist on OK and are counted separately rather than silently skipped.
                         if (!c.Enabled) continue;
-                        var before = SnapshotConfig();
+                        var before = SnapshotConfig(auditSettings);
                         // (5) THE LOG. Captured around the drive, so a control that changes stored
                         // configuration can be required to SAY so — see below.
                         dialogLogCapture.Clear();
                         try { DriveDialogControl(c); }
                         catch (Exception ex) { problems.Add($"{name} / '{DialogControlName(c)}': driving it threw {ex.GetType().Name}: {ex.Message}"); continue; }
-                        if (SnapshotConfig() == before) continue;
+                        if (SnapshotConfig(auditSettings) == before) continue;
                         effectsProven++;
                         changedConfig.Add($"{name} / '{DialogControlName(c)}'");
                         if (dialogLogCapture.Count > 0) loggedIt.Add($"{name} / '{DialogControlName(c)}'");
@@ -155,6 +164,10 @@ internal static partial class SelfTest
             Check(loggedIt.Count > 0,
                 "not one dialog control was proven to log what it changed — the log half of this suite proved nothing");
 
+            Check(StartupAutoStart.RealRegistryValueForTest() == realRunValueBefore,
+                "driving the dialogs must leave this machine's real 'start RemSound when you sign in' entry exactly as it was — "
+                + "the suite ticks that box like any other, and until 2026-09-13 it rewrote the real entry on every run");
+
             Check(problems.Count == 0, string.Join("; ", problems));
 
             return $"{dialogs} dialogs, {controlsAudited} interactive controls audited (accessibility + theme + driven); "
@@ -166,14 +179,24 @@ internal static partial class SelfTest
             CuePlayer.GloballyMuted = restoreMuted;
             CheckSoundService.Suppressed = restoreChecks;
             UiChangeLog.Sink = restoreSink;
+            KeyClickService.Enabled = restoreKeyClicks;
+            StartupAutoStart.UseMemoryForTest = restoreAutoStartMemory;
+            StartupAutoStart.MemoryValueForTest = null;
         }
     }
 
-    /// <summary>The whole persisted configuration as text, so "did driving this control change
-    /// anything" is answerable without knowing which setting each control maps to.</summary>
-    private static string SnapshotConfig()
+    /// <summary>Everything a dialog control can change, as text, so "did driving this control change anything" is
+    /// answerable without knowing which setting each control maps to: the machine-wide configuration, the profile settings
+    /// the dialogs were given, and the start-up entry. Until 2026-09-13 only the first — so a profile setting (accept remote
+    /// volume, a cue turned off) or the start-up entry could change with nothing logged and the suite stayed green.</summary>
+    private static string SnapshotConfig(RemSoundSettingsStore settings)
     {
-        try { return System.Text.Json.JsonSerializer.Serialize(AppConfig.Load()); }
+        try
+        {
+            return System.Text.Json.JsonSerializer.Serialize(AppConfig.Load())
+                + "|profile:" + settings.SnapshotForTest()
+                + "|start-up entry:" + (StartupAutoStart.MemoryValueForTest ?? "");
+        }
         catch { return ""; }
     }
 

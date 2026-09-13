@@ -49,10 +49,28 @@ public static class ServiceStore
         catch { return null; }
     }
 
+    /// <summary>Write a whole file crash-safely: a sibling temp file, then an atomic move over the target. A torn write of the
+    /// service profile read back as NO service profile, and the service stayed idle with nothing said. Every whole file in
+    /// this folder is written this way; the two append-only logs are not whole files. 2026-09-13 review.</summary>
+    internal static void WriteAtomic(string path, string contents)
+    {
+        var tmp = path + ".tmp";
+        try
+        {
+            File.WriteAllText(tmp, contents);
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch
+        {
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* ignore */ }
+            throw;
+        }
+    }
+
     public static void SaveProfile(Profile profile)
     {
         System.IO.Directory.CreateDirectory(Directory);
-        File.WriteAllText(ProfilePath, JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true }));
+        WriteAtomic(ProfilePath, JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true }));
     }
 
     /// <summary>Whether the service writes its own log. Machine-wide (the service can't read the user's
@@ -104,7 +122,7 @@ public static class ServiceStore
 
     public static void SaveStatus(ServiceStatus status)
     {
-        try { System.IO.Directory.CreateDirectory(Directory); File.WriteAllText(StatusPath, JsonSerializer.Serialize(status)); }
+        try { System.IO.Directory.CreateDirectory(Directory); WriteAtomic(StatusPath, JsonSerializer.Serialize(status)); }
         catch { /* best-effort */ }
     }
 
@@ -125,7 +143,7 @@ public static class ServiceStore
     /// <summary>Record the folder the app that installed/updated the service runs from. Never throws.</summary>
     public static void SaveAppSourcePath(string folder)
     {
-        try { System.IO.Directory.CreateDirectory(Directory); File.WriteAllText(AppSourcePathFile, folder); }
+        try { System.IO.Directory.CreateDirectory(Directory); WriteAtomic(AppSourcePathFile, folder); }
         catch { /* best-effort */ }
     }
 
@@ -145,7 +163,7 @@ public static class ServiceStore
     /// <summary>Record the installing user's SID. Elevated install path only. Never throws.</summary>
     public static void SaveInstallingUserSid(string sid)
     {
-        try { System.IO.Directory.CreateDirectory(Directory); File.WriteAllText(InstallingUserSidFile, sid); }
+        try { System.IO.Directory.CreateDirectory(Directory); WriteAtomic(InstallingUserSidFile, sid); }
         catch { /* best-effort */ }
     }
 
@@ -202,7 +220,7 @@ public static class ServiceStore
     /// completion — so the update log shows the update actually finished (and its absence flags a stuck one).</summary>
     public static void SetUpdatePending()
     {
-        try { System.IO.Directory.CreateDirectory(Directory); File.WriteAllText(UpdatePendingPath, ""); } catch { }
+        try { System.IO.Directory.CreateDirectory(Directory); WriteAtomic(UpdatePendingPath, ""); } catch { }
     }
 
     public static bool ConsumeUpdatePending()
@@ -237,7 +255,7 @@ public static class ServiceStore
     private static void SaveSettings(ServiceSettings s)
     {
         System.IO.Directory.CreateDirectory(Directory);
-        File.WriteAllText(SettingsPath, JsonSerializer.Serialize(s));
+        WriteAtomic(SettingsPath, JsonSerializer.Serialize(s));
     }
 
     /// <summary>The startup-volume option: (enabled, percent 0-100, boot-only vs every start).</summary>
@@ -264,7 +282,7 @@ public static class ServiceStore
 
     public static void SaveStartupVolumeBootMarker(DateTime bootUtc)
     {
-        try { System.IO.Directory.CreateDirectory(Directory); File.WriteAllText(StartupVolumeMarkerPath, bootUtc.ToString("o")); }
+        try { System.IO.Directory.CreateDirectory(Directory); WriteAtomic(StartupVolumeMarkerPath, bootUtc.ToString("o")); }
         catch { /* best-effort */ }
     }
 
@@ -286,7 +304,7 @@ public static class ServiceStore
 
     public static void SaveStartupVolumeLastAppliedUtc(DateTime whenUtc)
     {
-        try { System.IO.Directory.CreateDirectory(Directory); File.WriteAllText(StartupVolumeLastAppliedPath, whenUtc.ToString("o")); }
+        try { System.IO.Directory.CreateDirectory(Directory); WriteAtomic(StartupVolumeLastAppliedPath, whenUtc.ToString("o")); }
         catch { /* best-effort */ }
     }
 

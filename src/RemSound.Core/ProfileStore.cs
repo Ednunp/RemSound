@@ -141,6 +141,16 @@ public sealed class ProfileStore
         WriteFileAtomic(path, json);
     }
 
+    /// <summary>Write a profile to an explicit path the same crash-safe way <see cref="Save"/> does. For the places that
+    /// rewrite a profile file directly — rename, save to a chosen path, read-only and password changes, the password
+    /// manager — which used plain writes: a crash or forced close mid-write left a truncated file that loads as a blank
+    /// profile. 2026-09-13 review.</summary>
+    public static void WriteProfileFile(string path, Profile profile)
+    {
+        if (profile is null) throw new ArgumentNullException(nameof(profile));
+        WriteFileAtomic(path, JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true }));
+    }
+
     /// <summary>Write text crash-safely: write a sibling temp file, then atomically move it over the
     /// target. A crash, power-loss, or the updater force-closing mid-write then leaves either the old
     /// file or the complete new one — never a truncated file that the catch-all loaders would

@@ -684,6 +684,7 @@ internal sealed class PreferencesDialog : Form
             {
                 cue.SaveCustomPath(null);
                 if (cue.IsProfileSetting) ChangedAnyProfileSetting = true;
+                UiChangeLog.Record($"cue sound: {cue.CueId}", "built-in sound (your own file no longer used)");
                 RefreshCueActionButtons();
                 RefreshDefaultSoundList();   // the list must show the built-in sound now playing
             }
@@ -729,6 +730,7 @@ internal sealed class PreferencesDialog : Form
         {
             settings.SaveAcceptRemoteVolumeCommands(acceptRemoteVolumeBox.Checked);
             ChangedAnyProfileSetting = true;
+            UiChangeLog.Record("accept remote volume commands", acceptRemoteVolumeBox.Checked ? "on" : "off");
         };
 
         // Auto-save interval — machine-local, saved on change. Rows map 1:1 to AutoSaveMinuteOptions;
@@ -957,7 +959,10 @@ internal sealed class PreferencesDialog : Form
             // further action. NOT a profile setting — do NOT touch ChangedAnyProfileSetting
             // or we'll trigger a spurious "save profile?" prompt on exit when the user
             // toggled nothing else.
+            // Said while the log is open: before logging goes off, after it comes on. 2026-09-13 review.
+            if (!loggingBox.Checked) UiChangeLog.Record("logging", "off");
             applyLoggingEnabled(loggingBox.Checked);
+            if (loggingBox.Checked) UiChangeLog.Record("logging", "on");
         };
 
         writeLogsNowButton.Click += (_, _) => writeLogsNow();
@@ -1296,6 +1301,7 @@ internal sealed class PreferencesDialog : Form
             if (suppressStartWithUserHandler) return;
             // Source of truth for auto-start is the registry, not AppConfig — flip it directly.
             var ok = startWithUserBox.Checked ? StartupAutoStart.TryEnable() : StartupAutoStart.TryDisable();
+            if (ok) UiChangeLog.Record("start RemSound automatically when you sign in", startWithUserBox.Checked ? "on" : "off");
             if (!ok)
             {
                 MessageBox.Show(this,
@@ -1498,6 +1504,7 @@ internal sealed class PreferencesDialog : Form
             // turned back on.
             cue.SaveEnabled(false);
             if (cue.IsProfileSetting) ChangedAnyProfileSetting = true;
+            UiChangeLog.Record($"cue sound: {cue.CueId}", "off");
             RefreshCueActionButtons();
             return;
         }
@@ -1668,10 +1675,12 @@ internal sealed class PreferencesDialog : Form
         if (pickedFullPath.StartsWith(soundsFolderFullPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
         {
             cue.SaveCustomPath(null);
+            UiChangeLog.Record($"cue sound: {cue.CueId}", $"built-in sound {Path.GetFileName(pickedFullPath)}");
         }
         else
         {
             cue.SaveCustomPath(pickedFullPath);
+            UiChangeLog.Record($"cue sound: {cue.CueId}", $"your own file {Path.GetFileName(pickedFullPath)}");
         }
         // The Startup cue is machine-wide, not part of the profile — don't arm the save prompt.
         if (cue.IsProfileSetting) ChangedAnyProfileSetting = true;

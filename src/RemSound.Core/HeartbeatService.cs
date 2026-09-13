@@ -253,7 +253,8 @@ public sealed class HeartbeatService : IDisposable
             try
             {
                 var ok = transport(outboundPingBuffer, outboundPingBuffer.Length, p.AudioEndpoint);
-                onDiagnostic?.Invoke($"send seq={seq} to={p.AudioEndpoint} {(ok ? "ok" : "FAILED")}");
+                // Failures only: a line per successful ping, once a second per peer, buried the log. 2026-09-13 review.
+                if (!ok) onDiagnostic?.Invoke($"send seq={seq} to={p.AudioEndpoint} FAILED");
             }
             catch (Exception ex)
             {
@@ -293,8 +294,6 @@ public sealed class HeartbeatService : IDisposable
 
         if (kind == HeartbeatKind.Ping)
         {
-            onDiagnostic?.Invoke($"recv ping from={remote}");
-
             // Echo the originator's timestamp back to them as a Pong. Reply target is the
             // remote source endpoint (whatever socket the ping came in on, that's where to
             // send the pong) — this works for both LAN-direct (peer's audio port) and
@@ -328,9 +327,10 @@ public sealed class HeartbeatService : IDisposable
                 matchedCount++;
             }
         }
-        // Diagnostic for the Pong path. matched=0 means we got a pong from an IP we don't
-        // track (suspicious — possible loopback / echo), >0 is the normal case.
-        onDiagnostic?.Invoke($"recv pong from={remote} rtt={rttMs}ms matched={matchedCount} origTickMs={originatorTickMs} nowMs={nowMs}");
+        // A pong from an address we don't track (possible loopback / echo) is worth a line. A normal one, once a second per
+        // peer, is not: those lines buried the log. 2026-09-13 review.
+        if (matchedCount == 0)
+            onDiagnostic?.Invoke($"recv pong from={remote} matched no tracked peer (rtt={rttMs}ms origTickMs={originatorTickMs} nowMs={nowMs})");
     }
 
     /// <summary>Test seam: run the REAL health-state derivation (SnapshotHealthLocked) against a

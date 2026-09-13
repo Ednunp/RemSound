@@ -48,7 +48,13 @@ public sealed partial class MainForm : Form
 
     /// <summary>Run the once-a-second plugin summary on demand, so the gate does not have to wait for
     /// a timer that a headless form never starts.</summary>
-    internal void WritePluginLogLineForTest()
+    internal void WritePluginLogLineForTest() => WritePluginLogLine();
+
+    /// <summary>The plugin link's once-a-second log line: only while a plugin is connected, and only when it changed — a
+    /// line a second saying the same thing would bury the session somebody is trying to read, so a stalled link shows as a
+    /// gap, which is itself the finding. One method for the per-second tick and the gate, so the gate checks the line the
+    /// app writes rather than a copy of it. 2026-09-13 review.</summary>
+    private void WritePluginLogLine()
     {
         if (pluginHost is not { } host || !host.HasActivity) return;
         var line = host.DescribeForLog();
@@ -3286,7 +3292,14 @@ public sealed partial class MainForm : Form
         using var dialog = new RecordingSettingsDialog(settings.LoadRecordingSettings());
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         settings.SaveRecordingSettings(dialog.Result);
-        if (dialog.ChangedAnything) MarkProfileDirty();
+        if (dialog.ChangedAnything)
+        {
+            MarkProfileDirty();
+            // Recorded on OK, because the dialog changes nothing until then. It recorded nothing at all. 2026-09-13 review.
+            var r = dialog.Result;
+            LogUiChange("recording settings", $"{r.FileFormat}, {r.Source}, {r.ChannelMode}, split tracks {(r.SplitTracks ? "on" : "off")}, "
+                + $"folder {(string.IsNullOrWhiteSpace(r.Folder) ? "default" : r.Folder)}");
+        }
     }
 
     /// <summary>Show a file-picker rooted at the profiles folder; on selection, schedule a
@@ -3446,7 +3459,7 @@ public sealed partial class MainForm : Form
                 // Old file is gone (someone deleted it externally). Just write a fresh copy
                 // under the new name so the active profile still has a backing file.
                 var profile = BuildCurrentProfile(newTitle);
-                File.WriteAllText(newPath, JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true }));
+                ProfileStore.WriteProfileFile(newPath, profile);
             }
         }
         catch (Exception ex)
@@ -6605,6 +6618,9 @@ public sealed partial class MainForm : Form
         longRunRenderSamples++;
     }
 
+    /// <summary>Frames sent on the send-only branch, which has no render figures to note alongside them.</summary>
+    private void NoteLongRunSendFrames(long framesSent) => longRunSendFrames += framesSent;
+
     /// <summary>
     /// One compact line every few minutes, whenever logging is on — sending, receiving or idle.
     ///
@@ -7591,7 +7607,8 @@ public sealed partial class MainForm : Form
             "an output is being re-opened, and the gap it leaves is not network jitter", log: !healingAnOutput);
 
         var now = DateTime.UtcNow;
-        if (now - lastFaultedOutputHealUtc < FaultedOutputRetryInterval) return;
+        // The decision is ShouldReopenOutputs, the rule the gate pins; this used to restate it inline.
+        if (!ShouldReopenOutputs(faulted, missing.Length, withinRetryInterval: now - lastFaultedOutputHealUtc < FaultedOutputRetryInterval)) return;
         lastFaultedOutputHealUtc = now;
 
         // Logged once per episode, not once per attempt: a device that is genuinely unplugged would
@@ -7622,7 +7639,6 @@ public sealed partial class MainForm : Form
     {
         if (lastAppliedOutputIds.Length == 0) return [];
         var live = receiver.ActiveOutputDeviceIds;
-        if (live.Count == 0 && lastAppliedOutputIds.Length == 0) return [];
         var open = new HashSet<string>(live, StringComparer.OrdinalIgnoreCase);
         var missing = new List<string>();
         foreach (var id in lastAppliedOutputIds)
@@ -8829,8 +8845,10 @@ public sealed partial class MainForm : Form
         var sendText = sender.IsRunning
             ? $"sending {sender.PacketsSent} packets ({sender.BytesSent / 1024} KB) codec={sender.Codec} from \"{sender.CaptureDeviceName}\""
             : (IsSendEnabled && !HasCheckedSendDevice() ? "not sending — tick a capture device" : "not sending");
+        // No buffer or target here: they were one shared figure, true only with a single lane. The jitter buffer boxes and
+        // the Total latency box give them per lane. 2026-09-13 review.
         var receiveText = receiver.IsRunning
-            ? $"receiving {receiver.PacketsReceived} packets, buffer {receiver.CurrentBufferMs} ms (target {receiver.TargetLatencyMs} ms), underruns {receiver.Underruns}, drops {receiver.Drops} on \"{receiver.OutputDeviceName}\""
+            ? $"receiving {receiver.PacketsReceived} packets, underruns {receiver.Underruns}, drops {receiver.Drops} on \"{receiver.OutputDeviceName}\""
             : "not receiving";
         var peerCount = knownPeers.Count;
         var hbSummary = heartbeatService?.GetHealthSummary() ?? "no peers";
@@ -9044,22 +9062,9 @@ public sealed partial class MainForm : Form
             maxLatencyMsAsio: asioMaxMs,
             targetLatencyMsAsio: asioTargetMs);
 
-        // The plugin link's LOG LINE, once a second, but only while a plugin is actually connected —
-        // a line a second saying "nothing" would bury the session somebody is trying to read. This
-        // one belongs below the diagnostics gate; the sweep it used to sit next to did not, and has
-        // moved up.
-        if (pluginHost is { } host && host.HasActivity)
-        {
-            var line = host.DescribeForLog();
-            // Repeating an identical line every second is the same burial by a different route, so
-            // only a change is written. A stalled link therefore shows as a gap, which is itself the
-            // finding.
-            if (line != lastPluginLogLine)
-            {
-                lastPluginLogLine = line;
-                logFile.Event($"vst plugin: {line}");
-            }
-        }
+        // The plugin link's LOG LINE, once a second while a plugin is connected. This one belongs below the
+        // diagnostics gate; the sweep it used to sit next to did not, and has moved up.
+        WritePluginLogLine();
 
         // First-of-kind events make it easy to see in the log where the chain breaks.
         if (sender.IsRunning)
@@ -9396,6 +9401,9 @@ public sealed partial class MainForm : Form
                 // measurement the "mic only works in ASIO" report needs, now on the talker side too.
                 var capPeak = sender.TakeMaxSenderPreEncodePeak();
                 var sndAudFr = sender.TakeSenderAudioFramesSent();
+                // No render figures on a send-only machine, but the long-run report's send frames still count. It read
+                // "send frames=0/s" on every one of them. 2026-09-13 review.
+                NoteLongRunSendFrames(sndAudFr);
                 logFile.Event(
                     $"sender-diag sendCbGapMs={sendCbGapMs} emitMs={emitMs} sndCallMs={sendCallMs} " +
                     $"capPeak={capPeak:0.000} sndAudFrΔ={sndAudFr} " +
@@ -9959,8 +9967,7 @@ public sealed partial class MainForm : Form
             var profile = BuildCurrentProfile(title);
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            var json = JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(path, json);
+            ProfileStore.WriteProfileFile(path, profile);
 
             currentProfileTitle = title;
             currentProfilePath = path;
@@ -10205,8 +10212,7 @@ public sealed partial class MainForm : Form
         {
             var dir = Path.GetDirectoryName(currentProfilePath);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            var json = JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(currentProfilePath, json);
+            ProfileStore.WriteProfileFile(currentProfilePath, profile);
         }
         else
         {
@@ -10264,8 +10270,7 @@ public sealed partial class MainForm : Form
             if (profile is null) return;
             if (profile.ReadOnly == readOnly) return;  // no change, skip the rewrite
             profile.ReadOnly = readOnly;
-            var newJson = JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(currentProfilePath, newJson);
+            ProfileStore.WriteProfileFile(currentProfilePath, profile);
         }
         catch (Exception ex)
         {
@@ -10315,8 +10320,7 @@ public sealed partial class MainForm : Form
             var profile = JsonSerializer.Deserialize<Profile>(json);
             if (profile is null) return;
             profile.Password = RemSoundCrypto.Obfuscate(plaintextPassword);
-            var newJson = JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(currentProfilePath, newJson);
+            ProfileStore.WriteProfileFile(currentProfilePath, profile);
         }
         catch (Exception ex)
         {

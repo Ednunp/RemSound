@@ -32,12 +32,10 @@ namespace RemSound.Sender;
 ///     expected to fall back to <see cref="MixingEngine"/> for multi-source. Mixing N
 ///     independent WASAPI capture callbacks needs a rendezvous point that doesn't exist
 ///     in this design.
-///   • Float-format capture only. Modern WASAPI loopback / shared-mode delivers
-///     <see cref="WaveFormatEncoding.IeeeFloat"/> 32-bit stereo on every device we've seen.
-///     Direct-input devices that report int16 will fall through to a diagnostic and the
-///     callback returns silence; caller can fall back to <see cref="MixingEngine"/> in that
-///     case (which uses NAudio's <c>ToSampleProvider</c> conversion path that handles all
-///     formats).
+///   • 32-bit float, or 16/24/32-bit integer PCM (plain or extensible) converted to float in the
+///     callback. Modern WASAPI shared mode delivers 32-bit float on every device we've seen; an
+///     input reporting integer PCM used to stop with the lane silently dead. Any other format
+///     still stops, with a diagnostic.
 ///   • Resampling is performed inline using <see cref="WdlResampler"/> in sinc mode (64 taps,
 ///     32 sub-phases). That is NOT the pull path's configuration: the WdlResamplingSampleProvider
 ///     in <see cref="CaptureSource"/> runs the same resampler with sinc off (filter count 2).
@@ -81,6 +79,8 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
     private WdlResampler? resampler;
     private int sourceSampleRate;
     private int sourceChannels;
+    private bool sourceIsFloat = true;
+    private int sourceBitsPerSample = 32;
 
     // Reusable scratch buffers. Sized lazily inside the callback.
     private float[] sourceFloatScratch = new float[8192];
@@ -161,14 +161,18 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
                 captureFormatDescription = $"{fmt.SampleRate} Hz, {fmt.Channels} ch, {fmt.BitsPerSample}-bit "
                     + (fmt.Encoding == WaveFormatEncoding.IeeeFloat ? "float" : fmt.Encoding.ToString());
 
-                if (fmt.Encoding != WaveFormatEncoding.IeeeFloat)
+                // Float or integer PCM, plain or extensible. Integer PCM used to stop here with the lane silently dead —
+                // nothing re-opened it — while this class's summary promised a fallback that did not exist. It is now
+                // converted in the callback; any other format still stops, with this diagnostic. 2026-09-13 review.
+                if (SampleKindOf(fmt) is not { } sample)
                 {
                     onDiagnostic?.Invoke(
-                        $"push-wasapi: source \"{spec.Name}\" reports non-float capture format ({fmt.Encoding}); push mode requires IeeeFloat");
-                    lastError = $"unsupported source encoding: {fmt.Encoding}";
+                        $"push-wasapi: source \"{spec.Name}\" reports a capture format push mode cannot read ({fmt.Encoding}, {fmt.BitsPerSample}-bit)");
+                    lastError = $"unsupported source encoding: {fmt.Encoding} {fmt.BitsPerSample}-bit";
                     StopInternal();
                     return;
                 }
+                (sourceIsFloat, sourceBitsPerSample) = sample;
 
                 if (fmt.SampleRate != MixSampleRate)
                 {
@@ -286,6 +290,58 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
 
     public void Dispose() => Stop();
 
+    // KSDATAFORMAT_SUBTYPE_IEEE_FLOAT and KSDATAFORMAT_SUBTYPE_PCM, the sub-formats WAVE_FORMAT_EXTENSIBLE carries.
+    private static readonly Guid SubtypeIeeeFloat = new("00000003-0000-0010-8000-00aa00389b71");
+    private static readonly Guid SubtypePcm = new("00000001-0000-0010-8000-00aa00389b71");
+
+    /// <summary>Pure, testable: what the capture delivers — 32-bit float, or 16/24/32-bit integer PCM, plain or
+    /// WAVE_FORMAT_EXTENSIBLE. Null for anything push mode cannot read.</summary>
+    internal static (bool IsFloat, int Bits)? SampleKindOf(WaveFormat fmt)
+    {
+        var encoding = fmt.Encoding;
+        if (fmt is WaveFormatExtensible extensible)
+        {
+            if (extensible.SubFormat == SubtypeIeeeFloat) encoding = WaveFormatEncoding.IeeeFloat;
+            else if (extensible.SubFormat == SubtypePcm) encoding = WaveFormatEncoding.Pcm;
+        }
+        return encoding switch
+        {
+            WaveFormatEncoding.IeeeFloat when fmt.BitsPerSample == 32 => (true, 32),
+            WaveFormatEncoding.Pcm when fmt.BitsPerSample is 16 or 24 or 32 => (false, fmt.BitsPerSample),
+            _ => null,
+        };
+    }
+
+    /// <summary>Pure, testable: interleaved capture bytes to floats in -1..1. Float is copied as it is; 16, 24 and 32-bit
+    /// integer PCM are scaled by their full range. Allocation-free — it runs on the capture thread. Returns the sample
+    /// count written.</summary>
+    internal static int ConvertToFloat(byte[] bytes, int byteCount, bool isFloat, int bitsPerSample, float[] destination)
+    {
+        var count = byteCount / (bitsPerSample / 8);
+        if (isFloat)
+        {
+            Buffer.BlockCopy(bytes, 0, destination, 0, count * sizeof(float));
+            return count;
+        }
+        switch (bitsPerSample)
+        {
+            case 16:
+                for (var i = 0; i < count; i++) destination[i] = BitConverter.ToInt16(bytes, i * 2) / 32768f;
+                break;
+            case 24:
+                for (var i = 0; i < count; i++)
+                {
+                    var o = i * 3;
+                    destination[i] = (bytes[o] | (bytes[o + 1] << 8) | ((sbyte)bytes[o + 2] << 16)) / 8388608f;
+                }
+                break;
+            default:
+                for (var i = 0; i < count; i++) destination[i] = BitConverter.ToInt32(bytes, i * 4) / 2147483648f;
+                break;
+        }
+        return count;
+    }
+
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
     {
         Interlocked.Increment(ref callbackCount);
@@ -296,14 +352,13 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
         var workStart = diag ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
         try
         {
-            // 1. Reinterpret captured bytes as floats. Only IeeeFloat is supported (see Start).
-            var sourceFloatCount = e.BytesRecorded / sizeof(float);
+            // 1. The captured bytes as floats: float copied as it is, integer PCM scaled (see Start). e.Buffer is byte[]
+            //    and we need the floats indexable, so they go into our scratch; the copy is cheap (7680 bytes for 10 ms at
+            //    96 kHz stereo float).
+            var sourceFloatCount = e.BytesRecorded / (sourceBitsPerSample / 8);
             if (sourceFloatScratch.Length < sourceFloatCount)
                 sourceFloatScratch = new float[sourceFloatCount];
-            // MemoryMarshal.Cast avoids a copy where layout permits, but e.Buffer is byte[] and we
-            // need the floats indexable so we copy into our scratch. Copy is cheap: 7680 bytes for
-            // 10 ms at 96 kHz stereo float.
-            Buffer.BlockCopy(e.Buffer, 0, sourceFloatScratch, 0, e.BytesRecorded);
+            ConvertToFloat(e.Buffer, e.BytesRecorded, sourceIsFloat, sourceBitsPerSample, sourceFloatScratch);
             var sourceFrames = sourceFloatCount / sourceChannels;
 
             // Raw-capture probe — scans the L channel of the source buffer in the form

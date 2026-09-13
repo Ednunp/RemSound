@@ -537,6 +537,9 @@ public sealed class RemSoundSettingsStore
     // AppConfig directly.)
     private Settings cache = new();
 
+    /// <summary>The whole in-memory settings as text, for the gate's "did driving this control change anything" check.</summary>
+    internal string SnapshotForTest() => System.Text.Json.JsonSerializer.Serialize(cache);
+
     private Settings? Load() => cache;
 
     private void Save(Settings settings) => cache = settings;

@@ -22,12 +22,33 @@ internal static class StartupAutoStart
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string ValueName = "RemSound";
 
+    /// <summary>
+    /// The gate's stand-in for the registry value. While set, every method here reads and writes an in-memory value instead
+    /// of <c>HKCU\...\Run</c>. The dialog suite ticks "Start RemSound automatically" like any other box, and until 2026-09-13
+    /// that flipped the REAL entry on the machine running the gate — after an odd number of runs it pointed at the test build.
+    /// </summary>
+    internal static bool UseMemoryForTest;
+    private static string? memoryValueForTest;
+    internal static string? MemoryValueForTest { get => memoryValueForTest; set => memoryValueForTest = value; }
+
+    /// <summary>The real registry value, whatever <see cref="UseMemoryForTest"/> says — so the gate can prove it was left alone.</summary>
+    internal static string? RealRegistryValueForTest()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: false);
+            return key?.GetValue(ValueName) as string;
+        }
+        catch { return null; }
+    }
+
     /// <summary>True when an entry called "RemSound" exists under the per-user Run key.
     /// Reads the registry each call (cheap; single key open + value read). Never throws.</summary>
     public static bool IsEnabled
     {
         get
         {
+            if (UseMemoryForTest) return !string.IsNullOrWhiteSpace(memoryValueForTest);
             try
             {
                 using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: false);
@@ -66,6 +87,7 @@ internal static class StartupAutoStart
         try
         {
             if (string.IsNullOrWhiteSpace(exePath)) return false;
+            if (UseMemoryForTest) { memoryValueForTest = $"\"{exePath}\""; return true; }
             using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true)
                 ?? Registry.CurrentUser.CreateSubKey(RunKeyPath, writable: true);
             if (key is null) return false;
@@ -85,6 +107,7 @@ internal static class StartupAutoStart
     /// access errors.</summary>
     public static bool TryDisable()
     {
+        if (UseMemoryForTest) { memoryValueForTest = null; return true; }
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true);
@@ -108,6 +131,11 @@ internal static class StartupAutoStart
         try
         {
             if (string.IsNullOrWhiteSpace(folder)) return false;
+            if (UseMemoryForTest)
+            {
+                if (PathContainment.IsInside(memoryValueForTest?.Trim().Trim('"'), folder)) memoryValueForTest = null;
+                return true;
+            }
             using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true);
             if (key is null) return true; // No Run subkey → nothing to disable.
             var value = (key.GetValue(ValueName) as string)?.Trim().Trim('"');

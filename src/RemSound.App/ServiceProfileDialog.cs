@@ -253,12 +253,12 @@ internal sealed class ServiceProfileDialog : Form
         working.SendAllApplications = false;
         working.SelectedSendApplications = appsList.CheckedItems.OfType<AppRow>().Select(a => a.ProcessName).Distinct().ToList();
 
-        // Audio profile is fixed for the service (no tab): Opus live-jamming frame, Small packets, locked
-        // to the audio clock. These are also re-forced at runtime in ServiceSendHost.
+        // Audio profile is fixed for the service (no tab): Opus live-jamming frame and Small packets, also re-forced at
+        // runtime in ServiceSendHost. Lock to the audio clock is always on there and is not a profile setting, so nothing is
+        // stored for it (TightLatencyMode was set here and read by nothing).
         working.Codec = ServiceCodec;
         working.OpusFrameSamplesPerChannel = ServiceOpusFrameSamples;
         working.SendRate = ServiceSendRate;
-        working.TightLatencyMode = true;
 
         // Ticked peers are the ones the service sends to; keep every listed peer as remembered.
         working.SelectedConnectedPeers = peersList.CheckedItems.OfType<string>().Distinct().ToList();
