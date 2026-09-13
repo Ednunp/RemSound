@@ -31,7 +31,7 @@ ul, ol { padding-left: 1.4em; }
 <li><a href="#quick-start">Quick start</a></li>
 <li><a href="#profiles">Profiles</a></li>
 <li><a href="#main-window">The main window: menu bar and tabs</a></li>
-<li><a href="#menu-bar">Menus (File, Record, Options, Service, Help)</a></li>
+<li><a href="#menu-bar">Menus (File, Record, Service, DAW plugin, Options, Help)</a></li>
 <li><a href="#tab-connectivity">Connectivity tab</a></li>
 <li><a href="#tab-io">Audio inputs and outputs tab</a></li>
 <li><a href="#tab-profile">Audio profile tab</a></li>
@@ -103,7 +103,7 @@ ul, ol { padding-left: 1.4em; }
 
 <h2 id="profiles">3. Profiles</h2>
 
-<p>RemSound saves your whole setup &mdash; which devices are ticked, whether you're sending or receiving, your sound quality settings, delay targets, your ASIO driver choice, remembered peers, currently connected peers &mdash; into a single settings file. Each saved setup is called a <em>profile</em>. You choose which profile to load every time you start the program. You might keep one profile for &ldquo;morning podcast&rdquo; and another for &ldquo;evening jam session&rdquo;, each with a different mix of devices ticked, and switch between them in a couple of clicks. (Your keyboard shortcuts are the one thing that <em>isn't</em> saved per profile &mdash; from version 4.4 they're shared across all your profiles; see <a href="#hotkeys">Global hotkeys</a>.)</p>
+<p>RemSound saves your whole setup &mdash; which devices are ticked, whether you're sending or receiving, your sound quality settings, delay targets, your ASIO driver choice, remembered peers, currently connected peers &mdash; into a single settings file. Each saved setup is called a <em>profile</em>. You choose which profile to load every time you start the program. You might keep one profile for &ldquo;morning podcast&rdquo; and another for &ldquo;evening jam session&rdquo;, each with a different mix of devices ticked, and switch between them in a couple of clicks. (Your keyboard shortcuts are the one thing that <em>isn't</em> saved per profile &mdash; they're shared across all your profiles; see <a href="#hotkeys">Global hotkeys</a>.)</p>
 
 <h3>The startup picker</h3>
 
@@ -366,13 +366,13 @@ ul, ol { padding-left: 1.4em; }
 <tr><td><strong>Enable the remembered peers list on the Connectivity tab</strong></td><td>Alt+R</td><td>On by default. Untick to hide the Remembered peers list from the Connectivity tab.</td></tr>
 </table>
 
-<p>The <strong>Service</strong> menu (Alt+S) installs and controls the optional <a href="#service">lock-screen service</a> that keeps sending your audio when you are not at the machine. See that section for the details.</p>
+<p>The <strong>Service</strong> menu (Alt+J) installs and controls the optional <a href="#service">lock-screen service</a> that keeps sending your audio when you are not at the machine. See that section for the details.</p>
 
 <p>The <strong>DAW plugin</strong> menu (Alt+G) installs and removes the <a href="#daw-plugin">VST plugin</a> that puts RemSound inside your music software, and holds its two settings. See that section for the details.</p>
 
 <h2 id="tab-connectivity">6. Connectivity tab</h2>
 
-<p>This is where you manage peers and reach the logging options. The controls on this tab, in tab order:</p>
+<p>This is where you manage peers. (The logging options are on the <strong>Logging</strong> tab of Preferences &mdash; see <a href="#logs">Logs and diagnostics</a>.) The controls on this tab, in tab order:</p>
 
 <table>
 <tr><th>Control</th><th>Shortcut</th><th>What it does</th></tr>
@@ -509,13 +509,13 @@ ul, ol { padding-left: 1.4em; }
 
 <h3>Audio receive parameters</h3>
 
-<p>What you see in this section depends on whether an ASIO driver is chosen on the Audio inputs and outputs tab. With no ASIO driver, you see one delay setting (labelled simply &ldquo;Audio jitter buffer&rdquo;). With an ASIO driver chosen, you see two delay settings &mdash; one for each sound path &mdash; each with its own auto-tune toggle. The two paths are independent: a problem on one doesn't affect the other.</p>
+<p>What you see in this section depends on whether an ASIO driver is chosen on the Audio inputs and outputs tab. With no ASIO driver, you see one delay setting (labelled &ldquo;Audio jitter buffer in milliseconds&rdquo;). With an ASIO driver chosen, you see two delay settings &mdash; one for each sound path &mdash; each with its own auto-tune toggle. The two paths are independent: a problem on one doesn't affect the other.</p>
 
 <table>
 <tr><th>Control</th><th>Shortcut</th><th>What it does</th></tr>
 <tr><td><strong>ASIO jitter buffer in milliseconds</strong></td><td>Alt+I</td><td>(Only when an ASIO driver is chosen.) A small up/down number control. It sets the target amount of sound to keep buffered for the ASIO path. Default 10 ms. ASIO can sustain very low values, but going below the network's real-world jitter level (typically 15&ndash;25 ms) causes constant tiny corrections that you can hear &mdash; pick 25 ms as a safe floor unless both computers are on the same wired network or the same machine.</td></tr>
 <tr><td><strong>Continuous auto-tune ASIO jitter buffer</strong></td><td>Alt+T</td><td>(Only when an ASIO driver is chosen.) A checkbox. It nudges the ASIO delay target as the ASIO path's jitter changes. It works independently of the WASAPI toggle.</td></tr>
-<tr><td><strong>WASAPI jitter buffer in milliseconds</strong> (called just &ldquo;Jitter buffer&rdquo; when there's no ASIO driver)</td><td>Alt+W (Alt+L when no ASIO driver)</td><td>A small up/down number control. It sets the target amount of sound to keep buffered for the WASAPI path (or the only path, in WASAPI-only setups). Smaller means less delay but more clicks. Most people want 20&ndash;80 ms.</td></tr>
+<tr><td><strong>WASAPI jitter buffer in milliseconds</strong> (called &ldquo;Audio jitter buffer in milliseconds&rdquo; when there's no ASIO driver)</td><td>Alt+W (Alt+L when no ASIO driver)</td><td>A small up/down number control. It sets the target amount of sound to keep buffered for the WASAPI path (or the only path, in WASAPI-only setups). Smaller means less delay but more clicks. Most people want 20&ndash;80 ms.</td></tr>
 <tr><td><strong>Continuous auto-tune WASAPI jitter buffer</strong> (called &ldquo;Continuous auto-tune jitter buffer&rdquo; when there's no ASIO driver)</td><td>Alt+Y (Alt+T when no ASIO driver)</td><td>A checkbox. When it's on, RemSound nudges the WASAPI delay value automatically as the network changes. The companion interval combo box (<strong>Alt+N</strong>) sets how often it re-checks: 3, 5, 10, 15, or 30 seconds. The combo&rsquo;s label follows what you are actually using: &ldquo;Auto-tune interval for jitter buffer&rdquo; when only one kind of output is ticked (WASAPI only, or ASIO only), and &ldquo;Auto-tune interval for WASAPI and ASIO jitter buffer&rdquo; when you have both ticked, because that one timer drives both paths' auto-tuning. Each path still settles at whatever target its own calculation chooses; only the timing of the re-checks is shared.</td></tr>
 <tr><td><strong>Buffer smoothness</strong></td><td>Alt+B</td><td>A list, 1 to 10. It controls how patient the receiving side is with sound that arrives late, on either path. Higher means more protection from clicks but a longer steady delay. Default 3.</td></tr>
 <tr><td><strong>Artefact sound type</strong></td><td>Alt+A</td><td>A list. <em>Noise burst</em> (the default) fills a momentary gap with a brief soft hiss, which blends into music. <em>Click</em> leaves the gap unfilled so you hear an obvious click &mdash; useful when you want to hear every problem.</td></tr>
@@ -610,7 +610,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 </div>
 
 <div class="warn">
-<strong>RemSound watches for it for you (new in v3.4):</strong> if a Realtek ASIO driver is installed, RemSound spots it on startup and offers, just once, to disable it &mdash; partly for the device-grabbing reason above, and partly because it leaks Windows resources every time it's opened. Say yes and RemSound adds it to a never-touch list and takes it out of the driver picker, so it can't be chosen by accident. You can reverse that &mdash; or disable it later if you kept it &mdash; any time from <strong>Options &rarr; Enable / Disable Realtek ASIO driver in RemSound</strong>. Once you've answered the startup question, RemSound won't ask again.
+<strong>RemSound watches for it for you:</strong> if a Realtek ASIO driver is installed, RemSound spots it on startup and offers, just once, to disable it &mdash; partly for the device-grabbing reason above, and partly because it leaks Windows resources every time it's opened. Say yes and RemSound adds it to a never-touch list and takes it out of the driver picker, so it can't be chosen by accident. You can reverse that &mdash; or disable it later if you kept it &mdash; any time from <strong>Options &rarr; Enable / Disable Realtek ASIO driver in RemSound</strong>. Once you've answered the startup question, RemSound won't ask again.
 </div>
 
 <h3>Same driver, sending and receiving, on one computer</h3>
@@ -658,7 +658,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <table>
 <tr><th>Channel</th><th>Purpose</th><th>Default</th></tr>
 <tr><td>Audio</td><td>The actual sound, sent straight from one computer to the other. The regular health check-ins use this same channel too &mdash; one channel, one firewall rule.</td><td>47830</td></tr>
-<tr><td>Discovery</td><td>&ldquo;I'm here&rdquo; announcements every 1.5 seconds, so peers can find each other.</td><td>47831</td></tr>
+<tr><td>Discovery</td><td>&ldquo;I'm here&rdquo; announcements every 1.5 seconds, so peers can find each other.</td><td>47821</td></tr>
 </table>
 
 <p>One audio channel number is used for everything &mdash; Tailscale, local network connections, and any relay server. You never need to type a channel number after an address; the default is assumed. Both sides of a connection do need to use the same audio channel number.</p>
@@ -723,7 +723,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 
 <h2 id="encryption">13. Passwords and encryption</h2>
 
-<p>From v3.3, <strong>all the audio RemSound sends is encrypted</strong> &mdash; scrambled as it leaves your computer and only unscrambled at the other end. Anyone in between (your internet provider, a shared Wi-Fi, anyone watching the connection) just sees noise. This means you no longer need a VPN simply to keep your audio private. And it adds no delay you could ever notice &mdash; the scrambling happens in millionths of a second, far less time than the audio itself takes.</p>
+<p><strong>All the audio RemSound sends is encrypted</strong> &mdash; scrambled as it leaves your computer and only unscrambled at the other end. Anyone in between (your internet provider, a shared Wi-Fi, anyone watching the connection) just sees noise. This means you no longer need a VPN simply to keep your audio private. And it adds no delay you could ever notice &mdash; the scrambling happens in millionths of a second, far less time than the audio itself takes.</p>
 
 <h3>How it works: a password per profile</h3>
 
@@ -751,12 +751,12 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 
 <h3>When passwords don't match</h3>
 
-<p>If you connect to someone whose password is different from yours, RemSound shows a clear message &mdash; <em>&ldquo;You and [name] have different passwords, so no audio will pass between you&rdquo;</em> &mdash; so you know exactly what to fix. If the other person is on an older version of RemSound that can't encrypt, you'll be told they need to update.</p>
+<p>If you connect to someone whose password is different from yours, RemSound shows a clear message &mdash; <em>&ldquo;You and [name] have different passwords, so no audio will pass between you&rdquo;</em> &mdash; so you know exactly what to fix. If the other person has no password set on their profile, RemSound tells you they aren't sending a password fingerprint. That is by far the most common reason. Less often, their copy of RemSound is old enough to predate encryption and needs updating. Check the password first.</p>
 
 <h3>Two things worth knowing</h3>
 
 <ul>
-<li><strong>Everyone needs v3.3 or newer.</strong> Because the audio is now scrambled, a v3.3 copy can only talk to other v3.3 (and later) copies. Anyone you connect with needs to update too.</li>
+<li><strong>Very old copies can't join in.</strong> A copy of RemSound old enough to predate encryption can't talk to a current one. Anyone still using one needs to update.</li>
 <li><strong>The password lives with the profile.</strong> It's stored (lightly scrambled) inside the profile file, so it travels with the profile if you copy it to another machine or sync it through something like Dropbox. That's handy, but it means you should keep the profile file private &mdash; protect it the way you'd protect the password itself.</li>
 </ul>
 
@@ -775,7 +775,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 
 <h3>The sound-card cushion is automatic</h3>
 
-<p>Separately from the controls above &mdash; which manage the cushion against <em>network</em> jitter &mdash; RemSound also keeps a small cushion at the sound card itself, to smooth over the tiny timing differences between your two computers' sound clocks. From this version, RemSound sizes that cushion to each card automatically: a card that moves sound in bigger chunks (some onboard and USB cards do) gets a little more room, while a fast professional interface stays tight. You don't set this or think about it &mdash; it settles on the right amount for whatever card you're using.</p>
+<p>Separately from the controls above &mdash; which manage the cushion against <em>network</em> jitter &mdash; RemSound also keeps a small cushion at the sound card itself, to smooth over the tiny timing differences between your two computers' sound clocks. RemSound sizes that cushion to each card automatically: a card that moves sound in bigger chunks (some onboard and USB cards do) gets a little more room, while a fast professional interface stays tight. You don't set this or think about it &mdash; it settles on the right amount for whatever card you're using.</p>
 
 <h3>The jitter buffer</h3>
 
@@ -857,7 +857,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 
 <h3>Continuous auto-tune</h3>
 
-<p>The <strong>Continuous auto-tune jitter buffer</strong> checkbox hands the jitter buffer over to RemSound itself. When it's on, RemSound watches how evenly packets are arriving, every few seconds, and nudges the jitter buffer up if it&rsquo;s seeing late packets, or down if the network has been calm. It deliberately ignores a single one-off stall &mdash; the kind a driver or Windows hiccup causes once and never again &mdash; and only raises the cushion when late audio keeps arriving, so one brief blip doesn't balloon your latency for the rest of the session. The companion <strong>Auto-tune interval for jitter buffer (Alt+I)</strong> combo box sets how often it re-checks &mdash; <strong>3, 5, 10, 15, or 30 seconds</strong>. Faster values react quickly to a change in the network but can feel a bit twitchy. Think of continuous auto-tune as a hands-off way to keep the cushion the right size as your network changes through the session.</p>
+<p>The <strong>Continuous auto-tune jitter buffer</strong> checkbox hands the jitter buffer over to RemSound itself. When it's on, RemSound watches how evenly packets are arriving, every few seconds, and nudges the jitter buffer up if it&rsquo;s seeing late packets, or down if the network has been calm. It deliberately ignores a single one-off stall &mdash; the kind a driver or Windows hiccup causes once and never again &mdash; and only raises the cushion when late audio keeps arriving, so one brief blip doesn't balloon your latency for the rest of the session. The companion <strong>Auto-tune interval for jitter buffer (Alt+N)</strong> combo box sets how often it re-checks &mdash; <strong>3, 5, 10, 15, or 30 seconds</strong>. Faster values react quickly to a change in the network but can feel a bit twitchy. Think of continuous auto-tune as a hands-off way to keep the cushion the right size as your network changes through the session.</p>
 
 <p>If you turn auto-tune off, the jitter buffer just stays wherever it last was.</p>
 
@@ -938,7 +938,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <tr><td>Alt+U</td><td>Toggle Use CPU and Windows performance settings in high priority mode (for this profile)</td></tr>
 <tr><td>Alt+C</td><td>Focus Audio codec</td></tr>
 <tr><td>Alt+P</td><td>Focus Packet size</td></tr>
-<tr><td>Alt+L</td><td>Focus the jitter-buffer control. With no ASIO driver this is the single <strong>Audio jitter buffer</strong> box; with an ASIO driver chosen the WASAPI box takes Alt+W and the ASIO box takes Alt+I instead</td></tr>
+<tr><td>Alt+L</td><td>Focus the jitter-buffer control. With no ASIO driver this is the single <strong>Audio jitter buffer in milliseconds</strong> box; with an ASIO driver chosen the WASAPI box takes Alt+W and the ASIO box takes Alt+I instead</td></tr>
 <tr><td>Alt+T</td><td>Toggle continuous auto-tune &mdash; the ASIO path when an ASIO driver is chosen, otherwise the single Continuous auto-tune toggle</td></tr>
 <tr><td>Alt+W</td><td>(Only when an ASIO driver is chosen.) Focus the WASAPI-path jitter-buffer control</td></tr>
 <tr><td>Alt+Y</td><td>(Only when an ASIO driver is chosen.) Toggle the WASAPI-path continuous auto-tune</td></tr>
@@ -1100,12 +1100,12 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 </ul>
 
 <div class="note">
-<strong>Tip for troubleshooting:</strong> the log file (Preferences dialog &rarr; Enable logs) records every remote-control command sent and received, including <code>IGNORED</code> entries when an incoming command was turned down &mdash; either because the sender wasn't in your list of ticked peers, or because &ldquo;Accept remote volume commands&rdquo; was off. Handy for working out &ldquo;why isn't my hotkey doing anything&rdquo; without guessing.
+<strong>Tip for troubleshooting:</strong> the log file (Options &rarr; Preferences &rarr; Logging tab &rarr; Enable logs) records every remote-control command sent and received, including <code>IGNORED</code> entries when an incoming command was turned down &mdash; either because the sender wasn't in your list of ticked peers, or because &ldquo;Accept remote volume commands&rdquo; was off. Handy for working out &ldquo;why isn't my hotkey doing anything&rdquo; without guessing.
 </div>
 
 <h2 id="startup">18. Startup behaviour</h2>
 
-<p>Startup behaviour now lives on the <strong>Startup behaviour</strong> tab of the Preferences dialog (<strong>File &rarr; Preferences</strong>, or Ctrl+P). It has three independent toggles, plus a profile picker that appears when the third one is on. Each tick is saved straight away &mdash; there's no OK or Apply button. (It used to be a separate item on the Options menu; it moved into Preferences in the 2026 cue overhaul.)</p>
+<p>Startup behaviour is on the <strong>Startup behaviour</strong> tab of the Preferences dialog (<strong>Options &rarr; Preferences</strong>, or Ctrl+P). It has three independent toggles, plus a profile picker that appears when the third one is on. Each tick is saved straight away &mdash; there's no OK or Apply button.</p>
 
 <table>
 <tr><th>Toggle</th><th>What it does</th></tr>
@@ -1155,7 +1155,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <h3>The Audio cues tab</h3>
 
-<p>Open <strong>File &rarr; Preferences</strong> (or Ctrl+P) and go to the <strong>Audio cues</strong> tab. (Preferences is organised into six tabs &mdash; General, Appearance, Audio cues, Startup behaviour, Update settings and Logging &mdash; which you move between with Ctrl+Tab, Ctrl and a number, or the arrow keys when the row of tab names has focus.)</p>
+<p>Open <strong>Options &rarr; Preferences</strong> (or Ctrl+P) and go to the <strong>Audio cues</strong> tab. (Preferences is organised into six tabs &mdash; General, Appearance, Audio cues, Startup behaviour, Update settings and Logging &mdash; which you move between with Ctrl+Tab, Ctrl and a number, or the arrow keys when the row of tab names has focus.)</p>
 
 <p>The <strong>Audio cue sounds (Alt+N)</strong> list shows every cue by name. Use the up and down arrow keys to move between them &mdash; as you land on each cue, RemSound plays its current sound, so you can hear what's set just by arrowing through.</p>
 
@@ -1339,7 +1339,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <h3>Recording settings dialog</h3>
 
-<p>Reached via <strong>Record &rarr; Recording settings</strong>. Two tickboxes sit at the top, then up to five keyboard-navigable lists laid out left to right. FLAC's compression level has its own list, but it only shows when the file format is FLAC.</p>
+<p>Reached via <strong>Options &rarr; Recording settings</strong> (Alt+O, S). Two tickboxes sit at the top, then up to five keyboard-navigable lists laid out left to right. FLAC's compression level has its own list, but it only shows when the file format is FLAC.</p>
 
 <table>
 <tr><th>Control</th><th>What it does</th></tr>
@@ -1360,7 +1360,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <h2 id="logs">22. Logs and diagnostics</h2>
 
-<p>Everything to do with logging lives on its own <strong>Logging</strong> tab in the Preferences dialog (Options &rarr; Preferences, or Ctrl+P). If logging is turned on (the <strong>Enable logs</strong> checkbox there, on by default), RemSound writes a log file each session into a <code>logs</code> folder inside <strong>user settings and logs</strong> &mdash; the same folder your settings and profiles live in. One file per launch.</p>
+<p>Everything to do with logging lives on its own <strong>Logging</strong> tab in the Preferences dialog (Options &rarr; Preferences, or Ctrl+P). If logging is turned on (the <strong>Enable logs</strong> checkbox there, off by default), RemSound writes a log file each session into a <code>logs</code> folder inside <strong>user settings and logs</strong> &mdash; the same folder your settings and profiles live in. One file per launch.</p>
 
 <p>The file contains two kinds of rows:</p>
 
@@ -1418,8 +1418,10 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <table>
 <tr><th>Option</th><th>What it does</th></tr>
 <tr><td><code>--help</code> or <code>-h</code></td><td>Lists every option, the same as this section in short form.</td></tr>
-<tr><td><code>--version</code></td><td>Prints which version of RemSound is installed, for example &ldquo;RemSound 3.9&rdquo;.</td></tr>
+<tr><td><code>--version</code></td><td>Prints which version of RemSound this is: the word RemSound followed by the version number.</td></tr>
 <tr><td><code>--devices</code></td><td>Lists every microphone and line-in, every speaker and headphone output, and every ASIO driver on the machine &mdash; each with its sample rate, channel count and the exact device id RemSound uses internally. This is the quickest way to confirm an interface is actually present and seen by Windows.</td></tr>
+<tr><td><code>--list-profiles</code></td><td>Lists the names of your saved profiles. It only reads them and changes nothing.</td></tr>
+<tr><td><code>--list-named-peers</code></td><td>Lists the friendly names you've given peers, with each one's machine name and where and when it was last seen. It only reads them and changes nothing.</td></tr>
 <tr><td><code>--selftest</code><br>(or <code>--smoke-test</code>)</td><td>Runs RemSound's built-in self-test and reports <strong>PASS</strong> or <strong>FAIL</strong>. It works through a list of named checks: a full audio round-trip on the machine on its own (capture &rarr; encode &rarr; send across the network layer to itself &rarr; receive &rarr; decode, for both quality settings), the audio encryption, the network packet format, saving and reloading settings and a profile, that a diagnostics report never leaks a password, and that the bundled sounds and manual are present. No sound is played out, so it is safe to run silently. Add <code>--seconds N</code> to make the audio part run for longer than the default.</td></tr>
 <tr><td><code>--perftest</code><br>[<code>--seconds N</code>]</td><td>Runs the audio path through several short cycles and reports whether RemSound's handle, memory and thread use stays bounded &mdash; a quick check for resource leaks. Prints the numbers each cycle so two builds can be compared. No sound is played out.</td></tr>
 <tr><td><code>--diagnostics</code></td><td>Writes a single plain-text report file holding the version, the operating system, the current settings, the list of profiles, the full device list, a check of the Windows microphone-privacy permission, a quick live audio self-check, the most recent session snapshot and recent warnings from the log, and the tail of the most recent log. With no path it saves into the <strong>user settings and logs</strong> folder and prints where it put it; you can also give a path, for example <code>--diagnostics C:\Users\you\Desktop\report.txt</code>. This is the file to send when asking for help &mdash; it answers most questions in one go.</td></tr>
@@ -1430,6 +1432,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <tr><th>Option</th><th>What it does</th></tr>
 <tr><td><code>--log on</code> or <code>--log off</code></td><td>Turns the diagnostic log on or off. The change takes effect the next time RemSound starts. The same setting lives in the Preferences dialog; this is just a way to set it without opening the window.</td></tr>
 <tr><td><code>--close</code></td><td>Closes a copy of RemSound that is already running. Useful in a script that needs to restart it.</td></tr>
+<tr><td><code>--uninstall</code></td><td>Uninstalls an installed copy of RemSound &mdash; the same as <strong>Options &rarr; Uninstall RemSound from this PC</strong>. It asks you to confirm first. On a portable copy it just tells you there is nothing to remove.</td></tr>
 </table>
 
 <h3>Options that change how RemSound starts</h3>
@@ -1438,14 +1441,16 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <tr><th>Option</th><th>What it does</th></tr>
 <tr><td><code>--profile "&lt;name&gt;"</code></td><td>Starts straight into the named profile and skips the profile picker. Put the name in quotes if it contains a space, for example <code>--profile "Studio link"</code>.</td></tr>
 <tr><td><code>--connect &lt;ip&gt;</code></td><td>Starts and connects to a peer at that address. You can give just an address (<code>--connect 192.168.1.42</code>) or an address and port (<code>--connect 192.168.1.42:47830</code>); with no port it uses RemSound's normal port, 47830. If you don't also give a <code>--profile</code>, it starts on a fresh blank profile already pointed at that peer.</td></tr>
-<tr><td><code>--minimized</code> or <code>--tray</code></td><td>Starts minimized to the notification area, with no window popping up. Pair it with <code>--profile</code> or <code>--connect</code> so it has something to do without waiting at the picker.</td></tr>
-<tr><td><code>--config-dir &lt;folder&gt;</code></td><td>Uses an explicit folder for this run's settings, profiles, logs and sounds, instead of the usual location. It lets you (or an automated test) run RemSound against a throwaway folder without touching your real settings. Works with any command &mdash; for example <code>--selftest --config-dir C:\Temp\rstest</code> or <code>--diagnostics --config-dir C:\Temp\rstest</code>.</td></tr>
+<tr><td><code>--minimized</code>, <code>--minimised</code> or <code>--tray</code></td><td>Starts minimized to the notification area, with no window popping up. Pair it with <code>--profile</code> or <code>--connect</code> so it has something to do without waiting at the picker.</td></tr>
+<tr><td><code>--config-dir &lt;folder&gt;</code></td><td>Uses an explicit folder for this run's settings, profiles and logs, instead of the usual location. (The built-in cue sounds still come from the <strong>default sounds</strong> folder next to the program.) It lets you (or an automated test) run RemSound against a throwaway folder without touching your real settings. Works with any command &mdash; for example <code>--selftest --config-dir C:\Temp\rstest</code> or <code>--diagnostics --config-dir C:\Temp\rstest</code>.</td></tr>
+<tr><td><code>--silent</code></td><td>Plays no cue sounds and shows no &ldquo;sound file missing&rdquo; pop-ups for this run. Meant for automated or unattended launches.</td></tr>
 </table>
 
 <h3>Examples</h3>
 <pre>
 RemSound.exe --devices
-RemSound.exe --selftest --opus
+RemSound.exe --list-profiles
+RemSound.exe --selftest
 RemSound.exe --diagnostics
 RemSound.exe --profile "Studio" --minimized
 RemSound.exe --connect 192.168.1.42
@@ -1487,7 +1492,7 @@ RemSound.exe --connect 192.168.1.42
 
 <p>RemSound can also work <em>inside</em> your music software. The plugin puts one person on one track: a track you are sending goes out to your peers, and a peer you are receiving arrives on a track of their own, where you can record them, shape them and mix them like anything else.</p>
 
-<p>It is a VST3 plugin, so it works in Reaper, Cubase, Studio One, Reaper's fellow hosts and anything else that loads VST3.</p>
+<p>It is a VST3 plugin, so it works in Reaper, Cubase, Studio One and any other music software that loads VST3 plugins.</p>
 
 <h3>Putting it on your machine</h3>
 
