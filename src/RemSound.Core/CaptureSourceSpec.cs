@@ -18,8 +18,9 @@ public enum CaptureKind
 
 /// <summary>
 /// Identifies one source the sender should mix into the outgoing stream. <see cref="Name"/> is
-/// purely for diagnostic logging; <see cref="DeviceId"/> is either a WASAPI MMDevice ID or a
-/// synthetic ASIO id of the form <c>"asio:&lt;channel-pair-index&gt;"</c>.
+/// purely for diagnostic logging; <see cref="DeviceId"/> is a WASAPI MMDevice ID, a synthetic ASIO id
+/// of the form <c>"asio:&lt;channel-pair-index&gt;"</c> (<see cref="AsioDeviceId"/>), or a
+/// per-application id of the form <c>"proc:&lt;pid&gt;"</c> (<see cref="ProcessLoopbackId"/>).
 /// </summary>
 public sealed record CaptureSourceSpec(string DeviceId, CaptureKind Kind, string Name);
 
