@@ -2,15 +2,16 @@ using RemSound.Core;
 
 namespace RemSound.App;
 
-/// <summary>Tiny single-line modal — "give this profile a name". Used by File → Rename
-/// (and historically by File → Save As, before that flow moved to a real Windows
-/// SaveFileDialog on 2026-05-10). Returns the trimmed name or null on cancel.
+/// <summary>Tiny single-line modal — "give this profile a name". Used by File → Rename, and to
+/// name an untitled session before saving it from the unsaved-changes prompts on File → New
+/// profile and on closing RemSound. (File → Save As used it too until 2026-05-10, when that flow
+/// moved to a real Windows SaveFileDialog.) Returns the trimmed name or null on cancel.
 ///
 /// Two parameter knobs let the dialog title and prompt label change between use cases:
 ///   * Rename: title = "Rename profile", prompt = "Please enter a new name for your profile:"
-///   * Legacy save-as (close-confirm path): title = "Save profile as", prompt = "Profile name:"
-///     and pass <paramref name="store"/> non-null so the dialog refuses an existing-name unless
-///     the user confirms overwrite.
+///   * Save as (New profile and close-confirm prompts): title = "Save profile as", prompt =
+///     "Profile name:" and pass <paramref name="store"/> non-null so the dialog refuses an
+///     existing-name unless the user confirms overwrite.
 ///
 /// When <paramref name="store"/> is null, no overwrite check is performed — the caller is
 /// responsible for handling name collisions (rename has its own conflict logic in MainForm).</summary>

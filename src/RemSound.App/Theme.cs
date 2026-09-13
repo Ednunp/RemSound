@@ -3,9 +3,10 @@ using System.Drawing.Drawing2D;
 namespace RemSound.App;
 
 /// <summary>Central visual style for RemSound. The app font is set globally (csproj
-/// ApplicationDefaultFont) and dark/light follows the OS (Application.SetColorMode in Program.Main), so
-/// this only holds the extra touches: an accent colour, section-header + dialog-heading label factories,
-/// and health-status colours. All of it is visual only — it changes no control types and no
+/// ApplicationDefaultFont) and dark/light is the user's Colour theme choice in Preferences — match
+/// Windows (the default), Light or Dark — applied by Application.SetColorMode in Program.Main, so
+/// this only holds the extra touches: the window icon, an accent colour, section-header +
+/// dialog-heading label factories, and health-status colours. All of it is visual only — it changes no control types and no
 /// accessibility wiring, so the screen-reader experience is untouched.</summary>
 internal static class Theme
 {
@@ -38,11 +39,13 @@ internal static class Theme
         }
     }
 
-    /// <summary>True when the app is currently showing on a dark background. Cosmetic heuristic
-    /// (mirrors <see cref="EqCurveControl"/>) — used to pick contrasting accent/health colours.</summary>
+    /// <summary>True when the system window colour is dark (brightness below one half). Cosmetic
+    /// heuristic — used to pick contrasting accent/health colours. <see cref="EqCurveControl"/> makes
+    /// its own brightness test on its BackColor and does not use this.</summary>
     public static bool IsDark => SystemColors.Window.GetBrightness() < 0.5f;
 
-    /// <summary>Accent used for section headings and the EQ curve. Lighter blue in dark mode.</summary>
+    /// <summary>Accent used for section headings (<see cref="SectionHeader"/>). Lighter blue in dark
+    /// mode. The EQ curve draws in its own colours, not this one.</summary>
     public static Color Accent => IsDark ? Color.FromArgb(88, 166, 255) : Color.FromArgb(0, 99, 177);
 
     public static Color Healthy => IsDark ? Color.FromArgb(70, 200, 100) : Color.FromArgb(24, 140, 56);

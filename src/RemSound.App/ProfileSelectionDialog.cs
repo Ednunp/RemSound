@@ -8,11 +8,12 @@ namespace RemSound.App;
 /// session. Enter or OK selects; Esc does nothing (deliberately disabled — picking is
 /// required); Alt+F4 closes the dialog and exits the app; Del on a profile prompts to
 /// delete it with a yes/no confirm. The user can also browse to a custom profiles
-/// folder, which persists in <c>remsound.config.json</c> next to the exe.
+/// folder, or reset to the default one; the choice persists in
+/// <see cref="AppConfig.ProfilesDirectory"/> (<c>global config.json</c> in the user-data folder).
 ///
 /// On OK, exposes:
-///   * <see cref="SelectedTitle"/> — the chosen title, or null for blank template.
-///   * <see cref="SelectedProfile"/> — the loaded <see cref="Profile"/>, or null for blank.
+///   * <see cref="SelectedTitle"/> — the chosen title, or null for "New profile".
+///   * <see cref="SelectedProfile"/> — the loaded <see cref="Profile"/>, or null for "New profile".
 ///   * <see cref="Store"/> — the (possibly-rebuilt) profile store. If the user clicked
 ///     Browse and changed the folder, this points at the new folder; the caller should
 ///     use this reference rather than the one it passed in.
@@ -253,7 +254,7 @@ internal sealed class ProfileSelectionDialog : Form
 
     /// <summary>Open a folder picker, persist the choice to AppConfig, and rebuild the
     /// profile store + list against the new folder. No-op on cancel. If the new folder
-    /// has no profiles yet, the listbox simply shows just the blank-template entry; the
+    /// has no profiles yet, the listbox shows just the "New profile" entry; the
     /// user can save into the new folder later.</summary>
     private void BrowseForFolder()
     {
@@ -270,9 +271,9 @@ internal sealed class ProfileSelectionDialog : Form
 
     private void ResetToDefaultFolder()
     {
-        // Clearing the AppConfig field and reloading swings the store back to the legacy
-        // default (per-machine subfolder under the exe). Cheap and reversible — user can
-        // Browse to a custom folder again any time.
+        // Clearing the AppConfig field and reloading swings the store back to the default
+        // (a per-machine subfolder: <exe>\user settings and logs\profiles\<machine>\). Cheap and
+        // reversible — user can Browse to a custom folder again any time.
         var cfg = AppConfig.Load();
         cfg.ProfilesDirectory = null;
         try { cfg.Save(); }

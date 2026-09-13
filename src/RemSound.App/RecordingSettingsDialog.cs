@@ -10,6 +10,12 @@ namespace RemSound.App;
 ///   * FLAC compression &level (Alt+L)      — 0..8; visible only when FLAC is selected
 ///   * &Channels (Alt+C)                    — Stereo / Mono
 ///
+/// Above the columns sit two checkboxes:
+///   * Split recording into separate tracks (Alt+T) — one file per peer connected when recording
+///     starts, plus a file of your own send only when the recording source includes what you send
+///     (both, or sent only)
+///   * Bypass pan and EQ when recording (Alt+R) — record the raw audio
+///
 /// Channel mode was originally folded into every attribute row (16-bit stereo / 16-bit
 /// mono / 24-bit stereo / 24-bit mono / …) which doubled the attribute count for no real
 /// benefit. Pulling it out into its own listbox keeps each list focused on one decision.
@@ -18,7 +24,7 @@ namespace RemSound.App;
 /// stays in the attributes column, the compression level gets its own conditional column
 /// that only appears when FLAC is selected. Compression level 0 = fastest encode and
 /// biggest file; 8 = slowest and smallest. The libFLAC reference default is 5, which is
-/// where the slider defaults if nothing's been set. All levels produce bit-identical
+/// where the list defaults if nothing's been set. All levels produce bit-identical
 /// audio — it's a pure encode-time-vs-file-size tradeoff.
 ///
 /// The attribute and compression lists repopulate whenever the file-format selection
@@ -28,7 +34,7 @@ namespace RemSound.App;
 /// discards. The dialog also exposes <see cref="ChangedAnything"/> so the caller can
 /// MarkProfileDirty after a successful OK.
 ///
-/// Reachable from the Record menu → "Recording settings...".
+/// Reachable from the Options menu → "Recording settings...".
 /// </summary>
 internal sealed class RecordingSettingsDialog : Form
 {

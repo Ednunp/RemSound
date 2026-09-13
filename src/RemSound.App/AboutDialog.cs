@@ -3,9 +3,9 @@ using System.Reflection;
 namespace RemSound.App;
 
 /// <summary>
-/// About dialog. Shows the running version, a short blurb about RemSound and the latest
-/// release notes (built in below — bumped per release alongside the project's
-/// <see cref="System.Version"/> property).
+/// About dialog. Shows the running version (read from the assembly) and the release notes for
+/// the newest few releases (the notes constant below, cut to <see cref="ShownVersions"/> blocks by
+/// <see cref="TrimToLastVersions"/>).
 ///
 /// Layout follows the same NVDA-friendly conventions the rest of the app uses: a small
 /// modal dialog with a heading label, a read-only multi-line text box for the notes that
@@ -91,7 +91,8 @@ internal sealed class AboutDialog : Form
 
     /// <summary>Pure, testable: cut <paramref name="notes"/> after its first <paramref name="maxVersions"/>
     /// version blocks (lines starting "RemSound v"), appending a plain pointer to the full history.
-    /// Notes with fewer blocks pass through unchanged.</summary>
+    /// The pointer is appended only when it trims: notes with <paramref name="maxVersions"/> blocks or
+    /// fewer pass through unchanged, ending with whatever closing line they carry themselves.</summary>
     internal static string TrimToLastVersions(string notes, int maxVersions)
     {
         var count = 0;

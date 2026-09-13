@@ -16,13 +16,14 @@ namespace RemSound.App;
 ///     elapsing.
 ///   * "Skip this version" returns <see cref="DialogResult.Ignore"/> so the caller can
 ///     log the skip and decline to install on this launch.
-///   * "Postpone (close)" returns <see cref="DialogResult.Cancel"/> — the install will
+///   * "Postpone" (or Esc) returns <see cref="DialogResult.Cancel"/> — the install will
 ///     be re-attempted on the next periodic poll or next launch.
 ///   * A countdown timer auto-triggers Install after a few seconds so the silent path
 ///     remains effectively silent — the user who walks away from their desk during boot
 ///     gets the install they asked for, while a user who's at the keyboard has a moment
-///     to intervene. The countdown is announced inline (label text changes), so NVDA
-///     reads each tick if the user is reading the dialog when it appears.
+///     to intervene. The countdown label's text and accessible name update each second, but
+///     the label is not a live region, so a screen reader is not told about each tick; the
+///     current count is there when the user reads the label.
 ///
 /// NVDA accessibility: the dialog uses standard WinForms <see cref="Button"/> and
 /// <see cref="Label"/>; AccessibleName is set explicitly on the heading and countdown
