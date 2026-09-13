@@ -59,6 +59,17 @@ internal sealed class CaptureSource : IDisposable
     public int BufferedMilliseconds =>
         (int)(buffer.BufferedDuration.TotalMilliseconds);
 
+    /// <summary>A count of the device's own bytes, expressed as the bytes of 48 kHz stereo float they
+    /// become once resampled and mixed down: the units the drift corrector counts its pulls in. Channel
+    /// count and sample size change how many bytes a frame takes, not how many frames there are; the
+    /// sample rate changes how many frames there are.</summary>
+    internal static long ToMixEquivalentBytes(long deviceBytes, WaveFormat format)
+    {
+        var frames = deviceBytes / Math.Max(1, (int)format.BlockAlign);
+        var mixFrames = (long)Math.Round(frames * (double)MixSampleRate / Math.Max(1, format.SampleRate));
+        return mixFrames * MixChannels * sizeof(float);
+    }
+
     /// <summary>Set by the mixing engine: true only while more than one source is live. A lone source
     /// has nothing to stay aligned WITH, so its drift corrector stays idle at ratio 1.0 and the
     /// commonest setup of all behaves exactly as it always has.</summary>
@@ -83,7 +94,10 @@ internal sealed class CaptureSource : IDisposable
     /// <summary>Wraps an arbitrary <see cref="IWaveIn"/> capture — used for per-application
     /// process-loopback (<see cref="ProcessLoopbackCapture"/>), where the source isn't an
     /// <see cref="MMDevice"/> and <paramref name="deviceId"/> is the synthetic <c>"proc:&lt;pid&gt;"</c> id.</summary>
-    public CaptureSource(IWaveIn waveIn, CaptureKind kind, string deviceId, string displayName, Action<string>? onDiagnostic = null)
+    /// <param name="driftWindowSec">The drift corrector's measurement window. Overridable ONLY so the
+    /// gate can see a correction in seconds; every shipped caller takes the default.</param>
+    public CaptureSource(IWaveIn waveIn, CaptureKind kind, string deviceId, string displayName, Action<string>? onDiagnostic = null,
+        double driftWindowSec = CaptureDriftCorrector.DefaultMeasurementWindowSec)
     {
         Name = displayName;
         Kind = kind;
@@ -118,13 +132,20 @@ internal sealed class CaptureSource : IDisposable
         // ever corrected a drifting source was the ring hitting 250 ms and discarding, or emptying and
         // padding silence — a jump or a hole, and only after a quarter-second of error. Idle (ratio
         // pinned at 1.0) while this is the only live source. See CaptureDriftCorrector. 2026-09-07.
+        //
+        // FED IS COUNTED IN THE CORRECTOR'S UNITS, NOT THE DEVICE'S. The corrector counts what it pulls as
+        // 48 kHz stereo float, and it used to be handed the device's own byte count to compare against:
+        // a 44.1 kHz source read as 8 % slow, a mono or 16-bit one as half speed, a 96 kHz one as double.
+        // Every one of those is outside the ±5 % sanity band, so every window was thrown away and the
+        // correction never ran for most real devices, without a word in the log. Only a 48 kHz stereo
+        // float source ever measured right — which is exactly what the test fed it. 2026-09-13 review.
         var drift = new CaptureDriftCorrector(
             sp,
             () => BufferedMilliseconds,
-            () => BytesCaptured,
+            () => ToMixEquivalentBytes(BytesCaptured, captureFormat),
             () => CorrectionWanted?.Invoke() ?? false,
             displayName,
-            CaptureDriftCorrector.DefaultMeasurementWindowSec,
+            driftWindowSec,
             onDiagnostic);
         DriftCorrector = drift;
         Provider = drift;

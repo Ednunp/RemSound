@@ -136,11 +136,15 @@ internal sealed class RecordingController
         {
             diagnostic($"recording: failed to start: {ex.GetType().Name}: {ex.Message}");
             CleanUpAfterFailedStart();
-            MessageBox.Show(
+            // Through ForegroundDialog: a recording can be started from the global hotkey while RemSound
+            // is minimised, and an ownerless MessageBox then opens BEHIND whatever has focus, where a
+            // screen reader never finds it. 2026-09-13 review.
+            ForegroundDialog.Show(owner => MessageBox.Show(
+                owner,
                 $"Could not start recording:\n\n{ex.Message}",
                 "RemSound — recording",
                 MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
+                MessageBoxIcon.Warning));
             return;
         }
         RecordingStartedUtc = DateTime.UtcNow;

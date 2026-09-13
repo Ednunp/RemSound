@@ -125,7 +125,49 @@ internal static partial class SelfTest
             + $"{ticks} render ticks with the lane still ticked. This is the one that bit: on 2026-09-07 it ran at "
             + "288,960 bytes a second for hours, and the CPU it burned starved the lane the user was listening to");
 
-        return $"{label}: a stalled lane stops being fed ({overflowed} overflow bytes over {ticks} ticks)";
+        // HEARD ONCE, AND STILL RECORDED. The lane that is still reading must play this peer at the level
+        // it was sent, not twice over. When the stalled lane is the one the primary lives on, the primary
+        // falls through onto the kept lane — and the kept lane has its own mirror of the same peer, which
+        // used to play as well: about 6 dB hot, and comb-filtered as the two copies drift apart. And the
+        // receive recording must carry on from the kept lane; it used to follow the first ticked lane
+        // only, so a stalled first output stopped every recording while the peer still played.
+        var recordedBlocks = 0;
+        engine.OnReceivedSamples = (_, lane) => { if (lane == kept) recordedBlocks++; };
+        // And the split-track tap, which rides on each copy of the stream rather than on the mix.
+        var peerTrackBlocks = 0;
+        engine.SetRecordTap((_, _) => peerTrackBlocks++, raw: false);
+        var peak = 0f;
+        var underrunsBefore = engine.AggregateUnderrunsFor(kept);
+        for (var i = 0; i < 50; i++)
+        {
+            session.Write(audio);
+            engine.ReadForRoute(outBuf, 0, blockBytes, kept, mixBuf, sessionBuf, false);
+            foreach (var f in System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(outBuf.AsSpan()))
+                peak = Math.Max(peak, Math.Abs(f));
+        }
+        var underruns = engine.AggregateUnderrunsFor(kept) - underrunsBefore;
+        engine.OnReceivedSamples = null;
+        engine.SetRecordTap(null, false);
+        Check(peerTrackBlocks == 50,
+            $"{label}: a split recording must get this peer's block exactly once per render from the lane still reading (got "
+            + $"{peerTrackBlocks} for 50 renders) — none means a stalled output silences the peer's own track, and twice means "
+            + "the peer is recorded once per copy");
+        // A copy that is no longer fed must not be READ either. Read, it runs dry and every block after
+        // that is a gap filled with concealment noise, mixed into a peer who is otherwise playing fine.
+        Check(underruns == 0,
+            $"{label}: nothing playing on the lane still reading may run dry — {underruns} underrun(s) in 50 blocks while the "
+            + "peer was fed steadily. A copy the engine has stopped feeding is still being read");
+        Check(peak > 0.15f,
+            $"{label}: the lane still reading must still be playing the peer (peak {peak:0.000}, fed at 0.250)");
+        Check(peak < 0.35f,
+            $"{label}: the peer must be heard ONCE on the lane still reading — fed at 0.250 it peaked at {peak:0.000}. "
+            + "About twice the level is the primary falling through onto this lane while its mirror plays here too");
+        Check(recordedBlocks > 0,
+            $"{label}: the receive recording must carry on from the lane still reading ({recordedBlocks} blocks recorded) "
+            + "— otherwise a stalled output silently stops every recording while the peer goes on playing");
+
+        return $"{label}: a stalled lane stops being fed ({overflowed} overflow bytes over {ticks} ticks); the lane still "
+             + $"reading plays the peer once (peak {peak:0.00}) and records it";
     }
 
     private static string RunUntickedLaneCase(RenderRoute turnedOff, RenderRoute kept, string label)
@@ -219,5 +261,126 @@ internal static partial class SelfTest
             + "for hours, sawtoothing the readout between 275 and 800 ms and starving the lane the user WAS listening to");
 
         return $"{label}: no orphaned ring ({overflowed} overflow bytes over {ticks} ticks)";
+    }
+
+    /// <summary>
+    /// EVERY PEER IS HEARD ONCE — IN ALL THREE CONFIGURATIONS, THROUGH THE READ EACH ONE REALLY USES.
+    ///
+    /// <para>2026-09-13 review, finding 4. The engine fans each stream out to one copy per active output
+    /// lane and marks the extra copies as mirrors. The per-lane reads keep every copy on its own lane. The
+    /// all-sessions read — the one a machine with no ASIO driver renders from — filtered by nothing, so any
+    /// mirror in the engine was summed on top of its primary: the peer twice, about 6 dB hot and
+    /// comb-filtered. Two ordinary things made a mirror there. A new engine believes both lanes are active
+    /// until it is told which outputs are ticked. And an ASIO pair left ticked after the driver was
+    /// unchosen still flagged the ASIO lane active, with no ASIO backend to read it, so that copy was fed
+    /// for good as well.</para>
+    ///
+    /// <para>Each configuration is flagged the way the render backend flags the engine and read the way
+    /// that configuration renders. The level must be the level sent, and nothing may overflow.</para>
+    /// </summary>
+    private static string? AuditEachPeerIsHeardOnceInEveryConfiguration()
+    {
+        var findings = new List<string>();
+        foreach (var configuration in AudioConfigurations.All)
+        {
+            // An ASIO driver is chosen in two of the three, and WASAPI-only is also reachable with one, so the
+            // per-lane reads are what render here. Lanes flagged as CompositeRenderBackend flags them: active
+            // when an output of that kind is ticked.
+            var engine = new PlayoutEngine(new ReceiverDiagnostics());
+            engine.SetLaneActive(RenderRoute.WasapiLane, configuration.UsesWasapi());
+            engine.SetLaneActive(RenderRoute.AsioLane, configuration.UsesAsio());
+            RenderRoute[] lanes = configuration switch
+            {
+                AudioConfiguration.WasapiOnly => [RenderRoute.WasapiLane],
+                AudioConfiguration.AsioOnly => [RenderRoute.AsioLane],
+                _ => [RenderRoute.WasapiLane, RenderRoute.AsioLane],
+            };
+            var (peak, drops, recordedPerRender) = PlayOnePeerForTest(engine, lanes, readAllSessions: false);
+            Check(peak > 0.15f && peak < 0.35f,
+                $"{configuration.Describe()}: each output must play the peer ONCE, at the level it was sent (peak {peak:0.000}, "
+                + "sent 0.250)");
+            Check(Math.Abs(recordedPerRender - 1.0) < 0.01,
+                $"{configuration.Describe()}: a split recording must get the peer's audio once per render, however many outputs "
+                + $"play it (got {recordedPerRender:0.00} times) — every copy carries the tap, and only the recording lane may use it");
+            Check(drops == 0,
+                $"{configuration.Describe()}: nothing may be fed and left unread ({drops} bytes overflowed)");
+            findings.Add($"{configuration.Describe()}: heard once at {peak:0.00}");
+        }
+
+        // WASAPI ONLY WITH NO ASIO DRIVER CHOSEN renders through the all-sessions read. Two ways a second copy
+        // of a peer could get into it.
+        //
+        // 1. A new engine, before its outputs are known: both lane flags start on, so a mirror is made.
+        var fresh = new PlayoutEngine(new ReceiverDiagnostics());
+        var (freshPeak, _, _) = PlayOnePeerForTest(fresh, [], readAllSessions: true);
+        Check(freshPeak > 0.15f && freshPeak < 0.35f,
+            $"a new engine read through the all-sessions path must play a peer ONCE (peak {freshPeak:0.000}, sent 0.250) — "
+            + "about twice that is a mirror summed on top of its primary");
+
+        // 2. An ASIO pair still ticked after the driver was unchosen, beside a WASAPI output tick.
+        var stale = new PlayoutEngine(new ReceiverDiagnostics());
+        using (var render = new CompositeRenderBackend(AudioMode.WasapiOnly, null, stale))
+        {
+            // An id no device has, so nothing is opened; the WASAPI lane still counts as ticked.
+            render.SetOutputDevices(["{0.0.0.00000000}.{remsound-gate-no-such-device}", AsioDeviceId.Format(0)]);
+        }
+        var (stalePeak, staleDrops, _) = PlayOnePeerForTest(stale, [], readAllSessions: true);
+        Check(staleDrops == 0,
+            $"an ASIO pair left ticked with no driver chosen must not make a copy that nothing reads ({staleDrops} bytes "
+            + "overflowed)");
+        Check(stalePeak > 0.15f && stalePeak < 0.35f,
+            $"...and must not put the peer into the output twice (peak {stalePeak:0.000}, sent 0.250)");
+
+        return string.Join("; ", findings)
+             + $"; with no driver chosen, a new engine ({freshPeak:0.00}) and a stale ASIO tick ({stalePeak:0.00}) each play the peer once";
+    }
+
+    /// <summary>One peer at a steady 0.25, armed, then played for three seconds through the given lane
+    /// reads, or through the all-sessions read. Returns the loudest sample, the bytes that overflowed, and how
+    /// many renders' worth of the peer the split-recording tap received per render — all over the settled
+    /// second half.</summary>
+    private static (float Peak, long Drops, double RecordedPerRender) PlayOnePeerForTest(PlayoutEngine engine, RenderRoute[] lanes, bool readAllSessions)
+    {
+        const int frames = 480, blockBytes = frames * 8;
+        engine.SetMaxLatencyMs(RenderRoute.Mixed, 60);
+        engine.SetMaxLatencyMs(RenderRoute.WasapiLane, 60);
+        engine.SetMaxLatencyMs(RenderRoute.AsioLane, 60);
+        var session = engine.GetOrCreateSession(new IPEndPoint(IPAddress.Parse("10.0.0.21"), 47830), 1, 256 * 1024);
+        var measuring = false;
+        var recordedFloats = 0L;
+        engine.SetRecordTap((_, block) => { if (measuring) recordedFloats += block.Length; }, raw: false);
+
+        var audio = new byte[blockBytes];
+        System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(audio.AsSpan()).Fill(0.25f);
+        var arming = new byte[48000];
+        System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(arming.AsSpan()).Fill(0.25f);
+        session.Write(arming);
+        session.NoteFramesQueued(60);
+
+        var outBuf = new byte[blockBytes];
+        var mixBuf = new float[frames * 2];
+        var sessionBuf = new float[frames * 2];
+        var dropsBefore = 0L;
+        var peak = 0f;
+        for (var tick = 0; tick < 300; tick++)
+        {
+            if (tick == 150)
+            {
+                dropsBefore = engine.AggregateDrops;
+                measuring = true;
+            }
+            session.Write(audio);
+            var reads = readAllSessions ? 1 : lanes.Length;
+            for (var r = 0; r < reads; r++)
+            {
+                if (readAllSessions) engine.Read(outBuf, 0, blockBytes);
+                else engine.ReadForRoute(outBuf, 0, blockBytes, lanes[r], mixBuf, sessionBuf, false);
+                if (tick < 150) continue;
+                foreach (var f in System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(outBuf.AsSpan()))
+                    peak = Math.Max(peak, Math.Abs(f));
+            }
+        }
+        engine.SetRecordTap(null, false);
+        return (peak, engine.AggregateDrops - dropsBefore, recordedFloats / (150.0 * frames * 2));
     }
 }

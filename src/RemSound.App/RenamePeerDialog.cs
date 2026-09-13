@@ -52,15 +52,17 @@ internal sealed class RenamePeerDialog : Form
         grid.Controls.Add(machineLabel, 0, 1);
         grid.SetColumnSpan(machineLabel, 2);
 
-        // Plain label with '&' wires the mnemonic to the next control in tab order (the text box).
-        var nameLabel = new Label { Text = "Friendly &name (Alt+N)", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 8, 0) };
+        // Aimed at the text box explicitly. A plain label sends its mnemonic to the next control in TAB
+        // order, and with the explicit tab indexes below that was the button row — so Alt+N landed on
+        // "Clear custom name", and pressing Enter there wiped the name. 2026-09-13 review.
+        var nameLabel = new MnemonicLabel { Text = "Friendly &name (Alt+N)", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 8, 0), MnemonicTarget = nameBox };
         grid.Controls.Add(nameLabel, 0, 2);
         grid.Controls.Add(nameBox, 1, 2);
 
         var clearButton = new Button { Text = "&Clear custom name (Alt+C)", AutoSize = true, AccessibleName = "Clear custom name", TabIndex = 1 };
         var okButton = new Button { Text = "&OK", AutoSize = true, DialogResult = DialogResult.OK, TabIndex = 2 };
-        // Cancel keeps Esc (it's the CancelButton) rather than a mnemonic — Alt+C is the Clear button here.
-        var cancelButton = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel, TabIndex = 3 };
+        // Alt+A, because Alt+C is the Clear button here. Escape works too (it's the CancelButton).
+        var cancelButton = new Button { Text = "C&ancel", AutoSize = true, DialogResult = DialogResult.Cancel, TabIndex = 3 };
 
         clearButton.Click += (_, _) =>
         {

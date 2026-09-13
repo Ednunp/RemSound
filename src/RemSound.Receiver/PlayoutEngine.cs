@@ -322,6 +322,11 @@ internal sealed class PlayoutEngine : IWaveProvider
             recordTap = tap;
             recordTapRaw = raw;
             foreach (var s in sessions.Values) s.SetRecordTap(tap, raw);
+            // Mirrors carry it too: while a primary's own lane is not reading, its mirror is the copy the recording
+            // lane plays, and a peer's own track would otherwise go silent. The read passes emitRecordTap only on
+            // the recording lane, so the peer is still recorded once. 2026-09-13 review, finding 3.
+            foreach (var mirs in mirrorsByKey.Values)
+                foreach (var m in mirs) m.SetRecordTap(tap, raw);
         }
     }
 
@@ -683,6 +688,9 @@ internal sealed class PlayoutEngine : IWaveProvider
                 continue;
             }
             primary.Route = lanes[0];
+            // The primary asks too: while its own lane is not reading, it falls through onto the lane
+            // that is and its mirrors stand down, or that lane plays the peer twice. See SessionPlayout.Write.
+            primary.LaneIsConsuming ??= LaneIsConsuming;
             // Wanted mirror lanes = every active lane except the primary's.
             var wanted = lanes.Count > 1 ? lanes.GetRange(1, lanes.Count - 1) : null;
             if (wanted is null || wanted.Count == 0)
@@ -704,7 +712,10 @@ internal sealed class PlayoutEngine : IWaveProvider
                 mir.SetConcealmentArtifact((ConcealmentArtifact)concealmentArtifactRaw);
                 if (peerDspByAddress.TryGetValue(primary.Endpoint.Address, out var chain) && chain is not null)
                     mir.SetDsp(chain.Clone()); // its own filter state — must NOT share with the primary
-                // Deliberately NO record tap on mirrors: recording follows the primary/recordingRoute only.
+                // The split-recording tap too. It fires only on the recording lane's read (emitRecordTap), so the
+                // peer is recorded once — from the primary normally, from this mirror while the primary's own lane is
+                // not reading. It used to be kept off mirrors, which silenced a peer's own track through such a stall.
+                if (recordTap is not null) mir.SetRecordTap(recordTap, recordTapRaw);
                 existing.Add(mir);
             }
             mirrorsByKey[key] = existing;
@@ -1139,6 +1150,11 @@ internal sealed class PlayoutEngine : IWaveProvider
         var aggregateBufferedBytes = 0;
         var anyContributed = false;
         var routeClaims = pluginClaims;
+        // Recording is driven by ONE lane: the primary/first-active lane, unless that lane has stopped reading —
+        // then the lane that still is records instead. Decided once per read, because the per-peer taps inside the
+        // session reads below must follow the same lane as the mixed tap at the bottom, or a peer's own track is
+        // silent while the mix records, or recorded once per copy. 2026-09-13 review, finding 3.
+        var recordHere = route == recordingRoute || !LaneIsConsuming(recordingRoute);
         foreach (var session in snap)
         {
             // Same rule as the mixed path: a peer taken over by a plugin goes to the DAW instead of
@@ -1155,10 +1171,15 @@ internal sealed class PlayoutEngine : IWaveProvider
             // lane would play its peer twice, since the primary falls through as well. Before lanes
             // could go quiet without being unticked this could not arise: an unticked lane had its
             // mirrors disposed outright. 2026-09-08.
+            // And a PRIMARY never falls through onto a lane that has its own mirror of the stream: that mirror is
+            // already playing the peer there, so falling through played them twice — about 6 dB hot and
+            // comb-filtered. The primary is not fed in that state either (SessionPlayout.Write). Fall-through is
+            // for a lane with no copy of its own. 2026-09-13 review, finding 3.
             var isOrphanFromOtherLane = !matchesOwnLane
                 && !session.IsMirror
                 && session.Route != RenderRoute.Mixed
-                && !otherLaneActive;
+                && !otherLaneActive
+                && !session.HasMirrorOn(route);
             // A Mixed (plain) session belongs to NO lane — it's what a classic WASAPI-only sender
             // announces. In BothIndependent mode the lane-filtered reads would otherwise SKIP it
             // (it matches neither lane, and the orphan clause above excludes Mixed), so a plain
@@ -1172,7 +1193,7 @@ internal sealed class PlayoutEngine : IWaveProvider
                 && (route == RenderRoute.WasapiLane || !wasapiLaneActive);
             if (!matchesOwnLane && !isOrphanFromOtherLane && !playMixedHere) continue;
             aggregateBufferedBytes += session.BufferedBytes;
-            var produced = session.ReadFloats(sessionBuf.AsSpan(0, outFloats), outFrames, routeTargetMs, routeMaxMs, smoothness);
+            var produced = session.ReadFloats(sessionBuf.AsSpan(0, outFloats), outFrames, routeTargetMs, routeMaxMs, smoothness, emitRecordTap: recordHere);
             if (produced <= 0) continue;
             anyContributed = true;
             var summed = produced * MixChannels;
@@ -1217,7 +1238,10 @@ internal sealed class PlayoutEngine : IWaveProvider
         // replica of every stream (and holds the per-peer record taps), so recording from it alone
         // captures everything once. Mix is fully processed here (volume, mute, limiter applied), so the
         // recorder still sees exactly what the user hears.
-        if (route == recordingRoute)
+        // ...unless that lane has stopped reading. Then the lane that still is records instead: otherwise a
+        // stalled first output silently stopped every receive recording, single file and split tracks
+        // alike, while the peer went on playing on the other output. 2026-09-13 review, finding 3.
+        if (recordHere)
         {
             DispatchReceivedSamples(mixBuf.AsMemory(0, outFloats), route);
             OnRecordBlockComplete?.Invoke(outFloats);
@@ -1354,6 +1378,11 @@ internal sealed class PlayoutEngine : IWaveProvider
             // A peer a plugin has taken over must NOT also come out of the speakers. Skipped here
             // rather than muted so its buffer keeps running and the plugin's copy stays continuous.
             if (IsClaimedSession(session, claims)) continue;
+            // PRIMARIES ONLY. This read does not filter by lane, so a mirror replica — made whenever the
+            // engine believes a second output lane exists, which includes a fresh engine before its outputs
+            // are known — was summed on top of its primary and the peer heard twice. The same rule
+            // ReadClaimedPeer learned in August. 2026-09-13 review, finding 4.
+            if (session.IsMirror) continue;
             // Per-session latency: each session's own lane governs its buffer behaviour, so a
             // WASAPI-captured stream can sit at one target depth and an ASIO-captured stream
             // at another. Mixing them at the output level doesn't collapse those targets.

@@ -428,14 +428,21 @@ internal sealed class SessionPlayout : IDisposable
     private volatile SessionPlayout[] mirrors = [];
     public void SetMirrors(SessionPlayout[] value) => mirrors = value;
 
-    /// <summary>Set on every mirror so it can ask whether the lane it exists to feed is still taking
-    /// audio. Null on a primary, and null in tests that build a session directly.</summary>
+    /// <summary>Set on every replica the engine fans out — the primary and each mirror — so it can ask
+    /// whether a lane is still taking audio. Null in tests that build a session directly.</summary>
     internal Func<RenderRoute, bool>? LaneIsConsuming { get; set; }
 
     public void Write(ReadOnlySpan<byte> source)
     {
-        WriteLocal(source);
         var mir = mirrors;
+        // EACH LANE PLAYS ITS OWN COPY. When the lane this primary belongs to stops reading while a mirror's lane
+        // is still reading, that mirror is what plays the peer. So the primary is not fed — exactly as a mirror on
+        // a quiet lane is not fed below — and the read path does not let the primary fall through onto the
+        // mirror's lane (PlayoutEngine.ReadForRouteInner). It used to fall through AND the mirror played, so the
+        // peer was heard twice on that lane, about 6 dB hot and comb-filtered. Letting the mirror play, not the
+        // primary, keeps that lane's buffer, underrun and tuning figures its own. 2026-09-13 review, finding 3.
+        if (!(mir.Length > 0 && LaneIsConsuming is { } primaryLane && !primaryLane(Route) && AnyMirrorConsuming(mir, primaryLane)))
+            WriteLocal(source);
         for (var i = 0; i < mir.Length; i++)
         {
             var m = mir[i];
@@ -447,6 +454,27 @@ internal sealed class SessionPlayout : IDisposable
             if (m.LaneIsConsuming is { } consuming && !consuming(m.Route)) continue;
             m.WriteLocal(source);
         }
+    }
+
+    private static bool AnyMirrorConsuming(SessionPlayout[] mir, Func<RenderRoute, bool> consuming)
+    {
+        for (var i = 0; i < mir.Length; i++)
+        {
+            if (consuming(mir[i].Route)) return true;
+        }
+        return false;
+    }
+
+    /// <summary>Does this stream have a mirror for <paramref name="route"/>? Then that lane has a copy of its own,
+    /// and the primary must never fall through onto it. Render thread; allocation-free.</summary>
+    internal bool HasMirrorOn(RenderRoute route)
+    {
+        var mir = mirrors;
+        for (var i = 0; i < mir.Length; i++)
+        {
+            if (mir[i].Route == route) return true;
+        }
+        return false;
     }
 
     /// <summary>The single-instance write body — used directly for a mirror replica (so a mirror never
@@ -546,7 +574,10 @@ internal sealed class SessionPlayout : IDisposable
     /// the session is disarmed (or drained completely) the return is 0 and
     /// <paramref name="output"/> is untouched (caller is responsible for zero-fill).
     /// </summary>
-    public int ReadFloats(Span<float> output, int outFrames, int targetLatencyMs, int currentMaxLatencyMs, int smoothness = 3, bool applyShaping = true)
+    /// <param name="emitRecordTap">False when this read is not on the lane that records. Every replica carries the
+    /// split-recording tap, so the tap follows whichever copy the recording lane plays — the primary normally, its
+    /// mirror while the primary's own lane is not reading — and a peer is never recorded once per lane.</param>
+    public int ReadFloats(Span<float> output, int outFrames, int targetLatencyMs, int currentMaxLatencyMs, int smoothness = 3, bool applyShaping = true, bool emitRecordTap = true)
     {
         // Drain on user knob change.
         if (drainRequested)
@@ -730,7 +761,7 @@ internal sealed class SessionPlayout : IDisposable
         // Read through the resampler and apply concealment on full underruns.
         ReadThroughResampler(output, outFrames);
         // Split-recording tap, RAW variant — grab this peer's block BEFORE pan/EQ (bypass recording).
-        var tap = recordTap;
+        var tap = emitRecordTap ? recordTap : null;
         if (tap is not null && recordRaw) EmitRecordTapGuarded(tap, output, outFrames);
         // Per-peer pan + EQ: this peer's block is fully decoded and isolated here, immediately before
         // PlayoutEngine sums it into the mix — so shaping is per-peer and pre-mix, and being per-sample

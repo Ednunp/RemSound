@@ -112,10 +112,12 @@ internal sealed class PreferencesDialog : Form
     // cue currently selected in cueList. Arrowing it previews each variant AND makes it the chosen
     // default for that cue (machine-wide, AppConfig.DefaultCueSounds). The count isn't hard-coded —
     // whatever "<base> <n>.wav" files exist are offered, so adding more sounds later needs no code.
+    // "Choose sound" on screen AND to NVDA. The label used to say "Choose sound" while both names said
+    // "Choose default sound", so a screen reader heard a different control from the one on screen.
     private readonly Label defaultSoundLabel = new()
     {
-        Text = "Choose default soun&d (Alt+D):",
-        AccessibleName = "Choose default sound",
+        Text = "Choose soun&d (Alt+D):",
+        AccessibleName = "Choose sound",
         AutoSize = true,
         Padding = new Padding(0, 6, 0, 4),
     };
@@ -125,7 +127,7 @@ internal sealed class PreferencesDialog : Form
         IntegralHeight = false,
         Height = 76,
         Width = 360,
-        AccessibleName = "Choose default sound",
+        AccessibleName = "Choose sound",
     };
 
     // The variant filenames currently shown in defaultSoundList, index-aligned with its items, so a
@@ -293,7 +295,9 @@ internal sealed class PreferencesDialog : Form
 
     private readonly AccessibleCheckBox acceptRemoteVolumeBox = new()
     {
-        Text = "Accept remote volume commands from peers (Alt+&A)",
+        // Alt+V, not Alt+A: "Auto-save non-read-only profiles" on the same tab already owns A, so Alt+A
+        // from the auto-save list silently switched this security setting on or off. 2026-09-13 review.
+        Text = "Accept remote &volume commands from peers (Alt+V)",
         AccessibleName = "Accept remote volume commands from peers",
         AutoSize = true,
     };
@@ -549,7 +553,7 @@ internal sealed class PreferencesDialog : Form
 
     private readonly Button closeButton = new()
     {
-        Text = "Close",
+        Text = "&Close",
         AutoSize = true,
         DialogResult = DialogResult.OK,
     };
@@ -664,6 +668,7 @@ internal sealed class PreferencesDialog : Form
             if (cueList.SelectedIndex < 0 || cueList.SelectedIndex >= cueRows.Length) return;
             OnBrowseClicked(browseSelectedCueButton, cueRows[cueList.SelectedIndex]);
             RefreshCueActionButtons();
+            RefreshDefaultSoundList();   // your new file gets its row in the Choose sound list, selected
         };
 
         // Right-click "Use default sound" context menu lives on the Browse button. It acts
@@ -680,6 +685,7 @@ internal sealed class PreferencesDialog : Form
                 cue.SaveCustomPath(null);
                 if (cue.IsProfileSetting) ChangedAnyProfileSetting = true;
                 RefreshCueActionButtons();
+                RefreshDefaultSoundList();   // the list must show the built-in sound now playing
             }
         };
         browseCtx.Opening += (_, _) =>
@@ -1422,21 +1428,36 @@ internal sealed class PreferencesDialog : Form
             defaultSoundList.Enabled = true;
             currentVariants = variants;
 
-            // Row 0 is always "(none)" = this cue is off. The numbered variants follow, offset by one.
+            // Row 0 is always "(none)" = this cue is off. When the cue has your own file — or had one
+            // earlier while this dialog has been open — a row for it comes next, so the list says what
+            // will actually play. The numbered variants follow.
+            var customPath = cue.LoadCustomPath();
+            if (!string.IsNullOrWhiteSpace(customPath)) ownFilesThisSession[cue.CueId] = customPath;
             defaultSoundList.Items.Add("(none)");
+            ownFileRow = -1;
+            if (ownFilesThisSession.TryGetValue(cue.CueId, out var ownFile))
+            {
+                ownFileRow = defaultSoundList.Items.Add($"Your own file: {Path.GetFileName(ownFile)}");
+            }
+            var firstVariantRow = defaultSoundList.Items.Count;
             foreach (var v in variants) defaultSoundList.Items.Add(CueSounds.VariantLabel(cue.DefaultFileName, v));
 
-            // (none) selected only when the cue is off; otherwise the chosen variant (default = first).
+            // (none) when the cue is off; your own file when one is set, because that is what plays;
+            // otherwise the chosen variant (default = first).
             var sel = 0;
-            if (cue.LoadEnabled() && variants.Count > 0)
+            if (cue.LoadEnabled() && !string.IsNullOrWhiteSpace(customPath) && ownFileRow >= 0)
             {
-                sel = 1;
+                sel = ownFileRow;
+            }
+            else if (cue.LoadEnabled() && variants.Count > 0)
+            {
+                sel = firstVariantRow;
                 var chosen = CueSounds.ResolveDefaultFileName(cue.CueId, cue.DefaultFileName, AppConfig.Load());
                 if (chosen is not null)
                 {
                     for (var i = 0; i < variants.Count; i++)
                     {
-                        if (variants[i].Equals(chosen, StringComparison.OrdinalIgnoreCase)) { sel = i + 1; break; }
+                        if (variants[i].Equals(chosen, StringComparison.OrdinalIgnoreCase)) { sel = firstVariantRow + i; break; }
                     }
                 }
             }
@@ -1445,9 +1466,23 @@ internal sealed class PreferencesDialog : Form
         finally { suppressDefaultSoundPreview = false; }
     }
 
+    /// <summary>Your own file for each cue, as it was when this dialog saw it. Kept so choosing a
+    /// built-in sound — which replaces your file — can be undone by arrowing back onto your file's row
+    /// before the dialog closes. Arrowing through the list to hear the choices must never lose anything.</summary>
+    private readonly Dictionary<string, string> ownFilesThisSession = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The row in the sound list for the selected cue's own file, or -1 when it has none.</summary>
+    private int ownFileRow = -1;
+
     /// <summary>The user arrowed onto / picked an entry in the sound list. "(none)" (row 0) turns the
-    /// cue off; any other row turns it on and records that variant as the cue's sound, then previews
-    /// it. The running app re-reads it all when the dialog closes (MainForm.ReloadAllCueSounds).</summary>
+    /// cue off; your own file's row turns it back on with your file; a built-in sound turns it on with
+    /// that sound — replacing your own file, if there was one — and previews it. The running app
+    /// re-reads it all when the dialog closes (MainForm.ReloadAllCueSounds).
+    ///
+    /// <para>Choosing a built-in sound used to change nothing you could hear while a custom file was set:
+    /// it was saved, and previewed, and your file went on playing anyway, because a custom file always
+    /// wins. The list now shows your file as a row of its own, and choosing anything else really does
+    /// switch to it. 2026-09-13 review.</para></summary>
     private void OnDefaultSoundChosen()
     {
         // A programmatic re-fill must not persist or preview.
@@ -1459,18 +1494,37 @@ internal sealed class PreferencesDialog : Form
 
         if (vi == 0)
         {
-            // "(none)" — turn the cue off. No sound to preview.
+            // "(none)" — turn the cue off. No sound to preview. Your own file is kept for when it is
+            // turned back on.
             cue.SaveEnabled(false);
             if (cue.IsProfileSetting) ChangedAnyProfileSetting = true;
             RefreshCueActionButtons();
             return;
         }
 
-        var variantIndex = vi - 1; // account for the (none) row
+        if (vi == ownFileRow && ownFilesThisSession.TryGetValue(cue.CueId, out var ownFile))
+        {
+            cue.SaveEnabled(true);
+            if (!string.Equals(cue.LoadCustomPath(), ownFile, StringComparison.OrdinalIgnoreCase)) cue.SaveCustomPath(ownFile);
+            if (cue.IsProfileSetting) ChangedAnyProfileSetting = true;
+            UiChangeLog.Record($"cue sound: {cue.CueId}", $"your own file {Path.GetFileName(ownFile)}");
+            RefreshCueActionButtons();
+            try
+            {
+                if (File.Exists(ownFile)) new CuePlayer(ownFile).Play();
+            }
+            catch { /* a preview must never disturb the dialog */ }
+            return;
+        }
+
+        var variantIndex = vi - (ownFileRow >= 0 ? ownFileRow + 1 : 1); // account for the rows above the variants
         if (variantIndex < 0 || variantIndex >= currentVariants.Count) return;
         var chosenFile = currentVariants[variantIndex];
 
         cue.SaveEnabled(true);
+        // A built-in sound replaces your own file, or it would never be heard. Your file's row stays in
+        // the list until the dialog closes, so arrowing back onto it undoes this.
+        if (!string.IsNullOrWhiteSpace(cue.LoadCustomPath())) cue.SaveCustomPath(null);
         if (cue.IsProfileSetting) ChangedAnyProfileSetting = true;
         var cfg = AppConfig.Load();
         cfg.DefaultCueSounds[cue.CueId] = chosenFile;
@@ -1490,6 +1544,25 @@ internal sealed class PreferencesDialog : Form
         }
         catch { /* a preview must never disturb the dialog */ }
     }
+
+    // ---- Gate seams: the cue list and the Choose sound list, driven the way a user drives them ----
+    internal int CueCountForTest => cueRows.Length;
+    internal void SelectCueForTest(int index) => cueList.SelectedIndex = index;
+    internal ListBox SoundListForTest => defaultSoundList;
+
+    /// <summary>What Browse does with a file from outside the built-in sounds folder, without the picker.</summary>
+    internal void UseOwnFileForTest(string path)
+    {
+        var cue = cueRows[cueList.SelectedIndex];
+        cue.SaveEnabled(true);
+        cue.SaveCustomPath(path);
+        RefreshCueActionButtons();
+        RefreshDefaultSoundList();
+    }
+
+    /// <summary>The file the selected cue would play if it fired now — the same resolution Play uses.</summary>
+    internal string? SoundThatWouldPlayForTest() =>
+        cueList.SelectedIndex is var i && i >= 0 && i < cueRows.Length ? ResolveCueFilePath(cueRows[i]) : null;
 
     /// <summary>Preview the currently-selected cue's current sound (custom or chosen default), so
     /// arrowing the cue list lets the user hear each cue. A cue set to "(none)" plays nothing.</summary>

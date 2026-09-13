@@ -130,9 +130,12 @@ internal sealed class AddBandDialog : Form
 
     // The mnemonic hint is embedded in each NumericUpDown's AccessibleName; the label carries the
     // visible '&' so Alt+letter moves focus to the box (NumericUpDown has no '&' of its own).
+    // A MnemonicLabel aimed at its own box, not a plain Label: a plain label sends Alt+letter to the NEXT
+    // control in tab order, and the boxes' explicit tab order put each label before the box of the row
+    // BELOW. Alt+S landed on End frequency, Alt+E on Gain and Alt+G on OK. 2026-09-13 review.
     private static void AddRow(TableLayoutPanel grid, int row, string labelText, NumericUpDown box)
     {
-        var label = new Label { Text = labelText, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 8, 0) };
+        var label = new MnemonicLabel { Text = labelText, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 8, 0), MnemonicTarget = box };
         grid.Controls.Add(label, 0, row);
         grid.Controls.Add(box, 1, row);
     }

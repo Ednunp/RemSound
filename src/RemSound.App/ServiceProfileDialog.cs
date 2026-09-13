@@ -43,7 +43,9 @@ internal sealed class ServiceProfileDialog : Form
 
     // --- Button row ---
     private readonly Button saveButton = new() { Text = "&Save and Close", AutoSize = true, DialogResult = DialogResult.OK };
-    private readonly Button cancelButton = new() { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
+    // Alt+N: C is "Peers to send to" and A is "Add peer by IP", and these buttons sit outside the tabs,
+    // so they share a letter space with both.
+    private readonly Button cancelButton = new() { Text = "Ca&ncel", AutoSize = true, DialogResult = DialogResult.Cancel };
     private readonly Button additionalButton = new() { Text = "Additional &options...", AutoSize = true, AccessibleName = "Additional options" };
 
     private bool suppressAppEvents;
@@ -334,19 +336,32 @@ internal sealed class ServiceProfileDialog : Form
 
     private void ShowAdditionalOptions()
     {
-        var saved = ServiceStore.LoadStartupVolume();
-        var (dlg, logging, volume) = BuildAdditionalOptions(ServiceLoggingEnabled, saved.Enabled, saved.Percent, saved.BootOnly);
+        // Reopening it before this dialog closes shows what was chosen last time, not the stored value.
+        var stored = ServiceStore.LoadStartupVolume();
+        var start = PendingStartupVolume ?? (stored.Enabled, stored.Percent, stored.BootOnly);
+        var (dlg, logging, volume) = BuildAdditionalOptions(ServiceLoggingEnabled, start.Enabled, start.Percent, start.BootOnly);
         using (dlg)
         {
             if (ForegroundDialog.Show(owner => dlg.ShowDialog(owner)) == DialogResult.OK)
-            {
-                ServiceLoggingEnabled = logging.Checked;
-                // Startup volume persists straight to the machine-wide store (like the logging flag
-                // it sits beside, it's service behaviour, not part of the audio profile). The
-                // service reads it fresh on every start, so it takes effect from the next start.
-                ServiceStore.SaveStartupVolume(volume.Enabled.Checked, (int)volume.Percent.Value, volume.When.SelectedIndex == 0);
-            }
+                AcceptAdditionalOptions(logging.Checked, volume.Enabled.Checked, (int)volume.Percent.Value, volume.When.SelectedIndex == 0);
         }
+    }
+
+    /// <summary>The startup volume chosen in Additional options, waiting for THIS dialog's OK. Null when
+    /// Additional options was never accepted, which leaves the stored value exactly as it was.</summary>
+    internal (bool Enabled, int Percent, bool BootOnly)? PendingStartupVolume { get; private set; }
+
+    /// <summary>OK in Additional options. It HOLDS the choices rather than saving them: they are saved by
+    /// the caller along with the service profile, only if this dialog is accepted too.
+    ///
+    /// <para>It used to write the startup volume to the machine-wide store the moment its own OK was
+    /// pressed, so cancelling the service dialog afterwards kept a change the user had just cancelled —
+    /// and this class promises that nothing is persisted until the caller acts on OK. The logging flag
+    /// beside it was always held this way; the volume now matches. 2026-09-13 review.</para></summary>
+    internal void AcceptAdditionalOptions(bool loggingEnabled, bool volumeEnabled, int volumePercent, bool volumeBootOnly)
+    {
+        ServiceLoggingEnabled = loggingEnabled;
+        PendingStartupVolume = (volumeEnabled, Math.Clamp(volumePercent, 0, 100), volumeBootOnly);
     }
 
     /// <summary>Construction split from ShowDialog so the accessibility audit can inspect this inner
@@ -402,6 +417,8 @@ internal sealed class ServiceProfileDialog : Form
         SyncVolumeEnabled();
 
         var ok = new Button { Text = "&OK", AutoSize = true, DialogResult = DialogResult.OK };
+        // A real Cancel, and Escape bound to it. There was only OK, so Escape did nothing at all.
+        var cancel = new Button { Text = "&Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
 
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(12), AutoSize = true };
         foreach (var single in new Control[] { logging, volEnabled })
@@ -420,9 +437,11 @@ internal sealed class ServiceProfileDialog : Form
         layout.Controls.Add(whenRow);
         var okRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         okRow.Controls.Add(ok);
+        okRow.Controls.Add(cancel);
         layout.Controls.Add(okRow);
         dlg.Controls.Add(layout);
         dlg.AcceptButton = ok;
+        dlg.CancelButton = cancel;
         return (dlg, logging, (volEnabled, volPercent, volWhen));
     }
 

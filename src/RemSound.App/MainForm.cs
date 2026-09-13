@@ -298,7 +298,7 @@ public sealed partial class MainForm : Form
     // the same job, and the manual button confused users by sitting next to the auto-tune
     // checkbox doing almost the same thing in a less convenient one-shot shape.
     private readonly AccessibleCheckBox continuousTuneBox = new() { Text = "Continuous auto-tune jitter buffer", AutoSize = true };
-    private readonly ComboBox continuousIntervalBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90, AccessibleName = "Auto-tune interval for jitter buffer (Alt+I)" };
+    private readonly ComboBox continuousIntervalBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90, AccessibleName = "Auto-tune interval for jitter buffer (Alt+N)" };
     // Label for continuousIntervalBox. Held as a field (rather than a local in
     // BuildAudioReceiveGroupContents) so UpdateBothIndependentVisibility can rewrite the
     // text and mnemonic when the user flips audio mode — the interval governs both lanes'
@@ -1023,19 +1023,11 @@ public sealed partial class MainForm : Form
         // The user gets the regular MessageBox warning on registration failure; the log
         // captures the cause so we can debug without guessing.
         hotkeyController.Log = msg => logFile.Event($"hotkey: {msg}");
-        // Hotkey edits via the Keyboard shortcuts dialog need to mark the profile dirty
-        // so the close-without-saving prompt fires. The dirty flag is only set by direct
-        // UI handlers in MainForm; the controller is its own object so it can't reach
-        // MarkProfileDirty without being told how. Without this hook the user would change
-        // a binding, close, get no prompt, launch again — and find their new binding
-        // wasn't in the profile JSON. (The settings cache holds it, but the cache is
-        // copied to the profile only on Save / Update, not on close.)
-        hotkeyController.OnHotkeyChanged = () =>
-        {
-            MarkProfileDirty();
-            // Keep the spoken "press X anywhere" hints in sync with the new binding.
-            UpdateHotkeyAnnouncements();
-        };
+        // A hotkey change does NOT mark the profile dirty. Hotkeys have been saved on this computer,
+        // straight away, since v4.4 (RemSoundSettingsStore.SaveGlobalHotkey writes AppConfig), so there
+        // is nothing in the profile to save — and the "unsaved changes" prompt it used to raise asked the
+        // user to save something that was already saved. 2026-09-13 review.
+        hotkeyController.OnHotkeyChanged = UpdateHotkeyAnnouncements;
         trayController = new MainFormTrayController(
             this,
             // getSending / toggleSending — the tray's "Enable sending" checkable item reads
@@ -2802,6 +2794,14 @@ public sealed partial class MainForm : Form
             ServiceStore.SaveProfile(dlg.Result);
             ServiceStore.SaveLoggingEnabled(dlg.ServiceLoggingEnabled);
             logFile.Event($"service: profile saved (service logging {(dlg.ServiceLoggingEnabled ? "on" : "off")})");
+            // Held by the dialog until now, so a cancelled service dialog keeps nothing. 2026-09-13 review.
+            if (dlg.PendingStartupVolume is { } startupVolume)
+            {
+                ServiceStore.SaveStartupVolume(startupVolume.Enabled, startupVolume.Percent, startupVolume.BootOnly);
+                logFile.Event(startupVolume.Enabled
+                    ? $"service: startup volume {startupVolume.Percent}% ({(startupVolume.BootOnly ? "first start after each boot" : "every start")})"
+                    : "service: startup volume off");
+            }
             // Remove any stray copy the old design left in the user's profiles folder.
             try { profileStore?.Delete(ServiceControl.ServiceProfileTitle); } catch { /* best-effort */ }
             var restartNeeded = ServiceControl.Query() == ServiceState.Running;
@@ -5254,11 +5254,16 @@ public sealed partial class MainForm : Form
         // 2026-05-08 mnemonic refresh per Ed's spec:
         //   Audio codec (renamed from "Transport codec") → Alt+C  (was Alt+T)
         //   Packet size                                  → Alt+P  (was Alt+S)
-        var codecAndSendLabel = new Label { Text = "Audio codec (Alt+&C) / Packet size (Alt+&P)", AutoSize = true, Anchor = AnchorStyles.Left };
+        // Each box has its OWN label and its own letter. This used to be one plain label carrying both
+        // "&C" and "&P", and a caption can only have one working mnemonic, so Alt+P never reached Packet
+        // size however its name advertised it. 2026-09-13 review.
+        var codecAndSendLabel = new MnemonicLabel { Text = "Audio &codec (Alt+C)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = codecBox };
         codecAndSendLabel.Click += (_, _) => FocusControl(codecBox);
         var codecRowPanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
         codecRowPanel.Controls.Add(codecBox);
-        codecRowPanel.Controls.Add(new Label { Text = "  Packet size: ", AutoSize = true, Padding = new Padding(8, 6, 0, 0) });
+        var packetSizeLabel = new MnemonicLabel { Text = "  &Packet size (Alt+P): ", AutoSize = true, Padding = new Padding(8, 6, 0, 0), MnemonicTarget = sendRateBox };
+        packetSizeLabel.Click += (_, _) => FocusControl(sendRateBox);
+        codecRowPanel.Controls.Add(packetSizeLabel);
         codecRowPanel.Controls.Add(sendRateBox);
         panel.Controls.Add(codecAndSendLabel, 0, 0);
         panel.Controls.Add(codecRowPanel, 1, 0);
@@ -5290,11 +5295,13 @@ public sealed partial class MainForm : Form
         // === Row 0: ASIO latency row — VISIBLE ONLY IN BOTHINDEPENDENT MODE ===
         // In BothIndependent the WASAPI and ASIO lanes have independent targets. The ASIO row
         // sits above the WASAPI row so it's first in tab order (ASIO is the "headline" lane
-        // a user picks the new mode for) and takes the simpler Alt+L / Alt+T mnemonics — when
-        // the user enters BothIndependent the WASAPI row's labels mutate to "WASAPI latency
-        // (Alt+W)" / "Continuous auto-tune WASAPI (Alt+Y)", surrendering L/T to ASIO. In every
-        // classic mode this row is hidden via UpdateBothIndependentVisibility and the WASAPI
-        // row keeps the unqualified "Audio jitter buffer (Alt+L)" labels.
+        // a user picks the new mode for) and takes Alt+I for its jitter buffer and Alt+T for its
+        // auto-tune — when the user enters BothIndependent the WASAPI row's labels mutate to
+        // "WASAPI jitter buffer (Alt+W)" / "Continuous auto-tune WASAPI (Alt+Y)", surrendering T to
+        // ASIO. The shared interval takes Alt+N. In every classic mode this row is hidden via
+        // UpdateBothIndependentVisibility and the WASAPI row keeps the unqualified
+        // "Audio jitter buffer (Alt+L)" labels. KeyboardShortcutsGoWhereTheySay walks all three
+        // configurations, so a letter reused here fails the gate.
         asioLatencyLabel = new Label { Text = "AS&IO jitter buffer in milliseconds (Alt+I)", AutoSize = true, Anchor = AnchorStyles.Left };
         asioLatencyLabel.Click += (_, _) => FocusControl(maxLatencyAsioBox);
         SelectAllOnFocus(maxLatencyAsioBox);
@@ -5415,7 +5422,9 @@ public sealed partial class MainForm : Form
         measuredLatencyReadout.Text = FormatMeasuredLatency(AudioConfiguration.WasapiOnly, 0, 0, 0, 0);
         var measuredLatencyLabel = new MnemonicLabel
         {
-            Text = "&Total latency (Alt+M)",
+            // Alt+M, as it says. The & used to sit on the T, which made the real key Alt+T — already the
+            // auto-tune checkbox — and left Alt+M answering nothing. 2026-09-13 review.
+            Text = "Total latency (Alt+&M)",
             AutoSize = true,
             Anchor = AnchorStyles.Left,
             MnemonicTarget = measuredLatencyReadout,
@@ -5580,7 +5589,8 @@ public sealed partial class MainForm : Form
         {
             foreach (var ph in hb.GetAllPeerHealth())
             {
-                if (ph.State != PeerHealthState.Healthy) continue;
+                // The same rule as the connect cue: audio arriving or a healthy heartbeat, held through a blip.
+                if (!IsPeerConnectedNow(ph)) continue;
                 // Find a label by walking selectedPeerEndpoints for a matching address+port.
                 string? label = null;
                 foreach (var (id, ep) in selectedPeerEndpoints)
@@ -5765,7 +5775,8 @@ public sealed partial class MainForm : Form
 
             var addrKey = item.Peer.Address.ToString();
             var ph = healthByAddress.GetValueOrDefault(addrKey);
-            var isHealthy = ph is { State: PeerHealthState.Healthy };
+            // "Connected" by the same rule as the connect cue and the status readout — see PeerConnectionRule.
+            var isHealthy = ph is not null && IsPeerConnectedNow(ph);
 
             s.Connected = isHealthy;
             s.Sending = isHealthy && sendingNow;
@@ -5839,7 +5850,10 @@ public sealed partial class MainForm : Form
         var item = SelectedConnectedPeer();
         renamePeerButton.Enabled = item is not null;
         var text = item is null ? "Select a connected peer to see its details." : BuildPeerDetailsText(item);
-        if (peerDetailsBox.Text != text) peerDetailsBox.Text = text;
+        // Not while it has focus. "Connected for" changes every second, so this rewrote the box under a
+        // screen reader once a second while it was being read — the house rule every other readout keeps.
+        // Selecting a different peer moves focus to the list, so a genuine change still lands. 2026-09-13 review.
+        if (ShouldWriteReadout(peerDetailsBox.Text, text, peerDetailsBox.Focused)) peerDetailsBox.Text = text;
     }
 
     private string BuildPeerDetailsText(PeerListItem item)
@@ -7711,10 +7725,12 @@ public sealed partial class MainForm : Form
     /// <summary>Pure and testable: the interval label for a given configuration. Both lanes live →
     /// name both; anything else → just "jitter buffer". Kept pure so the gate can pin all THREE
     /// configurations without building a window.</summary>
+    /// <remarks>Alt+N, not Alt+I: with an ASIO driver chosen, "ASIO jitter buffer in milliseconds" on
+    /// the same tab owns Alt+I, so the interval's Alt+I was a second owner of one key. 2026-09-13 review.</remarks>
     internal static string AutoTuneIntervalLabel(AudioConfiguration configuration) =>
         configuration.HasTwoLanes()
-            ? "Auto-tune interval for WASAPI and ASIO jitter buffer (Alt+&I)"
-            : "Auto-tune interval for jitter buffer (Alt+&I)";
+            ? "Auto-tune i&nterval for WASAPI and ASIO jitter buffer (Alt+N)"
+            : "Auto-tune i&nterval for jitter buffer (Alt+N)";
 
     // ===================== "Use Windows default device" follower support =====================
 
@@ -10847,30 +10863,50 @@ public sealed partial class MainForm : Form
     ///     Healthy at the last observation — quiet otherwise.
     /// Stale is ignored (it's a transient between Healthy and Unreachable).
     /// </summary>
+    /// <summary>
+    /// THE rule for whether a peer is connected, and the only one. Connected the moment its audio arrives or its
+    /// heartbeat is healthy; lost only when the audio has stopped AND the heartbeat has gone unreachable; anything in
+    /// between (a stale heartbeat, a pause in the audio) keeps whatever it was — hysteresis, so a heartbeat blip while
+    /// audio keeps playing never reads as a disconnect.
+    ///
+    /// <para>The connect and disconnect cues have decided this way since 2026-05-31. The status readout and the
+    /// connected-peers list went on asking the heartbeat alone, so during a blip with the audio still playing the
+    /// readout said "Not connected to any peer" and reset "connected for", while the cue rightly said nothing. All
+    /// three ask this now. 2026-09-13 review.</para>
+    /// </summary>
+    internal static bool PeerConnectionRule(bool audioFlowing, PeerHealthState heartbeat, bool wasConnected) =>
+        audioFlowing || heartbeat == PeerHealthState.Healthy || (wasConnected && heartbeat != PeerHealthState.Unreachable);
+
+    /// <summary>How recently audio must have arrived to count as flowing. Audio arrives hundreds of times a second, so
+    /// a three-second gap is a genuine interruption, not jitter. Disconnect also needs the heartbeat Unreachable (5 s of
+    /// no reply), so the heartbeat is the slower gate for a real, total loss.</summary>
+    private static readonly TimeSpan PeerAudioWindow = TimeSpan.FromSeconds(3);
+
+    private static string PeerStateKey(PeerHealth ph) => $"{ph.AudioEndpoint.Address}:{ph.AudioEndpoint.Port}";
+
+    /// <summary>Is this peer connected right now, by <see cref="PeerConnectionRule"/>, remembering what the cue logic
+    /// last decided for it.</summary>
+    private bool IsPeerConnectedNow(PeerHealth ph) => PeerConnectionRule(
+        receiver.IsAudioFlowingFrom(ph.AudioEndpoint.Address, PeerAudioWindow),
+        ph.State,
+        peerConnectedState.TryGetValue(PeerStateKey(ph), out var was) && was);
+
     private void DetectAndAnnouncePeerHealthTransitions()
     {
         if (heartbeatService is null) return;
         var current = heartbeatService.GetAllPeerHealth();
 
         var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        // How recently audio must have arrived to count the peer as "audibly connected". Audio
-        // arrives hundreds of times a second, so a 3-second gap is a genuine interruption, not
-        // jitter. Disconnect also requires the heartbeat to be Unreachable (5 s of no reply), so
-        // the heartbeat is the slower gate for a real, total loss.
-        var audioWindow = TimeSpan.FromSeconds(3);
         foreach (var ph in current)
         {
-            var key = $"{ph.AudioEndpoint.Address}:{ph.AudioEndpoint.Port}";
+            var key = PeerStateKey(ph);
             seenKeys.Add(key);
 
-            var audioFlowing = receiver.IsAudioFlowingFrom(ph.AudioEndpoint.Address, audioWindow);
-            // Connected the moment audio arrives OR the heartbeat is solidly healthy; lost only
-            // when audio has stopped AND the heartbeat has gone unreachable. The middle ground
-            // (heartbeat Stale, or audio briefly paused) holds the previous state — hysteresis,
-            // so a heartbeat blip while audio keeps playing never fires a false disconnect.
-            var isConnected = audioFlowing || ph.State == PeerHealthState.Healthy;
-            var isLost = !audioFlowing && ph.State == PeerHealthState.Unreachable;
+            var audioFlowing = receiver.IsAudioFlowingFrom(ph.AudioEndpoint.Address, PeerAudioWindow);
             var wasConnected = peerConnectedState.TryGetValue(key, out var w) && w;
+            // The one rule; the status readout and the peer list ask it as well.
+            var isConnected = PeerConnectionRule(audioFlowing, ph.State, wasConnected);
+            var isLost = !isConnected;
 
             if (isConnected && !wasConnected)
             {

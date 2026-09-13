@@ -100,7 +100,9 @@ If you had both kinds of output running and one of them stopped — you switched
 
 The waste was not the problem. The work of doing it took real processing time away from the output you were still listening to, which then started running short, and the automatic tuning quite correctly raised your buffer to cope. So an output you had finished with could make the one you were using audibly late, and the buffer reading would show a figure that belonged to the dead output rather than the live one.
 
-RemSound now watches whether each output is actually taking audio, rather than only whether it is switched on. An output that stops taking audio stops being prepared for within a few seconds, and anything that was playing through it moves across to an output that is still running so you keep hearing it. Both kinds of output are treated the same way.
+RemSound now watches whether each output is actually taking audio, rather than only whether it is switched on. An output that stops taking audio stops being prepared for within a few seconds, and anything that was playing through it moves across to an output that is still running so you keep hearing it — once, not twice over — and a recording carries on from that output too. Both kinds of output are treated the same way.
+
+With no ASIO driver chosen, an ASIO output still ticked from before can no longer make a peer play twice, louder and with a phasey sound.
 
 ## The "older version" warning names the likelier cause
 
@@ -115,6 +117,29 @@ Nothing corrected it. A source running fast eventually filled its buffer and the
 Each source is now held on the mixer's clock by the same gentle correction that has been holding sound cards steady on the receiving end for months: a rate trim of well under a tenth of a percent, far too small to hear as pitch. If you send only one source, which is what most people do, nothing is touched at all — there is nothing for it to stay aligned with.
 
 Reported by Anthony Reyers from real use.
+
+## Keyboard shortcuts that go where they say
+
+Every Alt key in the main window and the dialogs has been checked against what the screen says, in every tab and with every combination of outputs ticked. These were wrong:
+
+- **Total latency** said Alt+M but answered Alt+T, which is the auto-tune checkbox. It is Alt+M now.
+- With an ASIO driver chosen, Alt+I belonged to both the ASIO jitter buffer and the auto-tune interval. The interval is Alt+N now.
+- **Packet size** said Alt+P but Alt+P went to the codec box. It goes to Packet size now.
+- In **Add EQ band**, Alt+S, Alt+E and Alt+G each landed on the box below the one they name. They land on their own boxes now.
+- In **Rename peer**, Alt+N landed on Clear custom name, so pressing Enter cleared the name. It lands on the name box now, and Cancel has Alt+A.
+- In **Preferences**, Alt+A belonged to both the auto-save list and Accept remote volume commands, so it could switch remote volume commands on or off by accident. Accept remote volume commands is Alt+V now, and Close has Alt+C.
+- The service profile's Cancel has Alt+N, and **Additional options** now has a Cancel button that Escape presses. What you set there is only kept if you then save the service profile.
+- In **Keyboard shortcuts**, Close has Alt+O.
+
+The gate now walks every tab and dialog this way on every build, so a shortcut that points at the wrong control fails it.
+
+## Other fixes for keyboard and screen reader users
+
+- The peer details box no longer rewrites itself every second while you are reading it.
+- If RemSound cannot start a recording, the message now comes to the front, even when you started it with the hotkey while RemSound was minimised.
+- Changing a keyboard shortcut no longer says the profile has unsaved changes. Shortcuts are saved on this computer straight away.
+- The status readout and the connected peers list now agree with the connect sound about whether a peer is connected. A short heartbeat hiccup while audio is still playing no longer shows "Not connected".
+- In Preferences, the **Choose sound** list now shows your own file as an entry when you have picked one with Browse. Choosing a built-in sound really does switch to it, and you can arrow back to your own file before closing. It also reads as "Choose sound" to a screen reader, as it does on screen.
 
 ## When logging is off
 

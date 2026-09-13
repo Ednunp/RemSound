@@ -78,10 +78,9 @@ internal sealed class MainFormHotkeyController : IDisposable
     public Action<string>? Log { get; set; }
 
     /// <summary>Optional callback fired when the user successfully captures and saves a new
-    /// hotkey via the Keyboard shortcuts dialog. MainForm wires this to MarkProfileDirty so
-    /// the unsaved-changes prompt fires on close and the user gets a Save reminder. Without
-    /// this hook, hotkey edits silently bypass the dirty-flag and the user finds out their
-    /// new bindings never made it into the profile JSON.</summary>
+    /// hotkey via the Keyboard shortcuts dialog. MainForm wires it to refresh the spoken
+    /// "press X anywhere" hints. It must not mark the profile dirty: hotkeys are saved on this
+    /// computer the moment they change, not in the profile.</summary>
     public Action? OnHotkeyChanged { get; set; }
 
     public MainFormHotkeyController(
@@ -309,7 +308,8 @@ internal sealed class MainFormHotkeyController : IDisposable
             AutoSize = true,
             Padding = new Padding(0, 8, 0, 0),
         };
-        var closeButton = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.OK, TabIndex = 2 };
+        // Alt+O: C is "Clear this shortcut". Every button has an Alt key.
+        var closeButton = new Button { Text = "Cl&ose", AccessibleName = "Close", AutoSize = true, DialogResult = DialogResult.OK, TabIndex = 2 };
         // Discoverable "clear" alongside the Del key — the Del shortcut isn't obvious to a screen-reader
         // user. Clears whichever shortcut is selected in the list (UnsetSelected reads list.SelectedIndex,
         // which the ListBox keeps even when focus is on this button).
@@ -734,8 +734,8 @@ internal sealed class MainFormHotkeyController : IDisposable
             };
             Log?.Invoke($"register {description}: FAILED = {hotkey} (Win32 error {err}: {hint})");
             ShowRegisterWarning($"Could not register {description} hotkey {hotkey}. " + (err == 1409
-                ? "Another app — or another running copy of RemSound — is already using that combo. The hotkey is saved in your profile, so the binding will take effect once the conflict is resolved."
-                : $"Windows reported error {err}. The hotkey is saved in your profile but Windows didn't accept the registration."));
+                ? "Another app — or another running copy of RemSound — is already using that combo. The hotkey is saved on this computer, so the binding will take effect once the conflict is resolved."
+                : $"Windows reported error {err}. The hotkey is saved on this computer but Windows didn't accept the registration."));
         }
     }
 

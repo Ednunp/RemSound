@@ -67,12 +67,19 @@ internal sealed class CaptureDriftCorrector : ISampleProvider
     /// assert the correction really engages, and so the diag line can show it per source.</summary>
     public double AppliedRatio { get; private set; } = 1.0;
 
+    /// <summary>Has a measurement been accepted? False while every window is being thrown away — which
+    /// is what a feed counted in the wrong units looks like from outside, and why the gate asks.</summary>
+    internal bool IsTracking => tracker.IsTracking;
+
     public WaveFormat WaveFormat => upstream.WaveFormat;
 
     /// <param name="bufferedMs">The source ring's current depth, for the cushion term.</param>
     /// <param name="correctionWanted">False while this is the only live source — see the class note
     /// on leaving a single source alone.</param>
-    /// <param name="fedBytes">Total bytes the device has captured, for the feed side of the ratio.</param>
+    /// <param name="fedBytes">Total audio the device has fed, counted in THIS corrector's units: bytes of
+    /// 48 kHz stereo float, the same units the pulled side is counted in. A device's own bytes are the
+    /// wrong thing to pass for any source that is not already 48 kHz stereo float — see
+    /// <c>CaptureSource.ToMixEquivalentBytes</c>.</param>
     public CaptureDriftCorrector(
         ISampleProvider upstream,
         Func<int> bufferedMs,

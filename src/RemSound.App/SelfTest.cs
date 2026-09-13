@@ -249,7 +249,18 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT: the plugin pan/EQ switch actually changes the audio (measured)", AuditPluginShapingSwitchActuallySwitches);
         RunStep(results, "AUDIT: two capture sources in one stream stay aligned (drift corrected)", AuditCaptureSourcesStayAligned);
         RunStep(results, "AUDIT: the one shared drift loop keeps its four hard-won safety rules", AuditSharedDriftLoopRules);
-        RunStep(results, "AUDIT: switching an output lane off leaves no ring written-but-never-read", AuditUntickedLaneIsNotFedForever);
+        RunStep(results, "AUDIT: switching an output lane off leaves no ring written-but-never-read, and a stalled one plays and records each peer once", AuditUntickedLaneIsNotFedForever);
+        RunStep(results, "AUDIT: every peer is heard once, in all three configurations and through the all-sessions read", AuditEachPeerIsHeardOnceInEveryConfiguration);
+        RunStep(results, "AUDIT: adding a capture source cannot freeze sending (a mix read never waits on the engine's lock)", AuditMixerNeverWaitsOnItsLockFromTheAudioThread);
+        RunStep(results, "AUDIT: a 44.1 kHz mono 16-bit capture source is drift-corrected (fed audio counted in the mixer's units)", AuditCaptureDriftCountsInTheMixersUnits);
+        RunStep(results, "Recording: every sending lane keeps its own ring, the DAW plugin's included (all three configurations)", RecordingKeepsEverySendingLaneApart);
+        RunStep(results, "Keyboard: every Alt key goes where it says, in every tab, dialog and configuration", KeyboardShortcutsGoWhereTheySay);
+        RunStep(results, "Keyboard: a recording that cannot start says so in front, not behind", AuditRecordingStartFailureComesToTheFront);
+        RunStep(results, "Keyboard: Additional service options can be cancelled and saves nothing until the service dialog's OK", AuditServiceAdditionalOptionsCanBeCancelled);
+        RunStep(results, "Screen reader: choosing a sound changes what you hear, and your own file can be chosen back", AuditChoosingASoundIsWhatYouHear);
+        RunStep(results, "AUDIT: changing a hotkey does not claim the profile has unsaved changes", AuditHotkeyChangeLeavesTheProfileClean);
+        RunStep(results, "AUDIT: \"connected\" means the same in the connect cue, the status readout and the peer list", AuditConnectedMeansTheSameEverywhere);
+        RunStep(results, "Screen reader: the peer details box holds still while it is being read", AuditPeerDetailsHoldStillWhileRead);
         RunStep(results, "AUDIT: a missing password fingerprint names both causes, the likelier first", AuditMissingFingerprintNamesBothCauses);
         RunStep(results, "AUDIT: the long-run report says what could creep, in every configuration", AuditLongRunReportSaysWhatCreeps);
         RunStep(results, "AUDIT: the long-run report is actually WRITTEN when the old line goes silent", AuditLongRunReportIsActuallyWritten);
@@ -260,6 +271,7 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT: a wake holds every lane and discards the readings across the gap, keeping what the tuner learned", AuditWakeHoldsTheTunerAndKeepsWhatItLearned);
         RunStep(results, "AUDIT: a wake puts back the tune the tuner had settled on, not its last moment", AuditWakePutsBackTheSettledTuneNotTheLastMoment);
         RunStep(results, "AUDIT: waking stops all the audio, starts it again and puts back the tune from before the sleep (all three configurations)", AuditWakeRestartsTheAudioWithTheTuneFromBeforeSleep);
+        RunStep(results, "AUDIT: a wake puts back the tune with logging and auto-tune switched off (all three configurations)", AuditWakeRestoresTheTuneWithLogsOff);
         RunStep(results, "AUDIT: re-opening an output is not network jitter (both output kinds)", AuditOutputReopenIsNotJitter);
         RunStep(results, "AUDIT: a settling WASAPI endpoint is not taken as a clock", AuditSettlingEndpointIsNotTakenAsAClock);
         RunStep(results, "AUDIT: after a wake the report bursts and splits network gaps from render gaps", AuditPostWakeBurstSplitsNetworkFromRender);

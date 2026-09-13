@@ -64,8 +64,15 @@ internal sealed class MixingEngine : ICaptureBackend
 
     /// <summary>How many capture sources are live. Drives the drift correctors: with ONE source there
     /// is nothing to stay aligned with, so correction stays off and the commonest setup of all is
-    /// untouched.</summary>
-    internal int ActiveSourceCount { get { lock (gate) return active.Count; } }
+    /// untouched.
+    ///
+    /// <para><b>Lock-free, and it has to be.</b> The audio thread asks this from inside NAudio's mixer
+    /// Read, which holds the mixer's own lock while it runs. Adding a source takes <c>gate</c> first and
+    /// then the mixer's lock (AddMixerInput). When this took <c>gate</c> too, the two threads could each
+    /// hold the lock the other was waiting for, and sending froze for good. Written under
+    /// <c>gate</c> wherever <c>active</c> changes; read here without it. 2026-09-13 review.</para></summary>
+    internal int ActiveSourceCount => activeCount;
+    private volatile int activeCount;
 
     /// <summary>Per-source ring depth and applied drift ratio, for the diag line — so two sources
     /// pulling apart becomes something a log can SHOW rather than something you have to hear. Ordered
@@ -223,9 +230,7 @@ internal sealed class MixingEngine : ICaptureBackend
             {
                 var entry = OpenSource(spec);
                 if (entry is null) continue;
-                entry.Source.CorrectionWanted = () => ActiveSourceCount > 1;
-                mixer.AddMixerInput(entry.Source.Provider);
-                active.Add(entry);
+                AttachLocked(entry);
             }
 
             if (active.Count == 0)
@@ -296,6 +301,7 @@ internal sealed class MixingEngine : ICaptureBackend
                 try { mixer.RemoveMixerInput(a.Source.Provider); } catch { /* ignore */ }
                 DisposeEntry(a);
                 active.RemoveAt(i);
+                activeCount = active.Count;
                 onDiagnostic?.Invoke(faulted
                     ? $"mixer: dropped DEAD source \"{a.Source.Name}\" ({a.Source.Kind}) — will re-open below if still wanted"
                     : $"mixer: removed source \"{a.Source.Name}\" ({a.Source.Kind})");
@@ -308,9 +314,7 @@ internal sealed class MixingEngine : ICaptureBackend
                 if (existingKeys.Contains(SourceKey(spec.DeviceId, spec.Kind))) continue;
                 var entry = OpenSource(spec);
                 if (entry is null) continue;
-                entry.Source.CorrectionWanted = () => ActiveSourceCount > 1;
-                mixer.AddMixerInput(entry.Source.Provider);
-                active.Add(entry);
+                AttachLocked(entry);
                 try
                 {
                     entry.Source.Start();
@@ -339,7 +343,40 @@ internal sealed class MixingEngine : ICaptureBackend
 
         foreach (var a in active) DisposeEntry(a);
         active.Clear();
+        activeCount = 0;
         mixer = null;
+    }
+
+    /// <summary>Put an opened source into the mix. Caller holds <c>gate</c>. The one place a source is
+    /// added, so the lock-free count can never fall out of step with the list.</summary>
+    private void AttachLocked(ActiveSource entry)
+    {
+        entry.Source.CorrectionWanted = () => ActiveSourceCount > 1;
+        mixer!.AddMixerInput(entry.Source.Provider);
+        active.Add(entry);
+        activeCount = active.Count;
+    }
+
+    /// <summary>Gate seam: add an already-built source through the same path a real one takes, so the
+    /// mixer can run in a test without a device being opened.</summary>
+    internal void AddSourceForTest(CaptureSource source)
+    {
+        lock (gate)
+        {
+            mixer ??= new MixingSampleProvider(WaveFormat.CreateIeeeFloatWaveFormat(MixSampleRate, MixChannels)) { ReadFully = true };
+            AttachLocked(new ActiveSource { Source = source, Device = null, KeepAlive = null });
+        }
+    }
+
+    /// <summary>Gate seam: one mix read, on whatever thread calls it — the audio thread's side of the
+    /// lock order.</summary>
+    internal int ReadMixForTest(float[] buffer) => mixer?.Read(buffer, 0, buffer.Length) ?? 0;
+
+    /// <summary>Gate seam: run something while holding the engine's lock, the way adding or replacing a
+    /// source does.</summary>
+    internal void HoldLockForTest(Action whileHeld)
+    {
+        lock (gate) whileHeld();
     }
 
     public void Dispose() => Stop();

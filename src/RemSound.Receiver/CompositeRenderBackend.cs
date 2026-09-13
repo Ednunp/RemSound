@@ -221,7 +221,11 @@ internal sealed class CompositeRenderBackend : IRenderBackend
         // signal those sessions stay stuck in their session ring and the user just hears
         // silence from that peer. 2026-05-15.
         source.SetLaneActive(RenderRoute.WasapiLane, wasapiIds.Count > 0);
-        source.SetLaneActive(RenderRoute.AsioLane, asioIds.Count > 0);
+        // An ASIO lane exists only when there is an ASIO backend to read it. With no driver chosen, a
+        // stale "asio:" id still in the ticked list used to flag the lane active anyway, and the engine
+        // then made a mirror copy of every stream for a lane nothing would ever read: fed for good, and
+        // summed on top of its primary by the all-sessions read. 2026-09-13 review, finding 4.
+        source.SetLaneActive(RenderRoute.AsioLane, asio is not null && asioIds.Count > 0);
 
         // Record what is ticked, and say so when it changes. Without this the log only ever named
         // the MODE, which claims "WASAPI + ASIO" whenever an ASIO driver is chosen — so an ASIO-only

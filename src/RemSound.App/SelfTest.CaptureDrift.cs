@@ -232,4 +232,133 @@ internal static partial class SelfTest
         return $"the shared loop discards its start-up window and any out-of-band glitch, takes the first valid reading "
              + $"whole ({settled:0.000000}), caps the depth nudge at 0.3 %, and refuses to count a window twice";
     }
+
+    /// <summary>
+    /// SENDING MUST NOT FREEZE WHEN A CAPTURE SOURCE IS ADDED OR REPLACED.
+    ///
+    /// <para>2026-09-13 review. Every source's drift corrector asks the mixing engine how many sources
+    /// are live, on every audio read, from inside NAudio's mixer — which holds the mixer's own lock while
+    /// it reads. The engine answered under ITS lock. Adding a source (ticking another one, an
+    /// application's capture being replaced when the application restarts, a dead device being reopened)
+    /// takes the engine's lock first and the mixer's second. Two threads, each holding the lock the other
+    /// is waiting for: sending stops for good, and nothing is logged.</para>
+    ///
+    /// <para>So this holds the engine's lock exactly as adding a source does, and runs a real mix read on
+    /// another thread. The read must finish while the lock is still held.</para>
+    ///
+    /// <para>Not per-configuration: this is the capture mixer, which sits upstream of every output choice,
+    /// and its lock order is the same whatever is ticked.</para>
+    /// </summary>
+    private static string? AuditMixerNeverWaitsOnItsLockFromTheAudioThread()
+    {
+        var format = WaveFormat.CreateIeeeFloatWaveFormat(48000, 2);
+        using var engine = new MixingEngine(_ => { });
+        var first = new CaptureSource(new FakeCaptureDevice(format), CaptureKind.Input, "gate:first", "first source");
+        var second = new CaptureSource(new FakeCaptureDevice(format), CaptureKind.Input, "gate:second", "second source");
+
+        engine.AddSourceForTest(first);
+        Check(engine.ActiveSourceCount == 1 && first.CorrectionWanted?.Invoke() == false,
+            $"with ONE source the engine must count one and leave correction off (count {engine.ActiveSourceCount}) — a lone "
+            + "source has nothing to stay aligned with");
+        engine.AddSourceForTest(second);
+        Check(engine.ActiveSourceCount == 2 && first.CorrectionWanted?.Invoke() == true,
+            $"with TWO sources the engine must count two and switch correction on (count {engine.ActiveSourceCount})");
+
+        var finishedWhileHeld = false;
+        var buffer = new float[960];
+        engine.HoldLockForTest(() =>
+        {
+            var audioThread = new Thread(() => engine.ReadMixForTest(buffer)) { IsBackground = true, Name = "gate: mix read" };
+            audioThread.Start();
+            // Judged INSIDE the lock. A read that needs this lock cannot finish until the lambda returns,
+            // so checking afterwards would let it finish in the gap and pass.
+            finishedWhileHeld = audioThread.Join(TimeSpan.FromSeconds(2));
+        });
+        Check(finishedWhileHeld,
+            "a mix read must finish while another thread holds the engine's lock. It did not, so the audio thread is "
+            + "waiting on the lock that adding a source holds while it waits on the mixer — the two can freeze each other "
+            + "and sending stops for good");
+
+        engine.Stop();
+        Check(engine.ActiveSourceCount == 0,
+            $"stopping the engine must bring the count back to zero (got {engine.ActiveSourceCount}) — otherwise the next "
+            + "start believes a source is still there and switches correction on for a lone one");
+
+        return "a mix read finishes while the engine's lock is held, so adding a source can no longer freeze sending; the "
+             + "lock-free count follows one, two and zero sources";
+    }
+
+    /// <summary>
+    /// A 44.1 KHZ MONO 16-BIT SOURCE MUST BE DRIFT-CORRECTED, NOT JUST A 48 KHZ STEREO FLOAT ONE.
+    ///
+    /// <para>2026-09-13 review. The corrector counts what it pulls as 48 kHz stereo float. It was handed
+    /// the device's own byte count to compare against, so any other format measured as a huge clock
+    /// error: 44.1 kHz read as 8 % slow, mono or 16-bit as half speed, 96 kHz as double. All of those are
+    /// outside the ±5 % sanity band, so every window was thrown away and nothing was corrected — silently,
+    /// for most real devices. The test above never saw it because it feeds the corrector 48 kHz stereo
+    /// float units directly, the one format where the two counts agree.</para>
+    ///
+    /// <para>So this goes through a real <c>CaptureSource</c>, with the resampler and mix-down in front of
+    /// the corrector, fed by a device in a format that is wrong in all three ways at once.</para>
+    ///
+    /// <para>Not per-configuration: capture-side, upstream of every output choice.</para>
+    /// </summary>
+    private static string? AuditCaptureDriftCountsInTheMixersUnits()
+    {
+        Check(CaptureSource.ToMixEquivalentBytes(88_200, new WaveFormat(44100, 16, 1)) == 384_000,
+            "one second of 44.1 kHz mono 16-bit is one second of mix audio: 384,000 bytes of 48 kHz stereo float");
+        Check(CaptureSource.ToMixEquivalentBytes(768_000, WaveFormat.CreateIeeeFloatWaveFormat(96000, 2)) == 384_000,
+            "one second of 96 kHz stereo float is one second of mix audio too");
+        Check(CaptureSource.ToMixEquivalentBytes(384_000, WaveFormat.CreateIeeeFloatWaveFormat(48000, 2)) == 384_000,
+            "a source already in the mix format is counted as it is");
+
+        var device = new FakeCaptureDevice(new WaveFormat(44100, 16, 1));
+        using var source = new CaptureSource(device, CaptureKind.Input, "gate:44k1", "44.1 kHz mono 16-bit",
+            onDiagnostic: null, driftWindowSec: 0.5);
+        source.CorrectionWanted = () => true;
+
+        var chunk = new byte[4096];
+        for (var i = 0; i + 1 < chunk.Length; i += 2) BitConverter.TryWriteBytes(chunk.AsSpan(i), (short)3000);
+        device.Feed(chunk, 1323 * 2);   // a 30 ms cushion to start, where the corrector aims to hold the ring
+
+        // Half a percent fast: well inside the sanity band, and big enough that the ring-depth nudge
+        // (capped at 0.3 %) cannot pull the ratio back under 1.0 by itself.
+        const double fast = 1.005;
+        var pull = new float[480 * 2];
+        var owedFrames = 0.0;
+        var started = DateTime.UtcNow;
+        while (DateTime.UtcNow - started < TimeSpan.FromSeconds(2.5))
+        {
+            owedFrames += 441 * fast;             // 10 ms of 44.1 kHz audio, a little over
+            var frames = (int)owedFrames;
+            owedFrames -= frames;
+            device.Feed(chunk, frames * 2);
+            source.Provider.Read(pull, 0, pull.Length);   // 10 ms of 48 kHz stereo out, as the mixer pulls
+            Thread.Sleep(1);
+        }
+
+        var corrector = Require(source.DriftCorrector, "the capture source must have a drift corrector");
+        Check(corrector.IsTracking,
+            "no measurement was ever accepted for a 44.1 kHz mono 16-bit source: every window was thrown away as a wild "
+            + "clock error, so this source is never held on the mix clock. The feed side is being counted in the device's "
+            + "own units instead of the mixer's");
+        Check(source.AppliedDriftRatio > 1.0 && source.AppliedDriftRatio < 1.05,
+            $"a source feeding half a percent fast must be pulled faster, inside the sanity band (ratio "
+            + $"{source.AppliedDriftRatio:0.000000})");
+
+        return $"a 44.1 kHz mono 16-bit source is measured in the mixer's units and corrected (ratio {source.AppliedDriftRatio:0.0000} "
+             + "for a feed 0.5 % fast)";
+    }
+
+    /// <summary>A capture device that produces exactly what the test hands it, when the test hands it.</summary>
+    private sealed class FakeCaptureDevice(WaveFormat format) : IWaveIn
+    {
+        public WaveFormat WaveFormat { get; set; } = format;
+        public event EventHandler<WaveInEventArgs>? DataAvailable;
+        public event EventHandler<StoppedEventArgs>? RecordingStopped { add { } remove { } }
+        public void StartRecording() { }
+        public void StopRecording() { }
+        public void Dispose() { }
+        public void Feed(byte[] data, int count) => DataAvailable?.Invoke(this, new WaveInEventArgs(data, count));
+    }
 }

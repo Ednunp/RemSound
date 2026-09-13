@@ -595,6 +595,91 @@ internal static partial class SelfTest
              + "its own streams and outputs returning, and treats a stream after the minute as new";
     }
 
+    /// <summary>
+    /// A WAKE PUTS BACK THE TUNE WITH LOGGING SWITCHED OFF — AND AUTO-TUNE OFF TOO.
+    ///
+    /// <para>Ed, 2026-09-13: "the new resume behaviour takes the last tuned settings when it resumes ... but does it do this
+    /// even with the logs turned off?" It does, and this pins why. The per-second tick records the tuner's history ABOVE the
+    /// diagnostics switch, and the restart comes from Windows' resume notice, which has nothing to do with logging. A later
+    /// change that moved the recording below that switch, or behind the log, would break the restore only for people who
+    /// never turn logging on — which is almost everybody, and nobody would see it in a log.</para>
+    ///
+    /// <para>So everything that can hold the diagnostics switch on is turned off first — logging, the main auto-tune and the
+    /// ASIO auto-tune — and the switch is checked off before and after. The wiring itself is
+    /// AuditWakeRestartsTheAudioWithTheTuneFromBeforeSleep; this proves it does not lean on logging.</para>
+    /// </summary>
+    private static string? AuditWakeRestoresTheTuneWithLogsOff()
+    {
+        var restoreGate = DiagnosticsGate.Enabled;
+        var proven = new List<string>();
+        try
+        {
+            foreach (var configuration in AudioConfigurations.All)
+            {
+                MainForm form;
+                try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+                catch (Exception ex) { return Skip($"headless main window could not be built: {ex.GetType().Name}: {ex.Message}"); }
+
+                using (form)
+                {
+                    var receiver = form.ReceiverForTest;
+                    try
+                    {
+                        SetAudioConfigurationForTest(form, configuration);
+                        receiver.SetIndependentLaneLatency(configuration != AudioConfiguration.WasapiOnly);
+                        var name = configuration.Describe();
+
+                        // EVERYTHING THAT COULD HOLD THE SWITCH ON, OFF.
+                        form.LogForTest.Enabled = false;
+                        form.SetContinuousTuneForTest(false);
+                        const System.Reflection.BindingFlags Private = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                        var settingsField = Require(typeof(MainForm).GetField("settings", Private), "MainForm.settings not found");
+                        var settings = Require(settingsField.GetValue(form), "MainForm.settings is empty");
+                        Require(settings.GetType().GetMethod("SaveContinuousAutoTuneAsioEnabled"), "SaveContinuousAutoTuneAsioEnabled not found")
+                            .Invoke(settings, [false]);
+                        Require(typeof(MainForm).GetMethod("UpdateDiagnosticsGate", Private), "MainForm.UpdateDiagnosticsGate not found").Invoke(form, null);
+                        Check(!DiagnosticsGate.Enabled,
+                            $"{name}: premise — with logging and both auto-tunes off the diagnostics switch must be off, or this proves nothing");
+
+                        var sleptAt = DateTime.UtcNow - TimeSpan.FromSeconds(98);
+                        var recordedBefore = form.TuneHistoryCountForTest;
+                        form.SnapshotTickForTest();
+                        Check(form.TuneHistoryCountForTest == recordedBefore + 1,
+                            $"{name}: with logging off, the per-second tick must still record what the tuner has — it is the only record a "
+                            + $"wake has to put back ({recordedBefore} before the tick, {form.TuneHistoryCountForTest} after)");
+
+                        var reference = new TuneHistory();
+                        FeedFieldShapedTuneHistory(sample => { reference.Note(sample); form.NoteTuneHistoryForTest(sample); }, sleptAt);
+                        Check(reference.BeforeSleep(sleptAt) is not null, $"{name}: premise — the fed history must give a tune");
+                        var expectedTune = reference.BeforeSleep(sleptAt)!.Value;
+                        form.SetTuneForTest(new TuneSnapshot(DateTime.UtcNow, 41, 31, 0, 0, 0));
+
+                        form.RewindTickClockForTest(TimeSpan.FromSeconds(98));
+                        form.SnapshotTickForTest();
+                        form.SimulateSystemResumeForTest();
+
+                        var tune = form.CurrentTuneForTest();
+                        Check(tune.MainSliderMs == expectedTune.MainSliderMs && tune.AsioSliderMs == expectedTune.AsioSliderMs,
+                            $"{name}: with logging off, waking must still put both sliders back where the tuner had them before the sleep "
+                            + $"({expectedTune.MainSliderMs}/{expectedTune.AsioSliderMs}; got {tune.MainSliderMs}/{tune.AsioSliderMs})");
+                        Check(tune.MixedFloorMs == expectedTune.MixedFloorMs && tune.WasapiFloorMs == expectedTune.WasapiFloorMs
+                              && tune.AsioFloorMs == expectedTune.AsioFloorMs,
+                            $"{name}: ...and every lane's learned floor ({expectedTune.MixedFloorMs}/{expectedTune.WasapiFloorMs}/{expectedTune.AsioFloorMs}; "
+                            + $"got {tune.MixedFloorMs}/{tune.WasapiFloorMs}/{tune.AsioFloorMs})");
+                        Check(!DiagnosticsGate.Enabled,
+                            $"{name}: the wake must not have needed the diagnostics switch on — it is on again after the restart");
+                        proven.Add(name);
+                    }
+                    finally { receiver.SetPlaybackEnabled(false); }
+                }
+            }
+        }
+        finally { DiagnosticsGate.Enabled = restoreGate; }
+
+        return $"in {string.Join(", ", proven)}, with logging and both auto-tunes off, the tick still records the tune and a wake "
+             + "puts the sliders and floors from before the sleep back";
+    }
+
     /// <summary>Seven minutes of tuner history shaped like Ed's laptop before the 2026-09-12 hibernate: stale values from
     /// before the settled window; the tuner hunting through the five minutes that count (WASAPI 32–43, ASIO 22–33, floors
     /// 30/35/26); and the last minute, when the Roger On was unplugged, the tuner raised on it and the floors went.</summary>
