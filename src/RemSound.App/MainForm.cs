@@ -242,7 +242,7 @@ public sealed partial class MainForm : Form
     private readonly Button addBandButton = new() { Text = "&Add band (Alt+A)", AutoSize = true, AccessibleName = "Add band" };
     private readonly Button deleteBandButton = new() { Text = "&Delete band (Alt+D)", AutoSize = true, AccessibleName = "Delete band" };
     private readonly ListBox parametricBandList = new() { Width = 430, Height = 150, IntegralHeight = false, SelectionMode = SelectionMode.MultiExtended, AccessibleName = "Bands (Alt+B), left and right arrow change the selected band's gain" };
-    // Purely-visual EQ response graph (invisible to NVDA). See EqCurveControl.
+    // Purely visual EQ response graph: not a tab stop, and it has no accessible name. See EqCurveControl.
     private readonly EqCurveControl eqCurve = new() { Width = 430, Height = 110, Margin = new Padding(0, 8, 0, 0) };
     // Working copy of the active profile's per-peer shaping, keyed by peer address string. Loaded on
     // profile apply, saved by BuildCurrentProfile, mutated live as the user moves the controls.
@@ -10817,20 +10817,6 @@ public sealed partial class MainForm : Form
     }
 
     /// <summary>
-    /// Compares current peer-health states to the last-seen states and plays a connect /
-    /// disconnect cue on the relevant transitions. Driven from the 1 Hz snapshot tick. Rules:
-    ///   • Any state → Healthy: play connect cue (first connection, or a stale/unreachable peer
-    ///     came back).
-    ///   • Healthy or Stale → Unreachable: play disconnect cue. We deliberately do NOT fire a
-    ///     disconnect cue for Unknown → Unreachable — that's "we typed an address but never got
-    ///     a single heartbeat reply", which is a connect-failed event, not a connect-then-lost
-    ///     event. Playing a disconnect ding for a peer that never connected is jarring and was
-    ///     observed at jam-session start when the relay/peer hadn't paired yet.
-    ///   • Tracked peer disappeared from the list (deselected): play disconnect if the peer was
-    ///     Healthy at the last observation — quiet otherwise.
-    /// Stale is ignored (it's a transient between Healthy and Unreachable).
-    /// </summary>
-    /// <summary>
     /// THE rule for whether a peer is connected, and the only one. Connected the moment its audio arrives or its
     /// heartbeat is healthy; lost only when the audio has stopped AND the heartbeat has gone unreachable; anything in
     /// between (a stale heartbeat, a pause in the audio) keeps whatever it was — hysteresis, so a heartbeat blip while
@@ -11107,8 +11093,7 @@ public sealed partial class MainForm : Form
     // === Latency probe helpers ===
 
     /// <summary>Average send-side accumulator wait — half the active codec frame size. PCM
-    /// 5 ms → 2.5 ms typical; PCM 2.5 ms → 1.25 ms; Opus 20 ms → 10 ms; tight-latency PCM in
-    /// AsioOnly bypasses the accumulator entirely so this estimate is an upper bound there.</summary>
+    /// 5 ms → 2.5 ms typical; PCM 2.5 ms → 1.25 ms; Opus 20 ms → 10 ms.</summary>
     private double SenderAccumulatorEstimateMs()
     {
         // MEASURED first. The derived figures below are exact for Opus and PCM - the wait really is
@@ -11357,7 +11342,7 @@ public sealed partial class MainForm : Form
     ///      second-highest gap across the last <c>LookbackSeconds</c> seconds (the only reading
     ///      when there is just one), so jitter that persists keeps the target elevated long enough
     ///      to cover the long tail of the same disturbance.
-    ///   2. **Cap auto-tune recommendations at <see cref="AutoTuneRecommendationCapMs"/>.** Beyond
+    ///   2. **Cap auto-tune recommendations at <c>AutoTuneRecommendationCapMs</c>.** Beyond
     ///      that the user is in "I want a huge buffer for terrible network" territory — they can
     ///      drag the slider there manually; the auto-tuner shouldn't go there on its own.
     ///   3. **Asymmetric step.** Raising the target on observed jitter happens immediately. Lowering
