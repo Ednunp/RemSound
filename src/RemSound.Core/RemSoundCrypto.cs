@@ -20,7 +20,7 @@ public enum PeerSecurityStatus
 }
 
 /// <summary>
-/// Cryptographic helpers for RemSound's always-on audio encryption (in development, 2026-05-31).
+/// Cryptographic helpers for RemSound's always-on audio encryption (added 2026-05-31).
 ///
 /// Model (agreed design): each profile carries a password. Two peers can exchange audio only
 /// when their profile passwords match, because the audio is encrypted with a key derived from
@@ -42,8 +42,8 @@ public enum PeerSecurityStatus
 ///     it just keeps the password from being readable at a glance in a possibly-synced file.
 ///     That's an accepted trade-off of a portable per-profile password.
 ///
-/// All algorithms are supported back to Windows 7 (PBKDF2 is pure-managed; AES-GCM goes through
-/// Windows CNG) — worth verifying on a real Win7 box before this ships, same as the updater.
+/// Everything here is the .NET runtime's own System.Security.Cryptography; no extra library ships
+/// for it.
 /// </summary>
 public static class RemSoundCrypto
 {
@@ -107,8 +107,8 @@ public static class RemSoundCrypto
 
     /// <summary>True when <paramref name="plainPassword"/>'s credentials are already cached, so
     /// <see cref="ForPlainPassword"/> will return instantly without running PBKDF2. Lets the caller
-    /// decide whether it can derive on the UI thread (cached / weak / empty = fast) or must go
-    /// off-thread (a strong password's first use this session). Empty/weak count as "no work".</summary>
+    /// decide whether it can derive on the UI thread (cached or empty = fast) or must go off-thread
+    /// (any password's first use this session). Empty counts as "no work".</summary>
     public static bool IsCached(string? plainPassword) =>
         string.IsNullOrEmpty(plainPassword)
         || derivedCache.ContainsKey(plainPassword);
@@ -125,8 +125,9 @@ public static class RemSoundCrypto
             Encoding.UTF8.GetBytes(password ?? ""), FingerprintSalt, Pbkdf2Iterations, HashAlgorithmName.SHA256, FingerprintBytes);
 
     /// <summary>Encrypt a payload. Output layout: nonce(12) || tag(16) || ciphertext. A fresh
-    /// random nonce is generated per call. (The live wire layer may later derive the nonce from
-    /// the packet sequence number instead, which is the textbook approach for a long-lived key.)</summary>
+    /// random nonce is generated per call. This allocating form seals control commands
+    /// (<see cref="ControlSealing"/>); the audio path uses <see cref="EncryptInto"/> with a
+    /// counter-based <see cref="NonceSequence"/> instead.</summary>
     public static byte[] Encrypt(byte[] key, ReadOnlySpan<byte> plaintext)
     {
         var nonce = new byte[NonceBytes];

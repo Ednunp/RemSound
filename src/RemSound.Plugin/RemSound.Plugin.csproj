@@ -58,7 +58,9 @@
       <_Parameter1>RemSound</_Parameter1>
     </AssemblyAttribute>
     <PackageReference Include="AudioPlugSharp" Version="0.7.13" />
-    <PackageReference Include="AudioPlugSharpVst3" Version="*" />
+    <!-- Pinned to the same version as AudioPlugSharp. A floating "*" resolved to whatever was newest
+         at restore time, so two builds of one commit could ship different VST3 bridges. -->
+    <PackageReference Include="AudioPlugSharpVst3" Version="0.7.13" />
   </ItemGroup>
 
   <ItemGroup>

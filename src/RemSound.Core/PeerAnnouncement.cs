@@ -9,7 +9,4 @@ public sealed record PeerAnnouncement(
     bool CanSend,
     bool CanReceive,
     DateTime LastSeenUtc,
-    IPAddress Address)
-{
-    public string DisplayName => $"{Name} at {Address}";
-}
+    IPAddress Address);

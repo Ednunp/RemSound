@@ -131,8 +131,6 @@ public static class RemPacket
     /// exceed. Zero means "not stated" — the same convention
     /// <c>ICaptureBackend.ReportedInputLatencyMs</c> uses for a device that will not say.</summary>
     public const double CaptureLatencyTicksPerMs = 10.0;
-    // KeepAlivePayloadSize removed 2026-05-23 — no code reads or writes this payload any more
-    // (see top-of-file comment). RemPacketType.KeepAlive itself is retained for wire safety.
     /// <summary>
     /// Heartbeat payload: 1 byte <see cref="HeartbeatKind"/> + 8 bytes originator-monotonic
     /// timestamp (Stopwatch.ElapsedMilliseconds at the time the originating Ping was sent).
@@ -148,11 +146,13 @@ public static class RemPacket
     /// </summary>
     public const int ControlPayloadSize = 2;
     /// <summary>
-    /// Single canonical port for everything: receiver bind, LAN peer-to-peer dials, and the
-    /// public RemSound relay. Was 47820 (audio receiver) + 47830 (relay) in the old design;
-    /// unified to 47830 on 2026-05-05 so users never have to type `:port` after a hostname or
-    /// IP. Any peer the user adds — Tailscale IP, LAN IP, or relay hostname — defaults to
-    /// this port. The +1 (discovery) and +2 (heartbeat) derived ports follow accordingly.
+    /// Single canonical port for audio and everything that travels with it: receiver bind, LAN
+    /// peer-to-peer dials, heartbeats, and the public RemSound relay. Was 47820 (audio receiver) +
+    /// 47830 (relay) in the old design; unified to 47830 on 2026-05-05 so users never have to type
+    /// `:port` after a hostname or IP. Any peer the user adds — Tailscale IP, LAN IP, or relay
+    /// hostname — defaults to this port. The two other fixed ports are NOT derived from this one:
+    /// LAN discovery is <see cref="PeerDiscoveryService.DefaultDiscoveryPort"/> (47821), and the
+    /// loopback-only DAW plugin link is <see cref="PluginBridgeProtocol.DefaultPort"/> (47831).
     /// </summary>
     public const int DefaultPort = 47830;
     /// <summary>
@@ -242,9 +242,6 @@ public static class RemPacket
         }
         return FormatPayloadExtendedSize;
     }
-
-    // WriteKeepAlivePayload removed 2026-05-23 — dead since HeartbeatService landed
-    // 2026-05-06. See top-of-file comment.
 
     public static bool TryReadHeader(ReadOnlySpan<byte> packet, out RemPacketType type, out ushort streamId, out uint sequence)
     {
@@ -345,6 +342,10 @@ public static class RemPacket
         return true;
     }
 
+    /// <summary>Writes the bare 2-byte control payload — what a pre-5.6 peer sent in the clear. Nothing
+    /// in RemSound sends this any more: <see cref="ControlSealing.Seal"/> writes kind and delta itself at
+    /// the front of its sealed plaintext. Kept for the gate, which builds one to prove that a legacy
+    /// clear-text command is refused.</summary>
     public static int WriteControlPayload(Span<byte> destination, RemoteControlKind kind, sbyte delta)
     {
         if (destination.Length < ControlPayloadSize)
@@ -374,15 +375,15 @@ public static class RemPacket
         delta = (sbyte)payload[1];
         return true;
     }
-
-    // TryReadKeepAlive removed 2026-05-23 — dead since HeartbeatService landed 2026-05-06.
-    // See top-of-file comment.
 }
 
 /// <summary>
-/// PCM transport sub-header. PCM frames are larger than a UDP datagram (10 ms × 48 kHz × 2 ch × 3 byte = 2880 B)
-/// so they're split into multi-part chunks. The receiver assembles parts back into a complete frame
-/// before queueing for playout. Sub-header (6 bytes) is prepended to the audio bytes:
+/// PCM transport sub-header. A PCM frame is encrypted whole and the ciphertext is split into parts of
+/// at most <see cref="RemPacket.MaxAudioPayloadBytes"/>. A full 5 ms frame (240 samples × 2 ch × 3 bytes
+/// = 1,440 B) plus the 28-byte AES-GCM overhead is just too big for one, so it goes as two parts;
+/// shorter frames (Tight rate, or a small ASIO buffer sent as it arrives) fit in one. The receiver
+/// assembles the parts back into the complete ciphertext, then decrypts, before queueing for playout.
+/// Sub-header (6 bytes) is prepended to each part:
 ///   uint32 frameId
 ///   uint8  partIndex
 ///   uint8  totalParts

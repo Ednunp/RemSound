@@ -16,13 +16,13 @@ namespace RemSound.Core;
 /// thread and a live pump. The ASIO audio callback still runs on the driver's own real-time thread — that
 /// is unchanged; only the control calls move here.</para>
 ///
-/// <para><b>Lives in Core because BOTH ASIO backends need it.</b> It was written for the capture side and
-/// stayed there, so the RENDER side (AsioRenderBackend, in the receiver) went on doing exactly what the
-/// paragraph above describes as the cause of the native crash: opening, initialising, stopping and
-/// disposing an AsioOut on whatever thread called in, normally the UI thread, with no pump and no bound.
-/// Same driver, same COM object, same failure mode. Moving this type to Core — it needs nothing but
-/// threading and user32, no NAudio — lets the render side use the identical mechanism instead of a second
-/// copy that could drift. 2026-08-23 audit, finding R1.</para>
+/// <para><b>Lives in Core because capture and playback share it.</b> It was written for the capture side
+/// and stayed there, so the RENDER side went on doing exactly what the paragraph above describes as the
+/// cause of the native crash: opening, initialising, stopping and disposing an AsioOut on whatever thread
+/// called in, normally the UI thread, with no pump and no bound. Moving this type to Core — it needs
+/// nothing but threading and user32, no NAudio — gave both sides the identical mechanism (2026-08-23
+/// audit, finding R1). Today each driver is opened once, by <see cref="SharedAsioDevice"/>, and that
+/// device owns the one apartment every control call from either side goes through.</para>
 /// </summary>
 public sealed class AsioApartment : IDisposable
 {

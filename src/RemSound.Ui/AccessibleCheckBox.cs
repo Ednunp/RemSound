@@ -8,8 +8,8 @@ namespace RemSound.App;
 /// ProcessCmdKey, focus into a control inside a wrapper container, etc.) NVDA's screen-reader
 /// listener doesn't pick up the announcement. Re-firing the event explicitly forces it.
 ///
-/// Same pattern documented in claude-notes.md for the AccessibleCheckBox state-change fix —
-/// "the load-bearing piece is the FOCUS re-fire."
+/// Same load-bearing piece as the <see cref="AccessibleCheckBox"/> state-change fix below: the FOCUS
+/// re-fire.
 /// </summary>
 internal static class WinEventNotifier
 {

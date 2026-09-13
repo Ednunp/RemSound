@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace RemSound.Core;
 
 /// <summary>How often the self-updater polls GitHub Releases for a newer build. Values are
-/// stable: don't reorder; deserialisation reads the underlying int from <c>remsound.config.json</c>.</summary>
+/// stable: don't reorder; deserialisation reads the underlying int from <c>global config.json</c>.</summary>
 public enum UpdateCheckFrequency
 {
     Never = 0,
@@ -13,28 +13,27 @@ public enum UpdateCheckFrequency
 }
 
 /// <summary>
-/// App-level configuration that lives next to the exe as <c>remsound.config.json</c>.
+/// App-level configuration, kept as <c>global config.json</c> in the user-data folder
+/// (<c>&lt;exe&gt;\user settings and logs\</c>, see <see cref="UserDataDirectory"/>).
 /// Distinct from <see cref="Profile"/>: profiles are user-chosen sets of audio /
 /// connectivity / device settings; the app config is the *meta* layer that holds
-/// preferences that should be sticky regardless of which profile is loaded. Profiles are
-/// per-setup; this file is per-installation.
+/// preferences that should be sticky regardless of which profile is loaded — the profiles
+/// folder, logging, cues, keyboard shortcuts, the remembered peers and applications, update
+/// behaviour and so on. Profiles are per-setup; this file is per-installation.
 ///
-/// What lives here:
-///   * <see cref="ProfilesDirectory"/> — where the profile JSONs are read from.
-///
-/// (Pre-2026-05-11 also held <c>BothModeWarningSuppressed</c> — the "do not show me again"
-/// tick on the WASAPI+ASIO latency popup. The popup was retired along with the audio-mode
-/// listbox; old config JSONs that still contain the key just have it ignored.)
-///
-/// Persisted location: <c>&lt;exe&gt;\remsound.config.json</c>. If the file is missing or
-/// malformed, defaults are used and the app behaves exactly as it did pre-2026-05-05
-/// (per-machine subfolder under the exe). The file is only written when the user
-/// explicitly changes a setting.
+/// If the file is missing or malformed, <see cref="Load"/> returns defaults. Older layouts
+/// (<c>&lt;exe&gt;\remsound.config.json</c>, then <c>&lt;exe&gt;\config\global config.json</c>) are
+/// moved here once by <see cref="MigrateLegacyLayoutIfNeeded"/>. Keys an older build wrote that this
+/// one no longer has — <c>BothModeWarningSuppressed</c>, retired with the WASAPI+ASIO latency popup
+/// on 2026-05-11, for one — are ignored on load.
 /// </summary>
 public sealed class AppConfig
 {
     /// <summary>Filesystem path to the directory the app should read profiles from. When
-    /// null, RemSound uses the legacy default: <c>&lt;exe&gt;\profiles\&lt;machine&gt;\</c>.
+    /// null, RemSound uses the default,
+    /// <c>&lt;exe&gt;\user settings and logs\profiles\&lt;machine&gt;\</c>
+    /// (<see cref="ProfilesBaseDirectory"/> plus the machine name), and so does a folder that
+    /// no longer exists (<see cref="CreateStore"/>).
     /// When set to an explicit folder, that folder IS the profiles folder — no per-machine
     /// subfolder is appended (the user picked it, they meant it; that also lets a user point
     /// at a Dropbox folder shared between machines).</summary>
@@ -126,10 +125,10 @@ public sealed class AppConfig
     /// (The usual "auto-options default off" rule is about data-persistence toggles, not cues.)</summary>
     public bool EnableStartupCue { get; set; } = true;
 
-    /// <summary>Optional custom WAV path for the startup cue. Null = use the bundled
-    /// <c>sounds\start up.wav</c>. Machine-wide for the same reason as
-    /// <see cref="EnableStartupCue"/>: the cue plays before any profile (and the per-profile
-    /// custom-cue paths) is loaded, so it can't live on <see cref="Profile"/>.</summary>
+    /// <summary>Optional custom WAV path for the startup cue. Null = the default startup sound from
+    /// <see cref="SoundsDirectory"/> (<c>default sounds\</c> next to the exe). Machine-wide for the
+    /// same reason as <see cref="EnableStartupCue"/>: the cue plays before any profile (and the
+    /// per-profile custom-cue paths) is loaded, so it can't live on <see cref="Profile"/>.</summary>
     public string? StartupCueCustomPath { get; set; }
 
     /// <summary>The chosen default-sound FILENAME for each cue (e.g. "connect 2.wav"), keyed by
@@ -186,11 +185,11 @@ public sealed class AppConfig
     /// <see cref="StartupCueCustomPath"/> field for backward compatibility.</summary>
     public Dictionary<string, string> MachineCueCustomPaths { get; set; } = new();
 
-    /// <summary>If true, RemSound writes a tab-separated diagnostic log to
-    /// <c>&lt;exe&gt;\logs\</c>. Lives here (not in <see cref="Profile"/>) because logging
-    /// is a debugging affordance for the installation, not a user-facing audio preference —
-    /// switching profiles shouldn't accidentally re-enable a flood of writes the user had
-    /// turned off, and a one-machine "yes log everything" decision shouldn't have to ride
+    /// <summary>If true, RemSound writes a tab-separated diagnostic log to <see cref="LogsDirectory"/>
+    /// (<c>&lt;exe&gt;\user settings and logs\logs\</c>). Lives here (not in <see cref="Profile"/>)
+    /// because logging is a debugging affordance for the installation, not a user-facing audio
+    /// preference — switching profiles shouldn't accidentally re-enable a flood of writes the user
+    /// had turned off, and a one-machine "yes log everything" decision shouldn't have to ride
     /// along on every saved profile. Default false: no log file is created until the user
     /// ticks <em>Enable logs</em> in the Preferences dialog.</summary>
     public bool LoggingEnabled { get; set; }
@@ -270,8 +269,8 @@ public sealed class AppConfig
     /// startup profile picker and loads this profile directly. Combine with
     /// <see cref="StartMinimised"/> + the Windows auto-start registry entry
     /// (see <c>StartupAutoStart</c>) to get a fully unattended boot-into-streaming flow.
-    /// To re-show the picker temporarily, untick "Start with a specific profile" in the
-    /// Startup behaviour dialog. Null = always show the picker (legacy behaviour).</summary>
+    /// To re-show the picker temporarily, untick "Start with a specific profile" on the
+    /// Preferences dialog's Startup behaviour tab. Null = always show the picker (the default).</summary>
     public string? StartWithProfileTitle { get; set; }
 
     /// <summary>How often (in minutes) RemSound auto-saves the current profile if it's NOT read-only and
@@ -317,9 +316,9 @@ public sealed class AppConfig
 
     /// <summary>If true, RemSound opens the About box (which leads with the latest release
     /// notes) once on the first launch AFTER an update has been installed, so the user sees
-    /// "what's new" without going looking. Default false — opt-in. Detected by comparing the
-    /// running version against <see cref="LastWhatsNewVersion"/> at launch, so it only fires
-    /// when the version actually changed, never on an ordinary relaunch. On by default — it's a
+    /// "what's new" without going looking. Detected by comparing the running version against
+    /// <see cref="LastWhatsNewVersion"/> at launch, so it only fires when the version actually
+    /// changed, never on an ordinary relaunch. On by default — it's a
     /// discoverability aid (see what changed), not a data-persistence toggle, so the usual
     /// "auto-options default off" rule doesn't really apply; users can untick it.</summary>
     public bool ShowWhatsNewAfterUpdate { get; set; } = true;

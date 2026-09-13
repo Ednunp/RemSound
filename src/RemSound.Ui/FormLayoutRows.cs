@@ -65,9 +65,9 @@ internal sealed class CmdKeyForm : Form
 /// Microsoft removed the opt-out — so this subclass is the only path.
 ///
 /// Risk: dotnet/winforms#11831 was filed against .NET 8 reporting that overriding
-/// CreateAccessibilityInstance throws InvalidOperationException. Status uncertain on .NET 10.
-/// If we hit that exception at runtime, the fallback is to remove the override and accept
-/// the announcement.
+/// CreateAccessibilityInstance throws InvalidOperationException. RemSound targets .NET 10, and the
+/// main window, Preferences and the service dialog all use this control, so a regression would show
+/// at once. If it does, the fallback is to remove the override and accept the announcement.
 /// </summary>
 internal sealed class QuietTabControl : TabControl
 {

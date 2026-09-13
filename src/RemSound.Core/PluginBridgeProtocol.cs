@@ -23,7 +23,7 @@ public enum PluginBridgeMessage : byte
     Goodbye = 6,
     /// <summary>App → plugin, in reply to Hello: who this machine can receive, one per line as
     /// "address TAB name". Also the plugin's proof that RemSound is running — no reply means the app
-    /// is closed, or the user has switched the plugin off in Preferences, and the plugin says so.</summary>
+    /// is closed, or the link is switched off in RemSound's DAW plugin menu, and the plugin says so.</summary>
     PeerList = 7,
     /// <summary>Plugin → app, every audio block: the same three jobs as <see cref="ClaimPeer"/> —
     /// claim, heartbeat and request — but for SEVERAL peers at once. Payload is a little-endian int32
@@ -33,10 +33,11 @@ public enum PluginBridgeMessage : byte
     /// conversation you want to hear over your own session), and the naive way to do it — one request
     /// and one reply per peer — multiplies the loopback traffic and the bridge thread's work by the
     /// number of people on the track. The app already has each peer decoded and shaped, so it reads
-    /// them all and returns ONE mixed block, and the plugin's audio path is unchanged: one ring, one
-    /// resampler. The cost is that a per-peer trim is not available in the plugin; RemSound's own
-    /// per-peer volume, pan and EQ apply to what the plugin gets (they run inside the session read
-    /// this path calls), so that control already exists where the user already knows it.</para></summary>
+    /// them all and returns ONE mixed block, and the plugin's audio path is unchanged: one reply per
+    /// block, one resampler. The cost is that a per-peer trim is not available in the plugin;
+    /// RemSound's own per-peer volume, pan and EQ apply to what the plugin gets (they run inside the
+    /// session read this path calls), so that control already exists where the user already knows
+    /// it.</para></summary>
     ClaimPeers = 8,
     /// <summary>App → plugin: a block of the claimed peers' audio, like <see cref="PeerAudio"/>, but
     /// stamped with WHICH DAW BLOCK it is for. Payload is a little-endian int64 round number, then the

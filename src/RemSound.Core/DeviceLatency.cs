@@ -6,8 +6,8 @@ namespace RemSound.Core;
 /// <para>Lives in Core because BOTH sides need the identical rule — the capture backends are in
 /// RemSound.Sender, the output backends in RemSound.Receiver, and Receiver does not reference
 /// Sender. Duplicating the rule in two assemblies is how two answers to one question start
-/// disagreeing. Pure functions with no NAudio dependency, so Core stays dependency-free and the gate
-/// can pin the rule without opening a device.</para>
+/// disagreeing. Pure functions with no NAudio dependency (SharedAsioDevice is the one type in Core that
+/// touches NAudio), so the gate can pin the rule without opening a device.</para>
 ///
 /// <para><b>Why any of this exists.</b> RemSound's latency estimate had five terms and four of them
 /// were constants dressed as measurements. Capture added a flat 10 ms — the size RemSound ASKS

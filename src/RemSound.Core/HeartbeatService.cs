@@ -323,7 +323,6 @@ public sealed class HeartbeatService : IDisposable
             foreach (var p in peers.Values)
             {
                 if (!p.AudioEndpoint.Address.Equals(remote.Address)) continue;
-                p.LastRttMs = rttMs;
                 p.RttEwmaMs = p.RttEwmaMs is null ? rttMs : (int)(p.RttEwmaMs.Value * 0.7 + rttMs * 0.3);
                 p.LastPongUtc = nowUtc;
                 matchedCount++;
@@ -352,7 +351,6 @@ public sealed class HeartbeatService : IDisposable
         public IPEndPoint AudioEndpoint { get; set; } = null!;
         public DateTime? FirstPingSentUtc { get; set; }
         public DateTime? LastPongUtc { get; set; }
-        public int? LastRttMs { get; set; }
         public int? RttEwmaMs { get; set; }
     }
 }

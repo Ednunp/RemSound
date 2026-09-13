@@ -18,9 +18,10 @@ namespace RemSound.Core;
 /// allocation on the audio thread can stall every plugin in the DAW, not just this one. Every buffer
 /// here is sized at construction and reused.</para>
 ///
-/// <para><b>Asking is the heartbeat.</b> Each block sends one ClaimPeer carrying the frames just
-/// consumed. That claims the peer (so it leaves the app's speakers), keeps the claim alive, and asks
-/// for the next block, all in one message. Stop playing and the claim lapses on its own — which is
+/// <para><b>Asking is the heartbeat.</b> Each block sends one ClaimPeers carrying the frames just
+/// consumed, the people on this track and the ask number. That claims them (so they leave the app's
+/// speakers), keeps the claims alive, and asks for the next block, all in one message. Stop playing
+/// and the claims lapse on their own — which is
 /// the right direction to fail, since a peer stuck silent everywhere is far worse than one that comes
 /// back through the speakers.</para>
 /// </summary>
@@ -58,7 +59,6 @@ public sealed class PluginBridgeClient : IDisposable
     private readonly Slot[] slots = new Slot[SlotCount];
     private int head;   // audio thread advances
     private int tail;   // bridge thread advances
-    private long repliesDropped;
 
     // The ask this thread is on, 1-based, never reset - the mapping below stays valid across a stop
     // and start. The block number a reply carries minus the ask number it answers is a constant for
@@ -110,8 +110,9 @@ public sealed class PluginBridgeClient : IDisposable
     /// <summary>Has the app answered us at all? Drives the plugin's status line.</summary>
     public bool Connected { get; private set; }
 
-    /// <summary>Blocks where the ring had nothing for the DAW. A few at startup are normal — the ring
-    /// is filling. A number that keeps climbing means the app isn't keeping up, and it belongs in the
+    /// <summary>Blocks the DAW got less than a full reply for: the reply for that block had not come,
+    /// or came back short, and the rest was left silent. A few at startup are normal — nothing has been
+    /// answered yet. A number that keeps climbing means the app isn't keeping up, and it belongs in the
     /// status readout rather than being left as a mystery crackle.</summary>
     public long StarvedBlocks => Interlocked.Read(ref blocksStarved);
 
@@ -123,9 +124,6 @@ public sealed class PluginBridgeClient : IDisposable
     /// the lead. See <see cref="ReadPeerBlock"/>.</summary>
     public long SkippedFrames => Interlocked.Read(ref framesSkipped);
 
-    /// <summary>Replies that found no free slot - the DAW was not reading. For the log.</summary>
-    public long DroppedReplies => Interlocked.Read(ref repliesDropped);
-
     /// <summary>Counters for the log's once-a-second line. All lock-free adds, because the audio
     /// thread bumps them and must not take a lock to do it.</summary>
     public long SentBlocks => Interlocked.Read(ref blocksSent);
@@ -134,7 +132,8 @@ public sealed class PluginBridgeClient : IDisposable
 
     /// <summary>How much audio is waiting for the DAW right now, in frames: the replies queued ahead
     /// of the block being played. Read on the log thread; a slot changing under it costs one wrong
-    /// number in a log line, nothing more.</summary>
+    /// number in a log line, nothing more. Named for the byte ring this queue replaced; the name is
+    /// kept because it is also the plugin log's column header.</summary>
     public int RingFrames
     {
         get
@@ -148,7 +147,7 @@ public sealed class PluginBridgeClient : IDisposable
         }
     }
 
-    public PluginBridgeClient(int appPort = PluginBridgeProtocol.DefaultPort, Guid? id = null, int ringFrames = 8192)
+    public PluginBridgeClient(int appPort = PluginBridgeProtocol.DefaultPort, Guid? id = null)
     {
         instanceId = id ?? Guid.NewGuid();
         instanceHash = PluginBridgeProtocol.InstanceHash(instanceId);
@@ -368,7 +367,6 @@ public sealed class PluginBridgeClient : IDisposable
             Connected = true;
             Notable?.Invoke("RemSound answered - connected");
         }
-        LastHeardUtc = DateTime.UtcNow;
         switch (type)
         {
             case PluginBridgeMessage.PeerAudio:
@@ -395,7 +393,7 @@ public sealed class PluginBridgeClient : IDisposable
 
     /// <summary>Bridge thread: file a reply that just arrived, in the next free slot. Lock-free
     /// producer side - see the slots. A full queue means the DAW is not reading, and the reply is
-    /// dropped and counted rather than written over something unread.
+    /// dropped rather than written over something unread.
     ///
     /// <para>The payload is little-endian float, and so is every machine RemSound builds for
     /// (win-x64), so the bytes go into the slot verbatim and come back out as floats. That is the
@@ -407,11 +405,7 @@ public sealed class PluginBridgeClient : IDisposable
         floats -= floats % PluginBridgeProtocol.WireChannels;   // whole frames, or every later sample swaps channels
         if (floats <= 0) return;
         var t = tail;
-        if (t - Volatile.Read(ref head) >= SlotCount)
-        {
-            Interlocked.Increment(ref repliesDropped);
-            return;
-        }
+        if (t - Volatile.Read(ref head) >= SlotCount) return;
         var slot = slots[t & (SlotCount - 1)];
         System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(payload[..(floats * sizeof(float))]).CopyTo(slot.Data);
         slot.Floats = floats;
@@ -467,9 +461,6 @@ public sealed class PluginBridgeClient : IDisposable
             leadWindowStartTicks = now;
         }
     }
-
-    /// <summary>When the app was last heard from. Turns "it stopped working" into a time.</summary>
-    public DateTime LastHeardUtc { get; private set; } = DateTime.MinValue;
 
     private static string DescribePeers(IReadOnlyList<(IPAddress Address, string Name)> peers)
         => peers.Count == 0 ? "(none)" : string.Join(", ", peers.Select(p => $"{p.Name} [{p.Address}]"));

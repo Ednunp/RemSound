@@ -17,16 +17,17 @@ public delegate int PeerAudioReader(IPAddress peer, Span<float> destination, int
 /// know to stop that peer also coming out of the speakers, and the user would hear the same person
 /// twice, slightly apart. Here it solves itself — a claim arrives, the peer leaves the mix.</para>
 ///
-/// <para><b>The DAW is the clock.</b> A plugin sends <see cref="PluginBridgeMessage.ClaimPeer"/> every
-/// audio block carrying the number of frames it just consumed; we read exactly that many from that
-/// peer and send them back. One message therefore does three jobs — it claims the peer, it is the
-/// heartbeat that keeps the claim alive, and it is the request for the next block. Pumping on a timer
-/// of our own instead would give the peer two clocks, and the ring between us would drift.</para>
+/// <para><b>The DAW is the clock.</b> A plugin sends <see cref="PluginBridgeMessage.ClaimPeers"/> every
+/// audio block carrying the number of frames it just consumed and the people on its track; we read
+/// exactly that many frames of each of them, sum them, and send the block back. One message therefore
+/// does three jobs — it claims the peers, it is the heartbeat that keeps the claims alive, and it is
+/// the request for the next block. Pumping on a timer of our own instead would give each peer two
+/// clocks, and what we send would drift against the DAW's blocks.</para>
 ///
 /// <para><b>Nothing here blocks a DAW.</b> Requests are served on the bridge's receive thread and the
-/// answer is fired back as a datagram; the plugin's audio thread reads from its own ring and never
-/// waits on us. If we are slow, the plugin gets a short block — the same failure the network path
-/// already handles — rather than a stall in someone's session.</para>
+/// answer is fired back as a datagram; the plugin's audio thread plays whatever reply has already
+/// arrived and never waits on us. If we are slow, the plugin plays silence for that block — the same
+/// failure the network path already handles — rather than a stall in someone's session.</para>
 ///
 /// <para><b>Instances are forgotten if they go quiet.</b> A DAW that crashes cannot send Goodbye, and
 /// a peer left claimed forever would be silent everywhere with no obvious way back. Claims lapse on
@@ -41,7 +42,6 @@ public sealed class PluginBridgeHost : IDisposable
     private sealed class Instance
     {
         public required Guid Id { get; init; }
-        public required IPEndPoint Endpoint { get; set; }
         /// <summary>Everybody this instance is putting on its track. Usually one; several when a track
         /// is carrying a conversation. Swapped whole rather than edited, so a reader never sees it
         /// half-changed.</summary>
@@ -126,8 +126,10 @@ public sealed class PluginBridgeHost : IDisposable
     /// diagnosing a crackle and guessing at it.</summary>
     public long ShortReads => Interlocked.Read(ref shortReads);
 
-    /// <summary>Requests for a peer we have no audio for — a plugin pointed at somebody who has gone.
-    /// Silent on the track, and invisible without this.</summary>
+    /// <summary>Requests that got no audio back from anybody in the set — their buffers are still
+    /// filling, or the plugin is pointed at people who have gone. Silent on the track, and invisible
+    /// without this. The name cannot tell those two apart; it matches the <c>unknownPeer=</c> key in
+    /// the log line, which is kept as it is.</summary>
     public long UnknownPeerRequests => Interlocked.Read(ref unknownPeerRequests);
 
     /// <summary>Malformed datagrams on our port. Rising means something else is talking to it.</summary>
@@ -174,7 +176,7 @@ public sealed class PluginBridgeHost : IDisposable
                 // logging every one of those would be a line per instance per two seconds — burying
                 // the one that matters, which is a plugin coming back after a silence.
                 var quietFor = LastSeenAge(hash);
-                var instance = Touch(hash, from);
+                var instance = Touch(hash);
                 NoteHostProcess(instance, payload.Span);
                 SendPeerList(from, hash);
                 if (quietFor is null) Notable?.Invoke($"a plugin said hello (instance {Short(instance.Id)}, from port {from.Port})");
@@ -197,7 +199,7 @@ public sealed class PluginBridgeHost : IDisposable
                 break;
 
             case PluginBridgeMessage.TrackAudio:
-                Touch(hash, from);
+                Touch(hash);
                 DispatchTrackAudio(hash, payload);
                 break;
 
@@ -214,7 +216,7 @@ public sealed class PluginBridgeHost : IDisposable
     /// implementation of claiming and reading rather than two that can drift apart.</summary>
     private void ServeClaimOne(int hash, IPEndPoint from, IPAddress peer, ReadOnlyMemory<byte> payload)
     {
-        if (payload.Length < sizeof(int)) { Touch(hash, from); return; }
+        if (payload.Length < sizeof(int)) { Touch(hash); return; }
         var frames = BinaryPrimitives.ReadInt32LittleEndian(payload.Span);
         Span<byte> raw = stackalloc byte[4];
         if (!peer.TryWriteBytes(raw, out var written) || written != 4) return;
@@ -227,7 +229,7 @@ public sealed class PluginBridgeHost : IDisposable
     {
         if (!PluginBridgeProtocol.TryReadClaimSet(payload.Span, out var frames, out var addresses, out var askNumber))
         {
-            Touch(hash, from);
+            Touch(hash);
             return;
         }
         Serve(hash, from, addresses, frames, askNumber);
@@ -245,7 +247,7 @@ public sealed class PluginBridgeHost : IDisposable
     /// </summary>
     private void Serve(int hash, IPEndPoint from, ReadOnlySpan<byte> addresses, int frames, int askNumber)
     {
-        var instance = Touch(hash, from);
+        var instance = Touch(hash);
         var peers = UpdateClaims(instance, addresses);
         if (peers.Length == 0 || readPeer is null || frames <= 0) return;
         frames = Math.Min(frames, MaxFramesPerRequest);
@@ -435,12 +437,7 @@ public sealed class PluginBridgeHost : IDisposable
         public int Available = -1;
         /// <summary>Who has been served this round. One of them asking again is the DAW moving on.</summary>
         public readonly HashSet<Guid> Served = [];
-        /// <summary>The first few dozen asks in order, logged once: whether a DAW interleaves its tracks
-        /// (A B A B) or runs each in a burst (A A A A B B B B) decides whether ask-order rounds can pair
-        /// them, and nothing but a log from the real DAW can say which it does.</summary>
-        public List<string>? Trace = new(RoundTraceLength);
     }
-    private const int RoundTraceLength = 32;
 
     /// <summary>The round in progress, per DAW and peer.</summary>
     private readonly Dictionary<(Guid Group, IPAddress Peer), Round> rounds = new();
@@ -539,15 +536,6 @@ public sealed class PluginBridgeHost : IDisposable
             }
 
             round.Served.Add(instance);
-            if (round.Trace is { } trace)
-            {
-                trace.Add(Short(instance));
-                if (trace.Count >= RoundTraceLength)
-                {
-                    round.Trace = null;
-                    Notable?.Invoke($"round order on {peer} for one DAW, first {RoundTraceLength} asks: {string.Join(" ", trace)}");
-                }
-            }
             var give = Math.Min(frames, round.Available);
             if (give <= 0) return 0;
             var offset = (int)(round.Start - stream.Start) * 2;
@@ -613,8 +601,8 @@ public sealed class PluginBridgeHost : IDisposable
         if (handler is null)
         {
             if (Interlocked.Increment(ref trackBlocksDropped) == 1)
-                Notable?.Invoke("a plugin is sending its track, but nothing in the app is taking that audio yet - "
-                              + "sending FROM a DAW track is not wired up in this build");
+                Notable?.Invoke("a plugin is sending its track, but nothing in the app is taking that audio - "
+                              + "the blocks are counted and dropped (blocksInDropped)");
             return;
         }
         Guid id;
@@ -679,7 +667,7 @@ public sealed class PluginBridgeHost : IDisposable
     private static string Describe(IPAddress[] peers)
         => peers.Length == 1 ? $"{peers[0]} is" : $"{string.Join(", ", peers.Select(p => p.ToString()))} are";
 
-    private Instance Touch(int hash, IPEndPoint from)
+    private Instance Touch(int hash)
     {
         lock (gate)
         {
@@ -688,10 +676,9 @@ public sealed class PluginBridgeHost : IDisposable
                 // The wire carries a 32-bit id to keep the header small; the claim register is keyed
                 // by Guid. Minting one here on first sight keeps both honest without a bigger header.
                 var id = Guid.NewGuid();
-                instance = new Instance { Id = id, Endpoint = from, Group = id };
+                instance = new Instance { Id = id, Group = id };
                 instances[hash] = instance;
             }
-            instance.Endpoint = from;
             instance.LastSeenUtc = DateTime.UtcNow;
             SweepLocked();
             return instance;

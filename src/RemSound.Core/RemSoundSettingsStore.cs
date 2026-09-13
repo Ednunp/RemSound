@@ -3,12 +3,14 @@ using System.Windows.Forms;
 namespace RemSound.Core;
 
 /// <summary>
-/// In-memory cache of UI/runtime preferences. As of 2026-05-02 this no longer persists to
-/// disk — RemSound's persistence layer is the profile system (<see cref="Profile"/> /
-/// <see cref="ProfileStore"/>), and this class is just an intra-process holding area that
-/// the active profile populates on app startup and reads back from when the user saves a
-/// profile. Old <c>configs/</c> folders from prior builds are ignored. Constructor still
-/// takes an <c>appName</c> for backwards compatibility but it's unused.
+/// In-memory cache of UI/runtime preferences. As of 2026-05-02 the per-profile settings here no
+/// longer persist to disk themselves — RemSound's persistence layer is the profile system
+/// (<see cref="Profile"/> / <see cref="ProfileStore"/>), and this class is an intra-process holding
+/// area that the active profile populates on app startup and reads back from when the user saves a
+/// profile. The machine-wide exceptions go straight to <see cref="AppConfig"/> instead: the keyboard
+/// shortcuts and the remembered peers and applications. Old <c>configs/</c> folders from prior builds
+/// are ignored. The constructor's <c>appName</c> is unused; it stays because MainForm and the gate
+/// both pass one.
 /// </summary>
 public sealed class RemSoundSettingsStore
 {
@@ -107,13 +109,11 @@ public sealed class RemSoundSettingsStore
     }
 
     /// <summary>
-    /// Per-route latency settings used only in BothIndependent audio mode. The existing
-    /// <see cref="LoadMaxLatencyMs"/> / <see cref="SaveMaxLatencyMs"/> govern the WASAPI lane
-    /// (which is what the existing slider has always controlled — every classic mode reads
-    /// it the same way pre-Stage-4.5). The ASIO companion below stores the ASIO lane's
-    /// target. Default 10 ms because the whole point of the new mode is to let ASIO run at
-    /// its native low latency; if the user has picked BothIndependent they almost certainly
-    /// want ASIO closer to 10 than to 80.
+    /// The ASIO lane's latency target, used only when an ASIO driver is chosen (BothIndependent).
+    /// <see cref="LoadMaxLatencyMs"/> / <see cref="SaveMaxLatencyMs"/> govern the other slider: the
+    /// WASAPI lane when an ASIO driver is chosen, the Mixed route when none is (WasapiOnly). Default
+    /// 10 ms because the whole point of the ASIO lane is to run at its native low latency; a user who
+    /// has chosen an ASIO driver almost certainly wants it closer to 10 than to 80.
     /// </summary>
     public int LoadMaxLatencyMsAsio(int defaultValue = 10) =>
         Try(() => Load()?.MaxLatencyMsAsio is int v ? Math.Clamp(v, 5, 500) : (int?)null) ?? defaultValue;
@@ -151,7 +151,9 @@ public sealed class RemSoundSettingsStore
         Save(s);
     }
 
-    /// <summary>Loads the Opus frame size in samples-per-channel at 48 kHz. Default 480 = 10 ms.
+    /// <summary>Loads the Opus frame size in samples-per-channel at 48 kHz. Default 480 = 10 ms, the
+    /// size from before the codec list offered only 960 and 120; MainForm.ResolveCodecIndex shows
+    /// anything but 120 as the 960 choice.
     /// Migration path: profiles written by v2.x stored milliseconds (5/10/20) in the same JSON
     /// field; values &lt; 120 are interpreted as legacy ms and converted (×48 → samples). The
     /// ranges don't overlap (max legitimate ms = 60, min legitimate samples = 120), so the
@@ -159,18 +161,18 @@ public sealed class RemSoundSettingsStore
     public int LoadOpusFrameSamplesPerChannel(int defaultValue = 480) =>
         Try(() => Load()?.OpusFrameSamplesPerChannel is int v ? NormalizeOpusFrameSamples(v) : (int?)null) ?? defaultValue;
 
-    /// <summary>Saves the Opus frame size in samples-per-channel at 48 kHz. Accepts the four
-    /// standard-Opus RESTRICTED_LOWDELAY values (120/240/480/960); anything else collapses to
-    /// 480 (= 10 ms), the safe default.</summary>
+    /// <summary>Saves the Opus frame size in samples-per-channel at 48 kHz. Accepts
+    /// 120/240/480/960; anything else collapses to 480 (= 10 ms). The codec list only ever saves 960
+    /// or 120: the smaller frame Tight rate gives is applied to the encoder, never saved here.</summary>
     public void SaveOpusFrameSamplesPerChannel(int value)
     {
         var s = Load() ?? new Settings();
         s.OpusFrameSamplesPerChannel = value switch
         {
-            960 => 960,  // 20 ms
-            480 => 480,  // 10 ms
-            240 => 240,  // 5 ms — not exposed in the dropdown but reachable via Tight rate
-            120 => 120,  // 2.5 ms experimental
+            960 => 960,  // 20 ms — "broadcast quality" in the codec list
+            480 => 480,  // 10 ms — older profiles
+            240 => 240,  // 5 ms
+            120 => 120,  // 2.5 ms — "live latency" in the codec list
             _ => 480,
         };
         Save(s);
@@ -269,19 +271,12 @@ public sealed class RemSoundSettingsStore
     /// a user-facing setting with its own listbox; now the UI is simpler — the user just picks
     /// an ASIO driver (or "(none)" to disable ASIO) and the mode follows. A real driver chosen
     /// means BothIndependent (WASAPI + ASIO running side by side, each at its own latency);
-    /// no driver means WasapiOnly. The AudioMode field still exists on the persisted Settings
-    /// JSON purely for backward compat with old profiles — its value is ignored on load. The
-    /// matching SaveAudioMode setter was deleted with the listbox in the 2026-05-11 cleanup;
-    /// callers that used to invoke it have been removed.
+    /// no driver means WasapiOnly. No mode is stored anywhere: an old profile's
+    /// <c>AudioModeRaw</c> key is ignored on load, and <paramref name="defaultValue"/> is ignored
+    /// too. The gate calls this by name through reflection (SelfTest.Audit), so keep the name.
     /// </summary>
     public AudioMode LoadAudioMode(AudioMode defaultValue = AudioMode.WasapiOnly) =>
         string.IsNullOrWhiteSpace(LoadAsioDriverName()) ? AudioMode.WasapiOnly : AudioMode.BothIndependent;
-
-    // BothModeWarningSuppressed used to live here. Moved to AppConfig (remsound.config.json,
-    // machine-local) on 2026-05-07 — a "do not show me this again" decision shouldn't be
-    // tied to which profile is active. The accessors were removed; callers go to AppConfig
-    // directly. Profile.BothModeWarningSuppressed is left in place to deserialise old JSONs
-    // (one-shot migrated to AppConfig in MainForm's constructor).
 
     public SendRate LoadSendRate(SendRate defaultValue = SendRate.Standard) =>
         Try(() => Load()?.SendRate is SendRate v ? v : (SendRate?)null) ?? defaultValue;
@@ -325,23 +320,9 @@ public sealed class RemSoundSettingsStore
         Save(s);
     }
 
-    /// <summary>Suppresses the connect/disconnect sound cues that play when a peer's health
-    /// transitions to/from Healthy. Off by default — cues are on. Saved per-profile so users
-    /// who don't want them in a given setup don't have to remember to mute every session.
-    /// 2026-05-06.</summary>
-    public bool LoadMuteConnectionCues(bool defaultValue = false) =>
-        Try(() => Load()?.MuteConnectionCues) ?? defaultValue;
-
-    public void SaveMuteConnectionCues(bool value)
-    {
-        var s = Load() ?? new Settings();
-        s.MuteConnectionCues = value;
-        Save(s);
-    }
-
     // === Per-cue enable flags (2026-05-15) ===
-    // Each cue sound has its own enable toggle, surfaced in the Preferences dialog as a
-    // CheckedListBox. The legacy MuteConnectionCues above used to gate both connect AND
+    // Each cue sound has its own enable toggle, on the Preferences dialog's Audio cues tab. The
+    // legacy MuteConnectionCues profile flag (2026-05-06) used to gate both connect AND
     // disconnect — when the new flags are absent (null cache + null profile), the load
     // helpers fall back to the legacy value as a migration step. Once the user touches
     // any per-cue toggle, that flag's load returns the explicit value directly and the
@@ -457,7 +438,8 @@ public sealed class RemSoundSettingsStore
     }
 
     /// <summary>Set a custom WAV path for a given cue. Pass null or empty to clear the
-    /// override (the cue reverts to the bundled default in <c>sounds\</c>).</summary>
+    /// override (the cue reverts to its shipped default in <c>default sounds\</c>,
+    /// <see cref="AppConfig.SoundsDirectory"/>).</summary>
     public void SaveCustomCuePath(string cueId, string? path)
     {
         var s = Load() ?? new Settings();
@@ -486,12 +468,13 @@ public sealed class RemSoundSettingsStore
         Save(s);
     }
 
-    /// <summary>How aggressively the receiver pulls the playout queue back to the user's
-    /// target latency under network jitter. 1 = stupid aggressive (~10 % playback rate change,
-    /// audible pitch shift on drift, sub-second recovery). 10 = perfectly smooth (gentle
-    /// controller, no audible artefacts, slow recovery — buffer can creep up over a long
-    /// session). Lower is faster-but-less-stable, like the latency slider. Default is 3 —
-    /// quite aggressive but not the extreme; user dials down for tighter, up for smoother.</summary>
+    /// <summary>How eagerly the receiver trims a playout buffer that has grown past the target
+    /// latency. The trim DROPS the oldest audio — a brief click — and never changes playback speed.
+    /// 1 = trim as soon as the buffer is a couple of packets over target (glued to target, frequent
+    /// clicks); each step up adds margin before the trim fires; 10 = no trim at all, so the buffer can
+    /// creep up over a long session. In normal operation the drift corrector keeps the buffer near
+    /// target and the trim rarely fires (SessionPlayout.ReadFloats). Default is 3; user dials down for
+    /// tighter, up for smoother.</summary>
     public int LoadSmoothness(int defaultValue = 3) =>
         Try(() => Load()?.Smoothness is int v ? Math.Clamp(v, 1, 10) : (int?)null) ?? defaultValue;
 
@@ -547,12 +530,11 @@ public sealed class RemSoundSettingsStore
         try { return action(); } catch { return null; }
     }
 
-    // 2026-05-02: persistence moved out of this class. RemSound now manages settings via the
-    // profile system (RemSound.Core.Profile / ProfileStore), and the settings store has become
-    // a per-process in-memory cache that the active profile populates on load and reads back
-    // from on save. Disk IO from this class is intentionally a no-op now: the old configs/
-    // folder is no longer written to. If a configs/ folder exists from a previous build, it's
-    // ignored — users are expected to re-create their setup as a Profile via the new dialog.
+    // 2026-05-02: profile-setting persistence moved out of this class. RemSound manages those via
+    // the profile system (RemSound.Core.Profile / ProfileStore); this cache is per-process, populated
+    // from the active profile on load and read back on save, and never touches disk itself. The old
+    // configs/ folder is no longer written or read. (The machine-wide accessors above write
+    // AppConfig directly.)
     private Settings cache = new();
 
     private Settings? Load() => cache;
@@ -581,9 +563,6 @@ public sealed class RemSoundSettingsStore
             // RememberedPeers no longer rides the cache — it's machine-wide in AppConfig now; the
             // profile's legacy copy is unioned in below (migration) instead of replacing anything.
             AsioDriverName = profile.AsioDriverName,
-            // Profile.AudioModeRaw and Profile.BothModeWarningSuppressed are no longer carried
-            // through the settings cache. Both fields are retired (2026-05-07 / 2026-05-11);
-            // mode is derived from AsioDriverName and the Both-mode warning popup is gone.
             SendRate = profile.SendRate,
             TightLatencyMode = profile.TightLatencyMode,
             PriorityMode = profile.PriorityMode,
@@ -655,9 +634,6 @@ public sealed class RemSoundSettingsStore
         // working against the same profile file, and makes the load-time migration union a no-op.
         profile.RememberedPeers = new List<string>(LoadRememberedPeers());
         profile.AsioDriverName = s.AsioDriverName;
-        // AudioMode and BothModeWarningSuppressed are not copied — both Profile fields were
-        // retired in the 2026-05-11 cleanup. Mode is derived from AsioDriverName and the
-        // popup that owned the suppression flag is gone.
         if (s.SendRate is SendRate sr) profile.SendRate = sr;
         if (s.TightLatencyMode is bool tl) profile.TightLatencyMode = tl;
         if (s.PriorityMode is bool pm) profile.PriorityMode = pm;
@@ -693,19 +669,16 @@ public sealed class RemSoundSettingsStore
         public int? OpusFrameSamplesPerChannel { get; set; }
         public bool? ContinuousAutoTuneEnabled { get; set; }
         public int? ContinuousAutoTuneIntervalSec { get; set; }
-        // Per-route latency settings used in AudioMode.BothIndependent only. MaxLatencyMs
-        // above continues to govern the WASAPI lane (= the only lane in classic modes), so
-        // existing profiles keep their current slider value untouched on upgrade. Asio
-        // companion below holds the ASIO lane's slider; the auto-tune enable companion lets
-        // the user opt either lane in or out independently.
+        // The ASIO lane's slider and auto-tune switch, used when an ASIO driver is chosen
+        // (BothIndependent). MaxLatencyMs above governs the other slider — the WASAPI lane with a
+        // driver chosen, the Mixed route without one — so existing profiles kept their slider value
+        // on upgrade. The auto-tune companion lets the user opt either lane in or out independently.
         public int? MaxLatencyMsAsio { get; set; }
         public bool? ContinuousAutoTuneAsioEnabled { get; set; }
         // RememberedPeers / RememberedApplications retired from this cache 2026-07-16 — both books are
         // machine-wide in AppConfig now (this cache is intra-process only, so applications were being
         // forgotten on every exit and peers were per-profile in practice).
         public string? AsioDriverName { get; set; }
-        // AudioMode and BothModeWarningSuppressed both retired from this cache. Mode is
-        // derived from AsioDriverName via LoadAudioMode; the Both-mode warning popup is gone.
         public SendRate? SendRate { get; set; }
         public bool? TightLatencyMode { get; set; }
         public bool? PriorityMode { get; set; }
