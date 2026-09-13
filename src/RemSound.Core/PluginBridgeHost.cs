@@ -42,7 +42,6 @@ public sealed class PluginBridgeHost : IDisposable
     private sealed class Instance
     {
         public required Guid Id { get; init; }
-        public required IPEndPoint Endpoint { get; set; }
         /// <summary>Everybody this instance is putting on its track. Usually one; several when a track
         /// is carrying a conversation. Swapped whole rather than edited, so a reader never sees it
         /// half-changed.</summary>
@@ -177,7 +176,7 @@ public sealed class PluginBridgeHost : IDisposable
                 // logging every one of those would be a line per instance per two seconds — burying
                 // the one that matters, which is a plugin coming back after a silence.
                 var quietFor = LastSeenAge(hash);
-                var instance = Touch(hash, from);
+                var instance = Touch(hash);
                 NoteHostProcess(instance, payload.Span);
                 SendPeerList(from, hash);
                 if (quietFor is null) Notable?.Invoke($"a plugin said hello (instance {Short(instance.Id)}, from port {from.Port})");
@@ -200,7 +199,7 @@ public sealed class PluginBridgeHost : IDisposable
                 break;
 
             case PluginBridgeMessage.TrackAudio:
-                Touch(hash, from);
+                Touch(hash);
                 DispatchTrackAudio(hash, payload);
                 break;
 
@@ -217,7 +216,7 @@ public sealed class PluginBridgeHost : IDisposable
     /// implementation of claiming and reading rather than two that can drift apart.</summary>
     private void ServeClaimOne(int hash, IPEndPoint from, IPAddress peer, ReadOnlyMemory<byte> payload)
     {
-        if (payload.Length < sizeof(int)) { Touch(hash, from); return; }
+        if (payload.Length < sizeof(int)) { Touch(hash); return; }
         var frames = BinaryPrimitives.ReadInt32LittleEndian(payload.Span);
         Span<byte> raw = stackalloc byte[4];
         if (!peer.TryWriteBytes(raw, out var written) || written != 4) return;
@@ -230,7 +229,7 @@ public sealed class PluginBridgeHost : IDisposable
     {
         if (!PluginBridgeProtocol.TryReadClaimSet(payload.Span, out var frames, out var addresses, out var askNumber))
         {
-            Touch(hash, from);
+            Touch(hash);
             return;
         }
         Serve(hash, from, addresses, frames, askNumber);
@@ -248,7 +247,7 @@ public sealed class PluginBridgeHost : IDisposable
     /// </summary>
     private void Serve(int hash, IPEndPoint from, ReadOnlySpan<byte> addresses, int frames, int askNumber)
     {
-        var instance = Touch(hash, from);
+        var instance = Touch(hash);
         var peers = UpdateClaims(instance, addresses);
         if (peers.Length == 0 || readPeer is null || frames <= 0) return;
         frames = Math.Min(frames, MaxFramesPerRequest);
@@ -668,7 +667,7 @@ public sealed class PluginBridgeHost : IDisposable
     private static string Describe(IPAddress[] peers)
         => peers.Length == 1 ? $"{peers[0]} is" : $"{string.Join(", ", peers.Select(p => p.ToString()))} are";
 
-    private Instance Touch(int hash, IPEndPoint from)
+    private Instance Touch(int hash)
     {
         lock (gate)
         {
@@ -677,10 +676,9 @@ public sealed class PluginBridgeHost : IDisposable
                 // The wire carries a 32-bit id to keep the header small; the claim register is keyed
                 // by Guid. Minting one here on first sight keeps both honest without a bigger header.
                 var id = Guid.NewGuid();
-                instance = new Instance { Id = id, Endpoint = from, Group = id };
+                instance = new Instance { Id = id, Group = id };
                 instances[hash] = instance;
             }
-            instance.Endpoint = from;
             instance.LastSeenUtc = DateTime.UtcNow;
             SweepLocked();
             return instance;

@@ -38,7 +38,6 @@ public sealed class PeerDiscoveryService : IDisposable
     private int audioPort = RemPacket.DefaultPort;
     private bool canSend;
     private bool canReceive;
-    private bool announceEnabled = true;
     // Snapshot of "send announcements directly to these IPs each tick" — typically the user's
     // remembered + manually-typed peer IPs. Replaced atomically; the announce loop reads the
     // reference once per tick. Volatile-write semantics via the assignment under the gate are
@@ -84,7 +83,6 @@ public sealed class PeerDiscoveryService : IDisposable
         audioPort = selectedAudioPort;
         canSend = sendEnabled;
         canReceive = receiveEnabled;
-        announceEnabled = true;
         cts = new CancellationTokenSource();
 
         listener = new UdpClient(AddressFamily.InterNetwork);
@@ -113,12 +111,6 @@ public sealed class PeerDiscoveryService : IDisposable
         canSend = sendEnabled;
         canReceive = receiveEnabled;
         SendAnnouncement();
-    }
-
-    public void SetAnnounceEnabled(bool enabled)
-    {
-        announceEnabled = enabled;
-        if (enabled) SendAnnouncement();
     }
 
     /// <summary>
@@ -280,7 +272,7 @@ public sealed class PeerDiscoveryService : IDisposable
     private void SendAnnouncement()
     {
         var currentAnnouncer = announcer;
-        if (currentAnnouncer is null || !announceEnabled) return;
+        if (currentAnnouncer is null) return;
 
         var message = new DiscoveryMessage(instanceId, displayName, audioPort, canSend, canReceive);
         var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));

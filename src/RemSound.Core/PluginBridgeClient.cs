@@ -59,7 +59,6 @@ public sealed class PluginBridgeClient : IDisposable
     private readonly Slot[] slots = new Slot[SlotCount];
     private int head;   // audio thread advances
     private int tail;   // bridge thread advances
-    private long repliesDropped;
 
     // The ask this thread is on, 1-based, never reset - the mapping below stays valid across a stop
     // and start. The block number a reply carries minus the ask number it answers is a constant for
@@ -125,9 +124,6 @@ public sealed class PluginBridgeClient : IDisposable
     /// the lead. See <see cref="ReadPeerBlock"/>.</summary>
     public long SkippedFrames => Interlocked.Read(ref framesSkipped);
 
-    /// <summary>Replies that found no free slot - the DAW was not reading. For the log.</summary>
-    public long DroppedReplies => Interlocked.Read(ref repliesDropped);
-
     /// <summary>Counters for the log's once-a-second line. All lock-free adds, because the audio
     /// thread bumps them and must not take a lock to do it.</summary>
     public long SentBlocks => Interlocked.Read(ref blocksSent);
@@ -151,7 +147,7 @@ public sealed class PluginBridgeClient : IDisposable
         }
     }
 
-    public PluginBridgeClient(int appPort = PluginBridgeProtocol.DefaultPort, Guid? id = null, int ringFrames = 8192)
+    public PluginBridgeClient(int appPort = PluginBridgeProtocol.DefaultPort, Guid? id = null)
     {
         instanceId = id ?? Guid.NewGuid();
         instanceHash = PluginBridgeProtocol.InstanceHash(instanceId);
@@ -371,7 +367,6 @@ public sealed class PluginBridgeClient : IDisposable
             Connected = true;
             Notable?.Invoke("RemSound answered - connected");
         }
-        LastHeardUtc = DateTime.UtcNow;
         switch (type)
         {
             case PluginBridgeMessage.PeerAudio:
@@ -398,7 +393,7 @@ public sealed class PluginBridgeClient : IDisposable
 
     /// <summary>Bridge thread: file a reply that just arrived, in the next free slot. Lock-free
     /// producer side - see the slots. A full queue means the DAW is not reading, and the reply is
-    /// dropped and counted rather than written over something unread.
+    /// dropped rather than written over something unread.
     ///
     /// <para>The payload is little-endian float, and so is every machine RemSound builds for
     /// (win-x64), so the bytes go into the slot verbatim and come back out as floats. That is the
@@ -410,11 +405,7 @@ public sealed class PluginBridgeClient : IDisposable
         floats -= floats % PluginBridgeProtocol.WireChannels;   // whole frames, or every later sample swaps channels
         if (floats <= 0) return;
         var t = tail;
-        if (t - Volatile.Read(ref head) >= SlotCount)
-        {
-            Interlocked.Increment(ref repliesDropped);
-            return;
-        }
+        if (t - Volatile.Read(ref head) >= SlotCount) return;
         var slot = slots[t & (SlotCount - 1)];
         System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(payload[..(floats * sizeof(float))]).CopyTo(slot.Data);
         slot.Floats = floats;
@@ -470,9 +461,6 @@ public sealed class PluginBridgeClient : IDisposable
             leadWindowStartTicks = now;
         }
     }
-
-    /// <summary>When the app was last heard from. Turns "it stopped working" into a time.</summary>
-    public DateTime LastHeardUtc { get; private set; } = DateTime.MinValue;
 
     private static string DescribePeers(IReadOnlyList<(IPAddress Address, string Name)> peers)
         => peers.Count == 0 ? "(none)" : string.Join(", ", peers.Select(p => $"{p.Name} [{p.Address}]"));
