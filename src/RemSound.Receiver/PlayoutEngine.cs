@@ -119,10 +119,9 @@ internal sealed class PlayoutEngine : IWaveProvider
     }
     private readonly object sessionsLock = new();
     // Sessions are keyed by (Endpoint, StreamId) — 2026-05-11. One peer can produce
-    // multiple simultaneous streams (e.g. WASAPI lane + ASIO lane in the native-
-    // independent audio mode). For the existing single-lane modes (WasapiOnly / AsioOnly /
-    // Both) the sender emits a single streamId so the dict still has one entry per peer,
-    // identical to the pre-refactor behaviour. The new mode adds a second entry per peer.
+    // multiple simultaneous streams (a WASAPI lane and an ASIO lane in BothIndependent, plus
+    // a plugin lane), one entry each. A WasapiOnly sender with no plugin lane emits a single
+    // streamId, so the dict has one entry for that peer.
     private readonly Dictionary<(IPEndPoint Endpoint, ushort StreamId), SessionPlayout> sessions = new();
     // Per-peer pan+EQ, keyed by peer address, so a session created later (a reconnect) inherits its
     // peer's shaping from frame zero — the same "applies to future sessions too" idea as the
@@ -160,9 +159,9 @@ internal sealed class PlayoutEngine : IWaveProvider
 
     // Per-route latency state. Stage 4.5 (2026-05-11): added so BothIndependent mode can run
     // each lane at its own target/max without one lane's auto-tune dragging the other up.
-    // In classic modes only the Mixed route is ever read from; the others sit at defaults
-    // and consume no resources. Each LaneLatency's fields are volatile so UI-thread writes
-    // are visible to the audio render thread without locks.
+    // With one slider every route reads sharedLatency and the two lane values sit unused (see
+    // LatencyFor). Each LaneLatency's fields are volatile so UI-thread writes are visible to the
+    // audio render thread without locks.
     private sealed class LaneLatency
     {
         public volatile int TargetMs = 30;
@@ -237,7 +236,7 @@ internal sealed class PlayoutEngine : IWaveProvider
         Interlocked.Exchange(ref renderTicksByRoute[(int)RenderRoute.Mixed & 7], 0));
     // 1 = stupid aggressive, 10 = perfectly smooth. Read on the audio thread, written from UI.
     // Now mostly a safety-knob for the click-trim catastrophic path; in normal operation the
-    // Phase-2 drift corrector (in SessionPlayout) keeps the buffer near target so the trim
+    // drift resampler (in SessionPlayout) keeps the buffer near target so the trim
     // never fires regardless of this value.
     private volatile int smoothness = 3;
     // User-pickable artifact for underrun gaps. Stored as raw int because volatile doesn't
@@ -448,16 +447,6 @@ internal sealed class PlayoutEngine : IWaveProvider
         return bytes / count / MixBytesPerFrame * 1000 / MixSampleRate;
     }
 
-    public bool IsArmed
-    {
-        get
-        {
-            var snap = sessionsSnapshot;
-            foreach (var s in snap) if (s.IsArmed) return true;
-            return false;
-        }
-    }
-
     public float Volume
     {
         get => volume;
@@ -533,10 +522,9 @@ internal sealed class PlayoutEngine : IWaveProvider
 
     /// <summary>
     /// IWaveProvider surface for sessions tagged <see cref="RenderRoute.WasapiLane"/>. Only
-    /// used in BothIndependent mode where the WASAPI render backend reads its own lane
-    /// independently of the ASIO render. In the three classic modes (WasapiOnly / AsioOnly /
-    /// Both) nothing ever reads from this surface and no session is ever tagged WasapiLane,
-    /// so it returns silence and consumes no resources.
+    /// read in BothIndependent mode, where the WASAPI render backend reads its own lane
+    /// independently of the ASIO render. In WasapiOnly the WASAPI backend reads the all-sessions
+    /// <see cref="Read"/> instead and nothing reads this surface.
     /// </summary>
     public IWaveProvider WasapiLaneOutput => wasapiLaneOutput;
 
@@ -546,37 +534,34 @@ internal sealed class PlayoutEngine : IWaveProvider
     /// </summary>
     public IWaveProvider AsioLaneOutput => asioLaneOutput;
 
-    /// <summary>
-    /// Sets the user's delay knob. Slider value drives the playout target directly so the change
-    /// is audible immediately.
-    ///
-    /// LOWER: by default disarms + drains every session. The buffer is now above the new target
-    /// and has to actually shrink before playback resumes. Brief silence is unavoidable on this
-    /// path; the user is asking for tighter latency and accepting the cost. Set
-    /// <paramref name="drainOnLower"/> = false to take the SOFT path instead — the buffer keeps
-    /// playing and the drift corrector's adaptive gain ramps it down over a few seconds. Used
-    /// for auto-tune-driven lowers, where the user didn't ask for an immediate change and
-    /// shouldn't hear one.
-    ///
-    /// RAISE (2026-05-06 change): NO disarm, NO drain regardless of <paramref name="drainOnLower"/>.
-    /// The buffer is now below the new target but audio keeps playing — the drift corrector's
-    /// adaptive-gain term (see SessionPlayout) ramps the buffer up to the new target within
-    /// seconds without the user ever hearing silence. Previously every raise produced an
-    /// audible stop-start because the always-drain path blew the buffer away. Tweaking the
-    /// slider in tiny increments is now silent.
-    ///
-    /// Equal value: no-op.
-    /// </summary>
-    /// <summary>Legacy single-route setter — operates on the Mixed route. Every classic-mode
-    /// call site continues to use this and behaves identically to pre-2026-05-11.</summary>
+    /// <summary>Single-slider setter: the Mixed route, which resolves to the one shared latency
+    /// (see <see cref="LatencyFor"/>). See the per-route overload for what a change does.</summary>
     public void SetMaxLatencyMs(int value, bool drainOnLower = true) =>
         SetMaxLatencyMs(RenderRoute.Mixed, value, drainOnLower);
 
     /// <summary>
-    /// Per-route setter. Identical algorithm to the legacy one but only drains sessions
-    /// tagged with the matching route — so lowering the WASAPI lane's target won't disarm
-    /// the ASIO lane's session (and vice versa). In BothIndependent the WASAPI/ASIO routes
-    /// have their own slider in the UI driving each call.
+    /// Sets the user's delay knob for one route. Slider value drives the playout target directly so
+    /// the change is audible immediately. With one slider it governs every session; in
+    /// BothIndependent the WASAPI and ASIO routes each have their own slider, and a change touches
+    /// only the sessions tagged with that route — so lowering the WASAPI lane's target won't disarm
+    /// the ASIO lane's session (and vice versa).
+    ///
+    /// LOWER: by default disarms + drains the governed sessions. The buffer is now above the new
+    /// target and has to actually shrink before playback resumes. Brief silence is unavoidable on
+    /// this path; the user is asking for tighter latency and accepting the cost. Set
+    /// <paramref name="drainOnLower"/> = false to take the SOFT path instead — the buffer keeps
+    /// playing and SessionPlayout's depth correction walks it down gradually. Used for
+    /// auto-tune-driven lowers, where the user didn't ask for an immediate change and shouldn't
+    /// hear one.
+    ///
+    /// RAISE (2026-05-06 change): NO disarm, NO drain. The buffer is now below the new target but
+    /// audio keeps playing while SessionPlayout's depth correction banks it up to the new target —
+    /// through the fast approach on the hard setter (see
+    /// <see cref="SessionPlayout.RequestFastLatencyApproach"/>), at the steady-state rate on the soft
+    /// one. Previously every raise produced an audible stop-start because the always-drain path blew
+    /// the buffer away. Tweaking the slider in tiny increments is now silent.
+    ///
+    /// Equal value: no-op.
     /// </summary>
     public void SetMaxLatencyMs(RenderRoute route, int value, bool drainOnLower = true)
     {
@@ -778,8 +763,8 @@ internal sealed class PlayoutEngine : IWaveProvider
 
     /// <summary>Per-route underrun aggregator. The continuous auto-tune uses this in
     /// BothIndependent mode so the WASAPI lane's underruns don't make the ASIO auto-tune
-    /// skip a tick (and vice versa). In classic modes only the Mixed route has sessions,
-    /// so AggregateUnderrunsFor(Mixed) == AggregateUnderruns.</summary>
+    /// skip a tick (and vice versa). Sessions carry their output lane as their route, so this
+    /// sums exactly the sessions rendering on that lane.</summary>
     public long AggregateUnderrunsFor(RenderRoute route)
     {
         long total = 0;
@@ -947,25 +932,10 @@ internal sealed class PlayoutEngine : IWaveProvider
     // (which always returned 0 under the Phase-4 resampler design) and the driftAcc= diag
     // log column.
 
-    /// <summary>Worst single-sample step seen out of the ring buffer since the last call.
-    /// Compared against the sender's pre-encode probe and the session's post-resampler
-    /// probe, this locates where in the pipeline an audio discontinuity was introduced.
-    /// Takes the max across all sessions and resets each. Returns max-of-(cross, within);
-    /// for the split, use the XB/WB variants and do NOT also call this in the same drain
-    /// window.</summary>
-    public float TakeMaxPostRingReadStep()
-    {
-        var snap = sessionsSnapshot;
-        var max = 0f;
-        foreach (var s in snap)
-        {
-            var v = s.TakeMaxPostRingReadStep();
-            if (v > max) max = v;
-        }
-        return max;
-    }
-
-    /// <summary>Cross-buffer (read-boundary) max post-ring-read step across all sessions.</summary>
+    /// <summary>Cross-buffer (read-boundary) max post-ring-read step across all sessions, draining
+    /// each. Compared against the sender's pre-encode probe and the session's post-resampler
+    /// probe, the post-ring-read pair locates where in the pipeline an audio discontinuity was
+    /// introduced.</summary>
     public float TakeMaxPostRingReadStepCrossBuffer()
     {
         var snap = sessionsSnapshot;
@@ -991,23 +961,9 @@ internal sealed class PlayoutEngine : IWaveProvider
         return max;
     }
 
-    /// <summary>Worst single-sample step in the resampler output since the last call.
-    /// Significantly larger than <see cref="TakeMaxPostRingReadStep"/> would point the
-    /// finger at the resampler integration. Returns max-of-(cross, within); use the XB/WB
-    /// variants for the split.</summary>
-    public float TakeMaxPostResamplerStep()
-    {
-        var snap = sessionsSnapshot;
-        var max = 0f;
-        foreach (var s in snap)
-        {
-            var v = s.TakeMaxPostResamplerStep();
-            if (v > max) max = v;
-        }
-        return max;
-    }
-
-    /// <summary>Cross-buffer max post-resampler step across all sessions.</summary>
+    /// <summary>Cross-buffer max post-resampler step across all sessions, draining each. A
+    /// resampler-output step significantly larger than the post-ring-read one would point the
+    /// finger at the resampler integration.</summary>
     public float TakeMaxPostResamplerStepCrossBuffer()
     {
         var snap = sessionsSnapshot;
@@ -1036,19 +992,15 @@ internal sealed class PlayoutEngine : IWaveProvider
     // === WASAPI render thread ===
 
     /// <summary>
-    /// Render-side audio pull. Iterates every session regardless of lane tag and sums them
-    /// into one mixed bus. This is what the WasapiOnly / AsioOnly render path reads from, so a
-    /// user can pick any output device for any received audio — independently of which capture
-    /// technology the sender used. Per-lane latency targets are still honoured: each session
-    /// reads its own route's TargetMs / MaxMs via <see cref="LatencyFor"/>, so the WASAPI-captured
-    /// stream can buffer at one latency and the ASIO-captured stream at another within the same
-    /// output mix. In BothIndependent mode this all-sessions pull is NOT used: each lane reads its
+    /// Render-side audio pull for the WasapiOnly path: every stream, whatever lane it is tagged
+    /// with, summed into one mixed bus, so a user can pick any output device for any received
+    /// audio — independently of which capture technology the sender used. Each session is paced
+    /// against its own route's TargetMs / MaxMs via <see cref="LatencyFor"/> (with one slider, the
+    /// shared value). In BothIndependent mode this all-sessions pull is NOT used: each lane reads its
     /// own filtered surface (<see cref="WasapiLaneOutput"/> / <see cref="AsioLaneOutput"/>) directly
-    /// — see <c>CompositeRenderBackend</c> — so those surfaces are ACTIVE render sources, not
-    /// future-only. 2026-05-11 revision: previous
-    /// implementation filtered by route, which made it impossible to route a WASAPI-captured
-    /// stream onto an ASIO output (and vice versa) in BothIndependent mode — that broke a
-    /// long-standing cross-backend send/receive flow.
+    /// — see <c>CompositeRenderBackend</c>. It deliberately does not filter by route: before the
+    /// 2026-05-11 revision it did, which made it impossible to play a WASAPI-captured stream on an
+    /// ASIO output (and vice versa) — that broke a long-standing cross-backend send/receive flow.
     /// </summary>
     public int Read(byte[] buffer, int offset, int count)
     {
@@ -1072,13 +1024,11 @@ internal sealed class PlayoutEngine : IWaveProvider
     }
 
     /// <summary>
-    /// Shared per-route render pull. Iterates the session snapshot, summing only those
-    /// sessions whose <see cref="SessionPlayout.Route"/> matches the requested filter into
-    /// the caller's scratch buffers, applies volume/mute/limiter, and packs to bytes. The
-    /// Mixed route additionally feeds <see cref="ReceiverDiagnostics"/> (output-step + buffer
-    /// level) — lane routes skip diagnostics to avoid double-counting in BothIndependent mode
-    /// where both lanes run their own ReadForRoute concurrently and the legacy single
-    /// per-tick stats columns are still the user-visible source of truth.
+    /// Shared per-route render pull. Iterates the session snapshot, summing the sessions this
+    /// lane plays (see the inclusion rule inside) into the caller's scratch buffers, applies
+    /// volume/mute/limiter, and packs to bytes. Feeds <see cref="ReceiverDiagnostics"/> (render
+    /// timing, output steps, buffer level) when <paramref name="recordDiagnostics"/> is set, which
+    /// both lane outputs do — see the note in <c>LaneOutput.Read</c> for what that blends.
     /// </summary>
     internal int ReadForRoute(byte[] buffer, int offset, int count, RenderRoute route, float[] mixBuf, float[] sessionBuf, bool recordDiagnostics)
     {
@@ -1126,10 +1076,10 @@ internal sealed class PlayoutEngine : IWaveProvider
         // Snapshot — local copy so the iteration is safe against concurrent dict mutations.
         var snap = sessionsSnapshot;
 
-        // Pull this route's target/max from the per-route state. In Mixed (classic modes)
-        // this reads mixedLatency, identical to pre-Stage-4.5 behaviour. In BothIndependent
-        // the WASAPI and ASIO route reads pick up their respective LaneLatency entries so
-        // each lane's session is paced against its own slider value.
+        // Pull this route's target/max from the per-route state. With one slider every route
+        // reads sharedLatency (see LatencyFor). In BothIndependent the WASAPI and ASIO route
+        // reads pick up their respective LaneLatency entries so each lane's session is paced
+        // against its own slider value.
         var routeLatency = LatencyFor(route);
         var routeTargetMs = routeLatency.TargetMs;
         var routeMaxMs = routeLatency.MaxMs;
@@ -1259,14 +1209,6 @@ internal sealed class PlayoutEngine : IWaveProvider
         return count;
     }
 
-    /// <summary>
-    /// Read all sessions, regardless of lane tag, into a single mixed bus. Each session is
-    /// paced against ITS OWN lane's target/max latency, so a WASAPI-captured session and an
-    /// ASIO-captured session in BothIndependent mode each maintain their independent buffer
-    /// depths even though they end up in the same output mix. This is the path every render
-    /// backend reads from in normal operation — the lane surfaces above are kept for
-    /// potential per-output-device routing in a future revision but are not used today.
-    /// </summary>
     /// <summary>Read one claimed peer's audio for a plugin instance, instead of the speakers.
     ///
     /// <para>This is the other half of the double-audio guard. The mix paths SKIP a claimed peer; this
@@ -1364,6 +1306,8 @@ internal sealed class PlayoutEngine : IWaveProvider
 
     private float[] claimedScratch = new float[8192];
 
+    /// <summary>The body of <see cref="Read"/>: every stream, whatever lane it is tagged with, into a
+    /// single mixed bus, each paced against its own route's latency.</summary>
     private int ReadAllSessions(byte[] buffer, int offset, int count, float[] mixBuf, float[] sessionBuf, bool recordDiagnostics)
     {
         // The Mixed route: the classic single-lane world, where there is only one output period.
@@ -1431,11 +1375,10 @@ internal sealed class PlayoutEngine : IWaveProvider
 
         if (recordDiagnostics) diagnostics.RecordOutputSampleSteps(mixBuf.AsSpan(0, outFloats));
 
-        // Recording tap (all-sessions path, classic modes / WasapiOnly). Same point in the
-        // pipeline as the lane-routed tap above — fully processed mix, just before the
-        // pack-to-bytes step. Tagged with RenderRoute.Mixed; the recorder maps Mixed to its
-        // wasapi-slot ring (canonical single-lane slot in classic modes), so this fires
-        // exactly once per real-time second.
+        // Recording tap (all-sessions path, WasapiOnly). Same point in the pipeline as the
+        // lane-routed tap above — fully processed mix, just before the pack-to-bytes step.
+        // Tagged with RenderRoute.Mixed; the recorder maps Mixed to its wasapi-slot ring
+        // (the single-lane slot), so each rendered block is recorded exactly once.
         DispatchReceivedSamples(mixBuf.AsMemory(0, outFloats), RenderRoute.Mixed);
         OnRecordBlockComplete?.Invoke(outFloats);
 
@@ -1477,7 +1420,7 @@ internal sealed class PlayoutEngine : IWaveProvider
     /// Per-lane IWaveProvider. Each instance filters PlayoutEngine's session snapshot down
     /// to sessions tagged with a specific <see cref="RenderRoute"/> and runs the standard
     /// volume/mute/limiter pipeline against just that subset. Only meaningful in
-    /// BothIndependent mode; in classic modes nothing reads from these surfaces.
+    /// BothIndependent mode; in WasapiOnly nothing reads from these surfaces.
     /// </summary>
     private sealed class LaneOutput : IWaveProvider
     {

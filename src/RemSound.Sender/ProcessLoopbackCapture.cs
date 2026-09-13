@@ -396,7 +396,8 @@ internal interface IActivateAudioInterfaceCompletionHandler
     // (QueryInterface) the operation object as the call was delivered; that QI returns E_NOINTERFACE
     // here, and the failure happened INSIDE the interop stub — before our method body — so the callback
     // was silently dropped and activation always "timed out". With IntPtr the stub marshals nothing, the
-    // method runs, and we QI the operation ourselves on this (the delivery) thread.
+    // method runs, and ActivationHandler reads the result through the operation's vtable directly, with
+    // no QueryInterface at all.
     void ActivateCompleted(IntPtr activateOperation);
 }
 

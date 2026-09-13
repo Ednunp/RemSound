@@ -6,10 +6,11 @@ using RemSound.Core;
 namespace RemSound.Receiver;
 
 /// <summary>
-/// Owns the per-sender decode pipeline. One sender = one StreamSession at a time. When a new
-/// sender appears (different remote endpoint, or stream/codec change), the receiver swaps in a
-/// new session — old buffered audio drains out of the playout buffer naturally during the
-/// swap rather than being thrown away mid-playback.
+/// Owns the decode pipeline for one incoming stream, keyed by (sender endpoint, stream id) — a
+/// sender with several lanes has one per lane. When a stream's format changes, the receiver swaps
+/// in a new StreamSession over the same SessionPlayout, so buffered audio drains out naturally
+/// rather than being thrown away mid-playback; a stream id the sender has rotated away from on
+/// the same lane is superseded and closed.
 ///
 /// All work runs on the network listener's thread. No locks; the only cross-thread interaction
 /// is writing decoded float frames to the SPSC <see cref="AudioRingBuffer"/>.
@@ -53,7 +54,6 @@ internal sealed class StreamSession : IDisposable
     // session playout, so the post-ring-read probe in SessionPlayout sees the exact same
     // samples a moment later (after riding through the ring buffer).
     private readonly AudioStepProbe postDecodeStepProbe = new();
-    public float TakeMaxPostDecodeStep() => postDecodeStepProbe.TakeMax();
     public float TakeMaxPostDecodeStepCrossBuffer() => postDecodeStepProbe.TakeMaxCrossBuffer();
     public float TakeMaxPostDecodeStepWithinBuffer() => postDecodeStepProbe.TakeMaxWithinBuffer();
 
@@ -118,11 +118,7 @@ internal sealed class StreamSession : IDisposable
     {
         // Already had it on the peer's other path. Handled, not failed: counting it as a drop would
         // make a healthy merged session look like a lossy one. See AlreadyDelivered.
-        if (AlreadyDelivered(sequence))
-        {
-            Interlocked.Increment(ref duplicatePathPackets);
-            return true;
-        }
+        if (AlreadyDelivered(sequence)) return true;
         diagnostics.RecordPacketArrived();
         TrackWireSequence(sequence);
         return Codec switch
@@ -204,16 +200,12 @@ internal sealed class StreamSession : IDisposable
     private bool multiPath;
     private uint replayHighest;
     private ulong replayMask;
-    private long duplicatePathPackets;
 
     /// <summary>This stream has now arrived from a second address belonging to the same peer.</summary>
     public void NoteAlternatePath() => multiPath = true;
 
     /// <summary>Has this stream been seen on more than one of its peer's paths?</summary>
     public bool IsMultiPath => multiPath;
-
-    /// <summary>Packets dropped because the other path had already delivered them.</summary>
-    public long DuplicatePathPackets => Interlocked.Read(ref duplicatePathPackets);
 
     /// <summary>Have we already delivered this wire sequence? Only ever true for a merged session.
     /// A sequence too far back to judge is let through: being wrong in that direction costs one

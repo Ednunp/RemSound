@@ -16,12 +16,13 @@ namespace RemSound.Sender;
 /// session, configured through the Connectivity &amp; transport dialog).
 ///
 /// Limitations vs the WASAPI backend (deliberate to keep this manageable):
-///   • Driver is locked at <see cref="Start"/> time. Switching drivers means Stop + new instance.
-///   • We always open the AsioOut with the driver's full input channel count, regardless of
-///     which pairs the user selected. The unused channels are pulled but discarded. This
-///     trades a tiny amount of buffer memory for a big stability win: adding or removing a
-///     channel pair never requires reopening the driver, which means we don't fight a
-///     concurrent receiver-side AsioOut on single-client drivers (Komplete Audio etc.).
+///   • The driver name is fixed at construction. Switching drivers means a new instance;
+///     AudioSender releases the old one in the background.
+///   • The driver is always opened with its full input channel count, regardless of which
+///     pairs the user selected. The unused channels are pulled but discarded. This trades a
+///     tiny amount of buffer memory for a big stability win: adding or removing a channel pair
+///     never requires reopening the driver, which the playback side may be holding open through
+///     the same <see cref="SharedAsioDevice"/> on single-client drivers (Komplete Audio etc.).
 ///   • Sample rate is fixed at 48 kHz; if the driver doesn't support that, capture fails to
 ///     start (the diagnostic line says so). All modern pro audio interfaces support 48 kHz.
 ///   • Hardware loopback channels (e.g. EVO 8's Loop-back 1/2) are just regular ASIO inputs
@@ -33,8 +34,8 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     private const int MixChannels = 2;
 
     // Volatile-published callback. The ASIO audio thread reads this every callback to
-    // decide where to deliver samples; AudioSender swaps it on mode changes so the same
-    // open driver can keep running while routing changes between Mixed / AsioLane / no-op.
+    // decide where to deliver samples; AudioSender swaps it so the same open driver can keep
+    // running while delivery moves between the ASIO lane and a no-op (parked, or being released).
     // Volatile is sufficient for reference assignment on .NET (atomic, with memory barrier).
     private volatile Action<ReadOnlyMemory<float>> onMixedSamples;
     // Raw-capture step probe — measures discontinuities in the ASIO buffer exactly as the
@@ -44,7 +45,6 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     private readonly AudioStepProbe rawCaptureStepProbe = new();
     private readonly Action<string>? onDiagnostic;
     private readonly string driverName;
-    public string DriverName => driverName;
     private readonly object gate = new();
 
     // The driver, SHARED with the receiver's playback side: one instance per driver name for the whole
@@ -58,7 +58,8 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     // the driver's real-time thread. It used to take `gate` to do so — but StopInternal holds `gate` for
     // the WHOLE close, so a callback already in flight when a close began could not return until the
     // close finished. That is the opposite of what the close needs: it unhooks the callback and sleeps
-    // 60 ms precisely to let an in-flight callback DRAIN, and the callback could not drain while the
+    // 60 ms precisely to let an in-flight callback DRAIN (that sequence now runs inside
+    // SharedAsioDevice.Close, still under our `gate`), and the callback could not drain while the
     // closing thread held the lock it was waiting on. The driver's own Stop typically waits for its
     // callback thread, so the two could deadlock until the bounded Invoke gave up.
     // The list is only ever REPLACED wholesale (UpdateSources, Start, StopInternal) and never mutated in
@@ -99,11 +100,10 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
 
     /// <summary>
     /// Swap the callback that captured audio is delivered to. Used by AudioSender to keep
-    /// one persistent AsioCaptureBackend instance alive across audio-mode changes — the
-    /// driver stays open, the callback gets rewired to the lane appropriate for the new
-    /// mode (Mixed in AsioOnly, AsioLane in BothIndependent, or a no-op while the
-    /// composite is being rebuilt). Volatile write, so the audio thread picks the new
-    /// callback up on its very next ASIO buffer.
+    /// one persistent AsioCaptureBackend instance alive across capture-engine rebuilds — the
+    /// driver stays open and the callback is pointed at the ASIO lane, or at a no-op while the
+    /// instance is being released (see also <see cref="Park"/>). Volatile write, so the audio
+    /// thread picks the new callback up on its very next ASIO buffer.
     /// </summary>
     public void SetCallback(Action<ReadOnlyMemory<float>> callback)
     {
@@ -133,8 +133,9 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     /// toggle off. 2026-08-23 audit, finding S1.</para>
     ///
     /// <para>Both halves matter. The no-op callback stops delivery immediately (a volatile write, so
-    /// it takes effect on the very next buffer). The zero pairs make the callback early-out before
-    /// it does any mixing work at all. Unparking is automatic: the composite's Start calls
+    /// it takes effect on the very next buffer). The zero pairs make the callback return before the
+    /// probe and the mix — it still copies the driver's buffer out and counts it, but sums and sends
+    /// nothing. Unparking is automatic: the composite's Start calls
     /// <see cref="UpdateSources"/> with the real specs, and <see cref="AudioSender"/> re-points the
     /// callback for the current mode.</para>
     /// </summary>
@@ -150,21 +151,12 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
         onDiagnostic?.Invoke("asio capture: parked — callback detached and zero active pairs; driver stays open");
     }
 
-    /// <summary>True when the lane is parked: the driver is open but no channel pair is active, so
-    /// no audio is being delivered. Exposed so the gate can assert the park actually happened rather
-    /// than trusting that a method was called.</summary>
-    public bool IsParked
-    {
-        get { lock (gate) return device is not null && activeChannelPairIndices.Count == 0; }
-    }
-
     /// <summary>The callback the driver's thread would invoke, so the gate can drive it directly and
     /// MEASURE whether audio still reaches the sender lane. Testing that Park() was called proves
     /// nothing — the bug was that a live callback kept delivering after a stop, so the test has to
     /// invoke the thing the driver invokes. Test seam only; nothing in the app reads this.</summary>
     internal Action<ReadOnlyMemory<float>> CallbackForTest => onMixedSamples;
 
-    public float TakeMaxRawCaptureStep() => rawCaptureStepProbe.TakeMax();
     public float TakeMaxRawCaptureStepCrossBuffer() => rawCaptureStepProbe.TakeMaxCrossBuffer();
     public float TakeMaxRawCaptureStepWithinBuffer() => rawCaptureStepProbe.TakeMaxWithinBuffer();
     public long TakeCumulativeCaptureTicks() => Interlocked.Exchange(ref cumulativeCaptureTicks, 0);

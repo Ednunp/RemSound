@@ -25,9 +25,10 @@ namespace RemSound.Receiver;
 /// empties (device faster) — Andre's "desktop and laptop drift apart over time on WASAPI". Each
 /// device is wrapped in a <see cref="DriftResamplingProvider"/> that sits on the PULL side
 /// (between the buffer and the WasapiOut) and continuously stretches/compresses by the measured
-/// clock ratio, holding the buffer level steady. This mirrors the proven per-sender corrector in
-/// <see cref="SessionPlayout"/> exactly: resampler on the consumer side, output-driven, slow
-/// rate-ratio measurement over a multi-second window. Crucially the producer still writes the RAW
+/// clock ratio, holding the buffer level steady. Same shape as the per-sender corrector in
+/// <see cref="SessionPlayout"/> — resampler on the consumer side, output-driven, slow rate-ratio
+/// measurement over a multi-second window — with the ratio loop itself in
+/// <see cref="DriftRatioTracker"/>. Crucially the producer still writes the RAW
 /// mix into each buffer (no resampling on the input), so the buffer keeps its natural cushion —
 /// the resampler only adjusts the rate at which the device drains it. An earlier attempt that
 /// resampled on the PRODUCER side drained the cushion to zero and crackled; this does not.
@@ -49,8 +50,8 @@ internal sealed class MultiOutputPlayout : IRenderBackend
     private const int OutputRequestedLatencyMs = 5;
 
     // Source typed as IWaveProvider (rather than concrete PlayoutEngine) so the composite
-    // backend can hand us a tee'd buffer instead of the engine directly. Single-backend usage
-    // still passes the engine in unchanged.
+    // backend can hand us PlayoutEngine's WASAPI lane surface in BothIndependent; in WasapiOnly
+    // it passes the engine itself.
     private readonly IWaveProvider source;
     private readonly Action<string>? onDiagnostic;
     private readonly object gate = new();
@@ -146,8 +147,8 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         }
     }
 
-    /// <summary>This backend IS the WASAPI lane (and the only lane in a WASAPI-only setup, where
-    /// sessions are tagged Mixed). It has nothing to say about the ASIO lane. See
+    /// <summary>This backend IS the WASAPI lane (and the only lane in a WASAPI-only setup). It has
+    /// nothing to say about the ASIO lane. See
     /// <see cref="IRenderBackend.ReportedOutputLatencyMsFor"/>.</summary>
     public double ReportedOutputLatencyMsFor(RenderRoute route) =>
         route == RenderRoute.AsioLane ? 0 : WorstReportedLatencyMs;
@@ -278,7 +279,7 @@ internal sealed class MultiOutputPlayout : IRenderBackend
                     // is still ~5 ms tighter than the old 15 ms, a free latency win. The per-device
                     // drift corrector keeps this buffer fed from its held card-sized cushion (≈12 ms
                     // on a typical card), so the smaller endpoint reserve doesn't risk underruns.
-                    wasapi = new WasapiOut(device, AudioClientShareMode.Shared, useEventSync: true, latency: 5);
+                    wasapi = new WasapiOut(device, AudioClientShareMode.Shared, useEventSync: true, latency: OutputRequestedLatencyMs);
                     // Ask the DEVICE how long playback takes, rather than doubling a callback gap and
                     // clamping it up to 10 ms. Once, here, off the audio thread. 2026-08-24.
                     var reportedMs = DeviceLatencyProbe.RenderLatencyMs(device, OutputRequestedLatencyMs);
@@ -372,11 +373,10 @@ internal sealed class MultiOutputPlayout : IRenderBackend
                 // Read the pre-built snapshot. Volatile load — no lock, no allocation per
                 // tick. SetOutputDevices rebuilds the snapshot under the gate whenever the
                 // device set changes (rare event), so reads here see a consistent view.
-                // Skip the source.Read entirely when no outputs are ticked: in BothIndependent
-                // mode the source is shared between WASAPI and ASIO, and pulling here when
-                // WASAPI has nothing ticked would consume PlayoutEngine audio ahead of the
-                // ASIO consumer. Pre-2026-05-23 this whole block ran under `lock (gate)` and
-                // rebuilt the array on every tick — fixed as item 7 of RemSoundefficiency.md.
+                // Skip the source.Read entirely when no outputs are ticked: with nowhere to play
+                // it, a read would only drain the sessions' rings for nothing. Pre-2026-05-23 this
+                // whole block ran under `lock (gate)` and rebuilt the array on every tick — fixed
+                // as item 7 of RemSoundefficiency.md.
                 var targets = outputSnapshot;
                 if (targets.Length == 0) continue;
 
@@ -415,7 +415,7 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         public required DriftResamplingProvider Drift { get; init; }
         public required string Name { get; init; }
         /// <summary>What this device says its playback latency is, read once at open. Zero when it
-        /// would not say. See IRenderBackend.ReportedOutputLatencyMs.</summary>
+        /// would not say. See IRenderBackend.ReportedOutputLatencyMsFor.</summary>
         public double ReportedLatencyMs { get; init; }
         // Set true (off-thread, from WasapiOut.PlaybackStopped) when this device dies mid-stream —
         // typically a USB card unplugged, which invalidates the WASAPI endpoint. SetOutputDevices
@@ -431,9 +431,10 @@ internal sealed class MultiOutputPlayout : IRenderBackend
     /// rate is the measured (producer-feed ÷ device-drain) clock ratio over a multi-second window.
     /// That holds the buffer level steady against per-device clock drift.
     ///
-    /// This deliberately mirrors <see cref="SessionPlayout"/>'s Phase-4 corrector: output-driven
+    /// Same shape as <see cref="SessionPlayout"/>'s Phase-4 corrector: output-driven
     /// (ResamplePrepare asks how many input frames it needs for N output frames), linear-interp
-    /// mode, 10 s window, 70/30 smoothing, ±5 % sanity clamp. Resampling on the PULL side keeps
+    /// mode, with the 10 s window, 70/30 smoothing and ±5 % sanity band in
+    /// <see cref="DriftRatioTracker"/>. Resampling on the PULL side keeps
     /// the producer's raw feed (and therefore the buffer's natural cushion) intact — the earlier
     /// producer-side attempt resampled the input and starved the cushion to zero.
     ///

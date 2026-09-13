@@ -5,15 +5,15 @@ namespace RemSound.Sender;
 
 /// <summary>
 /// Pins a continuous silent render stream on a WASAPI device so the device stays "warm".
-/// Some USB audio interfaces (Audient EVO8, RME, Focusrite, etc.) only fire WASAPI loopback
-/// callbacks when something is actively rendering to the device — when the render endpoint
+/// Some USB audio interfaces (Audient EVO8, RME, Focusrite, etc.) only deliver WASAPI loopback
+/// audio when something is actively rendering to the device — when the render endpoint
 /// goes idle, the loopback path stops delivering frames until an application starts rendering
 /// again. By pinning a zero-volume silent render stream on the same device we capture from,
-/// loopback callbacks keep firing regardless of whether other apps are playing audio.
+/// loopback capture keeps delivering regardless of whether other apps are playing audio.
 ///
 /// Same idea the legacy "silence.exe" used; folded into the sender so it's automatic, sized
 /// to the device's actual mix format (no resampler stage), and ties to capture lifetime.
-/// We do not own the MMDevice — AudioSender does — so we never dispose it.
+/// We do not own the MMDevice — the capture backend that opened it does — so we never dispose it.
 /// </summary>
 internal sealed class SilentRenderKeepAlive : IDisposable
 {

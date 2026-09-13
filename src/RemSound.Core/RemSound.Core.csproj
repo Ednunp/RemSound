@@ -9,8 +9,9 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
-    <!-- For SharedAsioDevice only: the one ASIO driver instance both the sender and the receiver
-         attach to. They may not reference each other, so the device lives here. -->
+    <!-- For the NAudio-shaped pieces both the sender and the receiver need, which may not reference
+         each other: SharedAsioDevice (the one ASIO driver instance both attach to) and
+         DeviceLatencyProbe (a WASAPI device's own engine period). -->
     <PackageReference Include="NAudio" Version="2.3.0" />
   </ItemGroup>
 </Project>

@@ -1,4 +1,4 @@
-namespace RemSound.Receiver;
+namespace RemSound.Core;
 
 /// <summary>
 /// How deep a cushion a WASAPI output should hold, sized from that card's own pull.
@@ -21,6 +21,11 @@ namespace RemSound.Receiver;
 /// <para><b>It reads the card and HOLDS.</b> It is deliberately not a load-reactive loop: it must never
 /// climb on a CPU or network spike and drift back down when things go quiet, because that is exactly
 /// the shape of a slow overnight creep.</para>
+///
+/// <para><b>Why it lives in Core.</b> The plugin sender's second-DAW lane (<c>PluginTrackSource</c>, in
+/// RemSound.Sender) sizes its ring's cushion by the same rule against the driving DAW's pull, and Sender
+/// and Receiver may not reference each other. That lane used to carry its own copy of these numbers;
+/// one rule in one place is what stops the two drifting apart.</para>
 /// </summary>
 public static class AdaptiveCushionTarget
 {

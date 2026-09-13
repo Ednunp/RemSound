@@ -90,7 +90,6 @@ public sealed class PluginTrackSource : IDisposable
 
     private long blocksSubmitted;
     private long blocksSummed;
-    private long blocksIgnoredOversize;
 
     /// <summary>Blocks handed to the plugin lane. The number that separates "the plugin is sending
     /// and the app is taking it" from "the app subscribed but nothing arrived".</summary>
@@ -99,10 +98,6 @@ public sealed class PluginTrackSource : IDisposable
     /// <summary>Blocks where a second DAW's audio was summed in. Zero in the ordinary single-host
     /// session, which is also the assertion that the fast path is the one being taken.</summary>
     public long BlocksSummed => Interlocked.Read(ref blocksSummed);
-
-    /// <summary>Blocks discarded for being larger than the bridge's own maximum. Should never move;
-    /// if it does, something is writing to our port that is not a plugin.</summary>
-    public long BlocksIgnoredOversize => Interlocked.Read(ref blocksIgnoredOversize);
 
     /// <summary>How many DAWs are delivering track audio right now.</summary>
     public int HostCount { get { lock (gate) return hosts.Count; } }
@@ -128,11 +123,8 @@ public sealed class PluginTrackSource : IDisposable
         if (span.Length < Channels) return;
         // Whole frames only: a truncated tail would swap the channels for everything after it.
         var frames = span.Length / Channels;
-        if (frames > MaxFramesPerBlock)
-        {
-            Interlocked.Increment(ref blocksIgnoredOversize);
-            return;
-        }
+        // Larger than the bridge's own maximum, which no plugin sends: drop it.
+        if (frames > MaxFramesPerBlock) return;
 
         bool isDriver;
         bool needArm;
@@ -336,32 +328,19 @@ public sealed class PluginTrackSource : IDisposable
         if (disarm) sender.SetPluginSendActive(false);
     }
 
-    /// <summary>Diagnostic snapshot of a non-driving host's ring, for the gate and the log.</summary>
-    public bool TryDescribeHost(Guid hostId, out int bufferedFrames, out double appliedRatio)
-    {
-        lock (gate)
-        {
-            bufferedFrames = 0;
-            appliedRatio = 1.0;
-            if (!hosts.TryGetValue(hostId, out var host)) return false;
-            if (host.Lane is null) return true;   // the driver: no ring, ratio is 1 by definition
-            bufferedFrames = host.Lane.BufferedFrames;
-            appliedRatio = host.Lane.AppliedRatio;
-            return true;
-        }
-    }
-
     /// <summary>Which host is currently driving, for the gate.</summary>
     public Guid DriverForTest { get { lock (gate) return driverId; } }
 
     /// <summary>
     /// A non-driving DAW's audio, held in a ring and pulled onto the driver's clock.
     ///
-    /// <para>Straight port of the receive side's <c>DriftResamplingProvider</c>, and deliberately so:
-    /// the same measured feed÷drain ratio over a ten-second window, the same 70/30 smoothing, the
-    /// same ±5 % sanity clamp, and the same depth term steering the ring toward a cushion sized off
-    /// the consumer's actual pull. That code is what holds a WASAPI card's buffer flat over hours,
-    /// and this problem is the same problem with different names on the two clocks.</para>
+    /// <para>Built from the same two shared pieces as the receive side's WASAPI output stage
+    /// (<c>MultiOutputPlayout.DriftResamplingProvider</c>), and deliberately so:
+    /// <see cref="DriftRatioTracker"/> for the measured feed÷drain ratio over a ten-second window, the
+    /// 70/30 smoothing, the ±5 % sanity band and the depth term, and <see cref="AdaptiveCushionTarget"/>
+    /// for a cushion sized off the consumer's actual pull. That stage is what holds a WASAPI card's
+    /// buffer flat over hours, and this problem is the same problem with different names on the two
+    /// clocks.</para>
     ///
     /// <para><b>Pull side only.</b> The resampler runs where the driver reads, never where the
     /// plugin writes. The receive-side file records that a producer-side attempt starved the cushion
@@ -370,12 +349,9 @@ public sealed class PluginTrackSource : IDisposable
     private sealed class HostLane : IDisposable
     {
         // The window, the sanity band, the smoothing and the depth term are the shared ones in
-        // DriftRatioTracker, which this loop was folded into on 2026-09-07. What stays here is what is
-        // local to a DAW: how deep a cushion this lane wants, and when it is ready to join the mix.
-        private const double TargetGulpMultiple = 1.2;
-        private const int MinTargetDepthMs = 8;
-        private const int MaxTargetDepthMs = 50;
-        private const int TargetHysteresisMs = 2;
+        // DriftRatioTracker, which this loop was folded into on 2026-09-07, and the cushion-sizing rule is
+        // AdaptiveCushionTarget's, the same one a WASAPI output card uses. What stays here is what is
+        // local to a DAW: when this lane is ready to join the mix.
         private const int BytesPerFrame = Channels * sizeof(float);
 
         private readonly AudioRingBuffer ring;
@@ -388,7 +364,7 @@ public sealed class PluginTrackSource : IDisposable
         private long drainedBytes;
         private long pullSumBytes;
         private long pullCount;
-        private int targetMs = 12;
+        private int targetMs = AdaptiveCushionTarget.DefaultMs;
         // Until the ring holds a cushion, this lane contributes silence and takes nothing out.
         //
         // Without it a second DAW starts with whatever happened to be in the ring when the driver
@@ -483,8 +459,7 @@ public sealed class PluginTrackSource : IDisposable
             if (avgPullBytes > 0)
             {
                 var gulpMs = avgPullBytes / (double)BytesPerFrame * 1000.0 / SampleRate;
-                var candidateMs = (int)Math.Round(Math.Clamp(gulpMs * TargetGulpMultiple, MinTargetDepthMs, MaxTargetDepthMs));
-                if (Math.Abs(candidateMs - targetMs) >= TargetHysteresisMs) targetMs = candidateMs;
+                targetMs = AdaptiveCushionTarget.Next(targetMs, gulpMs);
             }
 
             // The tracker discards the first completed window — it contains the ring filling from

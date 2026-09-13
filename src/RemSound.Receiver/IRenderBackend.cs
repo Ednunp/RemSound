@@ -1,14 +1,15 @@
 namespace RemSound.Receiver;
 
 /// <summary>
-/// Abstraction over the render-side audio backend so <see cref="AudioReceiver"/> can be wired
-/// to either a WASAPI implementation (today's <see cref="MultiOutputPlayout"/>) or an ASIO
-/// implementation (<see cref="AsioRenderBackend"/>) without caring which is in use.
+/// Abstraction over the render-side audio backend. <see cref="AudioReceiver"/> holds a
+/// <see cref="CompositeRenderBackend"/>, which runs the WASAPI implementation
+/// (<see cref="MultiOutputPlayout"/>) and, when an ASIO driver is chosen, the ASIO one
+/// (<see cref="AsioRenderBackend"/>) behind this same interface.
 ///
-/// Both backends pull mixed audio from <see cref="PlayoutEngine"/>'s <see cref="IWaveProvider"/>
-/// surface and route it to one or more output destinations. WASAPI destinations are MMDevice
-/// IDs; ASIO destinations are synthetic IDs of the form
-/// <c>"asio:&lt;driver-name&gt;|&lt;channel-pair-index&gt;"</c>.
+/// The WASAPI and ASIO backends each pull mixed audio from a <see cref="PlayoutEngine"/>
+/// <c>IWaveProvider</c> surface and route it to one or more output destinations. WASAPI
+/// destinations are MMDevice IDs; ASIO destinations are synthetic IDs of the form
+/// <c>"asio:&lt;channel-pair-index&gt;"</c> (see <c>AsioDeviceId</c>).
 /// </summary>
 internal interface IRenderBackend : IDisposable
 {

@@ -22,8 +22,9 @@ namespace RemSound.Sender;
 ///     starts a <see cref="SilentRenderKeepAlive"/> on every loopback source's device to keep
 ///     callbacks firing continuously.
 ///   • Per-source clock drift between independent audio devices is unavoidable across long
-///     sessions. The 250 ms ring + DiscardOnBufferOverflow tolerates it for realistic
-///     conversation lengths. A proper drift-correcting micro-resample is a future addition.
+///     sessions. While more than one source is live, each source's CaptureDriftCorrector
+///     resamples it onto the mix clock; a lone source is left untouched (see
+///     <see cref="ActiveSourceCount"/>).
 ///
 /// Source-list changes are LIVE: <see cref="UpdateSources"/> diffs the desired set against the
 /// active set and only adds/removes the sources that actually changed, using NAudio's
@@ -52,7 +53,6 @@ internal sealed class MixingEngine : ICaptureBackend
     private Task? mixTask;
 
     private long clippedSampleCount;
-    private long mixTickCount;
 
     public MixingEngine(Action<ReadOnlyMemory<float>> onMixedSamples, Action<string>? onDiagnostic = null)
     {
@@ -91,7 +91,6 @@ internal sealed class MixingEngine : ICaptureBackend
     }
 
     public long ClippedSampleCount => Interlocked.Read(ref clippedSampleCount);
-    public long MixTickCount => Interlocked.Read(ref mixTickCount);
 
     public long TotalCaptureCallbacks
     {
@@ -122,7 +121,8 @@ internal sealed class MixingEngine : ICaptureBackend
     /// <summary>MixingEngine doesn't track per-callback timing — its mix tick is timer-driven
     /// rather than callback-driven, so the metric isn't directly meaningful here. Returning 0
     /// is fine: the sender's diag log treats "0 means n/a or no spike". Tight Latency mode in
-    /// WASAPI uses <see cref="PushModeWasapiBackend"/> instead, which is callback-driven.</summary>
+    /// WASAPI uses <see cref="PushModeWasapiBackend"/> instead, which is callback-driven but does
+    /// not track the gap yet either; only the ASIO backend reports one.</summary>
     public int TakeMaxCallbackGapMs() => 0;
 
     public string? FirstCaptureFormatDescription
@@ -200,7 +200,6 @@ internal sealed class MixingEngine : ICaptureBackend
     /// the 2026-05-15 instrumentation push the user's tests have all been single-source on
     /// <see cref="PushModeWasapiBackend"/> instead. Stays at zero here; if a future
     /// multi-source WASAPI test needs the probe, add it per-source in CaptureSource.</summary>
-    public float TakeMaxRawCaptureStep() => 0f;
     public float TakeMaxRawCaptureStepCrossBuffer() => 0f;
     public float TakeMaxRawCaptureStepWithinBuffer() => 0f;
     public long TakeCumulativeCaptureTicks() => Interlocked.Exchange(ref cumulativeMixLoopTicks, 0);
@@ -250,7 +249,6 @@ internal sealed class MixingEngine : ICaptureBackend
             }
 
             Interlocked.Exchange(ref clippedSampleCount, 0);
-            Interlocked.Exchange(ref mixTickCount, 0);
             cts = new CancellationTokenSource();
             mixTask = Task.Run(() => MixLoop(cts.Token));
             onDiagnostic?.Invoke($"mixer started with {active.Count} source(s): [{string.Join(", ", active.Select(a => $"\"{a.Source.Name}\" ({a.Source.Kind})"))}]");
@@ -269,8 +267,8 @@ internal sealed class MixingEngine : ICaptureBackend
         {
             // If the engine was started with no sources (specs.Count==0 returns early in
             // Start, so mixTask is never created), a later UpdateSources adding sources used
-            // to silently no-op. That broke the BothIndependent flow where a user starts in
-            // AsioOnly→BothIndependent with no WASAPI ticks, then later ticks a WASAPI source
+            // to silently no-op. That broke the BothIndependent flow where a user starts with
+            // only ASIO sources ticked, then later ticks a WASAPI source
             // — the lane would never come alive. Mirror AsioCaptureBackend's pattern: when
             // not running and the new spec set is non-empty, just delegate to Start. The
             // existing empty-specs case (still not running, still no sources to add) stays a
@@ -518,7 +516,6 @@ internal sealed class MixingEngine : ICaptureBackend
                 // sources sum past unity. Shared rule (SampleClamp); one batched counter add.
                 var clipped = SampleClamp.ClampBuffer(mixScratch.AsSpan(0, read));
                 if (clipped > 0) Interlocked.Add(ref clippedSampleCount, clipped);
-                Interlocked.Increment(ref mixTickCount);
 
                 onMixedSamples(new ReadOnlyMemory<float>(mixScratch, 0, read));
                 if (diag) Interlocked.Add(ref cumulativeMixLoopTicks, Stopwatch.GetTimestamp() - workStart);

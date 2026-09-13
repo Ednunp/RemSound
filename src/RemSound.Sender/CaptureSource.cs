@@ -6,28 +6,31 @@ using RemSound.Core;
 namespace RemSound.Sender;
 
 /// <summary>
-/// One capture source feeding the mixer. Wraps a single <see cref="WasapiCapture"/> (loopback or
-/// direct input) and produces 48 kHz stereo float samples through an NAudio sample-provider chain.
+/// One capture source feeding the mixer. Wraps a single <see cref="IWaveIn"/> capture and produces
+/// 48 kHz stereo float samples through an NAudio sample-provider chain.
 ///
 /// Pipeline:
-///   WasapiCapture (event-sync, 10 ms buffer)
+///   capture — WasapiCapture for an input (event-sync, 10 ms buffer),
+///             LowLatencyWasapiLoopbackCapture for an output device (10 ms buffer),
+///             ProcessLoopbackCapture for one application (20 ms buffer)
 ///     → BufferedWaveProvider  (250 ms ring; ReadFully=true pads with silence on underflow,
 ///                              DiscardOnBufferOverflow=true drops oldest on overflow)
 ///     → ToSampleProvider      (bytes → floats)
 ///     → WdlResamplingSampleProvider (any rate → 48 kHz)
 ///     → StereoMixDown         (any channel layout → stereo)
+///     → CaptureDriftCorrector (holds this source on the mix clock while more than one is live)
 ///
 /// The <see cref="Provider"/> exposes that final 48 kHz stereo float stream so the mixing engine
 /// can plug it into NAudio's <see cref="MixingSampleProvider"/>.
 ///
-/// Threading: NAudio's capture event runs on its own dedicated thread. We push samples into a
+/// Threading: the capture delivers on its own dedicated thread. We push samples into a
 /// thread-safe BufferedWaveProvider; the mixer's pull thread reads from the sample-provider
 /// chain. Standard NAudio idiom — well-tested and avoids hand-rolling SPSC ring buffers.
 ///
 /// Per-source clock drift across independent audio devices IS unavoidable
-/// (https://rogueamoeba.com/support/knowledgebase/?showArticle=Loopback-AggregateDeviceHandling)
-/// but the 250 ms ring + automatic discard-on-overflow tolerates it for realistic session
-/// lengths. A proper drift-correcting micro-resample is a future addition.
+/// (https://rogueamoeba.com/support/knowledgebase/?showArticle=Loopback-AggregateDeviceHandling).
+/// A lone source has nothing to drift against; with several live, each one's CaptureDriftCorrector
+/// resamples it onto the mixer's clock — see the constructor.
 /// </summary>
 internal sealed class CaptureSource : IDisposable
 {
@@ -228,7 +231,7 @@ internal sealed class CaptureSource : IDisposable
     /// <summary>
     /// Down-mixes any channel layout to stereo. Mono is duplicated to L=R; stereo passes through;
     /// multi-channel (5.1, 7.1, etc.) takes the front L/R channels (a basic "front-pair" pick,
-    /// not a full ITU down-mix matrix). Same approach as the legacy RSound build.
+    /// not a full ITU down-mix matrix).
     /// </summary>
     private sealed class StereoMixDownSampleProvider : ISampleProvider
     {

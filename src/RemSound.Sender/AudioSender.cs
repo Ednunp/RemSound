@@ -5,23 +5,23 @@ using RemSound.Core;
 
 namespace RemSound.Sender;
 
-// PcmPack is in RemSound.Core (used by both Sender and Receiver).
-
 /// <summary>
-/// Captures from one or more Windows audio devices via WASAPI (loopback for output devices,
-/// direct capture for input devices), mixes them into a single 48 kHz stereo float stream
-/// through <see cref="MixingEngine"/>, encodes (PCM 24-bit or Opus), and sends to a configurable
-/// set of UDP receivers.
+/// Captures from Windows audio devices, applications and ASIO inputs, encodes (PCM 24-bit or
+/// Opus), encrypts, and sends to a configurable set of UDP receivers.
 ///
-/// The mixing engine owns the capture lifecycle and the per-source silence keepalive (needed on
-/// USB audio interfaces whose loopback callbacks otherwise stall when no app is rendering — see
-/// naudio/NAudio#1110). AudioSender just wires the mixer's mixed-sample callback into the
-/// existing PCM/Opus encode + UDP path.
+/// Capture runs through <see cref="CompositeCaptureBackend"/>: a WASAPI lane (<see cref="MixingEngine"/>
+/// summing every ticked device or application into one 48 kHz stereo float stream, or
+/// <see cref="PushModeWasapiBackend"/> for a single source in tight latency) and, when an ASIO
+/// driver is chosen, the persistent <see cref="AsioCaptureBackend"/> held here. The capture
+/// backends own the capture lifecycle and the per-source silence keepalive (needed on USB audio
+/// interfaces whose loopback capture otherwise stalls when no app is rendering — see
+/// naudio/NAudio#1110). AudioSender wires each capture lane's sample callback into its own
+/// <see cref="SenderLane"/>, and feeds a DAW track from the plugin bridge into a third.
 ///
-/// Threading model: the mixer's tick task delivers 10 ms frames here on its own thread; this
-/// class accumulates into PCM 5 ms or Opus 10/20 ms frames and dispatches over UDP. No
-/// cross-thread synchronization other than reading a few volatile flags (codec, mute,
-/// receiver list).
+/// Threading model: each lane is fed on one thread — the mix tick, a capture callback, or the
+/// plugin bridge's receive thread — and accumulates into PCM or Opus frames and dispatches over
+/// UDP. No cross-thread synchronization on that path other than reading a few volatile flags
+/// (codec, mute, receiver list, key).
 /// </summary>
 public sealed class AudioSender : IDisposable
 {
@@ -50,12 +50,11 @@ public sealed class AudioSender : IDisposable
     // Always on — no toggle. Failure (qwave.dll missing, QoS service disabled) is logged and
     // ignored; the socket continues unprioritised.
     private readonly NetworkPriority networkPriority = new();
-    // Two lanes. defaultLane carries every output in the three classic modes (Mixed route).
-    // In BothIndependent mode defaultLane carries WASAPI-only audio (route WasapiLane) and
-    // asioLane carries ASIO-only audio (route AsioLane), each producing its own UDP stream
-    // tagged with the matching Lane byte so the receiver routes them to per-lane
-    // IWaveProvider surfaces. We always construct both lanes — the asio lane sits idle
-    // (no capture child wired to it) in classic modes and the memory cost is trivial.
+    // The capture lanes. In WasapiOnly defaultLane carries all captured audio (route Mixed). In
+    // BothIndependent defaultLane carries WASAPI-only audio (route WasapiLane) and asioLane
+    // carries ASIO-only audio (route AsioLane), each producing its own UDP stream tagged with the
+    // matching Lane byte. We always construct both lanes — the asio lane sits idle (no capture
+    // child wired to it) in WasapiOnly and the memory cost is trivial.
     private readonly SenderLane defaultLane;
     private readonly SenderLane asioLane;
     // Third lane: a VST plugin instance's DAW track, fed straight from the bridge by
@@ -70,13 +69,13 @@ public sealed class AudioSender : IDisposable
     // rule keys on (endpoint, streamId) and only drops a session whose lane MATCHES, on Windows, iOS
     // and Android alike. Proven here by the "Three concurrent streams from one sender" gate step.
     private readonly SenderLane pluginLane;
-    // Persistent AsioCaptureBackend that survives audio-mode changes. The composite borrows
-    // a reference to it; mode rebuilds rewire its callback (via SetCallback) rather than
-    // tearing it down and reopening the driver. This avoids Audient (and similar single-
-    // client drivers) hanging the audio thread for ~5 s on rapid close+reopen — which had
-    // been crashing the laptop on every "switch between Both and AsioOnly" attempt.
-    // Lazily created when first needed, disposed when transitioning to WasapiOnly OR when
-    // the user picks a different ASIO driver entirely. The Action<...> stub is a deliberate
+    // Persistent AsioCaptureBackend that survives capture-engine rebuilds. The composite borrows
+    // a reference to it; rebuilds (a tight-latency toggle, a re-applied mode) re-point its callback
+    // (via SetCallback) rather than tearing it down and reopening the driver. This avoids Audient
+    // (and similar single-client drivers) hanging the audio thread for ~5 s on rapid close+reopen
+    // — which had been crashing the laptop on every switch between the old ASIO modes.
+    // Lazily created when first needed, released in the background when ASIO is deselected OR
+    // when the user picks a different ASIO driver entirely. The Action<...> stub is a deliberate
     // placeholder that gets immediately swapped via SetCallback in EnsurePersistentAsio.
     private AsioCaptureBackend? persistentAsio;
     private string? persistentAsioDriverName;
@@ -91,13 +90,9 @@ public sealed class AudioSender : IDisposable
     private Action<string>? diagnostic;
 
     // Per-stream state (streamId, audioSequence, frame accumulator, Opus encoder, PCM frame id,
-    // format-resend timer) now lives on each SenderLane. This file kept its monolithic shape
-    // through Phase 1/2 — the BothIndependent refactor required splitting "stuff that belongs
-    // to one outbound stream" from "shared infrastructure". The accumulator/outbound scratch/
-    // streamId/sequence counters are all per-lane; the UDP socket, codec config, mute flag,
+    // format-resend timer) lives on each SenderLane; the UDP socket, codec config, mute flag,
     // engine and stats stay here. See <see cref="SenderLane"/> for the per-stream hot path.
 
-    private readonly Stopwatch uptime = new();
     private volatile AudioTransportCodec codec = AudioTransportCodec.Pcm;
     // Opus frame size in samples-per-channel at 48 kHz. Default 480 = 10 ms. Renamed from
     // opusFrameMs 2026-05-23 (v3.0 wire-format refactor) so the 2.5 ms RESTRICTED_LOWDELAY
@@ -128,7 +123,7 @@ public sealed class AudioSender : IDisposable
     // below and re-used directly by the lane.
     internal bool IsTightLatencyEnabled => tightLatencyEnabled;
 
-    // Hot-path timing instrumentation. Both lanes update these on every emit; the SNAP
+    // Hot-path timing instrumentation. Every lane updates these on every emit; the SNAP
     // timer reads + resets them once per second. Used to split observed inter-packet jitter
     // between "our code is slow" vs "the kernel is slow" vs "the network is slow".
     //   maxEmitTicks    = Stopwatch ticks for the WIDEST observation of SenderLane's
@@ -175,25 +170,7 @@ public sealed class AudioSender : IDisposable
     public double TakeCaptureWorkMs() =>
         engine.TakeCumulativeCaptureTicks() * 1000.0 / Stopwatch.Frequency;
 
-    // Pre-encode discontinuity probe — per-lane (each <see cref="SenderLane"/> owns its own).
-    // The aggregate accessor returns the max across both lanes since the last read; per-lane
-    // accessors expose them individually so BothIndependent mode can tell which lane is
-    // producing the artefact. Splitting the probe per-lane (2026-05-15) eliminates the
-    // cross-stream synthetic-step artefact that appeared when both lanes shared one probe and
-    // their interleaved callbacks fooled the cross-buffer step computation into recording a
-    // "step" between two unrelated audio streams.
-    public float TakeMaxSenderPreEncodeStep()
-    {
-        var a = defaultLane.TakeMaxPreEncodeStep();
-        var b = asioLane.TakeMaxPreEncodeStep();
-        var c = pluginLane.TakeMaxPreEncodeStep();
-        return Math.Max(a, Math.Max(b, c));
-    }
-    public float TakeMaxPreEncodeStepWasapiLane() => defaultLane.TakeMaxPreEncodeStep();
-    public float TakeMaxPreEncodeStepAsioLane() => asioLane.TakeMaxPreEncodeStep();
-    public float TakeMaxPreEncodeStepPluginLane() => pluginLane.TakeMaxPreEncodeStep();
-
-    /// <summary>Loudest absolute pre-encode sample across both lanes since the last call (resets on
+    /// <summary>Loudest absolute pre-encode sample across all three lanes since the last call (resets on
     /// read). ~0 means we're sending silence; surfaced on the diag line as capPeak.</summary>
     public float TakeMaxSenderPreEncodePeak()
     {
@@ -208,19 +185,22 @@ public sealed class AudioSender : IDisposable
     /// different faults with different fixes, and the aggregate cannot tell them apart.</summary>
     public float TakeMaxPreEncodePeakPluginLane() => pluginLane.TakeMaxPreEncodePeak();
 
-    /// <summary>Total audio frames both lanes actually handed to the wire since the last call
+    /// <summary>Total audio frames all three lanes actually handed to the wire since the last call
     /// (resets on read). Pairs with <see cref="TakeMaxSenderPreEncodePeak"/> on the diag line:
     /// capPeak proves real signal reached the encoder; this proves frames left the socket. A
     /// high capPeak with zero frames sent localises a silence to the encode/encrypt stage — the
-    /// missing measurement behind the "mic only works in ASIO" report. In WasapiOnly mode only
-    /// defaultLane fires, so this number IS the WASAPI mic lane's output.</summary>
+    /// missing measurement behind the "mic only works in ASIO" report. In WasapiOnly mode with no
+    /// DAW sending only defaultLane fires, so this number IS the WASAPI mic lane's output.</summary>
     public long TakeSenderAudioFramesSent() =>
         defaultLane.TakeAudioFramesSent() + asioLane.TakeAudioFramesSent() + pluginLane.TakeAudioFramesSent();
 
-    // Cross-buffer (boundary) and within-buffer (content) split — see AudioStepProbe for the
-    // diagnostic distinction. Used by the per-second diag logger to emit two extra columns so
-    // an offline log inspection can tell a real audio transient apart from a buffer-boundary
-    // glitch. 2026-05-21 addition.
+    // Pre-encode discontinuity probe, read per lane — each <see cref="SenderLane"/> owns its own, so
+    // the log can tell which lane is producing an artefact. Splitting the probe per lane (2026-05-15)
+    // eliminated the cross-stream synthetic-step artefact that appeared when the lanes shared one
+    // probe and their interleaved callbacks fooled the cross-buffer step computation into recording
+    // a "step" between two unrelated audio streams. Cross-buffer (boundary) and within-buffer
+    // (content) are read separately — see AudioStepProbe for the diagnostic distinction — so an
+    // offline log inspection can tell a real audio transient apart from a buffer-boundary glitch.
     public float TakeMaxPreEncodeStepWasapiLaneCrossBuffer() => defaultLane.TakeMaxPreEncodeStepCrossBuffer();
     public float TakeMaxPreEncodeStepWasapiLaneWithinBuffer() => defaultLane.TakeMaxPreEncodeStepWithinBuffer();
     public float TakeMaxPreEncodeStepAsioLaneCrossBuffer() => asioLane.TakeMaxPreEncodeStepCrossBuffer();
@@ -241,12 +221,11 @@ public sealed class AudioSender : IDisposable
     public int TakeMaxEmitGapMsAsioLane() => asioLane.TakeMaxEmitGapMs();
     public int TakeMaxEmitGapMsPluginLane() => pluginLane.TakeMaxEmitGapMs();
 
-    // Raw capture-side step probe — now lives inside each <see cref="ICaptureBackend"/>
+    // Raw capture-side step probe — lives inside each <see cref="ICaptureBackend"/>
     // implementation so the ASIO path and the WASAPI path each measure their own buffers
-    // independently. The aggregate just asks the backend for the max since last read; in
+    // independently. These just ask the backend for the max since last read; in
     // BothIndependent mode the composite backend forwards to both inners and returns the
     // larger value.
-    public float TakeMaxSenderRawCaptureStep() => engine.TakeMaxRawCaptureStep();
     public float TakeMaxSenderRawCaptureStepCrossBuffer() => engine.TakeMaxRawCaptureStepCrossBuffer();
     public float TakeMaxSenderRawCaptureStepWithinBuffer() => engine.TakeMaxRawCaptureStepWithinBuffer();
 
@@ -271,7 +250,6 @@ public sealed class AudioSender : IDisposable
     // from a LAN peer because LAN peers send to the receiver's well-known port directly.
     private CancellationTokenSource? inboundCts;
     private Thread? inboundThread;
-    private long inboundPackets;
 
     /// <summary>
     /// Optional callback invoked for each UDP datagram that arrives at this sender's socket.
@@ -285,9 +263,10 @@ public sealed class AudioSender : IDisposable
     /// Optional callback invoked every time a SenderLane is about to encode a buffer of
     /// captured float audio. The span is 48 kHz interleaved stereo float, lives on the
     /// audio thread, and must be processed quickly or copied — the buffer is reused on
-    /// the very next callback. The <see cref="RenderRoute"/> tag identifies which
-    /// SenderLane invoked the callback (Mixed in classic modes; WasapiLane or AsioLane in
-    /// BothIndependent) so the recorder can keep per-lane streams separate and mix them
+    /// the very next callback. The <see cref="RenderRoute"/> tag is the invoking SenderLane's
+    /// route (Mixed on the capture lane in WasapiOnly; WasapiLane or AsioLane on the capture
+    /// lanes in BothIndependent; the plugin lane carries whichever route those leave free) so
+    /// the recorder can keep per-lane streams separate and mix them
     /// at drain time rather than appending sequentially. Null = no tap.
     /// </summary>
     public Action<ReadOnlyMemory<float>, RenderRoute>? OnSentSamples { get; set; }
@@ -361,9 +340,7 @@ public sealed class AudioSender : IDisposable
     ///   * BothIndependent: WASAPI MixingEngine + persistent AsioCaptureBackend running side by
     ///     side, each on its own SenderLane (own streamId, own UDP stream). No mix loop, no tee.
     ///     Each lane keeps its native latency.
-    /// Legacy <c>AudioMode.AsioOnly</c> and <c>AudioMode.Both</c> are tolerated (the composite
-    /// coerces them) but no UI path produces them any more. If running, previously-pending
-    /// sources are re-applied automatically.
+    /// If running, previously-pending sources are re-applied automatically.
     /// </summary>
     public void SetAudioMode(AudioMode mode, string? asioDriverName)
     {
@@ -375,9 +352,7 @@ public sealed class AudioSender : IDisposable
             // BothIndependent: defaultLane carries the WASAPI lane, asioLane carries the ASIO
             // lane. SetRoute rotates each lane's streamId so the receiver opens a fresh
             // session under the new Lane tag — old session drains naturally on its 4-second
-            // prune. Legacy AsioOnly / Both can't be produced by the UI any more; if they
-            // arrive (in-flight callers, future call sites) we treat them as BothIndependent
-            // for routing purposes so the streams still carry distinct Lane tags.
+            // prune.
             if (mode != AudioMode.WasapiOnly)
             {
                 defaultLane.SetRoute(RenderRoute.WasapiLane);
@@ -409,8 +384,8 @@ public sealed class AudioSender : IDisposable
     /// (no ASIO) or when the user picks a different driver. The persistent instance is
     /// loaned to the composite via the constructor; the composite borrows but doesn't
     /// dispose, so the underlying ASIO driver handle stays open across engine rebuilds.
-    /// Caller must hold <see cref="configGate"/>. The callback is also rewired here based
-    /// on which lane should receive ASIO audio in the new mode.
+    /// Caller must hold <see cref="configGate"/>. The callback is also pointed at the ASIO
+    /// lane here, which is what unparks it after a <see cref="Stop"/>.
     /// </summary>
     private void EnsurePersistentAsioLocked()
     {
@@ -450,15 +425,9 @@ public sealed class AudioSender : IDisposable
             persistentAsioDriverName = currentAsioDriverName;
         }
 
-        // Wire the callback to the right lane for the current mode. WasapiOnly never reaches
-        // here (willUseAsio is false above). BothIndependent is the only ASIO-using mode the
-        // UI can produce, and it routes ASIO into the dedicated AsioLane. Legacy AsioOnly is
-        // tolerated by sending into defaultLane (which carries RenderRoute.Mixed in non-
-        // BothIndependent setups).
-        persistentAsio.SetCallback(
-            currentAudioMode == AudioMode.BothIndependent
-                ? asioLane.OnMixedSamples
-                : defaultLane.OnMixedSamples);
+        // ASIO audio always goes to the dedicated ASIO lane: WasapiOnly never reaches here
+        // (willUseAsio is false above), so this is BothIndependent.
+        persistentAsio.SetCallback(asioLane.OnMixedSamples);
     }
 
     /// <summary>Close an outgoing ASIO backend WITHOUT making the caller wait. The caller here is the
@@ -529,9 +498,9 @@ public sealed class AudioSender : IDisposable
             var newSamples = rate == SendRate.Tight ? PcmTightSamplesPerChannel : PcmStandardSamplesPerChannel;
             if (newSamples == pcmFrameSamplesPerChannel) return;
             pcmFrameSamplesPerChannel = newSamples;
-            // Both lanes need to rotate streamId + reset accumulator on a frame-size change.
-            // The asio lane is idle in classic modes (no producer feeding it) so the reset is
-            // harmless there; in BothIndependent both lanes are active and both must roll.
+            // Every lane needs to rotate streamId + reset accumulator on a frame-size change.
+            // A lane with no producer feeding it (the asio lane in WasapiOnly, the plugin lane
+            // with no DAW sending) takes the reset harmlessly; an active one must roll.
             defaultLane.OnPcmFrameSizeChanged();
             asioLane.OnPcmFrameSizeChanged();
             pluginLane.OnPcmFrameSizeChanged();
@@ -539,19 +508,19 @@ public sealed class AudioSender : IDisposable
     }
 
     /// <summary>Tight-latency mode toggle. Affects two things:
-    ///   * ASIO-only PCM: every incoming ASIO buffer is emitted directly as a single packet
-    ///     instead of being accumulated to the PCM frame size — saves ~frame_size_ms/2 of
-    ///     average send-side latency. ProcessPcm reads <c>tightLatencyEnabled</c> directly.
-    ///   * WasapiOnly with single source: rebuilds the capture backend as
+    ///   * PCM on every lane: each delivered sample buffer is emitted directly as its own
+    ///     packet (split at 5 ms) instead of being accumulated to the PCM frame size — saves
+    ///     ~frame_size_ms/2 of average send-side latency. SenderLane.ProcessPcm reads
+    ///     <see cref="IsTightLatencyEnabled"/> directly.
+    ///   * A single WASAPI source: rebuilds the capture backend so its WASAPI lane runs
     ///     <see cref="PushModeWasapiBackend"/> instead of <see cref="MixingEngine"/>. The WASAPI
     ///     capture event drives the encode/UDP-send pipeline directly, eliminating the ~6 ms
     ///     of Stopwatch+WaitHandle scheduler jitter that <see cref="MixingEngine"/>'s mix tick
     ///     adds. Especially important at high device sample rates (96 kHz EVO8 etc.) where the
     ///     in-tick resampler stage compounds the jitter. <see cref="CompositeCaptureBackend"/>
-    ///     decides whether push-mode actually applies based on source count and mode.
-    /// No effect on Opus accumulation (Opus needs fixed frame sizes) or AsioOnly's WASAPI
-    /// (there's no WASAPI source). Sender-side only as of Phase 3 (2026-05-06): the
-    /// receiver no longer has a resampler to bypass.</summary>
+    ///     decides whether push-mode actually applies based on the WASAPI source count, in
+    ///     either mode.
+    /// No effect on Opus accumulation (Opus needs fixed frame sizes). Sender-side only.</summary>
     public void SetTightLatency(bool enabled)
     {
         lock (configGate)
@@ -610,9 +579,8 @@ public sealed class AudioSender : IDisposable
         {
             codec = newCodec;
             opusFrameSamples = clampedSamples;
-            // Rebuild both lanes' encoders + rotate their streamIds. Same idle-lane rationale
-            // as SetSendRate — harmless when the asio lane has no producer; necessary when it
-            // does (BothIndependent).
+            // Rebuild every lane's encoder + rotate its streamId. Same idle-lane rationale
+            // as SetSendRate.
             defaultLane.OnCodecChanged(newCodec, clampedSamples);
             asioLane.OnCodecChanged(newCodec, clampedSamples);
             pluginLane.OnCodecChanged(newCodec, clampedSamples);
@@ -622,7 +590,6 @@ public sealed class AudioSender : IDisposable
     public bool IsMuted { get => muted; set => muted = value; }
     public long PacketsSent => Interlocked.Read(ref packetsSent);
     public long BytesSent => Interlocked.Read(ref bytesSent);
-    public TimeSpan Uptime => uptime.Elapsed;
 
     /// <summary>
     /// Friendly summary of currently-active sources for diagnostic columns. Returns
@@ -657,8 +624,11 @@ public sealed class AudioSender : IDisposable
         pendingSources = sources;
         if (engine.IsRunning)
         {
-            // Live add/remove via NAudio's MixingSampleProvider — mix loop never pauses,
-            // streamId stays the same, receiver doesn't see a new stream session, no underrun.
+            // Live update: the composite applies the change in place where it can (MixingEngine
+            // adds/removes sources without stopping its mix loop; ASIO only changes which pairs it
+            // sums), so streamId stays the same and the receiver sees no new stream session. A
+            // change that swaps the WASAPI lane between push mode and the mix engine does rebuild
+            // that lane, coalesced — see CompositeCaptureBackend.UpdateSources.
             engine.UpdateSources(sources);
         }
     }
@@ -691,7 +661,6 @@ public sealed class AudioSender : IDisposable
         asioLane.ResetForStart();
         Interlocked.Exchange(ref packetsSent, 0);
         Interlocked.Exchange(ref bytesSent, 0);
-        uptime.Restart();
         // Unpark the ASIO lane if a previous Stop parked it (see Stop below). This re-points the
         // persistent instance's callback at the lane the CURRENT mode wants; the composite's Start,
         // a line below, restores its channel pairs via UpdateSources. Idempotent and cheap when the
@@ -715,7 +684,6 @@ public sealed class AudioSender : IDisposable
         // the bridge thread after the user switched sending off. The app re-arms it on its next tick
         // if a plugin is genuinely still delivering blocks (see PluginTrackSource).
         pluginSendActive = false;
-        uptime.Stop();
     }
 
     // === plugin lane (the DAW track) ===
@@ -738,7 +706,6 @@ public sealed class AudioSender : IDisposable
     internal RenderRoute DefaultLaneRouteForTest => defaultLane.Route;
     internal RenderRoute AsioLaneRouteForTest => asioLane.Route;
     internal ushort DefaultLaneStreamIdForTest => defaultLane.StreamId;
-    internal ushort AsioLaneStreamIdForTest => asioLane.StreamId;
 
     /// <summary>
     /// Arm or disarm the plugin lane. Called by <see cref="PluginTrackSource"/> when the first DAW
@@ -758,9 +725,6 @@ public sealed class AudioSender : IDisposable
             if (active)
             {
                 pluginLane.ResetForStart();
-                // Uptime is otherwise only started by the capture engine, and a plugin-only send has
-                // no capture engine. Without this the diagnostic line divides by a stopped clock.
-                if (!uptime.IsRunning) uptime.Restart();
                 diagnostic?.Invoke($"sender: plugin lane armed on route {pluginLane.Route}, stream {pluginLane.StreamId}");
             }
             else
@@ -871,7 +835,6 @@ public sealed class AudioSender : IDisposable
 
             if (received <= 0) continue;
             if (anyEndpoint is not IPEndPoint remote) continue;
-            Interlocked.Increment(ref inboundPackets);
 
             try
             {
@@ -899,10 +862,6 @@ public sealed class AudioSender : IDisposable
         catch (SocketException) { return false; }
         catch (ObjectDisposedException) { return false; }
     }
-
-    /// <summary>Cumulative inbound packets received on this sender's socket. Mostly zero
-    /// outside relay mode.</summary>
-    public long InboundPackets => Interlocked.Read(ref inboundPackets);
 
     /// <summary>
     /// Shutdown. The ORDER here is the whole content of this method, so it is spelled out.
@@ -958,8 +917,8 @@ public sealed class AudioSender : IDisposable
     /// drove visible packet-emission jitter via GC pauses. The span overload eliminates
     /// that entire allocation stream.
     ///
-    /// Single point of outbound socket use means both lanes share the same NAT pinhole
-    /// and stats. The send-buffer-full or kernel-mutex contention between two threads
+    /// Single point of outbound socket use means every lane shares the same NAT pinhole
+    /// and stats. The send-buffer-full or kernel-mutex contention between lane threads
     /// sending on the same UDP socket is microseconds in practice and not the source of
     /// the ms-scale jitter we observe; the per-packet allocation was.
     ///
