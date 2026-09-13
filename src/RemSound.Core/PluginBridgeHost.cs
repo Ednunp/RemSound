@@ -171,6 +171,9 @@ public sealed class PluginBridgeHost : IDisposable
         switch (type)
         {
             case PluginBridgeMessage.Hello:
+                // A plugin always says which DAW process it lives in. A hello without that came from one of the
+                // plugin's test builds before 6.0, which are not supported: no reply, and nothing registered.
+                if (payload.Length < sizeof(int) || BinaryPrimitives.ReadInt32LittleEndian(payload.Span) <= 0) return;
                 // How long it had been quiet, read BEFORE Touch resets it. A plugin now says hello
                 // every couple of seconds so that its peer list stays live with no window open, and
                 // logging every one of those would be a line per instance per two seconds — burying
@@ -183,11 +186,6 @@ public sealed class PluginBridgeHost : IDisposable
                 else if (quietFor > TimeSpan.FromSeconds(5))
                     Notable?.Invoke($"plugin {Short(instance.Id)} said hello again after {quietFor.Value.TotalSeconds:0}s quiet "
                                   + "- it will have reconnected after RemSound restarted");
-                break;
-
-            case PluginBridgeMessage.ClaimPeer:
-                if (peer is null) return;
-                ServeClaimOne(hash, from, peer, payload);
                 break;
 
             case PluginBridgeMessage.ClaimPeers:
@@ -212,19 +210,8 @@ public sealed class PluginBridgeHost : IDisposable
         }
     }
 
-    /// <summary>The single-peer request. Folded onto the same path as the set, so there is one
-    /// implementation of claiming and reading rather than two that can drift apart.</summary>
-    private void ServeClaimOne(int hash, IPEndPoint from, IPAddress peer, ReadOnlyMemory<byte> payload)
-    {
-        if (payload.Length < sizeof(int)) { Touch(hash); return; }
-        var frames = BinaryPrimitives.ReadInt32LittleEndian(payload.Span);
-        Span<byte> raw = stackalloc byte[4];
-        if (!peer.TryWriteBytes(raw, out var written) || written != 4) return;
-        Serve(hash, from, raw, frames, askNumber: -1);
-    }
-
-    /// <summary>Several peers onto one track. Claim, heartbeat and request in one message, exactly as
-    /// the single-peer form, for however many people the instance is carrying.</summary>
+    /// <summary>The peers onto one track: claim, heartbeat and request in one message, for however many
+    /// people the instance is carrying. A request without an ask number only keeps the instance alive.</summary>
     private void ServeClaimSet(int hash, IPEndPoint from, ReadOnlyMemory<byte> payload)
     {
         if (!PluginBridgeProtocol.TryReadClaimSet(payload.Span, out var frames, out var addresses, out var askNumber))
@@ -305,21 +292,11 @@ public sealed class PluginBridgeHost : IDisposable
             if (produced < frames) Interlocked.Increment(ref shortReads);
             var bytes = produced * 2 * sizeof(float);
             // No peer named on the reply: it is a mix of the set, not any one person's audio, and
-            // naming one of them in the header would be a lie the next reader has to work out.
-            // A plugin that numbered its ask gets the block number back in front of the samples; an
-            // older one gets the samples alone, as it always did.
-            bool sent;
-            if (askNumber >= 0)
-            {
-                PluginBridgeProtocol.WriteAudioRoundHeader(sendScratch, block, askNumber);
-                Buffer.BlockCopy(mixScratch, 0, sendScratch, PluginBridgeProtocol.AudioRoundHeaderSize, bytes);
-                sent = link.Send(from, PluginBridgeMessage.PeerAudioRound, hash, null, sendScratch.AsSpan(0, PluginBridgeProtocol.AudioRoundHeaderSize + bytes));
-            }
-            else
-            {
-                Buffer.BlockCopy(mixScratch, 0, sendScratch, 0, bytes);
-                sent = link.Send(from, PluginBridgeMessage.PeerAudio, hash, null, sendScratch.AsSpan(0, bytes));
-            }
+            // naming one of them in the header would be a lie the next reader has to work out. The
+            // block number and the plugin's ask number go in front of the samples.
+            PluginBridgeProtocol.WriteAudioRoundHeader(sendScratch, block, askNumber);
+            Buffer.BlockCopy(mixScratch, 0, sendScratch, PluginBridgeProtocol.AudioRoundHeaderSize, bytes);
+            var sent = link.Send(from, PluginBridgeMessage.PeerAudioRound, hash, null, sendScratch.AsSpan(0, PluginBridgeProtocol.AudioRoundHeaderSize + bytes));
             if (sent)
             {
                 Interlocked.Increment(ref blocksServed);
@@ -635,8 +612,7 @@ public sealed class PluginBridgeHost : IDisposable
     }
 
     /// <summary>A Hello told us which process this instance lives in. Instances sharing a process
-    /// share a group id. A Hello with no process id (an older plugin) leaves the instance in its own
-    /// group, which is exactly the behaviour there was before.</summary>
+    /// share a group id.</summary>
     private void NoteHostProcess(Instance instance, ReadOnlySpan<byte> payload)
     {
         if (payload.Length < sizeof(int)) return;

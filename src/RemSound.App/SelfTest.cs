@@ -210,7 +210,10 @@ internal static partial class SelfTest
         RunStep(results, "ASIO: one driver instance carries both directions (real hardware, when named)", AsioOneDriverBothDirections);
         RunStep(results, "Plugin: levels in decibels, and a nudge that costs no audio", PluginLevelsInDecibels);
         RunStep(results, "Plugin: who is on the track survives the peer list changing", PluginPeerSetSurvivesTheListChanging);
-        RunStep(results, "Plugin: a project from the one-job build still opens doing what it did", PluginLegacyProjectConverts);
+        RunStep(results, "Plugin: a track saved by a test build opens with nobody chosen", PluginTestBuildTrackOpensWithNobodyChosen);
+        RunStep(results, "Plugin link: the test builds' message types are refused", PluginLinkRefusesRetiredMessageTypes);
+        RunStep(results, "Plugin link: a request without an ask number gets no audio", PluginLinkRequestNeedsAnAskNumber);
+        RunStep(results, "Plugin link: a hello without a process id gets no reply", PluginLinkIgnoresAHelloWithoutAProcessId);
         RunStep(results, "Plugin logging (silent when off, honest when on)", PluginLogging);
         RunStep(results, "Plugin logging reaches the app's own log file (the wiring, not just the events)", PluginLoggingInTheApp);
         RunStep(results, "Every wired event is claimed (no handler escapes the suites)", EveryWiredEventIsClaimed);

@@ -171,19 +171,19 @@ internal static partial class SelfTest
     }
 
     /// <summary>
-    /// A project saved by the one-job-per-instance build must still open, and open doing what it did.
+    /// A TRACK SAVED BY ONE OF THE PLUGIN'S TEST BUILDS OPENS WITH NOBODY CHOSEN.
     ///
-    /// <para>Its parameters carried a "job" that no longer exists, so without a conversion both new
-    /// switches come back off and the instance silently does nothing — which reads as the plugin
-    /// having broken rather than as a format change. The address is the whole signal available: that
-    /// build only ever wrote one when a peer had been chosen to RECEIVE.</para>
+    /// <para>2026-09-13, Ed: there was no plugin before 6.0, and 6.0 is the first release, so the conversions for
+    /// projects saved by the test builds went — the one-job build's bare address, and the "v2|" single peer with its
+    /// linear levels. Such a track must still OPEN, because refusing the chunk loses the whole plugin instance, and it
+    /// opens with nobody chosen. A track this build saved must still bring its people back.</para>
     /// </summary>
-    private static string PluginLegacyProjectConverts()
+    private static string? PluginTestBuildTrackOpensWithNobodyChosen()
     {
-        // Build the old-shaped chunks from real ones, by replacing the payload this build writes with
-        // the payload an older one wrote. Deriving them from a real save rather than hand-rolling the
+        // Build the test-build chunks from real ones, by replacing the payload this build writes with
+        // the payload a test build wrote. Deriving them from a real save rather than hand-rolling the
         // bytes keeps the test honest if the surrounding format ever changes.
-        byte[] Chunk(string payloadText, string? address, double? level = null)
+        byte[] Chunk(string payloadText, string? address)
         {
             var plugin = new RemSoundPlugin { Host = new StubAudioHost() };
             try
@@ -191,16 +191,6 @@ internal static partial class SelfTest
                 plugin.Initialize();
                 if (address is not null)
                     plugin.PushJobToParametersForTest(send: false, receive: true, peer: IPAddress.Parse(address));
-                if (level is { } value)
-                {
-                    // The number an older build stored under these ids. The host saves ProcessValue.
-                    foreach (var id in new[] { "sendlevel", "receivelevel" })
-                    {
-                        var parameter = plugin.Parameters.First(p => p.ID == id);
-                        parameter.EditValue = value;
-                        parameter.ProcessValue = value;
-                    }
-                }
                 var state = plugin.SaveState();
                 var marker = System.Text.Encoding.ASCII.GetBytes("<!--RemSoundPeer:");
                 var at = IndexOfTail(state, marker);
@@ -220,86 +210,40 @@ internal static partial class SelfTest
             finally { try { plugin.CloseForTest(); } catch { /* best-effort */ } }
         }
 
-        // The build where an instance did one job or the other wrote the bare address and no tag at
-        // all; the build after it tagged the same single address "v2|".
-        var wasReceiving = Chunk("192.168.1.50", "192.168.1.50");
-        var wasSending = Chunk("", null);
-        var onePeer = Chunk("v2|192.168.1.50", "192.168.1.50");
-
-        var onePeerPlugin = new RemSoundPlugin { Host = new StubAudioHost() };
+        // This build's own chunk: its people must come back.
+        var ours = new RemSoundPlugin { Host = new StubAudioHost() };
         try
         {
-            onePeerPlugin.Initialize();
-            onePeerPlugin.RestoreState(onePeer);
-            Check(onePeerPlugin.SavedPeerAddressesForTest.SequenceEqual(new[] { "192.168.1.50" }),
-                "a chunk from the one-peer build must come back as a set of one - nothing has to be guessed, it is the same person");
-            Check(!onePeerPlugin.AllPeersForTest, "...and must not come back taking everybody");
+            ours.Initialize();
+            ours.RestoreState(Chunk("v3|-|192.168.1.50", "192.168.1.50"));
+            Check(ours.SavedPeerAddressesForTest.SequenceEqual(new[] { "192.168.1.50" }),
+                "a track this build saved must come back with the same person chosen");
         }
-        finally { try { onePeerPlugin.CloseForTest(); } catch { /* best-effort */ } }
+        finally { try { ours.CloseForTest(); } catch { /* best-effort */ } }
 
-        var receiver = new RemSoundPlugin { Host = new StubAudioHost() };
-        try
+        // The one-job test build wrote the bare address with no tag; the one-peer build after it tagged it "v2|".
+        foreach (var (chunk, what) in new[]
         {
-            receiver.Initialize();
-            receiver.RestoreState(wasReceiving);
-            Check(receiver.ReceiveEnabled,
-                "an old project that was RECEIVING must come back receiving - without the conversion both switches come back "
-              + "off and the instance silently does nothing, which reads as the plugin having broken");
-            Check(!receiver.SendEnabled, "...and must not start sending a track it was never sending");
-            Check(receiver.SavedPeerAddressForTest == "192.168.1.50",
-                $"...onto the same person, by address (got {receiver.SavedPeerAddressForTest ?? "nothing"})");
-        }
-        finally { try { receiver.CloseForTest(); } catch { /* best-effort */ } }
-
-        var sender = new RemSoundPlugin { Host = new StubAudioHost() };
-        try
-        {
-            sender.Initialize();
-            sender.RestoreState(wasSending);
-            Check(sender.SendEnabled, "an old project that was SENDING must come back sending - that build's default job was send");
-            Check(!sender.ReceiveEnabled, "...and must not claim a peer it never had");
-        }
-        finally { try { sender.CloseForTest(); } catch { /* best-effort */ } }
-
-        // --- The LEVELS of the build before decibels ------------------------------------------------
-        // That build kept them as linear gain, 1,0 = unity, under the same parameter ids this build
-        // reads as dB. Restored as-is, unity came back as +1 dB and a 1,1 as +1,1 dB (Anthony Reyers'
-        // project, 2026-09-04). A chunk from THIS build must of course not be converted.
-        var unityOld = Chunk("v2|192.168.1.50", "192.168.1.50", level: 1.0);
-        var boostedOld = Chunk("v2|192.168.1.50", "192.168.1.50", level: 1.1);
-        var unityNew = Chunk("v3|-|192.168.1.50", "192.168.1.50", level: 1.0);
-        foreach (var (chunk, expectedDb, what) in new[]
-        {
-            (unityOld, 0.0, "unity from the linear build"),
-            (boostedOld, RemSoundPlugin.DbFromGain(1.1f), "1,1 from the linear build"),
-            (unityNew, 1.0, "1 dB from this build"),
+            (Chunk("192.168.1.50", "192.168.1.50"), "the one-job test build"),
+            (Chunk("v2|192.168.1.50", "192.168.1.50"), "the one-peer test build"),
         })
         {
-            var restored = new RemSoundPlugin { Host = new StubAudioHost() };
+            var plugin = new RemSoundPlugin { Host = new StubAudioHost() };
             try
             {
-                restored.Initialize();
-                restored.RestoreState(chunk);
-                Check(Math.Abs(restored.SendLevelDbForTest - expectedDb) < 0.05 && Math.Abs(restored.ReceiveLevelDbForTest - expectedDb) < 0.05,
-                    $"{what} must come back as {expectedDb:0.00} dB, not {restored.SendLevelDbForTest:0.00} / {restored.ReceiveLevelDbForTest:0.00} dB");
+                plugin.Initialize();
+                try { plugin.RestoreState(chunk); }
+                catch (Exception ex)
+                {
+                    Check(false, $"a track saved by {what} must open — refusing it loses the whole plugin instance ({ex.GetType().Name}: {ex.Message})");
+                }
+                Check(plugin.SavedPeerAddressesForTest.Count == 0,
+                    $"a track saved by {what} must open with nobody chosen — its payload is not read (got {string.Join(", ", plugin.SavedPeerAddressesForTest)})");
             }
-            finally { try { restored.CloseForTest(); } catch { /* best-effort */ } }
+            finally { try { plugin.CloseForTest(); } catch { /* best-effort */ } }
         }
 
-        // A FRESH instance is the case the conversion must not touch: no old chunk, nothing restored,
-        // and both switches off.
-        var fresh = new RemSoundPlugin { Host = new StubAudioHost() };
-        try
-        {
-            fresh.Initialize();
-            Check(!fresh.SendEnabled && !fresh.ReceiveEnabled,
-                "a plugin inserted fresh must do nothing until it is told to, whatever the conversion does for old projects");
-        }
-        finally { try { fresh.CloseForTest(); } catch { /* best-effort */ } }
-
-        return "an old project that was receiving comes back receiving the same person; one that was sending comes back sending; "
-             + "the linear build's levels come back in dB (unity as 0 dB) and this build's are left alone; a fresh instance "
-             + "still starts with neither direction on";
+        return "a track this build saved comes back with its person; one saved by either test build opens with nobody chosen";
     }
 
     private static int IndexOfTail(byte[] haystack, byte[] needle)

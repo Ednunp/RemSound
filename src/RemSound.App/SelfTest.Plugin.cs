@@ -215,7 +215,7 @@ internal static partial class SelfTest
         Check(beforeClaim > 0.6f, $"both peers must start out audible on the speakers (peak {beforeClaim:0.000})");
 
         // --- The claim, over the real link ---------------------------------------------------------
-        plugin.ReceiveFrom(andre.Address);
+        plugin.SetReceivedPeers([andre.Address]);
         var peak = PumpPlugin(plugin, frames: 256, rounds: 60);
         Check(peak > 0.3f, $"the claimed peer's audio must actually REACH the plugin - this is the plugin working or not ({peak:0.000})");
         Check(peak < 0.9f, $"and arrive at its own level, not clipped or doubled ({peak:0.000})");
@@ -227,7 +227,7 @@ internal static partial class SelfTest
         Check(afterClaim > 0.05f, $"...but Chris, who nobody claimed, must still be playing ({afterClaim:0.000})");
 
         // --- Switching peers must let the old one go AT ONCE ----------------------------------------
-        plugin.ReceiveFrom(chris.Address);
+        plugin.SetReceivedPeers([chris.Address]);
         PumpPlugin(plugin, frames: 256, rounds: 20);
         Check(!host.Claims.IsClaimed(andre.Address),
             "switching a track to another peer must release the first IMMEDIATELY - waiting for a timeout would leave them mute for five seconds with nothing to explain it");
@@ -237,7 +237,7 @@ internal static partial class SelfTest
         using (var second = new PluginBridgeClient(host.Port))
         {
             second.Hello();
-            second.ReceiveFrom(chris.Address);
+            second.SetReceivedPeers([chris.Address]);
             var secondPeak = PumpPlugin(second, frames: 256, rounds: 40);
             Check(secondPeak > 0.05f, $"a second plugin on the SAME peer must also get audio ({secondPeak:0.000})");
             Check(host.Claims.ClaimCount(chris.Address) == 2,
@@ -245,7 +245,7 @@ internal static partial class SelfTest
         }
 
         // --- Letting go: the peer returns to the speakers ----------------------------------------------
-        plugin.ReceiveFrom(null);
+        plugin.SetReceivedPeers([]);
         Check(WaitUntil(() => !host.Claims.IsClaimed(chris.Address)),
             "leaving a peer must reach the app - otherwise it stays mute in RemSound until a timeout the user cannot see");
         host.Sweep();
@@ -263,7 +263,7 @@ internal static partial class SelfTest
         using (var orphan = new PluginBridgeClient(FreeLoopbackPort()))
         {
             orphan.Hello();
-            orphan.ReceiveFrom(andre.Address);
+            orphan.SetReceivedPeers([andre.Address]);
             var quiet = PumpPlugin(orphan, frames: 256, rounds: 10);
             Check(quiet == 0f, "with no app listening the plugin must produce silence, not noise");
             Check(!orphan.Connected, "and must report that it is not connected, so the status line can say so plainly");
@@ -372,7 +372,7 @@ internal static partial class SelfTest
             {
                 clients[k] = new PluginBridgeClient(host.Port);
                 clients[k].Hello();
-                clients[k].ReceiveFrom(andre.Address);
+                clients[k].SetReceivedPeers([andre.Address]);
             }
 
             var block = new float[256 * 2];
@@ -404,7 +404,7 @@ internal static partial class SelfTest
             }
 
             // One leaving must not disturb the rest: the others keep their claim and keep their audio.
-            clients[0].ReceiveFrom(null);
+            clients[0].SetReceivedPeers([]);
             Check(WaitUntil(() => host.Claims.ClaimCount(andre.Address) == Instances - 1),
                 "one instance letting go must drop exactly one claim, leaving the others holding the peer");
             var afterLeaving = PumpPlugin(clients[1], frames: 256, rounds: 30);
@@ -630,11 +630,11 @@ internal static partial class SelfTest
 
         // --- Framing: a message must survive the round trip exactly -----------------------------
         var buffer = new byte[PluginBridgeProtocol.HeaderSize + 64];
-        PluginBridgeProtocol.WriteHeader(buffer, PluginBridgeMessage.ClaimPeer, instance, peer, 8);
+        PluginBridgeProtocol.WriteHeader(buffer, PluginBridgeMessage.ClaimPeers, instance, peer, 8);
         Check(PluginBridgeProtocol.TryReadHeader(buffer.AsSpan(0, PluginBridgeProtocol.HeaderSize + 8),
                 out var type, out var hash, out var readPeer, out var len),
             "a well-formed bridge message must parse");
-        Check(type == PluginBridgeMessage.ClaimPeer && hash == instance && len == 8, "every header field must round-trip");
+        Check(type == PluginBridgeMessage.ClaimPeers && hash == instance && len == 8, "every header field must round-trip");
         Check(readPeer is not null && readPeer.Equals(peer), "the peer address must round-trip");
 
         PluginBridgeProtocol.WriteHeader(buffer, PluginBridgeMessage.Hello, instance, null, 0);
@@ -667,7 +667,7 @@ internal static partial class SelfTest
         Check(1000 < PluginBridgeProtocol.MaxAudioBytes,
             "this case only isolates the overrun check while the claim stays UNDER the size cap");
         var overrun = new byte[PluginBridgeProtocol.HeaderSize + 8];
-        PluginBridgeProtocol.WriteHeader(overrun, PluginBridgeMessage.ClaimPeer, instance, peer, 8);
+        PluginBridgeProtocol.WriteHeader(overrun, PluginBridgeMessage.ClaimPeers, instance, peer, 8);
         System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(overrun.AsSpan(6), 1000);
         Check(!PluginBridgeProtocol.TryReadHeader(overrun, out _, out _, out _, out _),
             "a payload length that overruns the received datagram must be rejected even when it is within the size cap — "
@@ -707,14 +707,14 @@ internal static partial class SelfTest
         // strictly more than the real path costs (that is one hop each way, not two).
         host.MessageReceived += (t, h, p, payload, from) =>
         {
-            if (t == PluginBridgeMessage.TrackAudio) host.Send(from, PluginBridgeMessage.PeerAudio, h, p, payload.Span);
+            if (t == PluginBridgeMessage.TrackAudio) host.Send(from, PluginBridgeMessage.PeerAudioRound, h, p, payload.Span);
         };
 
         var returned = new SemaphoreSlim(0);
         var receivedBytes = 0;
         client.MessageReceived += (t, _, _, payload, _) =>
         {
-            if (t != PluginBridgeMessage.PeerAudio) return;
+            if (t != PluginBridgeMessage.PeerAudioRound) return;
             receivedBytes = payload.Length;
             returned.Release();
         };

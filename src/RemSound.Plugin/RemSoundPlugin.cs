@@ -474,14 +474,6 @@ public class RemSoundPlugin : AudioPluginBase
         finally { pushingParameters = false; }
     }
 
-    private static void ConvertLinearLevel(AudioPluginParameter? parameter)
-    {
-        if (parameter is null) return;
-        var linear = parameter.EditValue;
-        if (linear < 0 || linear > 2) return;
-        SetParameter(parameter, DbFromGain((float)linear));
-    }
-
     private static void SetParameter(AudioPluginParameter? parameter, double value)
     {
         if (parameter is null) return;
@@ -1023,8 +1015,7 @@ public class RemSoundPlugin : AudioPluginBase
     public override byte[] SaveState()
     {
         var baseState = base.SaveState() ?? [];
-        // Tagged, so a chunk written by an older build can be told apart from one written since and
-        // converted rather than misread. See RestoreState. The payload is the "all peers" flag and
+        // Tagged, so a payload this build did not write is never misread. See RestoreState. The payload is the "all peers" flag and
         // then the chosen set, by address: "v3|A|" or "v3|-|10.0.0.5,10.0.0.9".
         var payload = StateTag + (allPeers ? "A" : "-") + "|" + string.Join(",", savedPeerAddresses);
         var address = System.Text.Encoding.UTF8.GetBytes(payload);
@@ -1038,13 +1029,14 @@ public class RemSoundPlugin : AudioPluginBase
 
     public override void RestoreState(byte[] stateData)
     {
-        stateAllPeers = false;   // only a v3 chunk can turn it on; an older one never carried it
-        var levelsAreLinear = false;   // the "v2|" build kept the levels as linear gain
+        stateAllPeers = false;   // only our own chunk can turn it on
         var baseLength = stateData?.Length ?? 0;
         if (stateData is not null)
         {
-            // Find OUR marker at the tail. Anything without one is a chunk from an older build, which
-            // must still load — refusing it would lose the user's whole plugin instance.
+            // Find OUR marker at the tail. A chunk without one still restores its parameters — refusing it would
+            // lose the user's whole plugin instance. What follows the marker is read only if this build wrote it:
+            // the plugin's test builds before 6.0 wrote other payloads, and 6.0 is the first release (Ed,
+            // 2026-09-13), so a track saved by one of them opens with nobody chosen.
             var at = LastIndexOf(stateData, Marker);
             if (at >= 0 && at + Marker.Length + sizeof(int) <= stateData.Length)
             {
@@ -1053,6 +1045,7 @@ public class RemSoundPlugin : AudioPluginBase
                 if (length >= 0 && from + length <= stateData.Length)
                 {
                     var text = System.Text.Encoding.UTF8.GetString(stateData, from, length);
+                    savedPeerAddresses = [];
                     if (text.StartsWith(StateTag, StringComparison.Ordinal))
                     {
                         var body = text[StateTag.Length..];
@@ -1064,25 +1057,6 @@ public class RemSoundPlugin : AudioPluginBase
                         stateAllPeers = bar > 0 && body[..bar] == "A";
                         var list = bar >= 0 ? body[(bar + 1)..] : body;
                         savedPeerAddresses = list.Split(',', StringSplitOptions.RemoveEmptyEntries);
-                    }
-                    else if (text.StartsWith(OnePeerStateTag, StringComparison.Ordinal))
-                    {
-                        // The build where a receiving instance carried exactly one person. Its payload
-                        // is that person's address, which is a set of one; nothing has to be guessed.
-                        var address = text[OnePeerStateTag.Length..];
-                        savedPeerAddresses = string.IsNullOrEmpty(address) ? [] : [address];
-                        levelsAreLinear = true;
-                    }
-                    else
-                    {
-                        // A chunk from the one-job-per-instance build. Its parameters carried a "job"
-                        // that no longer exists, so the new send and receive switches would both come
-                        // back off and the instance would silently do nothing. Convert instead: the
-                        // address was only ever written when a peer had been chosen to RECEIVE, so an
-                        // address means receive and no address means send, which is exactly what that
-                        // build's single job flag meant.
-                        savedPeerAddresses = string.IsNullOrEmpty(text) ? [] : [text];
-                        convertedFromLegacyState = true;
                     }
                     baseLength = at;
                 }
@@ -1097,24 +1071,6 @@ public class RemSoundPlugin : AudioPluginBase
         }
         else base.RestoreState(stateData!);
 
-        if (levelsAreLinear)
-        {
-            // The build that wrote "v2|" kept the levels as LINEAR gain (1,0 = unity, 2,0 = +6 dB) and
-            // this one keeps them in decibels under the SAME parameter ids, so the host has just
-            // restored 1,0 into a field that now means +1 dB. Anthony Reyers' project came back as
-            // "send level 1,0 dB, receive level 1,1 dB" (2026-09-04): unity had become a boost, and
-            // silently. Convert what was restored. A value above 2 cannot be linear and is left alone;
-            // the build before "v2|" had no levels at all, so an untagged chunk restores the defaults.
-            pushingParameters = true;
-            try
-            {
-                ConvertLinearLevel(sendLevelParameter);
-                ConvertLinearLevel(receiveLevelParameter);
-            }
-            finally { pushingParameters = false; }
-            log?.Event("state restored from the build before decibels - levels converted from linear gain");
-        }
-
         // OUR CHUNK WINS on the things our chunk owns. The set of people is only in there, and the
         // all-peers flag is saved beside it, so restoring one from the chunk and the other from a
         // parameter is two sources for one decision — and they disagree the moment a host restores a
@@ -1123,38 +1079,18 @@ public class RemSoundPlugin : AudioPluginBase
         try { SetParameter(allPeersParameter, stateAllPeers ? 1 : 0); }
         finally { pushingParameters = false; }
 
-        if (convertedFromLegacyState)
-        {
-            convertedFromLegacyState = false;
-            var receive = savedPeerAddresses.Length > 0;
-            var peer = receive && System.Net.IPAddress.TryParse(savedPeerAddresses[0], out var a) ? a : null;
-            // Through the parameters, not straight into the fields: ApplyParameters below reads the
-            // parameters, so setting the fields alone would be overwritten a line later by the
-            // defaults. This writes the converted decision where the parameters can agree with it.
-            PushJobToParameters(!receive, receive, peer is null ? [] : [peer], false);
-            log?.Event($"state restored from an older project - converted to {(receive ? $"receive {peer?.ToString() ?? "(by position)"}" : "send")}");
-        }
-
         ApplyParameters();
         log?.Event($"state restored - {DescribeJob()}, chosen {(savedPeerAddresses.Length == 0 ? "nobody" : string.Join(", ", savedPeerAddresses))}"
                  + $"{(allPeers ? " (all peers)" : "")}, send level {sendLevelDb:0.0} dB, receive level {receiveLevelDb:0.0} dB");
     }
 
-    /// <summary>Set while <see cref="RestoreState"/> is reading a chunk written by the
-    /// one-job-per-instance build, so the conversion happens after the base class has restored its own
-    /// parameters and not before.</summary>
-    private bool convertedFromLegacyState;
-
     /// <summary>The "all peers" flag as our own state chunk carried it, held apart from the live one
     /// because restoring the base class's parameters overwrites the live one on the way past.</summary>
     private bool stateAllPeers;
 
-    /// <summary>Prefix on our own state payload. A chunk carrying an older tag, or none at all, is
-    /// converted rather than refused: refusing it would lose the user's whole plugin instance.</summary>
+    /// <summary>Prefix on our own state payload. A payload without it is not read, and the track opens with
+    /// nobody chosen; its parameters still restore.</summary>
     private const string StateTag = "v3|";
-
-    /// <summary>The tag from the build where a receiving instance carried exactly one person.</summary>
-    private const string OnePeerStateTag = "v2|";
 
     private static readonly byte[] Marker = System.Text.Encoding.ASCII.GetBytes("<!--RemSoundPeer:");
 

@@ -646,12 +646,12 @@ internal static partial class SelfTest
                 {
                     plugin.Hello();
                     Check(WaitUntil(() => written.Any(l => l.Contains("said hello"))), "a plugin connecting must be logged");
-                    plugin.ReceiveFrom(peer);
+                    plugin.SetReceivedPeers([peer]);
                     var block = new float[512];
                     plugin.ReadPeerBlock(block, 256);
                     Check(WaitUntil(() => written.Any(l => l.Contains("took 192.168.1.50"))),
                         "a plugin taking a peer must be logged - it is the moment that peer leaves the speakers");
-                    plugin.ReceiveFrom(null);
+                    plugin.SetReceivedPeers([]);
                     Check(WaitUntil(() => written.Any(l => l.Contains("let 192.168.1.50 go"))),
                         "and letting them go must be logged, so a silent peer can be explained from a file");
                 }
@@ -703,7 +703,7 @@ internal static partial class SelfTest
                 {
                     plugin.Hello();
                     Check(WaitUntil(() => host.InstanceCount > 0), "the app must see the plugin connect");
-                    plugin.ReceiveFrom(IPAddress.Parse("192.168.1.50"));
+                    plugin.SetReceivedPeers([IPAddress.Parse("192.168.1.50")]);
                     var block = new float[512];
                     plugin.ReadPeerBlock(block, 256);
                     Check(WaitUntil(() => host.Claims.IsClaimed(IPAddress.Parse("192.168.1.50"))), "and see the claim");
@@ -855,7 +855,7 @@ internal static partial class SelfTest
         using var host = new PluginBridgeHost(engine.ReadClaimedPeer, port: 0);
         engine.SetPluginPeerClaims(host.Claims);
         using var client = new PluginBridgeClient(host.Port);
-        client.ReceiveFrom(peer.Address);
+        client.SetReceivedPeers([peer.Address]);
 
         var render = new PeerRenderBridge(client);
         render.PrepareForBlockSize(HostBlock, HostRate);

@@ -167,19 +167,14 @@ public sealed class PluginBridgeClient : IDisposable
     /// one DAW leaving and another arriving, and hand the new one a buffer and a resampler it does
     /// not need — for audio coming from the same audio thread it was already getting.</para>
     ///
-    /// <para>Local loopback only, and additive: an app that has never heard of this payload reads a
-    /// Hello exactly as before, and a plugin that does not send it is grouped by instance as before.
-    /// Nothing about the network protocol is involved.</para></summary>
+    /// <para>Local loopback only; nothing about the network protocol is involved. The app ignores a hello
+    /// without the process id.</para></summary>
     public void Hello()
     {
         Span<byte> payload = stackalloc byte[sizeof(int)];
         BinaryPrimitives.WriteInt32LittleEndian(payload, Environment.ProcessId);
         link.Send(app, PluginBridgeMessage.Hello, instanceHash, null, payload);
     }
-
-    /// <summary>One peer, or nobody. Kept for the single-peer callers; the list below is the real
-    /// one.</summary>
-    public void ReceiveFrom(IPAddress? peer) => SetReceivedPeers(peer is null ? [] : [peer]);
 
     /// <summary>
     /// Who this instance receives onto its track. Several people are allowed: the app reads each of
@@ -312,8 +307,7 @@ public sealed class PluginBridgeClient : IDisposable
         }
         else if (h != t)
         {
-            // Numbering not known yet - nothing has been answered since the start - or an app that
-            // predates the numbering: play in arrival order, as this always did.
+            // Numbering not known yet - nothing has been answered since the start: play in arrival order.
             filled = Take(slots[h & (SlotCount - 1)], destination, wantedFloats);
             h++;
         }
@@ -369,10 +363,6 @@ public sealed class PluginBridgeClient : IDisposable
         }
         switch (type)
         {
-            case PluginBridgeMessage.PeerAudio:
-                Interlocked.Add(ref bytesReceived, payload.Length);
-                Enqueue(payload.Span, round: -1, askNumber: -1);
-                break;
             case PluginBridgeMessage.PeerAudioRound:
                 Interlocked.Add(ref bytesReceived, payload.Length);
                 if (PluginBridgeProtocol.TryReadAudioRoundHeader(payload.Span, out var round, out var answered))

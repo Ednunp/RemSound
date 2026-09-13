@@ -364,7 +364,7 @@ internal static partial class SelfTest
             "the bottom of the range must be a REAL off. All the way down meaning -60 dB of leak rather than silence is the "
           + "kind of surprise that gets found in a live session");
         Check(RemSoundPlugin.GainFromDb(RemSoundPlugin.MinLevelDb - 20) == 0f, "and below it, for a value out of a saved project");
-        Check(Math.Abs(RemSoundPlugin.DbFromGain(1f)) < 0.001, "unity must convert back to 0 dB, or an old project's level shifts on load");
+        Check(Math.Abs(RemSoundPlugin.DbFromGain(1f)) < 0.001, "unity must convert to 0 dB");
 
         // --- The parameters ------------------------------------------------------------------------
         var plugin = new RemSoundPlugin { Host = new StubAudioHost() };
