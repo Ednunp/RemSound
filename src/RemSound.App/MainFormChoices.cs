@@ -5,7 +5,7 @@ namespace RemSound.App;
 
 /// <summary>
 /// CheckedListBox subclass that exposes the protected <c>RefreshItem</c> method publicly. Used
-/// for the connectivity dialog's "Connected peers" list, where each row's text is updated in
+/// for the Connectivity tab's "Connected peers" list, where each row's text is updated in
 /// place (live RTT, codec, direction) without re-adding items — that would destroy NVDA's row
 /// focus on every tick.
 /// </summary>
@@ -28,10 +28,10 @@ internal sealed record CodecChoice(string Label, AudioTransportCodec Codec, int 
 internal sealed record AudioDeviceChoice(string Name, string? DeviceId, CaptureKind Kind = CaptureKind.Loopback)
 {
     /// <summary>True for the special "Use Windows default" pseudo-entry that sits at the top of the
-    /// receive-output and send-input lists. When ticked, the current Windows default device is
-    /// resolved live (Render for an output follower, Capture for an input follower — derived from
-    /// <see cref="Kind"/>) and re-resolved whenever Windows' default changes. Its <see cref="DeviceId"/>
-    /// is a sentinel, never a real endpoint id.</summary>
+    /// receive-output, send-output (loopback) and send-input lists. When ticked, the current Windows
+    /// default device is resolved live (Render for an output follower, Capture for an input follower —
+    /// derived from <see cref="Kind"/>) and re-resolved whenever Windows' default changes. Its
+    /// <see cref="DeviceId"/> is a sentinel, never a real endpoint id.</summary>
     public bool IsDefaultFollower { get; init; }
 
     public override string ToString() => Name;
@@ -43,8 +43,8 @@ internal sealed record RememberedPeerItem(string Entry)
 }
 
 /// <summary>
-/// Live per-peer status surfaced in the connectivity dialog's listbox text. Mutated in place
-/// each tick by MainForm.SyncAllDialogPeerLists, then ListBox.RefreshItem(i) is called on the
+/// Live per-peer status surfaced in the Connectivity tab's peer list text. Mutated in place
+/// each tick by MainForm.SyncAllPeerLists, then ListBox.RefreshItem(i) is called on the
 /// containing item so the visible label updates without rebuilding the listbox (which would
 /// destroy NVDA focus on the row).
 /// </summary>

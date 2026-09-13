@@ -244,8 +244,9 @@ internal sealed class MainFormHotkeyController : IDisposable
         //     2026-05-08 cleanup; the workflow is "arrow + Enter" exclusively, removing
         //     the extra Tab-to-button step the user had to make for every change.
         //
-        // Why a ListBox instead of one Button per row: the hotkey count grew to eleven
-        // (5 local + 3 remote-app + 3 system-volume) and the per-row Button stack made
+        // Why a ListBox instead of one Button per row: the hotkey count grew (fifteen now:
+        // 6 local, 3 remote-app, 3 system-volume, then quick profile switch, speak status line
+        // and the peer-shaping toggle) and the per-row Button stack made
         // arrow-key / Tab navigation slow. ListBox is one focusable control with native
         // arrow-key navigation and NVDA reads each item as the selection moves — much
         // quicker to triage which binding you want to change.
@@ -253,8 +254,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         // ProcessDialogKey path (which is what would fire AcceptButton on Enter). We
         // need that to make Enter-on-the-list rebind a hotkey instead of closing the
         // dialog. Without this, AcceptButton swallowed Enter regardless of which
-        // control had focus and the user got bounced straight back to the Profiles
-        // and preferences tab. (KeyPreview + the form-level KeyDown wasn't enough on
+        // control had focus and closed the dialog. (KeyPreview + the form-level KeyDown wasn't enough on
         // its own — that fires AFTER ProcessCmdKey/ProcessDialogKey, so AcceptButton
         // had already won.)
         var dialog = new CmdKeyForm
@@ -323,7 +323,8 @@ internal sealed class MainFormHotkeyController : IDisposable
 
         // The list rows correspond to the order below. Index → which Change* helper to call.
         // Stable ordering keeps the user's muscle memory between sessions: local hotkeys
-        // first, then the remote-app trio, then the Windows system-volume trio.
+        // first, then the remote-app trio, then the Windows system-volume trio, then quick
+        // profile switch, speak status line and the peer-shaping toggle.
         void RefreshList()
         {
             var prev = list.SelectedIndex;
@@ -332,7 +333,8 @@ internal sealed class MainFormHotkeyController : IDisposable
             // Order matches the case-block dispatchers in ChangeSelected and UnsetSelected
             // below. Local-action hotkeys first (rows 0..5: send / receive / tray / volume×2 /
             // recording), then the remote-app trio (rows 6..8), then the Windows-system trio
-            // (rows 9..11). Toggle recording joined the local group at index 5 in v1.5
+            // (rows 9..11), then quick profile switch (12), speak status line (13) and the
+            // peer-shaping toggle (14). Toggle recording joined the local group at index 5 in v1.5
             // (2026-05-15) — natural fit alongside the other "this machine" toggles.
             list.Items.Add($"Toggle sending audio: {sendMuteHotkey}");
             list.Items.Add($"Toggle receiving audio: {receiveMuteHotkey}");
@@ -392,8 +394,7 @@ internal sealed class MainFormHotkeyController : IDisposable
             }
             RefreshList();
             // Move focus back to the list so the user can immediately arrow to another
-            // row without an extra Tab. Without this, focus stays on the Change button
-            // (which is what was clicked / Enter'd) — which is fine but feels sticky.
+            // row without an extra Tab.
             list.Focus();
         }
 
@@ -479,8 +480,8 @@ internal sealed class MainFormHotkeyController : IDisposable
         };
 
         RefreshList();
-        // Enter on Close closes — works because list KeyDown above handled Enter when
-        // focus was on the list. AcceptButton fires only when no control consumed Enter.
+        // Enter on Close closes — works because CmdKeyHandler above consumes Enter only when
+        // focus is on the list. AcceptButton fires only when nothing consumed Enter.
         dialog.AcceptButton = closeButton;
         dialog.CancelButton = closeButton;
         dialog.Load += (_, _) => list.Focus();
@@ -524,7 +525,7 @@ internal sealed class MainFormHotkeyController : IDisposable
 
     /// <summary>Open the capture dialog, log what came back, and (on a successful capture)
     /// run <paramref name="apply"/> with the captured hotkey. Centralises the boilerplate
-    /// the eleven per-row Change methods used to duplicate. The <paramref name="description"/>
+    /// the fifteen per-row Change methods used to duplicate. The <paramref name="description"/>
     /// is what shows in the diagnostic log so a user / developer can see the trail of
     /// "capture send-system-volume-down: OK = Ctrl+Shift+Alt+J / register …: OK" or
     /// "capture …: cancelled (DialogResult=Cancel)" / "register …: FAILED Win32 1409".</summary>
