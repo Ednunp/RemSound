@@ -278,7 +278,7 @@ internal sealed class MultiOutputPlayout : IRenderBackend
                     // is still ~5 ms tighter than the old 15 ms, a free latency win. The per-device
                     // drift corrector keeps this buffer fed from its held card-sized cushion (≈12 ms
                     // on a typical card), so the smaller endpoint reserve doesn't risk underruns.
-                    wasapi = new WasapiOut(device, AudioClientShareMode.Shared, useEventSync: true, latency: 5);
+                    wasapi = new WasapiOut(device, AudioClientShareMode.Shared, useEventSync: true, latency: OutputRequestedLatencyMs);
                     // Ask the DEVICE how long playback takes, rather than doubling a callback gap and
                     // clamping it up to 10 ms. Once, here, off the audio thread. 2026-08-24.
                     var reportedMs = DeviceLatencyProbe.RenderLatencyMs(device, OutputRequestedLatencyMs);

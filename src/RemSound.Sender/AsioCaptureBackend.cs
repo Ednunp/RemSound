@@ -131,8 +131,9 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     /// toggle off. 2026-08-23 audit, finding S1.</para>
     ///
     /// <para>Both halves matter. The no-op callback stops delivery immediately (a volatile write, so
-    /// it takes effect on the very next buffer). The zero pairs make the callback early-out before
-    /// it does any mixing work at all. Unparking is automatic: the composite's Start calls
+    /// it takes effect on the very next buffer). The zero pairs make the callback return before the
+    /// probe and the mix — it still copies the driver's buffer out and counts it, but sums and sends
+    /// nothing. Unparking is automatic: the composite's Start calls
     /// <see cref="UpdateSources"/> with the real specs, and <see cref="AudioSender"/> re-points the
     /// callback for the current mode.</para>
     /// </summary>

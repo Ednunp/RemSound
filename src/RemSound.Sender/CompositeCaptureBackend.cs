@@ -230,7 +230,11 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
                 else asio.Start(asioSpecs);
             }
             started = true;
-            onDiagnostic?.Invoke($"composite capture started: wasapi={wasapiSpecs.Count} sources, asio={asioSpecs.Count} sources, mode={ModeLabel()}{(wantPushMode ? " [wasapi push]" : "")}");
+            // Name the CONFIGURATION — which lanes are actually capturing — ahead of the mode, which says
+            // "WASAPI + ASIO" whenever a driver is chosen. The render side's line does the same; see
+            // CompositeRenderBackend.RenderStartLabel for the misreading that taught it.
+            var configuration = AudioConfigurations.From(wasapiSpecs.Count > 0, asio is not null && asioSpecs.Count > 0);
+            onDiagnostic?.Invoke($"composite capture started: configuration={configuration.Describe()}, wasapi={wasapiSpecs.Count} sources, asio={asioSpecs.Count} sources, mode={ModeLabel()}{(wantPushMode ? " [wasapi push]" : "")}");
         }
     }
 
