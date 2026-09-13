@@ -1,3 +1,5 @@
+> **Historical record, not current.** This handover describes relay work finished in May 2026. Its versions, commands and paths are out of date. For the current relay, including how to publish a server release, see [README.md](README.md).
+
 # RemSound Pi Server — Handover
 
 **Status: server side COMPLETE.** Built, released, deployed, verified — 15 May 2026.
@@ -155,9 +157,10 @@ clean upgrade path was re-verified on `server-v2.2` → `server-v2.3`.
 # 2. Tar it with the correct internal directory name:
 tar -czf /tmp/remsound-server-v2.4.tar.gz \
     --transform 's,^<srcdir>,remsound-server-v2.4,' <srcdir>
-# 3. Publish the release:
+# 3. Publish the release. ALWAYS --latest=false: GitHub's "Latest" label belongs to the
+#    Windows app. NEVER --prerelease: the relay updater skips pre-releases.
 gh release create server-v2.4 /tmp/remsound-server-v2.4.tar.gz \
-    --repo Ednunp/RemSound --title "Server v2.4 — ..." --notes "..."
+    --repo Ednunp/RemSound --latest=false --title "Server v2.4 — ..." --notes "..."
 # 4. Within ~1 hour every running relay's auto-updater picks it up,
 #    installs it, restarts, and rolls back automatically if it fails.
 ```
