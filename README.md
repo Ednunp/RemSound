@@ -52,7 +52,7 @@ After that, RemSound updates itself. Help → Check for updates pulls the next v
 
 * **Windows 10 or 11.** Some users run it successfully on Windows 7, but it's not officially supported there.
 * **Another person running RemSound** on their own Windows machine.
-* **A way for the two machines to reach each other on the network.** Both on the same Wi-Fi works. Both on the same [Tailscale](https://tailscale.com) network works (free and easy to set up). Or both pointed at the public RemSound relay (also free, no setup).
+* **A way for the two machines to reach each other on the network.** Both on the same Wi-Fi works. Both on the same [Tailscale](https://tailscale.com) network works (free and easy to set up). Or both connected through a RemSound relay server you run yourself. There's no public one, but the code to run one on a Linux machine or a Raspberry Pi is in the [server folder](https://github.com/Ednunp/RemSound/tree/main/server) of this repository, with setup instructions.
 
 ## RemSound on Android
 
