@@ -900,10 +900,6 @@ internal static partial class SelfTest
         finally { try { Directory.Delete(root, recursive: true); } catch { } }
     }
 
-    /// <summary>Write a steady tone into a session so the mix has something measurable in it.</summary>
-    /// <summary>Read one claimed peer the way the bridge does, and report the peak. Goes straight at
-    /// <see cref="PlayoutEngine.ReadClaimedPeer"/> so the peer-matching can be checked across all
-    /// three output configurations without standing a whole DAW link up three times.</summary>
     /// <summary>A CLAIMED PEER WHO CHANGES NETWORK PATH MUST KEEP PLAYING ON THE PLUGIN'S TRACK.
     ///
     /// <para>Two ways that goes wrong, one of each here. First: the session at the address the plugin
@@ -984,6 +980,9 @@ internal static partial class SelfTest
         return engine;
     }
 
+    /// <summary>Read one claimed peer the way the bridge does, and report the peak. Goes straight at
+    /// <see cref="PlayoutEngine.ReadClaimedPeer"/> so the peer-matching can be checked across all
+    /// three output configurations without standing a whole DAW link up three times.</summary>
     private static float PeakOfClaimedPeer(PlayoutEngine engine, IPAddress peer, int frames = 256, int rounds = 8)
     {
         var block = new float[frames * 2];
@@ -996,29 +995,12 @@ internal static partial class SelfTest
         return peak;
     }
 
+    /// <summary>Write a steady level into a session so the mix has something measurable in it.</summary>
     private static void FillSession(SessionPlayout session, float amplitude)
     {
         var block = new byte[48000 * 8 / 4]; // 250 ms stereo float
         var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(block.AsSpan());
         for (var i = 0; i < floats.Length; i++) floats[i] = amplitude;
-        session.Write(block);
-        session.NoteFramesQueued(30);
-    }
-
-    /// <summary>Fill a session with a real tone rather than a flat level, so a test can measure what
-    /// came out the far end and catch a rate conversion that transposed it.</summary>
-    private static void FillSessionWithTone(SessionPlayout session, double toneHz, float amplitude)
-    {
-        const int Seconds = 4;   // plenty for the pump to drink from without running dry mid-measurement
-        var block = new byte[48000 * 8 * Seconds];
-        var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(block.AsSpan());
-        var step = 2 * Math.PI * toneHz / 48000;
-        for (var frame = 0; frame < floats.Length / 2; frame++)
-        {
-            var v = (float)(Math.Sin(frame * step) * amplitude);
-            floats[frame * 2] = v;
-            floats[frame * 2 + 1] = v;
-        }
         session.Write(block);
         session.NoteFramesQueued(30);
     }

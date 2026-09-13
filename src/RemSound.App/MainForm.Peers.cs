@@ -468,12 +468,6 @@ public sealed partial class MainForm
         ApplyAudioRuntime();
     }
 
-    private void LoadRememberedPeersFromSettings()
-    {
-        // No checkboxes on the form for these — they live in the dialog. We just remember them.
-        rememberedPeerInstanceIds.Clear();
-    }
-
     /// <summary>
     /// Adds a peer's identity to the persisted Remembered list (if not already present), and
     /// records the entry → instance-id mapping so the Remembered dialog can display it. Used
@@ -489,7 +483,7 @@ public sealed partial class MainForm
         if (existing.Any(e => string.Equals(e, entry, StringComparison.OrdinalIgnoreCase)))
         {
             // Already remembered — make sure the id mapping is current so
-            // SyncDialogRememberedPeerList correctly hides this entry while the peer is connected.
+            // SyncAllPeerLists correctly hides this entry while the peer is connected.
             rememberedPeerInstanceIds[entry] = peer.InstanceId;
             PushDiscoveryUnicastHints();
             return;

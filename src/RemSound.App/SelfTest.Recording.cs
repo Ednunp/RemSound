@@ -308,7 +308,6 @@ internal static partial class SelfTest
         return Directory.GetFiles(folder, "*." + ext, SearchOption.AllDirectories).Count(f => new FileInfo(f).Length > 200);
     }
 
-    /// <summary>One render block of a steady stereo tone at the given level.</summary>
     /// <summary>
     /// AUDIT REC1: a peer arriving on BOTH lanes in one render must keep all of both blocks.
     ///
@@ -506,7 +505,7 @@ internal static partial class SelfTest
         // is written, not that it runs.
         var root = FindSourceRoot();
         if (root is null)
-            return "the rule is proved; the WIRING could not be checked (no source tree — set REMSOUND_SOURCE_ROOT)";
+            return Skip("the rule is proved, but the WIRING could not be checked (no source tree — set REMSOUND_SOURCE_ROOT)");
 
         var installerSource = File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "AppInstaller.cs"));
         var removerStart = installerSource.IndexOf("private static void StartDeleteAfterExit", StringComparison.Ordinal);
@@ -561,7 +560,7 @@ internal static partial class SelfTest
         using var self = System.Diagnostics.Process.GetCurrentProcess();
         int ownSession;
         try { ownSession = self.SessionId; }
-        catch { return "the rule holds; this machine's session could not be read, so the live check was skipped"; }
+        catch { return Skip("the rule holds, but this machine's session could not be read, so the live check could not run"); }
 
         var serviceSeen = 0;
         foreach (var p in System.Diagnostics.Process.GetProcessesByName("RemSound"))
@@ -661,6 +660,7 @@ internal static partial class SelfTest
         return total == 0 ? 1.0 : zero / (double)total;
     }
 
+    /// <summary>One render block of a steady stereo tone at the given level.</summary>
     private static float[] MakeBlock(float amplitude)
     {
         var block = new float[480 * 2];

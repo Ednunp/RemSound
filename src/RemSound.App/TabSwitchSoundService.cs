@@ -19,10 +19,6 @@ internal static class TabSwitchSoundService
     // the whole config file just to fetch one bool. Reload() runs whenever cue settings change.
     private static bool enableTabSwitch;
 
-    /// <summary>When true, <see cref="Play"/> is a no-op. Reserved for bulk programmatic tab changes
-    /// the focus gate doesn't already cover; mirrors <see cref="CheckSoundService.Suppressed"/>.</summary>
-    public static bool Suppressed { get; set; }
-
     /// <summary>(Re)load the cue from the current cue configuration. Call at startup and whenever cue
     /// settings change, alongside <see cref="CheckSoundService.Reload"/>.</summary>
     public static void Reload()
@@ -34,7 +30,6 @@ internal static class TabSwitchSoundService
 
     public static void Play()
     {
-        if (Suppressed) return;
         if (enableTabSwitch) switchSound?.Play();
     }
 

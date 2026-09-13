@@ -877,13 +877,6 @@ public sealed partial class MainForm : Form
     // each would stage and spawn its own helper. Cross-PROCESS duplication is prevented by the
     // single-instance lock in Program.Main; this is the within-process half of that protection.
     private bool updateInstallStarted;
-    /// <summary>Set when the user changed the profiles FOLDER (not just switched profile)
-    /// via the Manage Profiles dialog. Program.cs reads this after the form closes; if true,
-    /// it re-runs the entire profile selection flow under the new folder rather than the
-    /// cheap "switch within current folder" path. Mutually exclusive with
-    /// <see cref="NextProfileTitleToLoad"/> in practice.</summary>
-    public bool ReloadFromScratch { get; private set; }
-
     /// <summary>Bring this window to the front, restoring it from the system tray if it's
     /// parked there. Called when the user launches a SECOND copy of RemSound and the single-
     /// instance guard chooses "switch to the running copy" — the second copy signals this one
@@ -911,8 +904,6 @@ public sealed partial class MainForm : Form
         }
         catch { /* best-effort — surfacing the window is a convenience, not load-critical */ }
     }
-
-    public MainForm() : this(null, null, null, null) { }
 
     public MainForm(ProfileStore? profileStore, Profile? profile, string? loadedTitle, string? loadedPath = null, bool headless = false)
     {
@@ -1351,7 +1342,7 @@ public sealed partial class MainForm : Form
         // settings cache has finished loading; see the call further down. We seed it false
         // here so any early probe fires before the settings load are a no-op.
         DiagnosticsGate.Enabled = false;
-        if (logFile.Enabled) AppendLogEntry("logging enabled at startup");
+        if (logFile.Enabled) logFile.Event("logging enabled at startup");
         // WHICH BUILD IS THIS, EXACTLY?
         //
         // The version alone cannot answer it: every test build in a release cycle says v6.0, so a log
@@ -1363,7 +1354,7 @@ public sealed partial class MainForm : Form
         // sync between machines, so a half-delivered update is a real possibility: the app updated
         // and the receiver not, or the other way round. One line per assembly makes that visible
         // instead of leaving it as the explanation nobody can check.
-        if (logFile.Enabled) AppendLogEntry($"build: {DescribeAssemblyBuilds()}");
+        if (logFile.Enabled) logFile.Event($"build: {DescribeAssemblyBuilds()}");
 
         // Sender diagnostic events (capture started, errors, etc.) get written to the log file.
         sender.Diagnostic = msg => logFile.Event($"sender: {msg}");
@@ -1590,7 +1581,7 @@ public sealed partial class MainForm : Form
             }
             catch (Exception ex)
             {
-                AppendLogEntry($"status tick: {ex.GetType().Name}: {ex.Message}");
+                logFile.Event($"status tick: {ex.GetType().Name}: {ex.Message}");
             }
         };
 
@@ -1602,7 +1593,6 @@ public sealed partial class MainForm : Form
         };
 
         BuildLayout();
-        LoadRememberedPeersFromSettings();
         // Seed the discovery service's unicast hint list with any remembered peer IPs so that,
         // the moment we start announcing, those addresses get directly contacted (bridges
         // Tailscale/VPN where broadcast doesn't traverse).
@@ -3084,7 +3074,7 @@ public sealed partial class MainForm : Form
         // switch hotkey can fire from anywhere), keep the rebuilt instance in the tray too rather
         // than popping the window up in front of whatever the user is doing.
         startNextInstanceMinimized = !Visible || WindowState == FormWindowState.Minimized;
-        AppendLogEntry($"profile switch via Recent profiles: \"{title}\" from {path}");
+        logFile.Event($"profile switch via Recent profiles: \"{title}\" from {path}");
         Close();
     }
 
@@ -3171,7 +3161,7 @@ public sealed partial class MainForm : Form
         LoadBlankTemplateNext = true;
         // Stay in the tray if we were there, mirroring the quick-switch behaviour.
         startNextInstanceMinimized = !Visible || WindowState == FormWindowState.Minimized;
-        AppendLogEntry("new profile: loading blank template");
+        logFile.Event("new profile: loading blank template");
         Close();
     }
 
@@ -3329,7 +3319,7 @@ public sealed partial class MainForm : Form
         // path, so profiles saved outside the active BaseDirectory still load correctly.
         NextProfilePathToLoad = pickedPath;
         NextProfileTitleToLoad = picked;
-        AppendLogEntry($"profile open requested: \"{picked}\" from {pickedPath}");
+        logFile.Event($"profile open requested: \"{picked}\" from {pickedPath}");
         Close();
     }
 
@@ -3396,7 +3386,7 @@ public sealed partial class MainForm : Form
             var cfg = AppConfig.Load();
             cfg.SaveOnReadOnlyWarningSuppressed = true;
             try { cfg.Save(); } catch { /* harmless — preference just won't persist */ }
-            AppendLogEntry("save-on-read-only warning suppressed by user");
+            logFile.Event("save-on-read-only warning suppressed by user");
         }
         return clicked == saveButton;
     }
@@ -3473,7 +3463,7 @@ public sealed partial class MainForm : Form
         currentProfilePath = newPath;
         Text = FormatWindowTitle(newTitle);
         AccessibleName = Text;
-        AppendLogEntry($"renamed profile \"{oldTitle}\" → \"{newTitle}\" (path: {newPath})");
+        logFile.Event($"renamed profile \"{oldTitle}\" → \"{newTitle}\" (path: {newPath})");
     }
 
     /// <summary>Show the Preferences dialog. After it closes, mark the profile dirty if
@@ -6261,23 +6251,6 @@ public sealed partial class MainForm : Form
         // Preferences dialog (Mute cues / Accept remote vol / Startup behaviour).
     }
 
-    /// <summary>True if the given control is on the currently-selected tab. Used by
-    /// <see cref="ProcessCmdKey"/> to gate Alt+letter shortcuts so they only fire when the
-    /// target is on the visible tab — pressing Alt+L on the Connectivity tab does NOT auto-
-    /// switch to the Audio profile tab and focus the latency spinner. The user has to first
-    /// Ctrl+Tab to the right tab. This is the explicit per-tab shortcut isolation rule.</summary>
-    private bool IsControlOnActiveTab(Control? c)
-    {
-        if (c is null) return false;
-        var active = mainTabControl.SelectedTab;
-        if (active is null) return false;
-        for (var p = c.Parent; p is not null; p = p.Parent)
-        {
-            if (ReferenceEquals(p, active)) return true;
-        }
-        return false;
-    }
-
     private bool IsSendEnabled => sendMyAudioCheckbox.Checked;
     private bool IsReceiveEnabled => receiveAudioCheckbox.Checked;
 
@@ -6295,7 +6268,6 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
-            AppendLogEntry($"discovery failed: {ex.Message}");
             logFile.Event($"discovery failed: {ex.Message}");
         }
 
@@ -6336,7 +6308,7 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
-            AppendLogEntry($"heartbeat failed to start: {ex.Message}");
+            logFile.Event($"heartbeat failed to start: {ex.Message}");
             logFile.Event($"heartbeat failed to start: {ex.Message}");
         }
 
@@ -6353,7 +6325,7 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
-            AppendLogEntry($"receiver listener failed to start: {ex.Message}");
+            logFile.Event($"receiver listener failed to start: {ex.Message}");
             logFile.Event($"receiver listener failed to start: {ex.Message}");
         }
 
@@ -6526,7 +6498,6 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
-            AppendLogEntry($"audio runtime error: {ex.Message}");
             logFile.Event($"audio runtime error: {ex.Message}");
         }
     }
@@ -7036,7 +7007,7 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
-            AppendLogEntry($"could not enumerate devices: {ex.Message}");
+            logFile.Event($"could not enumerate devices: {ex.Message}");
         }
     }
 
@@ -7959,12 +7930,10 @@ public sealed partial class MainForm : Form
     /// On every call, list visibility is refreshed and any ticks in now-hidden lists are wiped
     /// so they don't contribute ghost specs to the next ApplyAudioRuntime push.
     /// </summary>
-    /// <summary>True if this audio-mode runs an ASIO backend. BothIndependent does; WasapiOnly
-    /// does not. The legacy AudioMode.Both and AudioMode.AsioOnly values can only arrive here
-    /// from an old persisted profile JSON; they're treated as ASIO-using so deserialisation
-    /// stays graceful but no UI path can produce them any more.</summary>
-    private static bool ModeUsesAsio(AudioMode mode) =>
-        mode == AudioMode.AsioOnly || mode == AudioMode.Both || mode == AudioMode.BothIndependent;
+    /// <summary>True if this audio-mode runs an ASIO backend: BothIndependent does, WasapiOnly does not. The mode is derived
+    /// from whether a driver is chosen (RemSoundSettingsStore.LoadAudioMode), which never yields the retired AsioOnly or
+    /// Both values.</summary>
+    private static bool ModeUsesAsio(AudioMode mode) => mode == AudioMode.BothIndependent;
 
     // ===================== BothIndependent companion controls =====================
     //
@@ -8088,11 +8057,6 @@ public sealed partial class MainForm : Form
     // lastUserSliderMoveUtc which serves the same role for the WASAPI / classic slider.
     private DateTime lastUserAsioSliderMoveUtc = DateTime.MinValue;
 
-    /// <summary>True if this audio-mode runs a WASAPI backend. Today only AsioOnly excludes
-    /// it; everything else (WasapiOnly, BothIndependent, the legacy Both) shows the WASAPI
-    /// device lists. Kept as a predicate so a future mode addition just needs to update the
-    /// expression rather than every call site.</summary>
-    private static bool ModeUsesWasapi(AudioMode mode) => mode != AudioMode.AsioOnly;
 
     // ModeFromListIndex / ListIndexFromMode retired 2026-05-11 — there is no audio-mode
     // listbox any more, so there are no indices to translate. The audio mode is derived
@@ -8103,13 +8067,7 @@ public sealed partial class MainForm : Form
     {
         var requestedMode = settings.LoadAudioMode();
         var driver = settings.LoadAsioDriverName();
-        var resolvedMode = requestedMode;
-        // Sanity: an ASIO mode without a driver demotes to WasapiOnly. Should be unreachable
-        // through normal UI flow (the listbox is disabled when there are no drivers).
-        if (ModeUsesAsio(requestedMode) && string.IsNullOrWhiteSpace(driver))
-        {
-            resolvedMode = AudioMode.WasapiOnly;
-        }
+        var resolvedMode = requestedMode;   // BothIndependent only ever comes with a chosen driver (LoadAudioMode)
 
         var asioDriverArg = ModeUsesAsio(resolvedMode) ? driver : null;
         try
@@ -8134,9 +8092,8 @@ public sealed partial class MainForm : Form
             logFile.Event($"backend switch failed: {ex.GetType().Name}: {ex.Message}");
         }
 
-        // List visibility per mode. BothIndependent shows both WASAPI and ASIO lists — user
-        // needs to assign devices to each lane. WasapiOnly hides the ASIO lists.
-        var wasapiListsVisible = ModeUsesWasapi(resolvedMode);
+        // List visibility per mode. The WASAPI lists show in both modes; BothIndependent adds the ASIO lists, so the user
+        // can assign devices to each lane. (A retired ASIO-only mode once hid the WASAPI lists; nothing produces it now.)
         var asioListsVisible = ModeUsesAsio(resolvedMode);
         // Driver picker stays visible whenever at least one ASIO driver is installed — that
         // way the user can turn ASIO on (by picking a driver) or off (by selecting "(none)")
@@ -8145,15 +8102,15 @@ public sealed partial class MainForm : Form
         // both the listbox and its label are null-or-hidden and these lines are no-ops.
         asioDriverBox.Visible = hasAnyAsioDriverInstalled;
         if (asioDriverLabel is not null) asioDriverLabel.Visible = hasAnyAsioDriverInstalled;
-        receiveOutputDevicesList.Visible = wasapiListsVisible;
-        receiveOutputDevicesStatusLabel.Visible = wasapiListsVisible;
-        if (receiveOutputDevicesLabel is not null) receiveOutputDevicesLabel.Visible = wasapiListsVisible;
-        sendOutputDevicesList.Visible = wasapiListsVisible;
-        sendOutputDevicesStatusLabel.Visible = wasapiListsVisible;
-        if (sendOutputDevicesLabel is not null) sendOutputDevicesLabel.Visible = wasapiListsVisible;
-        sendInputDevicesList.Visible = wasapiListsVisible;
-        sendInputDevicesStatusLabel.Visible = wasapiListsVisible;
-        if (sendInputDevicesLabel is not null) sendInputDevicesLabel.Visible = wasapiListsVisible;
+        receiveOutputDevicesList.Visible = true;
+        receiveOutputDevicesStatusLabel.Visible = true;
+        if (receiveOutputDevicesLabel is not null) receiveOutputDevicesLabel.Visible = true;
+        sendOutputDevicesList.Visible = true;
+        sendOutputDevicesStatusLabel.Visible = true;
+        if (sendOutputDevicesLabel is not null) sendOutputDevicesLabel.Visible = true;
+        sendInputDevicesList.Visible = true;
+        sendInputDevicesStatusLabel.Visible = true;
+        if (sendInputDevicesLabel is not null) sendInputDevicesLabel.Visible = true;
         asioReceiveOutputDevicesList.Visible = asioListsVisible;
         asioReceiveOutputDevicesStatusLabel.Visible = asioListsVisible;
         if (asioReceiveOutputDevicesLabel is not null) asioReceiveOutputDevicesLabel.Visible = asioListsVisible;
@@ -8173,15 +8130,6 @@ public sealed partial class MainForm : Form
         try
         {
             suppressDeviceCheckChange = true;
-            if (!wasapiListsVisible)
-            {
-                for (var i = 0; i < receiveOutputDevicesList.Items.Count; i++)
-                    if (receiveOutputDevicesList.GetItemChecked(i)) { receiveOutputDevicesList.SetItemChecked(i, false); wipedSomething = true; }
-                for (var i = 0; i < sendOutputDevicesList.Items.Count; i++)
-                    if (sendOutputDevicesList.GetItemChecked(i)) { sendOutputDevicesList.SetItemChecked(i, false); wipedSomething = true; }
-                for (var i = 0; i < sendInputDevicesList.Items.Count; i++)
-                    if (sendInputDevicesList.GetItemChecked(i)) { sendInputDevicesList.SetItemChecked(i, false); wipedSomething = true; }
-            }
             if (!asioListsVisible)
             {
                 for (var i = 0; i < asioSendDevicesList.Items.Count; i++)
@@ -8378,7 +8326,8 @@ public sealed partial class MainForm : Form
             // NatUtility teardown + restart inside Refresh() can block for tens of seconds
             // on unusual networks, and we're on the UI thread during the resume handler.
             // 2026-05-23.
-            if (AppConfig.Load().UpnpEnabled)
+            // Never from a headless (gate) window: a wake step must not go looking for the real router. 2026-09-13 review.
+            if (!headless && AppConfig.Load().UpnpEnabled)
             {
                 Task.Run(() =>
                 {
@@ -8439,32 +8388,6 @@ public sealed partial class MainForm : Form
             cfg.Save();
             logFile.Event("save-profile confirmation suppressed by user (saved to remsound.config.json)");
         }
-    }
-
-    /// <summary>What the user ASKED the latency control for, and what the machine is ACTUALLY
-    /// delivering, end to end.
-    ///
-    /// <para>Why both numbers (Ed, 2026-08-15): the control accepts 1 ms, but no hardware delivers
-    /// that — the output device alone hands out audio in chunks of its own period, and there is a
-    /// capture buffer, a codec frame and the network on top. A user set 1 and heard about 40, with no
-    /// way to tell which part was his setting and which was his hardware.</para>
-    ///
-    /// <para>Deliberately NOT a clamp on the control. The achievable floor is an estimate, and a limit
-    /// built on an estimate would lock someone out of latency their hardware could actually reach —
-    /// a smaller ASIO buffer, a better driver. So the range stays open and the number stops lying
-    /// instead: set what you like, and see what you got. Because it is measured live, better hardware
-    /// simply reports a better figure with no stale limit in the way.</para>
-    ///
-    /// <para>The ACHIEVED figure is the whole journey — capture + encode + wire + receive queue +
-    /// output device — so it is directly comparable to a clap test, which is how people actually
-    /// judge it. Quoting the receive queue alone would be a different kind of lie.</para></summary>
-    internal static string FormatLatencyStatus(int requestedMs, double achievedMs)
-    {
-        if (requestedMs <= 0 || achievedMs <= 0) return "";
-        // "Jitter buffer set to" against the TOTAL being achieved. "Latency set to X, achieving Y"
-        // implied the two were the same quantity and that we were falling short of a target; they
-        // are different things, and the jitter buffer is only one part of the total. 2026-08-23.
-        return $" Jitter buffer set to {requestedMs} ms, total latency approximately {achievedMs:0} ms.";
     }
 
     /// <summary>The measured end-to-end latency for ONE lane, or 0 when that lane isn't carrying
@@ -9661,13 +9584,6 @@ public sealed partial class MainForm : Form
         }
     }
 
-    private void AppendLogEntry(string message)
-    {
-        // No on-form log box now (kept just-in-status-line). Leaving this method to make the call sites
-        // future-proof; if we re-add a visible log box, AppendLogEntry is the single hook point.
-        logFile.Event(message);
-    }
-
     // ===================== Tray =====================
 
     private void ToggleTrayFromHotkey()
@@ -9870,7 +9786,7 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
-            AppendLogEntry($"profile apply: error applying \"{p.Title}\": {ex.GetType().Name}: {ex.Message}");
+            logFile.Event($"profile apply: error applying \"{p.Title}\": {ex.GetType().Name}: {ex.Message}");
         }
         finally
         {
@@ -9985,7 +9901,7 @@ public sealed partial class MainForm : Form
             }
             Text = FormatWindowTitle(title);
             AccessibleName = Text;
-            AppendLogEntry($"profile saved: \"{title}\" → {path}");
+            logFile.Event($"profile saved: \"{title}\" → {path}");
             unsavedChanges = false;
             // A freshly created profile has no password yet, and encryption is always on — so
             // ask for one now and write it straight into the file we just saved. OK requires a
@@ -9999,7 +9915,7 @@ public sealed partial class MainForm : Form
                     currentProfilePassword = pw;
                     RecomputeAudioCrypto();
                     PersistPasswordOnly(pw);
-                    AppendLogEntry($"profile password set on creation for \"{title}\"");
+                    logFile.Event($"profile password set on creation for \"{title}\"");
                 }
             }
             // No confirmation popup here. The Save-As dialog the user just dismissed is itself
@@ -10081,7 +9997,7 @@ public sealed partial class MainForm : Form
         try
         {
             SaveCurrentStateToProfileFile(title);
-            AppendLogEntry($"profile saved: \"{title}\"");
+            logFile.Event($"profile saved: \"{title}\"");
             // Save cue (2026-05-28): fires after any successful save — Save AND Save As, since
             // both routes funnel through this single method. Honours the EnableSaveCue per-
             // profile flag; the cue is silent if the user has unticked it in Preferences or if
@@ -10246,7 +10162,7 @@ public sealed partial class MainForm : Form
         Text = FormatWindowTitle(currentProfileTitle);
         AccessibleName = Text;
         PersistReadOnlyFlagOnly(readOnly);
-        AppendLogEntry($"profile read-only flag set to {readOnly} for \"{currentProfileTitle ?? "(blank template)"}\"");
+        logFile.Event($"profile read-only flag set to {readOnly} for \"{currentProfileTitle ?? "(blank template)"}\"");
     }
 
     /// <summary>Write JUST the ReadOnly flag back to the profile file on disk, without
@@ -10279,7 +10195,7 @@ public sealed partial class MainForm : Form
             // on; the in-memory state already reflects the toggle, so the current session
             // works correctly. Next launch the file's flag wins, but a single failed write
             // is rare enough that it's not worth a dialog.
-            AppendLogEntry($"failed to persist read-only flag: {ex.GetType().Name}: {ex.Message}");
+            logFile.Event($"failed to persist read-only flag: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -10303,7 +10219,7 @@ public sealed partial class MainForm : Form
         currentProfilePassword = entered;
         RecomputeAudioCrypto();
         PersistPasswordOnly(entered);
-        AppendLogEntry($"profile password changed for \"{currentProfileTitle}\" (now {(entered.Length == 0 ? "cleared" : "set")})");
+        logFile.Event($"profile password changed for \"{currentProfileTitle}\" (now {(entered.Length == 0 ? "cleared" : "set")})");
     }
 
     /// <summary>Write JUST the (scrambled) password back to the profile file, leaving every
@@ -10324,7 +10240,7 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
-            AppendLogEntry($"failed to persist profile password: {ex.GetType().Name}: {ex.Message}");
+            logFile.Event($"failed to persist profile password: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -10496,7 +10412,7 @@ public sealed partial class MainForm : Form
             }
             if (lastSecurityWarned.TryGetValue(addr, out var warned) && warned == status) continue;
             lastSecurityWarned[addr] = status;
-            AppendLogEntry($"security: {status} with {addr}");
+            logFile.Event($"security: {status} with {addr}");
             var msg = status == PeerSecurityStatus.PasswordMismatch
                 ? $"You and {addr} have different passwords, so no audio will pass between you.\n\nMake sure you've both set the same password (File → Change this profile's password)."
                 : PeerSecurityNotice.NoFingerprintMessage(addr.ToString());
@@ -10544,7 +10460,7 @@ public sealed partial class MainForm : Form
                 var profile = JsonSerializer.Deserialize<Profile>(File.ReadAllText(currentProfilePath));
                 currentProfilePassword = RemSoundCrypto.Deobfuscate(profile?.Password);
                 RecomputeAudioCrypto();
-                AppendLogEntry("active profile password refreshed from the password manager");
+                logFile.Event("active profile password refreshed from the password manager");
             }
             catch { /* benign — worst case the change applies on next load */ }
         }
@@ -10637,7 +10553,7 @@ public sealed partial class MainForm : Form
                 var address = await ResolvePeerAddressAsync(entry);
                 if (address is null)
                 {
-                    AppendLogEntry($"profile reconnect: could not resolve \"{entry}\"; skipping");
+                    logFile.Event($"profile reconnect: could not resolve \"{entry}\"; skipping");
                     return;
                 }
                 peer = CreateManualPeer(entry, address);
@@ -10666,7 +10582,7 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
-            AppendLogEntry($"profile reconnect: \"{entry}\" failed: {ex.GetType().Name}: {ex.Message}");
+            logFile.Event($"profile reconnect: \"{entry}\" failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -11268,11 +11184,7 @@ public sealed partial class MainForm : Form
             // EffectiveOpusFrameSamples is samples-per-channel at 48 kHz; ÷ 48 → ms, ÷ 2 → half-frame.
             return EffectiveOpusFrameSamples(item.Codec, item.OpusFrameSamples, rate) / 96.0;
         }
-        // PCM. Lock to audio clock is always on now, so ASIO-only means per-callback emission.
-        if (settings.LoadAudioMode() == AudioMode.AsioOnly)
-        {
-            return 0.5; // per-callback ASIO send → ~one ASIO buffer, hard to know without driver introspection
-        }
+        // PCM.
         return rate == SendRate.Tight ? 1.25 : 2.5;
     }
 
@@ -12067,7 +11979,7 @@ public sealed partial class MainForm : Form
         // a profile where the user wants exactly the opposite: silent exit. Crucially this
         // is what unblocks NVDA-less or remote-session-dropped shutdowns from deadlocking
         // on a dialog the user can't reach.
-        var skipPrompt = !string.IsNullOrEmpty(NextProfileTitleToLoad) || ReloadFromScratch
+        var skipPrompt = !string.IsNullOrEmpty(NextProfileTitleToLoad)
             || LoadBlankTemplateNext || currentProfileReadOnly || updatingInProgress || closingFromCommandLine;
 
         if (!skipPrompt && profileStore is not null && unsavedChanges)

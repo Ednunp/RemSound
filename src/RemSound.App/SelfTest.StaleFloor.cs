@@ -4,6 +4,10 @@ namespace RemSound.App;
 
 internal static partial class SelfTest
 {
+    /// <summary>A lane memory on its own, for the gate. The type is nested in MainForm because it is
+    /// MainForm state; this exists so the rule can be driven without a window.</summary>
+    private static MainForm.LaneTuneMemory NewLaneMemoryForTest() => new();
+
     /// <summary>
     /// A FLOOR LEARNED ABOUT A DEVICE THAT HAS GONE IS NOT EVIDENCE ABOUT THE ONE THAT COMES BACK.
     ///
@@ -26,17 +30,13 @@ internal static partial class SelfTest
     ///
     /// <para><b>Both lanes.</b> WASAPI is where outputs vanish most — a Bluetooth headset powering
     /// down, a USB interface unplugged, a resume from hibernate — but an ASIO driver can be lost too,
-    /// and a floor learned about a departed ASIO device is exactly as stale. The rule is per lane and
-    /// identical on both, so the test drives both.</para>
+    /// and a floor learned about a departed ASIO device is exactly as stale. One memory type serves both
+    /// lanes, so the test drives a fresh one under each lane's name.</para>
     ///
     /// <para>Not otherwise per-configuration: this is one lane's memory reacting to its own output
     /// coming and going. Which of the three configurations is live decides WHICH lanes exist, and the
     /// test covers each lane that can exist.</para>
     /// </summary>
-    /// <summary>A lane memory on its own, for the gate. The type is nested in MainForm because it is
-    /// MainForm state; this exists so the rule can be driven without a window.</summary>
-    private static MainForm.LaneTuneMemory NewLaneMemoryForTest() => new();
-
     private static string? AuditReturningOutputForgetsItsOldFloor()
     {
         var results = new List<string>();

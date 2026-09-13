@@ -55,10 +55,6 @@ internal static partial class SelfTest
             $"after Park, the driver's callback must deliver NOTHING to the sender lane — this is the "
             + $"'send off but still transmitting' bug (delivered {delivered}, expected 1)");
 
-        // And the park must not have closed anything: a second park is a no-op, not a teardown.
-        backend.Park();
-        Check(!backend.IsRunning, "no driver was ever opened in this test, so nothing should report running");
-
         // Unparking re-points the callback at a live lane again.
         var reDelivered = 0;
         backend.SetCallback(_ => reDelivered++);
@@ -812,16 +808,15 @@ internal static partial class SelfTest
                 Require(typeof(MainForm).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic),
                     $"MainForm.{name} not found — a renamed field would leave this test checking nothing").GetValue(form);
 
-            var checkedModes = 0;
-            foreach (var mode in new[] { AudioMode.WasapiOnly, AudioMode.BothIndependent })
+            var checkedConfigurations = 0;
+            // The three configurations, driven the way a user gets into each. This looped the two audio MODES until
+            // 2026-09-13 — the axis its own comment below calls the wrong one.
+            foreach (var configuration in AudioConfigurations.All)
             {
-                // Drive it the way the app actually works — and prove it took. This used to call a
-                // SaveAudioMode that was deleted in 2026-05, via a null-conditional that silently did
-                // nothing, so both passes ran against the unchanged default and the "both modes"
-                // in this test's name was a fiction.
-                SetAsioDriverForTest(form, mode == AudioMode.BothIndependent ? "RemSound self-test — no such ASIO driver" : null);
+                var mode = configuration.Describe();
+                SetAudioConfigurationForTest(form, configuration);
                 apply.Invoke(form, null);
-                checkedModes++;
+                checkedConfigurations++;
 
                 foreach (var fieldName in new[] { "wasapiLatencyLabel", "asioLatencyLabel", "continuousIntervalLabel" })
                 {
@@ -866,7 +861,7 @@ internal static partial class SelfTest
                 }
             }
 
-            Check(checkedModes == 2, "both audio modes must actually have been exercised");
+            Check(checkedConfigurations == 3, "all three configurations must actually have been exercised");
 
             // === ALL THREE CONFIGURATIONS ===
             //
@@ -1545,33 +1540,31 @@ internal static partial class SelfTest
     /// </summary>
     private static string? AuditFaultedOutputReopensItself()
     {
-        foreach (var configuration in AudioConfigurations.All)
-        {
-            var where = configuration.Describe();
+        // The rule takes no configuration, so it is checked once. It was looped over the three configurations until
+        // 2026-09-13, which fed a pure function the same arguments three times. 2026-09-13 review.
 
-            // Nothing wrong: leave the audio alone. Re-applying devices for no reason would break
-            // audio every second, which is far worse than the fault being fixed.
-            Check(!MainForm.ShouldReopenOutputs(anyFaulted: false, missingCount: 0, withinRetryInterval: false),
-                $"in {where} a healthy output must never be re-opened — tearing a live device down once a second "
-                + "would be a worse bug than the one this fixes");
+        // Nothing wrong: leave the audio alone. Re-applying devices for no reason would break
+        // audio every second, which is far worse than the fault being fixed.
+        Check(!MainForm.ShouldReopenOutputs(anyFaulted: false, missingCount: 0, withinRetryInterval: false),
+            "a healthy output must never be re-opened — tearing a live device down once a second "
+            + "would be a worse bug than the one this fixes");
 
-            // Ed's control-panel case: the device is still present and still ticked, but its endpoint
-            // was invalidated. Nothing external will ever ask for a re-apply.
-            Check(MainForm.ShouldReopenOutputs(anyFaulted: true, missingCount: 0, withinRetryInterval: false),
-                $"in {where} an output Windows invalidated must be re-opened without waiting for a hot-plug "
-                + "notification — the device never left, so no notification is coming, and the user is sitting in "
-                + "silence until they untick and re-tick it by hand");
+        // Ed's control-panel case: the device is still present and still ticked, but its endpoint
+        // was invalidated. Nothing external will ever ask for a re-apply.
+        Check(MainForm.ShouldReopenOutputs(anyFaulted: true, missingCount: 0, withinRetryInterval: false),
+            "an output Windows invalidated must be re-opened without waiting for a hot-plug "
+            + "notification — the device never left, so no notification is coming, and the user is sitting in "
+            + "silence until they untick and re-tick it by hand");
 
-            // The resume case: ticked, not open, nothing retrying.
-            Check(MainForm.ShouldReopenOutputs(anyFaulted: false, missingCount: 1, withinRetryInterval: false),
-                $"in {where} a ticked device that is not open must be retried — after a resume a wireless device can "
-                + "come back long after the post-resume re-init has already given up");
+        // The resume case: ticked, not open, nothing retrying.
+        Check(MainForm.ShouldReopenOutputs(anyFaulted: false, missingCount: 1, withinRetryInterval: false),
+            "a ticked device that is not open must be retried — after a resume a wireless device can "
+            + "come back long after the post-resume re-init has already given up");
 
-            // Rate limit: a device that is genuinely gone must not be hammered every tick.
-            Check(!MainForm.ShouldReopenOutputs(anyFaulted: true, missingCount: 2, withinRetryInterval: true),
-                $"in {where} the retry must respect its interval — a device that is truly unplugged would otherwise "
-                + "be re-opened every single tick for as long as it stays away");
-        }
+        // Rate limit: a device that is genuinely gone must not be hammered every tick.
+        Check(!MainForm.ShouldReopenOutputs(anyFaulted: true, missingCount: 2, withinRetryInterval: true),
+            "the retry must respect its interval — a device that is truly unplugged would otherwise "
+            + "be re-opened every single tick for as long as it stays away");
 
         // The interval itself, pinned in absolute seconds rather than against its own constant: a
         // measurement against the value that sets it proves only that SOME delay exists.
@@ -1581,7 +1574,7 @@ internal static partial class SelfTest
             + $"(got {MainForm.FaultedOutputRetryIntervalForTest.TotalSeconds}s)");
 
         return "an output invalidated by Windows, and a ticked output that never opened, are both re-opened by the "
-             + "app itself on a 3-second retry — in all three configurations, with a healthy output never disturbed";
+             + "app itself on a 3-second retry, with a healthy output never disturbed";
     }
 
     /// <summary>

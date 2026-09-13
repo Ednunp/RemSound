@@ -289,6 +289,8 @@ internal sealed class LowLatencyWasapiLoopbackCapture : IWaveIn
         RaiseRecordingStopped(error);
     }
 
+    /// <summary>Take every packet the device has queued — the rule <see cref="WasapiCaptureLoop.Drain"/> is proven against in
+    /// the gate. Stopping after one packet is what lost two buffers in three on a card whose event never fires.</summary>
     private void Drain(AudioCaptureClient capture)
     {
         var packetFrames = capture.GetNextPacketSize();

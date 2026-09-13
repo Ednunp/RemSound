@@ -37,8 +37,10 @@ internal static partial class SelfTest
         // Driven for real by the control suite, in all three audio configurations: every control on
         // the window is enumerated from the live form, so a handler on a new control cannot hide.
         new("RemSound.App/MainForm.cs", "Control suite (3 configurations) + Every control is specified"),
-        new("RemSound.App/MainFormHotkeyController.cs", "Keyboard shortcut suite (capture, conflict, apply, import)"),
-        new("RemSound.App/MainFormTrayController.cs", "Tray suite (minimise/restore cues, menu items, exit path)"),
+        new("RemSound.App/MainFormHotkeyController.cs", "Keyboard shortcut steps (keyboard shortcuts go where they say; a hotkey change leaves the profile clean; the Keyboard shortcuts window in the dialog suite)"),
+        new("RemSound.App/MainFormTrayController.cs",
+            "no test: its menu items call the same send and receive toggles, window restore and exit the control suite drives; " +
+            "the tray icon itself needs a notification area, which a gate run must not create"),
 
         // ---- Dialogs. The dialog suite enumerates every window type in the app and audits every
         // interactive control in each, so these are covered by construction rather than by listing. --
@@ -69,15 +71,17 @@ internal static partial class SelfTest
         new("RemSound.Core/PluginBridgeHost.cs", "App-plugin link + end-to-end bridge tests"),
 
         // ---- Engine and services ---------------------------------------------------------------------
-        new("RemSound.Core/PeerDiscoveryService.cs", "Discovery tests (announce, expiry, named peers)"),
+        new("RemSound.Core/PeerDiscoveryService.cs", "Discovery steps (a malformed broadcast is dropped; a remembered peer follows discovery)"),
         new("RemSound.Receiver/MultiOutputPlayout.cs", "Playout and lifecycle-churn tests"),
         new("RemSound.Core/SharedAsioDevice.cs", "Lifecycle churn (ASIO leg skipped without REMSOUND_TEST_ASIO), and the real-driver duplex step when REMSOUND_ASIO_TEST_DRIVER names one"),
-        new("RemSound.Sender/AudioSessionStartWatcher.cs", "Instant capture-on-first-sound tests"),
-        new("RemSound.Sender/CaptureSource.cs", "Capture and mixing tests"),
-        new("RemSound.Sender/PushModeWasapiBackend.cs", "Push-mode tests + lifecycle churn"),
+        new("RemSound.Sender/AudioSessionStartWatcher.cs", "Session-start watcher lifecycle, send-app capture change detection, and the service waiting for a chosen application"),
+        new("RemSound.Sender/CaptureSource.cs", "Capture steps (two sources stay aligned; the mixer never waits on its lock; drift counted in the mixer's units; capture survives a dead device event)"),
+        new("RemSound.Sender/PushModeWasapiBackend.cs", "Push-mode eligibility, integer capture, and lifecycle churn"),
         new("RemSound.App/RecordingController.cs", "Recording suites - multi-peer split, modes by content, and the dying-writer report"),
         new("RemSound.App/CuePlayer.cs", "Every sound is pinned"),
-        new("RemSound.App/PowerResumeHandler.cs", "Reconnect-after-resume test"),
+        new("RemSound.App/PowerResumeHandler.cs",
+            "no test: it only forwards Windows' resume notification. The wake steps call the path it forwards to directly, " +
+            "because a gate run cannot put the machine to sleep"),
 
         // ---- Deliberately untested, with the reason ---------------------------------------------------
         new("RemSound.App/Program.cs",

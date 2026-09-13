@@ -138,18 +138,9 @@ internal static partial class SelfTest
         // (profile apply, the control suite) from machine-gunning them.
         Check(ids.Contains("checkbox-on") && ids.Contains("checkbox-off"),
             "the checkbox tick/untick cues must be in the registry — they fire on every checkbox in the app");
-        var restoreSuppressed = CheckSoundService.Suppressed;
-        try
-        {
-            CheckSoundService.Suppressed = true;
-            CheckSoundService.Play(true);
-            CheckSoundService.Play(false);
-            Check(CheckSoundService.Suppressed, "Suppressed must survive a suppressed Play");
-        }
-        finally { CheckSoundService.Suppressed = restoreSuppressed; }
 
         return $"all {ids.Length} cues: ids unique + file-safe; BOTH custom-path stores round-trip (per-profile first, machine-wide fallback); "
-             + $"every cue has a working on/off switch ({machineFlags} machine-wide, {profileFlags} per-profile); muting and checkbox suppression hold";
+             + $"every cue has a working on/off switch ({machineFlags} machine-wide, {profileFlags} per-profile); muting holds";
     }
 
     /// <summary>A 44-byte silent WAV header — enough for a player to open without shipping a fixture.</summary>

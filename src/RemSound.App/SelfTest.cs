@@ -18,8 +18,10 @@ namespace RemSound.App;
 ///
 /// The steps run INSIDE a real RemSound process on purpose — that's the only way to exercise the
 /// genuine audio path, encryption, wire format and config/profile code rather than a stand-in.
-/// Everything here is read-only or temp-folder-scoped: a self-test never touches the user's real
-/// settings, profiles or logs, and never makes a sound.
+/// Settings, profiles and logs live in a throwaway folder for the whole run: the one given with
+/// --config-dir, or a temporary one made in <see cref="Run"/> when none is (run-tests.ps1 passes none).
+/// A self-test never makes a sound. Until 2026-09-13 a run without --config-dir wrote the real settings
+/// next to the exe and relied on each step putting them back.
 /// </summary>
 internal static partial class SelfTest
 {
@@ -76,6 +78,10 @@ internal static partial class SelfTest
 
     public static int Run(string[] args)
     {
+        // Every step works in a throwaway settings folder — see the class summary.
+        using var throwawaySettings = CommandLine.TryGetConfigDir(args, out _)
+            ? null
+            : AppConfig.UseThrowawayUserDataDirectory(Path.Combine(Path.GetTempPath(), "remsound-selftest-" + Guid.NewGuid().ToString("N")));
         var seconds = int.TryParse(ValueAfter(args, "--seconds"), out var s) && s is > 0 and <= 30 ? s : 3;
 
         Console.WriteLine($"RemSound self-test {CommandLine.AppVersion}  ({DateTime.Now:yyyy-MM-dd HH:mm:ss})");
@@ -96,7 +102,7 @@ internal static partial class SelfTest
         RunStep(results, "24-bit PCM pack/unpack (sign, clamp, 1-LSB accuracy)", Pcm24RoundTrip);
         RunStep(results, "Updater tag filtering (client vs server releases, version order)", UpdaterTagFiltering);
         RunStep(results, "CGNAT range detection (RFC 6598)", CgnatDetection);
-        RunStep(results, "Network QoS attach (no throw on a bound socket)", NetworkPrioritySmoke);
+        RunStep(results, "Network QoS attach (traffic still flows, and attach reports honestly)", NetworkPrioritySmoke);
         RunStep(results, "PCM frame reassembly (order, loss, discard counters)", PcmReassembly);
         RunStep(results, "Receiver allow-list gate (stranger rejected, no session)", ReceiverAllowGate);
         RunStep(results, "Receiver decryptor: wrong key yields silence, not noise", DecryptorWrongKey);
@@ -133,8 +139,7 @@ internal static partial class SelfTest
         RunStep(results, "Send-app lists semantics (ticked → Active, out of Remembered)", SendAppListSemantics);
         RunStep(results, "Service registration args", ServiceRegistrationArgs);
         RunStep(results, "Service self-contained install (own bin + user stop rights)", ServiceSelfContainedInstall);
-        RunStep(results, "Recording engine (all formats + source gate + mono)", RecordingEngine);
-        RunStep(results, "Recording split tracks (per-peer + own)", RecordingSplitTracks);
+        RunStep(results, "Recording engine (every file format writes real content)", RecordingEngine);
         RunStep(results, "Recording: two peers, each track holds its OWN audio", RecordingMultiPeerSplit);
         RunStep(results, "Recording reports its own death (never silently stops)", RecordingReportsItsOwnDeath);
         RunStep(results, "Recording: every source and channel mode, judged by the file contents", RecordingModesByContent);
@@ -159,7 +164,7 @@ internal static partial class SelfTest
         RunStep(results, "About box shows only the newest releases (screen-reader-safe size)", AboutBoxNotesTrimmed);
         RunStep(results, "Latency slider reaches the streams it governs (one slider = one value)", LatencySliderReachesSessions);
         RunStep(results, "Auto-tune descends on evidence (never below the measured need)", AutoTuneDescentPolicy);
-        RunStep(results, "The two auto-tunes behave identically but stay independent (WASAPI vs ASIO)", AutoTuneLanesIndependent);
+        RunStep(results, "The two auto-tunes stay independent (WASAPI vs ASIO)", AutoTuneLanesIndependent);
         RunStep(results, "Every control is specified (no control escapes the suite)", EveryControlIsSpecified);
         RunStep(results, "Every window is reachable by the audits (no unaudited dialog)", EveryDialogIsAudited);
         RunStep(results, "Dialog control suite (every dialog: accessibility + theme + driven)", DialogControlSuite);
@@ -223,7 +228,7 @@ internal static partial class SelfTest
         RunStep(results, "Relay address-proof echo (AddrCheck round-trip)", RelayAddrCheckEcho);
         // 2026-08-23 send/receive-path audit — one step per finding that can be pinned headlessly.
         // See AUDIT-FINDINGS.md; each was written to fail against the code as it was.
-        RunStep(results, "AUDIT S1: sending off parks the ASIO lane (no delivery, driver stays open)", AuditAsioParkStopsDelivery);
+        RunStep(results, "AUDIT S1: sending off parks the ASIO lane (no delivery)", AuditAsioParkStopsDelivery);
         RunStep(results, "AUDIT S5: the audio loops are not async (they keep their Pro Audio thread)", AuditAudioLoopsAreNotAsync);
         RunStep(results, "AUDIT R4: Format packets fail closed, and every real sender format still passes", AuditFormatValidation);
         RunStep(results, "AUDIT R5: a malformed Format packet doesn't cost a working peer its session", AuditBadFormatKeepsTheExistingSession);
@@ -265,7 +270,7 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT: the long-run report says what could creep, in every configuration", AuditLongRunReportSaysWhatCreeps);
         RunStep(results, "AUDIT: the long-run report is actually WRITTEN when the old line goes silent", AuditLongRunReportIsActuallyWritten);
         RunStep(results, "SOAK: nothing creeps over twelve simulated hours", AuditNothingCreepsOverHours);
-        RunStep(results, "SOAK: a wake returns the buffer to where it was", AuditResumeReturnsToWhereItWas);
+        RunStep(results, "SOAK: a disturbed cushion comes back to where it was, and a deep buffer walks back inside the cap", AuditResumeReturnsToWhereItWas);
         RunStep(results, "AUDIT: capture survives a sound card whose event never fires", AuditCaptureSurvivesADeadDeviceEvent);
         RunStep(results, "AUDIT: an output that comes back re-earns its learned floor", AuditReturningOutputForgetsItsOldFloor);
         RunStep(results, "AUDIT: a wake holds every lane and discards the readings across the gap, keeping what the tuner learned", AuditWakeHoldsTheTunerAndKeepsWhatItLearned);
@@ -302,6 +307,8 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT: the plugin link forgets a DAW once its last plugin goes", AuditPluginBridgeForgetsFinishedDaws);
         RunStep(results, "AUDIT: the post-decode step probe is fed for Opus streams", AuditOpusStepProbeIsFed);
         RunStep(results, "AUDIT: tight-latency capture reads integer PCM", AuditPushModeReadsIntegerCapture);
+        RunStep(results, "AUDIT: a gate run touches no real settings and opens no real output", AuditGateRunTouchesNoRealSettingsOrOutputs);
+        RunStep(results, "AUDIT: the About box carries only recent notes, and the history is kept in the repository", AuditAboutCarriesOnlyRecentNotes);
         RunStep(results, "AUDIT: re-opening an output is not network jitter (both output kinds)", AuditOutputReopenIsNotJitter);
         RunStep(results, "AUDIT: a settling WASAPI endpoint is not taken as a clock", AuditSettlingEndpointIsNotTakenAsAClock);
         RunStep(results, "AUDIT: after a wake the report bursts and splits network gaps from render gaps", AuditPostWakeBurstSplitsNetworkFromRender);
@@ -650,8 +657,9 @@ internal static partial class SelfTest
             // was completely dead. A clean process-loopback teardown carries no exception (a silent process
             // still activates fine — it just yields silence). Anything surfaced here is a real activation
             // failure, so fail the gate on it.
-            if (stopError is not null)
-                return $"process-loopback activation failed: {stopError.GetType().Name}: {stopError.Message}";
+            // A Check, not a returned string: a returned message read as "no assertions" and the real COM error was
+            // lost. 2026-09-13 review.
+            Check(stopError is null, $"process-loopback activation failed: {stopError?.GetType().Name}: {stopError?.Message}");
             cycles++;
         }
         // Activation must also be FAST. A dispose that takes ~2s means the capture thread was still stuck
@@ -718,8 +726,10 @@ internal static partial class SelfTest
         if (proc is not null) specSets.Add(new() { proc });
         if (loop is not null && proc is not null) specSets.Add(new() { loop, proc });
 
+        // Receive outputs stay EMPTY. Adding the first real output here opened it and played silence into it on every
+        // loop, on the machine running the gate. The churn is about the send side and the decode path; opening outputs
+        // has its own steps. 2026-09-13 review.
         var recvSets = new List<string[]> { Array.Empty<string>() };
-        if (deviceId is not null) recvSets.Add(new[] { deviceId });
 
         var handlesBefore = SafeHandleCount();
         var transitions = 0;
@@ -835,7 +845,9 @@ internal static partial class SelfTest
     /// written with real content — the thing Ed can't face testing by ear on every change. Drives the
     /// real <see cref="AudioRecorder"/> writer (WAV / MP3 / OGG-Opus / FLAC encoders and their native
     /// bits) headlessly by feeding its audio-thread taps directly, then asserting the file exists and is
-    /// non-trivial. Also covers the received/sent source gate and mono downmix.</summary>
+    /// non-trivial. What a recording CONTAINS — sources, split tracks, channel modes — is proven by content
+    /// in SelfTest.Recording.cs; the two weaker checks that sat here, and a split-track step that only
+    /// counted files, were removed 2026-09-13.</summary>
     private static string? RecordingEngine()
     {
         var temp = Path.Combine(Path.GetTempPath(), "remsound-rec-" + Guid.NewGuid().ToString("N"));
@@ -843,8 +855,6 @@ internal static partial class SelfTest
         try
         {
             var summary = new List<string>();
-
-            // 1. Every format, Both source, stereo — the file must exist with real content.
             foreach (var (fmt, ext) in new[]
             {
                 (RecordingFileFormat.Wav, "wav"), (RecordingFileFormat.Mp3, "mp3"),
@@ -858,81 +868,7 @@ internal static partial class SelfTest
                 Check(len > 200, $"{ext.ToUpperInvariant()} recording must have real content (got {len} bytes)");
                 summary.Add($"{ext}={len}B");
             }
-
-            // 2. Source gate: a SentOnly recorder fed only RECEIVED audio must stay (near) empty.
-            var sentOnlyPath = Path.Combine(temp, "gate.wav");
-            var gateLen = RecordTone(temp, sentOnlyPath,
-                new RecordingSettings { FileFormat = RecordingFileFormat.Wav, Source = RecordingSource.SentOnly },
-                feedReceived: true, feedSent: false);
-            var fullLen = RecordTone(temp, Path.Combine(temp, "full.wav"),
-                new RecordingSettings { FileFormat = RecordingFileFormat.Wav, Source = RecordingSource.SentOnly },
-                feedReceived: false, feedSent: true);
-            Check(gateLen < fullLen / 2, $"a SentOnly recorder must ignore received audio (gate={gateLen}B vs full={fullLen}B)");
-
-            // 3. Mono downmix produces a valid (smaller) WAV.
-            var monoLen = RecordTone(temp, Path.Combine(temp, "mono.wav"),
-                new RecordingSettings { FileFormat = RecordingFileFormat.Wav, Source = RecordingSource.Both, ChannelMode = RecordingChannelMode.Mono },
-                feedReceived: true, feedSent: false);
-            Check(monoLen > 200, $"mono WAV must have real content (got {monoLen} bytes)");
-
-            return string.Join(", ", summary) + $"; gate ok; mono={monoLen}B";
-        }
-        finally { try { Directory.Delete(temp, recursive: true); } catch { /* best-effort */ } }
-    }
-
-    /// <summary>Split-track (multi-track) recording: with SplitTracks on and one connected peer, the
-    /// recorder must write a FOLDER of tracks — one per peer plus your own send — not a single mixed file.
-    /// Drives the real RecordingController via a settings-injection seam (so it never touches the shared
-    /// settings store), feeds the "your send" track through the tap the controller wires onto the sender,
-    /// and asserts the track files land with content.</summary>
-    private static string? RecordingSplitTracks()
-    {
-        var temp = Path.Combine(Path.GetTempPath(), "remsound-split-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(temp);
-        using var receiver = new AudioReceiver();
-        using var sender = new RemSound.Sender.AudioSender();
-        try
-        {
-            var controller = new RecordingController(sender, receiver, new RemSoundSettingsStore("RemSound"), _ => { })
-            {
-                SettingsSourceForTest = () => new RecordingSettings
-                {
-                    SplitTracks = true,
-                    Source = RecordingSource.Both,
-                    FileFormat = RecordingFileFormat.Wav,
-                    Folder = temp,
-                },
-                ConnectedPeersProvider = () => new[] { (IPAddress.Loopback, "TestPeer") },
-            };
-
-            controller.Start();
-            Check(controller.IsRecording, "split recording should be running after Start");
-
-            // Feed the "your send" track through the tap Start wired onto the sender.
-            var tap = sender.OnSentSamples;
-            if (tap is not null)
-            {
-                var chunk = new float[480 * 2];
-                var phase = 0.0;
-                for (var c = 0; c < 60; c++)
-                {
-                    for (var i = 0; i < chunk.Length; i += 2)
-                    {
-                        var s = (float)(0.2 * Math.Sin(phase));
-                        phase += 2 * Math.PI * 440 / 48000;
-                        chunk[i] = s; chunk[i + 1] = s;
-                    }
-                    tap(chunk.AsMemory(), RenderRoute.Mixed);
-                    Thread.Sleep(2);
-                }
-            }
-            controller.Stop();
-            for (var i = 0; i < 40 && Directory.GetFiles(temp, "*.wav", SearchOption.AllDirectories).Length == 0; i++) Thread.Sleep(25);
-
-            var files = Directory.GetFiles(temp, "*.wav", SearchOption.AllDirectories);
-            Check(files.Length >= 2, $"split recording must make one file per peer plus your own (found {files.Length})");
-            Check(files.Any(f => new FileInfo(f).Length > 200), "at least one split track (your own send) must have real content");
-            return $"split recording made {files.Length} track files, one with content";
+            return string.Join(", ", summary);
         }
         finally { try { Directory.Delete(temp, recursive: true); } catch { /* best-effort */ } }
     }
@@ -1181,10 +1117,6 @@ internal static partial class SelfTest
         finally { try { Directory.Delete(temp, recursive: true); } catch { /* best-effort */ } }
     }
 
-    /// <summary>The service must configure the sender EXACTLY like the main app: derive both the audio key
-    /// AND the fingerprint from the password (a missing fingerprint gets the encrypted stream rejected at
-    /// the peer), and apply the send-rate-adjusted Opus frame (the "Small" rate halves it). Guards the
-    /// divergences found auditing the service against the main app.</summary>
     /// <summary>Ticking a "Use Windows default" follower must be EXCLUSIVE: it clears the specific cards in
     /// its list and locks them out (a check attempt is vetoed) until the follower is turned off. Unticking
     /// a card, and the follower entry itself, are never vetoed. (Ed, 2026-07-17.)</summary>
@@ -1946,6 +1878,10 @@ internal static partial class SelfTest
         return $"drained {r.StdOut.Length} bytes stdout + {r.StdErr.Length} stderr concurrently, no deadlock";
     }
 
+    /// <summary>The service must configure the sender EXACTLY like the main app: derive both the audio key
+    /// AND the fingerprint from the password (a missing fingerprint gets the encrypted stream rejected at
+    /// the peer), and apply the send-rate-adjusted Opus frame (the "Small" rate halves it). Guards the
+    /// divergences found auditing the service against the main app.</summary>
     private static string? ServiceSenderParity()
     {
         // The profile deliberately carries the WRONG audio transport (raw PCM, broadcast frame, Standard
@@ -2462,12 +2398,6 @@ internal static partial class SelfTest
         return "manual, cue sounds, native Opus";
     }
 
-    /// <summary>Headless accessibility audit of the dialogs that can be built without hardware: every
-    /// actionable control announces a name to a screen reader, and the Alt-key mnemonic letters are
-    /// unique within a container so keyboard navigation is never ambiguous. The main window can't be
-    /// built headlessly (its constructor opens audio devices, registers hotkeys and binds sockets),
-    /// so it's out of scope here. A dialog that won't construct in this context is skipped, not
-    /// failed.</summary>
     /// <summary>A checkbox that reports itself focused, so the gate can drive the focus half of the
     /// WinEvent recipe. A headless form has never been shown, so nothing on it ever reports Focused —
     /// which is why that half went untested.</summary>
@@ -2476,6 +2406,12 @@ internal static partial class SelfTest
         internal override bool HasKeyboardFocus => true;
     }
 
+    /// <summary>Headless accessibility audit of the dialogs that can be built without hardware: every
+    /// actionable control announces a name to a screen reader, and the Alt-key mnemonic letters are
+    /// unique within a container so keyboard navigation is never ambiguous. The main window can't be
+    /// built headlessly (its constructor opens audio devices, registers hotkeys and binds sockets),
+    /// so it's out of scope here. A dialog that won't construct in this context is skipped, not
+    /// failed.</summary>
     private static string? AccessibilityAudit()
     {
         // ---- THE LOAD-BEARING NVDA FIX ---------------------------------------------------------
@@ -2633,8 +2569,8 @@ internal static partial class SelfTest
         for (var i = 0; i < expected.Length; i++)
             Check(opts[i] == expected[i], $"auto-save option {i} must be {expected[i]} minutes (got {opts[i]})");
 
-        // 2. AppConfig persists the chosen interval across a save/load. Done in place (the gate runs
-        //    against a throwaway --config-dir) and restored in a finally so we leave no trace.
+        // 2. AppConfig persists the chosen interval across a save/load. Done in place — the whole run uses a
+        //    throwaway settings folder (see Run) — and restored in a finally anyway.
         var original = AppConfig.Load().AutoSaveNonReadOnlyMinutes;
         try
         {
@@ -2740,21 +2676,9 @@ internal static partial class SelfTest
             Check(Program.IsServiceInvocation(new[] { "--silent", verb }), $"'{verb}' must be recognised even alongside other args");
         }
 
-        // Belt-and-braces: evaluating the gate on a normal launch must not itself drag in the service
-        // assembly. (If nothing loaded it yet — most likely — this proves the gate references no service
-        // type; if an earlier step already loaded it, we can't re-check and just pass.)
-        const string svcAsm = "System.ServiceProcess.ServiceController";
-        bool loadedBefore = IsAssemblyLoaded(svcAsm);
-        _ = Program.IsServiceInvocation(new[] { "--silent" });
-        if (!loadedBefore)
-            Check(!IsAssemblyLoaded(svcAsm), "deciding a normal launch must not load the Windows-service assembly");
-
-        // Say so when that half could not run. It is order-dependent, and an order-dependent check
-        // that quietly passes is exactly the shape that had MainWindowServiceAssemblyFree checking
-        // nothing for months (2026-08-24).
-        var loadSafety = loadedBefore
-            ? "load-safety NOT re-checked this run (an earlier step had already loaded System.ServiceProcess)"
-            : "deciding a normal launch loads no service assembly";
+        // Whether deciding a launch loads the service assembly is MainWindowServiceAssemblyFree's question: it runs first,
+        // before any step can have loaded that assembly. A second copy here could never run. 2026-09-13 review.
+        const string loadSafety = "load-safety is checked by the main-window step that runs first";
 
         return $"normal launches stay load-safe; the five registered verb strings are pinned; all six recognised "
              + $"case-insensitively; {loadSafety}";
@@ -2799,12 +2723,6 @@ internal static partial class SelfTest
     private static bool IsAssemblyLoaded(string simpleName) =>
         AppDomain.CurrentDomain.GetAssemblies().Any(a => string.Equals(a.GetName().Name, simpleName, StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>The Service menu is shown by FEATURE-DETECTING the Windows service machinery (so it can
-    /// appear on Win7 too if the .NET service layer loads there), not by a hardcoded Windows version. The
-    /// probe must be stable/cached and must never throw. On this Win10/11 gate runner the machinery loads,
-    /// so it must report available; the "can't load → hidden" path can only be exercised on an OS where the
-    /// assembly genuinely won't load, but the try/catch that guarantees it degrades safely is verified here
-    /// by the probe never throwing.</summary>
     /// <summary>The Win7 launch guarantee, directly: building the main window (which builds the menu bar)
     /// must NOT load System.ServiceProcess. The Service menu's visibility is decided by a Windows-VERSION
     /// check, which touches no service type — so the service assembly is only ever loaded later, if a
@@ -3671,38 +3589,6 @@ internal static partial class SelfTest
         return $"floor never breached; fast descent {ticks} ticks vs the old crawl's {oldTicks}; creep reaches the need and stops at a learned floor";
     }
 
-    /// <summary>The measured-latency readout: what each lane is SET to, and what it is actually
-    /// DELIVERING, reported SEPARATELY for WASAPI and ASIO.
-    ///
-    /// Ed, 2026-08-15: "it should report wasapi and asio latency as 2 totally separate things... and
-    /// we can take it out of the status line, because people need to read both things and that will
-    /// be too much clutter." The two lanes have their own queue depth and their own output period —
-    /// an ASIO listener is NOT penalised by WASAPI's shared-mode buffering — so a blended figure
-    /// would hide the very difference the user is reading it for.</summary>
-    /// <summary>AUTO-TUNE MUST CLIMB OUT OF TROUBLE, NOT FREEZE IN IT.
-    ///
-    /// <para>Ed set the jitter buffer to 20 ms on 2026-08-22, switched auto-tune on, and it never
-    /// moved — for six minutes, while the buffer underran hundreds of times a tick. Fifteen ticks,
-    /// fourteen of them logged "skipping (N new underruns since last tick)". The fifteenth happened to
-    /// be clean, and it went 20 to 37 immediately and settled.</para>
-    ///
-    /// <para>The guard that skipped is right for LOWERING: never shave the buffer on the back of a
-    /// second where it already ran out. But it returned without doing anything, so it blocked raising
-    /// too — and an underrun is the strongest evidence there is that the buffer is too thin. The one
-    /// condition proving a raise was needed was the one preventing it.</para>
-    ///
-    /// <para>This drives the learned floor, which is what the raise now acts on, and pins the two
-    /// directions apart: shortfalls must push the floor UP, and a descent must never cross it.</para></summary>
-    /// <summary>EVERY VALUE A CONTROL OFFERS MUST SURVIVE BEING SAVED.
-    ///
-    /// <para>The auto-tune interval dropdown offered "3 seconds", the app honoured it for the whole
-    /// session, and it silently reverted to 5 on reload — the store clamped it to 5 going out and
-    /// rejected anything under 5 coming back. Ed hit it on 2026-08-22: "why the hell can I not save
-    /// the auto tune check delay as 3 seconds? I've saved the profile but it always jumps back."</para>
-    ///
-    /// <para>Written as a LOOP over the offered values rather than a check of the one that broke,
-    /// because the fault was never really about 3 seconds — it was a control and a store disagreeing
-    /// about what is allowed, and that can happen at either end of any list.</para></summary>
     /// <summary>THE STALE-STATE FAULTS. Three of the six problems found in the 2026-08-22 audit were
     /// the same shape: state the tuner kept while it was NOT running, then acted on as if it had been
     /// watching all along.
@@ -3760,6 +3646,16 @@ internal static partial class SelfTest
         finally { try { form?.Dispose(); } catch { } }
     }
 
+    /// <summary>EVERY VALUE A CONTROL OFFERS MUST SURVIVE BEING SAVED.
+    ///
+    /// <para>The auto-tune interval dropdown offered "3 seconds", the app honoured it for the whole
+    /// session, and it silently reverted to 5 on reload — the store clamped it to 5 going out and
+    /// rejected anything under 5 coming back. Ed hit it on 2026-08-22: "why the hell can I not save
+    /// the auto tune check delay as 3 seconds? I've saved the profile but it always jumps back."</para>
+    ///
+    /// <para>Written as a LOOP over the offered values rather than a check of the one that broke,
+    /// because the fault was never really about 3 seconds — it was a control and a store disagreeing
+    /// about what is allowed, and that can happen at either end of any list.</para></summary>
     private static string? AutoTuneIntervalRoundTrips()
     {
         var scratch = Path.Combine(Path.GetTempPath(), "remsound-interval-" + Guid.NewGuid().ToString("N"));
@@ -3797,6 +3693,20 @@ internal static partial class SelfTest
         finally { try { if (Directory.Exists(scratch)) Directory.Delete(scratch, recursive: true); } catch { } }
     }
 
+    /// <summary>AUTO-TUNE MUST CLIMB OUT OF TROUBLE, NOT FREEZE IN IT.
+    ///
+    /// <para>Ed set the jitter buffer to 20 ms on 2026-08-22, switched auto-tune on, and it never
+    /// moved — for six minutes, while the buffer underran hundreds of times a tick. Fifteen ticks,
+    /// fourteen of them logged "skipping (N new underruns since last tick)". The fifteenth happened to
+    /// be clean, and it went 20 to 37 immediately and settled.</para>
+    ///
+    /// <para>The guard that skipped is right for LOWERING: never shave the buffer on the back of a
+    /// second where it already ran out. But it returned without doing anything, so it blocked raising
+    /// too — and an underrun is the strongest evidence there is that the buffer is too thin. The one
+    /// condition proving a raise was needed was the one preventing it.</para>
+    ///
+    /// <para>This drives the learned floor, which is what the raise now acts on, and pins the two
+    /// directions apart: shortfalls must push the floor UP, and a descent must never cross it.</para></summary>
     private static string? AutoTuneClimbsOutOfTrouble()
     {
         // Every tick that runs short records where it ran short. That is the evidence the raise uses.
@@ -3960,6 +3870,14 @@ internal static partial class SelfTest
              + "never contains the jitter buffer, and stays silent when nothing is known — all three configurations";
     }
 
+    /// <summary>The measured-latency readout: what each lane is SET to, and what it is actually
+    /// DELIVERING, reported SEPARATELY for WASAPI and ASIO.
+    ///
+    /// Ed, 2026-08-15: "it should report wasapi and asio latency as 2 totally separate things... and
+    /// we can take it out of the status line, because people need to read both things and that will
+    /// be too much clutter." The two lanes have their own queue depth and their own output period —
+    /// an ASIO listener is NOT penalised by WASAPI's shared-mode buffering — so a blended figure
+    /// would hide the very difference the user is reading it for.</summary>
     private static string? MeasuredLatencyReadout()
     {
         // TWO LANES: both reported, each with its own pair of numbers, and never merged.
@@ -4192,38 +4110,6 @@ internal static partial class SelfTest
              + "term of the hardware sum is proved to reach it";
     }
 
-    /// <summary>The status line must tell the user BOTH numbers: what they asked the latency control
-    /// for, and what the machine is actually delivering end to end.
-    ///
-    /// The problem it solves (Ed, 2026-08-15): the control accepts 1 ms, no hardware delivers it, and
-    /// a user who set 1 and heard 40 had no way to tell which part was his setting and which was his
-    /// hardware. Deliberately NOT a clamp — a limit built on an estimate would lock someone out of
-    /// latency their hardware could genuinely reach.</summary>
-    private static string? LatencyStatusLine()
-    {
-        var text = MainForm.FormatLatencyStatus(1, 45.3);
-        Check(text.Contains("set to 1 ms"), $"it must state what the user ASKED for (got: {text})");
-        Check(text.Contains("achieving 45 ms"), $"it must state what is ACTUALLY achieved, rounded for speech (got: {text})");
-
-        // The achieved figure is the WHOLE journey, so it can legitimately be far bigger than the
-        // request — that is the entire point, and the line must not hide or clamp it.
-        Check(MainForm.FormatLatencyStatus(1, 45.3).Contains("45"),
-            "a request far below what the hardware can do must still report the real figure");
-
-        // Nothing to say when nothing is measured — a screen reader must not read a zero or a blank
-        // claim on a machine that isn't receiving yet.
-        Check(MainForm.FormatLatencyStatus(0, 45) == "", "no request, no claim");
-        Check(MainForm.FormatLatencyStatus(30, 0) == "", "nothing measured yet, no claim");
-        Check(MainForm.FormatLatencyStatus(30, -1) == "", "a nonsense measurement must be suppressed, not spoken");
-
-        // Speech-friendly: no decimals to read out, and it reads as a sentence.
-        var spoken = MainForm.FormatLatencyStatus(26, 41.678);
-        Check(!spoken.Contains('.') || spoken.TrimEnd().EndsWith('.'),
-            $"the figure must be rounded for speech, not read to three decimals (got: {spoken})");
-        Check(spoken.Contains("achieving 42 ms"), $"it must round rather than truncate (got: {spoken})");
-        return "reports both the requested and the achieved figure, rounded for speech, silent when nothing is measured";
-    }
-
     /// <summary>The reported end-to-end latency must count EVERY stage of the journey.
     ///
     /// The failure this pins (2026-08-15): the estimate omitted the capture buffer entirely and used a
@@ -4301,13 +4187,8 @@ internal static partial class SelfTest
     /// corrupted each other's evidence. Hence this test.</summary>
     private static string? AutoTuneLanesIndependent()
     {
-        // SAME RULES: identical inputs must give identical output, because there is one policy.
-        for (var current = 40; current <= 400; current += 60)
-        {
-            var wasapi = AutoTuneDescent.NextTarget(current, 30, current - 30, 15, 9, policy: null, creep: new AutoTuneDescent.CreepState());
-            var asio = AutoTuneDescent.NextTarget(current, 30, current - 30, 15, 9, policy: null, creep: new AutoTuneDescent.CreepState());
-            Check(wasapi == asio, $"the two lanes must follow the same rule (at {current}ms: WASAPI {wasapi}, ASIO {asio})");
-        }
+        // SAME RULES needs no check of its own: there is one AutoTuneDescent.NextTarget and both lanes call it. A loop
+        // that fed it the same numbers twice compared the function with itself. 2026-09-13 review.
 
         // INDEPENDENT MEMORY: a shortfall on one lane must not touch the other's floor.
         var wasapiMem = new AutoTuneDescent.CreepState();
@@ -4535,7 +4416,7 @@ internal static partial class SelfTest
     /// <summary>The peers list went machine-wide (AppConfig) with a ONE-TIME migration from each old
     /// profile's per-profile list. Regression guard for the bug where the migration re-ran every launch
     /// and RESURRECTED peers the user had just cleared: after a clear, re-loading the same profile (whose
-    /// JSON still holds the old peers) must NOT bring them back. Touches the real AppConfig; saves/restores.</summary>
+    /// JSON still holds the old peers) must NOT bring them back. Works on the run's throwaway AppConfig, and saves/restores anyway.</summary>
     private static string? RememberedPeersMigrationOnce()
     {
         var store = new RemSoundSettingsStore("RemSound");

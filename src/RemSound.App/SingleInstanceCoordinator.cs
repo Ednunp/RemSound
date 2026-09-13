@@ -68,9 +68,6 @@ internal sealed class SingleInstanceCoordinator : IDisposable
         this.closeEventName = closeEventName;
     }
 
-    /// <summary>True once we hold the single-instance lock.</summary>
-    public bool IsPrimaryInstance => ownsMutex;
-
     /// <summary>Try to take the single-instance lock, waiting up to <paramref name="timeout"/>.
     /// An abandoned mutex (previous owner crashed or was force-killed) counts as acquired — we
     /// become the new owner.</summary>

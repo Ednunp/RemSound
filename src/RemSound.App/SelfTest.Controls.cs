@@ -269,7 +269,6 @@ internal static partial class SelfTest
         // .LoadAudioMode) — no driver means one slider, a driver means two. So the configuration is
         // switched exactly the way a user switches it: by the driver choice.
         var settings = new RemSoundSettingsStore("RemSound");
-        var restoreDriver = settings.LoadAsioDriverName();
         settings.SaveAsioDriverName(mode == AudioMode.BothIndependent ? "RemSound Test ASIO Driver" : null);
         // Prove the configuration actually took before auditing anything in its name — a suite that
         // silently runs the same mode twice is exactly the blind spot this whole exercise is about.

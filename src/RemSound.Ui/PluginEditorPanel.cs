@@ -290,13 +290,9 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
     internal void SetReceiveForTest(bool on) => receiveBox.Checked = on;
     internal void SetSendLevelForTest(float db) => sendLevel.Value = ClampLevel(db);
     internal void SetReceiveLevelForTest(float db) => receiveLevel.Value = ClampLevel(db);
-    internal decimal SendLevelForTest => sendLevel.Value;
-    internal decimal ReceiveLevelForTest => receiveLevel.Value;
     internal decimal LevelMinimumForTest => sendLevel.Minimum;
     internal decimal LevelMaximumForTest => sendLevel.Maximum;
     internal void SetActiveForTest(bool active) => activeBox.Checked = active;
-    internal IReadOnlyList<Control> TabOrderForTest =>
-        Controls.Cast<Control>().Where(c => c.TabStop).OrderBy(c => c.TabIndex).ToList();
 
     /// <summary>How many times the peer list has actually been cleared and repopulated.
     ///

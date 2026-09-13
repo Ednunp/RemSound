@@ -295,12 +295,9 @@ internal static class Program
             ShowLayoutMigrationNotice();
         }
 
-        // Outer loop: lets ProfileManagementDialog change the profiles folder mid-session.
-        // When that happens, MainForm sets ReloadFromScratch=true, we re-read AppConfig, build
-        // a fresh ProfileStore, and re-show ProfileSelectionDialog so the user picks a profile
-        // (or blank template) from the *new* folder. Inner loop handles the cheaper "switch to
-        // a profile in the same folder" case.
-        while (true)
+        // Resolve the first profile, then run the window; the loop below re-opens it for a profile switch. An outer loop
+        // for changing the profiles folder mid-session wrapped all of this until 2026-09-13 — nothing had set its flag
+        // since the Manage Profiles dialog went.
         {
             var appConfig = AppConfig.Load();
             var store = appConfig.CreateStore();
@@ -407,13 +404,9 @@ internal static class Program
                 }
             }
 
-            // Switch-profile loop: when the user clicks "Switch to profile" in the Manage
-            // Profiles dialog, the form sets NextProfileTitleToLoad and closes; we re-open
-            // MainForm under the newly chosen profile. Null = user closed the form normally
-            // → exit. ReloadFromScratch = the user changed the profiles FOLDER mid-session,
-            // so we break out of this inner loop and let the outer loop redo the selection
-            // dialog under the new folder.
-            var reloadFromScratch = false;
+            // Switch-profile loop: a profile switch (File, Open; Recent profiles; quick switch) or File, New closes the
+            // form with the next profile named, and we re-open MainForm under it. Nothing named = the user closed the
+            // window → exit.
             string? nextPath = null;
             while (true)
             {
@@ -434,16 +427,8 @@ internal static class Program
                 Application.Run(form);
                 activeMainForm = null;
 
-                if (form.ReloadFromScratch)
-                {
-                    reloadFromScratch = true;
-                    break;
-                }
-
-                // Path-based reload (File → Open profile from a path that may be outside
-                // the active store's BaseDirectory) takes precedence — read JSON directly
-                // from that path. Falls back to title-based store.Load when no path is set
-                // (e.g. legacy switch-by-title flows that pre-date the path tracking).
+                // Every switch names the profile's file — a path that may be outside the active store's folder — so
+                // the JSON is read directly from there.
                 nextPath = form.NextProfilePathToLoad;
                 var nextTitle = form.NextProfileTitleToLoad;
                 if (form.LoadBlankTemplateNext)
@@ -474,18 +459,11 @@ internal static class Program
                         nextPath = null;
                     }
                 }
-                else if (!string.IsNullOrEmpty(nextTitle))
-                {
-                    title = nextTitle;
-                    profile = store.Load(nextTitle) ?? Profile.NewBlank();
-                }
                 else
                 {
                     return; // form closed normally — exit app
                 }
             }
-
-            if (!reloadFromScratch) return;
         }
     }
 

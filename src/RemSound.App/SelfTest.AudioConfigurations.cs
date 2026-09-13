@@ -53,7 +53,7 @@ internal static partial class SelfTest
         new("AuditWakeHoldsTheTunerAndKeepsWhatItLearned", "a wake holds ALL THREE tuned lanes at once — WASAPI, ASIO and the Mixed route a WASAPI-only configuration tunes — and the test asserts every one of them directly, including that each keeps its learned floor. The configurations decide which lanes are live; a wake holds every lane regardless, so the behaviour is identical in all three and is checked on every lane rather than by looping the same wake three times. The restart that follows DOES depend on the configuration, through which lane the main slider drives, and AuditWakeRestartsTheAudioWithTheTuneFromBeforeSleep loops all three"),
         new("AuditOutputReopenIsNotJitter", "this is about output KIND, not configuration: a WASAPI output fault holds the WASAPI lane and the Mixed route (what a WASAPI-only configuration tunes), a missing ASIO output holds the ASIO lane alone, and the test asserts each mapping and that the other kind is left untouched. That covers every lane any configuration can have; looping configurations would repeat the same fault on the same lanes"),
         new("AuditPostWakeBurstSplitsNetworkFromRender", "a log cadence and format check: the burst and the network/render gap split are written the same way whichever outputs are ticked, and a lane that does not exist prints a dash. The test formats both a both-lanes line and a WASAPI-only line; driving the timer in each configuration would exercise the same code three times"),
-        new("AuditReturningOutputForgetsItsOldFloor","this is ONE lane's tune memory reacting to its own output coming and going, and the test drives both lanes that can exist — WASAPI and ASIO — with the identical rule. The three configurations decide WHICH lanes exist; they do not change what a single lane's memory does when its device leaves and returns, so looping them would run the same two cases three times over"),
+        new("AuditReturningOutputForgetsItsOldFloor","one lane's tune memory reacting to its own output leaving and returning. Both lanes use the same memory type, so the test's WASAPI and ASIO passes run the same code under two names; the configuration decides which lanes exist, not what a lane's memory does when its device comes back"),
         new("AuditCaptureSurvivesADeadDeviceEvent", "this is WASAPI loopback CAPTURE, and the ASIO lane cannot reach this code at all — ASIO capture runs on its own driver callback with no WASAPI event anywhere in it, so there is nothing to compare. The three configurations are decided by which OUTPUT devices are ticked and have no bearing whatever on how a capture device is polled: the same loop would run identically in all three"),
         new("AuditNothingCreepsOverHours", "the three things soaked here — the WASAPI cushion target, the drift loop and the tuner's learned floor — are driven directly as arithmetic, and the WASAPI output stage has NO ASIO counterpart at all: ASIO pulls straight from the engine, with no device buffer, no cushion target and no rate-trimming resampler. That asymmetry is the SUBJECT of the test (the fault appears on WASAPI and never on ASIO), not a gap in it. Running the same arithmetic three times would add nothing"),
         new("AuditLongRunReportIsActuallyWritten", "this is a WIRING check, not a behaviour one: it drives the real per-second tick with NOTHING running — no receiver, no sender, no device ticked — because that is precisely the state in which the per-second diagnostic line goes silent and produced five lines in fourteen hours. There is no audio configuration in that state to vary. What the line SAYS in each of the three is covered by AuditLongRunReportSaysWhatCreeps, which loops all three"),
@@ -79,7 +79,7 @@ internal static partial class SelfTest
         new("ProfileRoundTrip", "settings persistence — the audio mode is a value being saved, not behaviour under test"),
         new("SettingsRoundTrip", "save/load arithmetic over the settings store, and the clamp-symmetry sweep already covers BOTH lanes' jitter-buffer settings by name — what is ticked changes none of it"),
         new("V5ConfigRoundTrip", "serialisation and the DEFAULTS a blank profile carries, including both lanes' jitter buffers by name — a default is a stored number, not behaviour that varies with what is ticked"),
-        new("MainWindowProfileRoundTrip", "the window's save/reload path; the configuration is one of the values it carries"),
+        new("MainWindowProfileRoundTrip", "the window's save/reload path; it names the WASAPI send mode (applications) only as a value to round-trip, and no output configuration is involved"),
         new("ProfileDriftTripwire", "reflects over every settings property to catch one that stops persisting"),
         new("AsioTickMemory", "per-driver tick memory is about remembering a selection, not about rendering it"),
         new("SendAppListSemantics", "the active/remembered app lists are WASAPI-only by construction"),
@@ -97,12 +97,22 @@ internal static partial class SelfTest
 
         // ---- Arithmetic and lane-independent policy. ----------------------------------------------
         new("AutoTuneLanesIndependent", "drives AutoTuneDescent with explicit values and two separate state objects — the point is that two states do not share, which needs no device"),
-        new("AutoTuneStaleStateGuards", "stale-state rules over supplied values, not a live configuration"),
+        new("AutoTuneStaleStateGuards", "one headless window driving each route's baseline and evidence rules directly — Mixed, the WASAPI lane and the ASIO lane, every route any configuration can tune; what is ticked does not change those rules"),
         new("LatencyEstimateComplete", "arithmetic over supplied period values; AuditLatencyUsesDeviceReportedFigures covers the device-figure rules"),
 
         // ---- Tests that ARE one configuration. ----------------------------------------------------
         new("FanOutToBothOutputs", "this test IS the both-lanes configuration — fan-out to a second output only exists there, so there is nothing to compare against"),
-        new("LifecycleChurn", "a churn/soak over start-stop cycles measuring handles and memory; it is about resource behaviour, not about routing"),
+        new("LifecycleChurn", "a churn over start-stop cycles measuring handles; it changes the audio mode (opening a real ASIO driver only with REMSOUND_TEST_ASIO) as one more resource transition, not to check routing, and it opens no output"),
+        new("RunControlSuite", "runs once per configuration: its registration loops SuiteConfigs, which names all three (WASAPI only, ASIO only, both), and each run proves its configuration took before auditing anything"),
+
+        // ---- Steps that return plain string, unseen by this guard until 2026-09-13. The first four are
+        // SENDER side: the lane byte a sender stamps follows the sender's audio mode, and which outputs are
+        // ticked is the receiver's business, so the three receiving configurations do not apply. -----------
+        new("PluginLaneNeverCollides", "sender side: the plugin lane's tag follows the sender's audio mode, and the step drives both modes a sender can be in"),
+        new("PluginLaneFollowsFormatChanges", "sender side: a mode change is one of the triggers that must rotate the plugin lane's stream id, alongside codec, rate and arming — not a configuration under test"),
+        new("PluginSendsWithNoCaptureDevice", "sender side, with nothing ticked in the app: that one state is the case under test, and the tag it reads is the sender's lane, not an output"),
+        new("PluginLaneObeysTheHouseRules", "sender side: no password, mute and the recorder tap are the same SenderLane code in every sender mode; the route it reads is the plugin lane's own tag"),
+        new("ThreeConcurrentStreamsFromOneSender", "about session identity on the receiver: three streams from one peer, one per lane tag, stay three sessions and a shared tag still supersedes; decode only, so no output is opened"),
     ];
 
     /// <summary>
@@ -123,6 +133,13 @@ internal static partial class SelfTest
         var decorative = new List<string>();    // ...whose loop contains no assertion at all
         var split = new Dictionary<string, (int Inside, int Outside)>(StringComparer.Ordinal);
         var methodPattern = TestMethodPattern();
+        var registered = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var file in Directory.GetFiles(srcDir, "SelfTest*.cs", SearchOption.TopDirectoryOnly))
+            foreach (Match m in RegisteredStepPattern().Matches(File.ReadAllText(file)))
+                registered.Add(m.Groups[1].Value);
+        Check(registered.Count > 100,
+            $"the scan found only {registered.Count} registered steps — the RunStep pattern has stopped matching, and this guard "
+            + "would audit almost nothing");
 
         foreach (var file in Directory.GetFiles(srcDir, "SelfTest*.cs", SearchOption.TopDirectoryOnly))
         {
@@ -133,6 +150,7 @@ internal static partial class SelfTest
             var text = File.ReadAllText(file);
             foreach (var body in SplitIntoMethodBodies(text, methodPattern))
             {
+                if (!body.Nullable && !registered.Contains(body.Name)) continue;
                 if (!axis.IsMatch(body.Body)) continue;
                 touching.Add(body.Name);
                 if (!coversAll.IsMatch(body.Body)) continue;
@@ -264,11 +282,11 @@ internal static partial class SelfTest
     /// <summary>Split a source file into test-method bodies by brace matching, so the axis check is
     /// applied to what a method actually DOES rather than to a whole file. A file-level scan would let
     /// one three-configuration test in a file vouch for every other test beside it.</summary>
-    private static IEnumerable<(string Name, string Body)> SplitIntoMethodBodies(string text, Regex methodPattern)
+    private static IEnumerable<(string Name, bool Nullable, string Body)> SplitIntoMethodBodies(string text, Regex methodPattern)
     {
         foreach (Match m in methodPattern.Matches(text))
         {
-            var name = m.Groups[1].Value;
+            var name = m.Groups["name"].Value;
             var open = text.IndexOf('{', m.Index + m.Length - 1);
             if (open < 0) continue;
             var depth = 0;
@@ -283,15 +301,22 @@ internal static partial class SelfTest
                 }
             }
             if (end < 0) continue;
-            yield return (name, text[open..end]);
+            yield return (name, m.Groups["nullable"].Success, text[open..end]);
         }
     }
 
-    /// <summary>Matches a gate test method: <c>private static string? SomeTest(</c>. Deliberately
-    /// narrow — helpers and pure decision cores are not gate steps and are covered through whichever
-    /// step drives them.</summary>
-    [GeneratedRegex(@"private static string\? ([A-Za-z_][A-Za-z0-9_]*)\s*\(", RegexOptions.Multiline)]
+    /// <summary>Matches a method that could be a gate step: <c>private static string? SomeTest(</c> or
+    /// <c>private static string SomeTest(</c>. A <c>string?</c> method is audited as it always was; a plain
+    /// <c>string</c> one only when RunStep registers it (see <see cref="RegisteredStepPattern"/>), because most
+    /// of those are helpers that build text. Until 2026-09-13 the pattern took <c>string?</c> only, and the
+    /// registered steps that return plain <c>string</c> were never seen by this guard.</summary>
+    [GeneratedRegex(@"private static string(?<nullable>\?)? (?<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(", RegexOptions.Multiline)]
     private static partial Regex TestMethodPattern();
+
+    /// <summary>A registered step: the method a <c>RunStep(results, "...", Method)</c> line names, directly or
+    /// through <c>() =&gt; Method(...)</c>.</summary>
+    [GeneratedRegex(@"RunStep\(results,\s*\$?""[^""]*"",\s*(?:\(\)\s*=>\s*)?([A-Za-z_][A-Za-z0-9_]*)", RegexOptions.Multiline)]
+    private static partial Regex RegisteredStepPattern();
 
     /// <summary>Does this method body touch the WASAPI/ASIO axis at all? Any mention of a lane, an
     /// audio mode, an ASIO driver or a per-lane latency figure counts. Deliberately generous: a false

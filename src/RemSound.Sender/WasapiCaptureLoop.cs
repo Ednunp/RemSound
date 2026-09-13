@@ -48,6 +48,10 @@ internal static class WasapiCaptureLoop
     /// packet and leaves the rest to be overwritten; conversely, draining fully makes the loop robust
     /// to a late wake-up for any reason — a scheduler stall, a GC pause, a busy machine — not just to
     /// an event that never fires.</para>
+    ///
+    /// <para>The shipped capture (LowLatencyWasapiLoopbackCapture.Drain) runs its own loop over the real client, with the
+    /// copy, silence and discontinuity handling this model leaves out, and follows the same rule: keep taking packets until
+    /// the device reports none. The gate proves the rule here; a change to that loop must keep it.</para>
     /// </summary>
     /// <returns>Total frames taken this pass.</returns>
     public static int Drain(ICapturePacketReader reader)
