@@ -26,6 +26,8 @@ internal static class ServiceEntry
         // verb runs so install/repair/harden grant the person at the keyboard, never whoever approved
         // the UAC prompt. Absent or invalid → null → the old own-token fallback. See ServiceControl.AsUserArg.
         ServiceControl.ElevatedInvokerSid = ServiceControl.ParseAsUserSid(args);
+        // The installer names the INSTALLED folder as the service's source; without it the helper's own folder is used.
+        ServiceControl.ElevatedServiceSource = ServiceControl.ParseServiceSource(args);
 
         if (Has(args, ServiceControl.RunVerb))
         {

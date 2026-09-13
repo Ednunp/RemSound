@@ -56,6 +56,15 @@ public static class ServiceControl
     /// — then <see cref="InstallingUserSid"/> falls back to the process identity as before.</summary>
     internal static string? ElevatedInvokerSid;
 
+    /// <summary>Argument naming the folder the service should be copied from and should watch for updates, when that is
+    /// not the folder the elevated helper runs from. "Install RemSound on this PC" runs the helper from the PORTABLE copy
+    /// while the app now lives in the installed folder — so the service recorded the portable folder and watched a place
+    /// no update ever reaches. 2026-09-13 review.</summary>
+    public const string ServiceSourceArg = "--service-source";
+
+    /// <summary>The <see cref="ServiceSourceArg"/> value for this elevated helper, set by ServiceEntry; null when absent.</summary>
+    internal static string? ElevatedServiceSource;
+
     /// <summary>Current service state. Never throws — returns <see cref="ServiceState.Unknown"/> on any
     /// error. Unprivileged, so safe to poll from the UI without elevation.</summary>
     public static ServiceState Query()
@@ -94,14 +103,14 @@ public static class ServiceControl
     /// <see cref="ElevatedTimedOut"/> if it didn't finish in time. NEVER waits forever — a stuck helper
     /// must not be able to freeze the caller (that was the install-hang, 2026-07-17). Best called off the
     /// UI thread so even the bounded wait can't stall the window or its audio.</summary>
-    public static int RunElevated(string verb)
+    public static int RunElevated(string verb, string? serviceSource = null)
     {
         var exe = Environment.ProcessPath;
         if (string.IsNullOrEmpty(exe)) return -1;
         var psi = new ProcessStartInfo
         {
             FileName = exe,
-            Arguments = BuildElevatedArguments(verb),
+            Arguments = BuildElevatedArguments(verb, serviceSource),
             UseShellExecute = true,
             Verb = "runas",
             WindowStyle = ProcessWindowStyle.Hidden,
@@ -120,11 +129,15 @@ public static class ServiceControl
     /// <summary>Pure, testable: the full command line for an elevated helper — the verb plus
     /// <see cref="AsUserArg"/> introducing THIS (non-elevated) process's user, when that identity is a
     /// real user account. See <see cref="AsUserArg"/> for why the identity must travel as an argument.</summary>
-    internal static string BuildElevatedArguments(string verb)
+    internal static string BuildElevatedArguments(string verb, string? serviceSource = null)
     {
         string? sid = null;
         try { sid = WindowsIdentity.GetCurrent().User?.Value; } catch { }
-        return IsValidUserSid(sid) ? $"{verb} {AsUserArg} {sid}" : verb;
+        var arguments = IsValidUserSid(sid) ? $"{verb} {AsUserArg} {sid}" : verb;
+        // Quoted, with any trailing backslash removed: a backslash before the closing quote would escape it.
+        return string.IsNullOrWhiteSpace(serviceSource)
+            ? arguments
+            : $"{arguments} {ServiceSourceArg} \"{serviceSource.TrimEnd('\\', '/')}\"";
     }
 
     /// <summary>True when <paramref name="sid"/> parses as a SID and denotes an actual user account —
@@ -151,6 +164,23 @@ public static class ServiceControl
         return null;
     }
 
+    /// <summary>Pure, testable: the <see cref="ServiceSourceArg"/> value, or null when absent or valueless.</summary>
+    internal static string? ParseServiceSource(string[] args)
+    {
+        for (var i = 0; i < args.Length - 1; i++)
+            if (string.Equals(args[i], ServiceSourceArg, StringComparison.OrdinalIgnoreCase))
+                return string.IsNullOrWhiteSpace(args[i + 1]) || args[i + 1].StartsWith("--", StringComparison.Ordinal) ? null : args[i + 1];
+        return null;
+    }
+
+    /// <summary>Pure, testable: can the service be installed from <paramref name="folder"/> — a full path holding a RemSound.exe?</summary>
+    internal static bool IsUsableServiceSource(string? folder, Func<string, bool> fileExists) =>
+        !string.IsNullOrWhiteSpace(folder) && Path.IsPathFullyQualified(folder) && fileExists(Path.Combine(folder, "RemSound.exe"));
+
+    /// <summary>Pure, testable: the folder to install the service from — the named one when usable, else the helper's own folder.</summary>
+    internal static string ChooseServiceSource(string? requested, string ownFolder, Func<string, bool> fileExists) =>
+        IsUsableServiceSource(requested, fileExists) ? requested! : ownFolder;
+
     // ---- Elevated-side (called from Program.cs when running an --xxx-service verb) ---------------
 
     /// <summary>Installs the service. Must be run elevated. Copies the program to the service's OWN folder
@@ -165,11 +195,19 @@ public static class ServiceControl
         // hardening — including the already-installed re-harden below, which would otherwise re-apply a
         // stale (possibly wrong-account) recorded owner forever.
         if (IsValidUserSid(ElevatedInvokerSid)) ServiceStore.SaveInstallingUserSid(ElevatedInvokerSid!);
-        if (IsInstalled()) { HardenServiceDirectory(); return 0; } // re-harden pre-audit installs
+        if (IsInstalled())
+        {
+            // Already installed: still follow a newly named source folder, so the service watches where the app now lives.
+            // Written before the hardening, which re-derives the folder's file permissions.
+            if (IsUsableServiceSource(ElevatedServiceSource, File.Exists)) ServiceStore.SaveAppSourcePath(ElevatedServiceSource!);
+            HardenServiceDirectory(); // re-harden pre-audit installs
+            return 0;
+        }
         var exe = Environment.ProcessPath;
         if (string.IsNullOrEmpty(exe)) return 2;
-        var sourceDir = Path.GetDirectoryName(exe);
-        if (string.IsNullOrEmpty(sourceDir)) return 2;
+        var ownDir = Path.GetDirectoryName(exe);
+        if (string.IsNullOrEmpty(ownDir)) return 2;
+        var sourceDir = ChooseServiceSource(ElevatedServiceSource, ownDir, File.Exists);
 
         // Copy the whole program (exe + DLLs + runtimes/ + default sounds/) into the service's own bin
         // folder, so the running service uses ITS copy, not the source it was installed from.
@@ -459,6 +497,9 @@ public static class ServiceControl
     /// running service as SYSTEM, so no elevation is involved.</summary>
     public const string SelfUpdateVerb = "--service-selfupdate";
 
+    /// <summary>How many times the self-update helper tries to start the service again after the copy, 5 s apart.</summary>
+    internal const int SelfUpdateStartAttempts = 4;
+
     /// <summary>The self-update worker: stop the service, copy the recorded app-source build into the
     /// service's own bin, start the service again — all in managed code. Replaces the old PowerShell
     /// restart script: where execution policy is enforced by Group Policy, the script's -ExecutionPolicy
@@ -506,15 +547,27 @@ public static class ServiceControl
                 Log("no app-source recorded; restarting onto the existing bin");
             }
 
-            try
+            // Start it again — and try more than once. The service manager's restart-on-failure only covers a
+            // service that CRASHES; a start that fails here (a file still briefly locked from the copy, the SCM
+            // still settling after the stop) used to leave the service stopped until the next reboot.
+            // 2026-09-13 review.
+            for (var attempt = 1; ; attempt++)
             {
-                using var sc = new ServiceController(ServiceName);
-                sc.Start();
-                sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(30));
-                Log("service started");
-                return 0;
+                try
+                {
+                    using var sc = new ServiceController(ServiceName);
+                    if (sc.Status != ServiceControllerStatus.Running) sc.Start();
+                    sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(30));
+                    Log(attempt == 1 ? "service started" : $"service started on attempt {attempt}");
+                    return 0;
+                }
+                catch (Exception ex) when (attempt < SelfUpdateStartAttempts)
+                {
+                    Log($"start attempt {attempt} failed — {ex.GetType().Name}: {ex.Message}; trying again in 5 s");
+                    Thread.Sleep(5000);
+                }
+                catch (Exception ex) { Log($"START FAILED after {attempt} attempts — {ex.GetType().Name}: {ex.Message}"); return 1; }
             }
-            catch (Exception ex) { Log($"START FAILED — {ex.GetType().Name}: {ex.Message}"); return 1; }
         }
         catch (Exception ex) { Log($"FATAL {ex.GetType().Name}: {ex.Message}"); return 2; }
     }

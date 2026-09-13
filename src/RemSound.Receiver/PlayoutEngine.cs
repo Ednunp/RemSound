@@ -490,11 +490,16 @@ internal sealed class PlayoutEngine : IWaveProvider
     /// "is the flag set" asks this instead. A lane that has stopped consuming is treated exactly like
     /// one that was switched off: its copies stop being fed, and any stream whose own lane has gone
     /// quiet falls through onto a lane that is still reading, so it stays audible.</summary>
+    /// <remarks>The Mixed route — what the all-sessions read plays when no ASIO driver is chosen — is judged
+    /// by its reads too. It used to answer "taking audio" whatever happened, so in WASAPI-only the tuner
+    /// never heard an output leave and come back, and a departed headset's floor was kept. A route that has
+    /// never been read still counts as taking audio, so in the two-lane world, where Mixed is never read,
+    /// nothing changes. 2026-09-13 review.</remarks>
     internal bool LaneIsConsuming(RenderRoute route) => route switch
     {
         RenderRoute.WasapiLane => wasapiLaneActive && laneActivity.IsConsuming(route),
         RenderRoute.AsioLane => asioLaneActive && laneActivity.IsConsuming(route),
-        _ => true,
+        _ => laneActivity.IsConsuming(RenderRoute.Mixed),
     };
 
     /// <summary>Drive a lane stall from the gate without waiting out the real window.</summary>
@@ -1047,6 +1052,9 @@ internal sealed class PlayoutEngine : IWaveProvider
     /// </summary>
     public int Read(byte[] buffer, int offset, int count)
     {
+        // The Mixed route is being played. Stamped before the read, as the lane reads do, so the tuner can hear
+        // an output on this route leave and come back — see LaneIsConsuming.
+        laneActivity.Note(RenderRoute.Mixed);
         // Per-thread CPU instrumentation. Gated on DiagnosticsGate so the Stopwatch
         // reads cost nothing when logs are off; cumulativeRenderTicks is what the diag
         // log samples for the renderMs column.

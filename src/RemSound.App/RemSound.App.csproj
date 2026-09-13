@@ -163,21 +163,32 @@
 
        Note what is NOT excluded. The .vst3 loader needs its own .deps.json and .runtimeconfig.json
        beside it to find the managed assemblies, and Ijwhost.dll is the C++/CLI shim that starts the
-       runtime at all. Trim any of those to tidy the folder up and the plugin simply will not load. -->
-  <ItemGroup>
-    <_PluginPayload Include="..\RemSound.Plugin\bin\$(Configuration)\$(TargetFramework)\**\*.*"
-                    Exclude="..\RemSound.Plugin\bin\$(Configuration)\$(TargetFramework)\**\*.pdb" />
-  </ItemGroup>
+       runtime at all. Trim any of those to tidy the folder up and the plugin simply will not load.
 
+       The file list is gathered INSIDE each target, when it runs — after the plugin project has been built
+       through its ProjectReference. Gathered at the top level, it was taken when this project was first read,
+       before that build: a fresh clone's first build or release had an empty plugin\ folder, and an existing
+       checkout copied the previous build's files. And a publish now stops rather than ship without the plugin.
+       2026-09-13 review. -->
   <Target Name="CopyPluginPayloadToBuild" AfterTargets="Build">
-    <Copy SourceFiles="@(_PluginPayload)"
-          DestinationFiles="@(_PluginPayload->'$(OutDir)plugin\%(RecursiveDir)%(Filename)%(Extension)')"
+    <ItemGroup>
+      <_PluginPayloadForBuild Include="..\RemSound.Plugin\bin\$(Configuration)\$(TargetFramework)\**\*.*"
+                              Exclude="..\RemSound.Plugin\bin\$(Configuration)\$(TargetFramework)\**\*.pdb" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_PluginPayloadForBuild)"
+          DestinationFiles="@(_PluginPayloadForBuild->'$(OutDir)plugin\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" ContinueOnError="true" />
   </Target>
 
   <Target Name="CopyPluginPayloadToPublish" AfterTargets="Publish">
-    <Copy SourceFiles="@(_PluginPayload)"
-          DestinationFiles="@(_PluginPayload->'$(PublishDir)plugin\%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="false" ContinueOnError="true" />
+    <ItemGroup>
+      <_PluginPayloadForPublish Include="..\RemSound.Plugin\bin\$(Configuration)\$(TargetFramework)\**\*.*"
+                                Exclude="..\RemSound.Plugin\bin\$(Configuration)\$(TargetFramework)\**\*.pdb" />
+    </ItemGroup>
+    <Error Condition="'@(_PluginPayloadForPublish)' == ''"
+           Text="The plugin's build output is empty, so this publish would have no plugin folder. Build RemSound.Plugin for $(Configuration) first." />
+    <Copy SourceFiles="@(_PluginPayloadForPublish)"
+          DestinationFiles="@(_PluginPayloadForPublish->'$(PublishDir)plugin\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="false" />
   </Target>
 </Project>

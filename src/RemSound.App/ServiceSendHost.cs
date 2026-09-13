@@ -107,6 +107,10 @@ public sealed class ServiceSendHost : IDisposable
     // lock screen. Our own silence keepalive also creates a session — filtered by process id, or it
     // would kick an endless reopen loop.
     private AudioSessionStartWatcher? sessionKick;
+    // Applications mode: what the last apply captured, as AppCaptureSignature (null outside applications mode). A chosen
+    // application starting changes what would be captured, and the session watcher re-applies.
+    private volatile string? appliedAppSignature;
+    private int reapplyingForApps;   // 1 while a chosen-application re-apply runs, so two sessions can't stack re-applies
 
     private const int MaxReopens = 3;              // per sending stint; refilled on Resume/power-resume
     private const float AudiblePeak = 0.003f;      // endpoint meter level considered "audibly playing"
@@ -224,17 +228,97 @@ public sealed class ServiceSendHost : IDisposable
         foreach (var d in old) { try { d.Dispose(); } catch { /* ignore */ } }
     }
 
-    /// <summary>Session-created notification (COM thread) — the INSTANT path of the issue-#23 self-heal.
-    /// An app just set up an audio session on the default render device, i.e. sound is about to start.
-    /// If this capture has never heard audio, re-open it right now so the re-attached capture is
-    /// listening from the first note (at boot: the Windows tune / NVDA at the logon screen). Hops to the
-    /// thread pool — never tear down audio objects from inside an audio notification callback.</summary>
+    /// <summary>Session-created notification (COM thread). An app just set up an audio session on the default render
+    /// device, i.e. sound is about to start. Two jobs, chosen by <see cref="DecideSessionStart"/>:
+    /// <list type="bullet">
+    /// <item>Applications mode: a chosen application may just have started. If what would be captured has changed,
+    /// capture it now — including when none of the chosen applications was running before. Until 2026-09-13 an
+    /// application opened after the service started was never sent.</item>
+    /// <item>The INSTANT path of the issue-#23 self-heal: if this capture has never heard audio, re-open it right now so
+    /// the re-attached capture is listening from the first note (at boot: the Windows tune / NVDA at the logon screen).</item>
+    /// </list>
+    /// Hops to the thread pool — never tear down audio objects from inside an audio notification callback, and working
+    /// out what applications mode would capture enumerates processes.</summary>
     private void OnAudioSessionCreated(int pid)
     {
         if (pid == Environment.ProcessId) return; // our own silence keepalive — reacting would loop forever
-        if (everHeardAudio || !wantSending || disposed) return;
-        Task.Run(() => ReopenCapture($"new audio session (pid {pid}) appeared while the capture has heard nothing — sound is starting"));
+        if (!wantSending || disposed) return;
+        Task.Run(() =>
+        {
+            var applied = appliedAppSignature;
+            var profile = applied is null ? null : loadProfile();
+            var current = profile is not null && IsApplicationsMode(profile) ? AppCaptureSignature(BuildSendSpecs(profile)) : null;
+            switch (DecideSessionStart(wantSending, disposed, applied, current, everHeardAudio))
+            {
+                case SessionStartResponse.ReapplyForChosenApps:
+                    ReapplyForChosenApps(profile!, pid);
+                    break;
+                case SessionStartResponse.ReopenDeafCapture:
+                    ReopenCapture($"new audio session (pid {pid}) appeared while the capture has heard nothing — sound is starting");
+                    break;
+            }
+        });
     }
+
+    internal enum SessionStartResponse { Ignore, ReapplyForChosenApps, ReopenDeafCapture }
+
+    /// <summary>Pure decision behind <see cref="OnAudioSessionCreated"/>. <paramref name="appliedAppSignature"/> is what the
+    /// last apply captured in applications mode (null outside it); <paramref name="currentAppSignature"/> is what it would
+    /// capture now. A change means a chosen application started or stopped, whether or not audio has been heard.</summary>
+    internal static SessionStartResponse DecideSessionStart(bool wantSending, bool disposed, string? appliedAppSignature,
+        string? currentAppSignature, bool everHeardAudio)
+    {
+        if (!wantSending || disposed) return SessionStartResponse.Ignore;
+        if (appliedAppSignature is not null && currentAppSignature is not null
+            && !string.Equals(appliedAppSignature, currentAppSignature, StringComparison.Ordinal))
+            return SessionStartResponse.ReapplyForChosenApps;
+        return everHeardAudio ? SessionStartResponse.Ignore : SessionStartResponse.ReopenDeafCapture;
+    }
+
+    /// <summary>Capture what the chosen applications are now. While streaming only the capture is rebuilt, so peers see no
+    /// blip; while waiting for the first of them, the send starts.</summary>
+    private void ReapplyForChosenApps(Profile profile, int pid)
+    {
+        if (Interlocked.Exchange(ref reapplyingForApps, 1) == 1) return;
+        try
+        {
+            lock (gate)
+            {
+                if (disposed || !wantSending) return;
+                if (running)
+                {
+                    log?.Invoke($"service: the chosen applications changed (audio session from pid {pid}) — re-opening capture to include them");
+                    RebuildCaptureLocked(profile);
+                    return;
+                }
+            }
+            log?.Invoke($"service: a chosen application started (audio session from pid {pid}) — starting the send");
+            ApplyProfile(profile);
+        }
+        finally { Interlocked.Exchange(ref reapplyingForApps, 0); }
+    }
+
+    /// <summary>Make sure the session watcher exists. Never throws: with no audio endpoint it can't be made, and the
+    /// device watcher re-applies when one appears.</summary>
+    private void EnsureSessionWatcher()
+    {
+        if (sessionKick is not null) return;
+        try { sessionKick = new AudioSessionStartWatcher(OnAudioSessionCreated, msg => log?.Invoke($"service: {msg}")); }
+        catch (Exception ex)
+        {
+            log?.Invoke($"service: session watcher unavailable ({ex.GetType().Name}: {ex.Message}) — a chosen application "
+                + "starting later is picked up at the next device change or hand-over");
+        }
+    }
+
+    /// <summary>Test seam: applications mode is waiting for a chosen application — not streaming, watcher up.</summary>
+    internal bool IsWaitingForChosenApplicationForTest
+    {
+        get { lock (gate) return !running && sessionKick is not null && appliedAppSignature is not null; }
+    }
+
+    /// <summary>Test seam: is the session watcher up at all?</summary>
+    internal bool HasSessionWatcherForTest { get { lock (gate) return sessionKick is not null; } }
 
     /// <summary>Tear down and re-open JUST the audio capture (sender stop → rebuild specs → start),
     /// leaving the network presence up so peers see no discovery blip. The shared exit of both
@@ -254,40 +338,53 @@ public sealed class ServiceSendHost : IDisposable
                 + $"(attempt {reopenAttempts}/{MaxReopens}, issue #23 boot self-heal)");
             var profile = loadProfile();
             if (profile is null) return;
-            try
+            RebuildCaptureLocked(profile);
+        }
+    }
+
+    /// <summary>Stop the capture and build it again from <paramref name="profile"/>, leaving the network presence up so
+    /// peers see no discovery blip. Shared by the self-heal re-open and a chosen application starting. The caller holds
+    /// <see cref="gate"/>.</summary>
+    private void RebuildCaptureLocked(Profile profile)
+    {
+        try
+        {
+            sender.Stop();
+            var specs = BuildSendSpecs(profile); // re-resolve (the default device may have moved)
+            var appsMode = IsApplicationsMode(profile);
+            appliedAppSignature = appsMode ? AppCaptureSignature(specs) : null;
+            if (specs.Count == 0)
             {
-                sender.Stop();
-                var specs = BuildSendSpecs(profile); // re-resolve (the default device may have moved)
-                if (specs.Count == 0)
-                {
-                    // The source went away (e.g. the only loopback device was unplugged). Release the whole
-                    // send stack — presence, meter readers, the session watcher AND the perf-mode overrides
-                    // — instead of sitting "running" with High priority / EcoQoS-off held while streaming
-                    // nothing. The device-change watcher re-opens (via ApplyProfile) when a device returns.
-                    log?.Invoke("service: re-open found no send sources — releasing until a device returns");
-                    try { presence.Stop(); } catch { }
-                    SwapMeterDevices(Array.Empty<CaptureSourceSpec>());
-                    try { sessionKick?.Dispose(); } catch { } sessionKick = null;
-                    try { PerformanceMode.Apply(false, msg => log?.Invoke($"service: {msg}")); } catch { }
-                    running = false;
-                    return;
-                }
-                sender.Configure(specs);
-                sender.Start();
-                SwapMeterDevices(specs);
-                captureWatchStartTick = Environment.TickCount64;
-                loggedFirstCallback = false;
-                loggedZeroCallbacks = false;
-                lastCallbacks = -1;
-                lastCallbacksChangeTick = Environment.TickCount64;
-                pulsePeakMax = 0f;
-                pulseMeterMax = 0f;
-                pulseFramesSent = 0;
+                // The source went away (e.g. the only loopback device was unplugged, or every chosen application
+                // closed). Release the send stack — presence, meter readers AND the perf-mode overrides — instead of
+                // sitting "running" with High priority / EcoQoS-off held while streaming nothing. The device-change
+                // watcher re-opens (via ApplyProfile) when a device returns. Applications mode keeps the session
+                // watcher: a chosen application starting again is what brings the send back.
+                log?.Invoke(appsMode
+                    ? "service: none of the chosen applications is running any more — releasing until one starts"
+                    : "service: re-open found no send sources — releasing until a device returns");
+                try { presence.Stop(); } catch { }
+                SwapMeterDevices(Array.Empty<CaptureSourceSpec>());
+                if (!appsMode) { try { sessionKick?.Dispose(); } catch { } sessionKick = null; }
+                try { PerformanceMode.Apply(false, msg => log?.Invoke($"service: {msg}")); } catch { }
+                running = false;
+                return;
             }
-            catch (Exception ex)
-            {
-                log?.Invoke($"service: capture re-open failed: {ex.GetType().Name}: {ex.Message}");
-            }
+            sender.Configure(specs);
+            sender.Start();
+            SwapMeterDevices(specs);
+            captureWatchStartTick = Environment.TickCount64;
+            loggedFirstCallback = false;
+            loggedZeroCallbacks = false;
+            lastCallbacks = -1;
+            lastCallbacksChangeTick = Environment.TickCount64;
+            pulsePeakMax = 0f;
+            pulseMeterMax = 0f;
+            pulseFramesSent = 0;
+        }
+        catch (Exception ex)
+        {
+            log?.Invoke($"service: capture re-open failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -319,9 +416,20 @@ public sealed class ServiceSendHost : IDisposable
         if (disposed) return false;
         var specs = BuildSendSpecs(profile);
         var endpoints = BuildEndpoints(profile);
+        var appsMode = IsApplicationsMode(profile);
         lock (gate)
         {
             if (disposed) return false;
+            appliedAppSignature = appsMode ? AppCaptureSignature(specs) : null;
+            if (specs.Count == 0 && appsMode && endpoints.Count > 0)
+            {
+                // None of the chosen applications is running yet. Keep the session watcher, so the first one to start is
+                // picked up then. Nothing used to look again until the next app hand-over, boot or device change — an
+                // application opened after the service started was never sent. 2026-09-13 review.
+                EnsureSessionWatcher();
+                log?.Invoke("service: none of the chosen applications is running yet — waiting for one to start");
+                return false;
+            }
             if (specs.Count == 0) { log?.Invoke("service: profile has no WASAPI send sources — nothing to stream"); return false; }
             if (endpoints.Count == 0) { log?.Invoke("service: profile has no reachable peers — nothing to stream to"); return false; }
 
@@ -394,7 +502,14 @@ public sealed class ServiceSendHost : IDisposable
     {
         lock (gate)
         {
-            if (!running) return;
+            appliedAppSignature = null;
+            if (!running)
+            {
+                // Not streaming — but applications mode may have a session watcher waiting for a chosen application.
+                try { sessionKick?.Dispose(); } catch { /* ignore */ }
+                sessionKick = null;
+                return;
+            }
             // Vacate the network FIRST (stop announcing, unbind the port, stop the heartbeat) so the
             // interactive app can take it over cleanly, then stop the audio send.
             try { presence.Stop(); } catch (Exception ex) { log?.Invoke($"service: presence stop error {ex.GetType().Name}: {ex.Message}"); }
@@ -479,7 +594,7 @@ public sealed class ServiceSendHost : IDisposable
             {
                 haveSeenApp = true;
                 wantSending = false;
-                if (IsSending) Suspend();
+                Suspend("interactive app present"); // cheap when idle; also lets go of a watcher waiting for a chosen application
                 absentSince = long.MaxValue;
                 triedThisAbsence = false;
             }
@@ -527,7 +642,9 @@ public sealed class ServiceSendHost : IDisposable
         // Wake-from-sleep re-plumbs the audio graph much like boot does — refill the self-heal ladder.
         everHeardAudio = false;
         reopenAttempts = 0;
-        Suspend();
+        // Say why: the default reason reads as the interactive app arriving, which sent a bug hunt after hand-overs that
+        // never happened. 2026-09-13 review.
+        Suspend("re-opening capture after a power resume");
         ApplyProfile(profile);
     }
 
@@ -549,17 +666,24 @@ public sealed class ServiceSendHost : IDisposable
         // self-heal ladder so a brand-new device that comes up momentarily deaf still gets its re-opens.
         everHeardAudio = false;
         reopenAttempts = 0;
-        Suspend();
+        Suspend("audio devices changed — re-opening capture");
         ApplyProfile(profile);
     }
+
+    /// <summary>Specific applications rather than output devices. Needs Windows 10 19041+.</summary>
+    internal static bool IsApplicationsMode(Profile p) =>
+        ProcessLoopbackCapture.IsSupported && string.Equals(p.WasapiSendMode, "applications", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>What an applications-mode apply captures, as one comparable string: the capture ids, sorted.</summary>
+    internal static string AppCaptureSignature(IEnumerable<CaptureSourceSpec> specs) =>
+        string.Join("|", specs.Select(s => s.DeviceId ?? "").OrderBy(s => s, StringComparer.Ordinal));
 
     // WASAPI-only send specs from a profile. Mirrors the app's applications-vs-devices logic but never
     // touches ASIO (the service can't). Applications mode needs Windows 10 19041+.
     internal static List<CaptureSourceSpec> BuildSendSpecs(Profile p)
     {
         var specs = new List<CaptureSourceSpec>();
-        var appsMode = ProcessLoopbackCapture.IsSupported
-            && string.Equals(p.WasapiSendMode, "applications", StringComparison.OrdinalIgnoreCase);
+        var appsMode = IsApplicationsMode(p);
         // Both branches are the SHARED builder (CaptureSpecBuilder) — the same code the main window
         // assembles its specs with, so the two can no longer drift apart. Apps mode = specific apps
         // only (the "send all" path was removed from both sides; the stale profile flag is ignored);

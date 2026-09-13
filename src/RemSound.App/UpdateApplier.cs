@@ -31,6 +31,10 @@ internal static class UpdateApplier
     private const int ProcessExitWaitMs = 30000;        // wait up to 30 s for the old app to exit
     private const int PostExitSettleMs = 1000;          // let the OS release file handles after exit
 
+    /// <summary>The folder inside the install that holds the old files during a swap. It exists only while a swap is under
+    /// way or rolling back; the service's self-update waits for it to be gone (<see cref="ServiceUpdate.SwapInProgress"/>).</summary>
+    internal const string BackupFolderName = "_update-backup";
+
     public static void Run(string[] args)
     {
         var source = GetArg(args, "--update-source");
@@ -57,7 +61,7 @@ internal static class UpdateApplier
 
             if (int.TryParse(pidText, out var pid) && pid > 0) WaitForExit(pid, Log);
 
-            var backupDir = Path.Combine(target, "_update-backup");
+            var backupDir = Path.Combine(target, BackupFolderName);
             TryDeleteDirectory(backupDir);
 
             var moved = new List<(string backup, string dest)>(); // old file renamed aside → restore on rollback

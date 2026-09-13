@@ -112,10 +112,9 @@ internal static class StartupAutoStart
             if (key is null) return true; // No Run subkey → nothing to disable.
             var value = (key.GetValue(ValueName) as string)?.Trim().Trim('"');
             if (string.IsNullOrWhiteSpace(value)) return true; // nothing set for us.
-            var target = System.IO.Path.GetFullPath(folder)
-                .TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
-            // Only our own installed copy's entry (its exe lives inside the folder being removed).
-            if (value.StartsWith(target, StringComparison.OrdinalIgnoreCase))
+            // Only our own installed copy's entry (its exe lives inside the folder being removed) — inside, not merely
+            // starting with the same letters: Programs\RemSound2 is not inside Programs\RemSound.
+            if (PathContainment.IsInside(value, folder))
             {
                 key.DeleteValue(ValueName, throwOnMissingValue: false);
             }

@@ -48,6 +48,7 @@ internal static partial class SelfTest
         // combination a user has selected. --------------------------------------------------------
         new("AsioApartmentThread", "the apartment thread's contract is the same however many lanes exist"),
         new("AuditAsioParkStopsDelivery", "parking is a property of the ASIO capture lane itself; there is no WASAPI equivalent to compare"),
+        new("AuditAsioDriverReleaseIsNotRushed", "letting go of a deselected or switched ASIO driver is the ASIO driver's own close; there is no WASAPI equivalent, and no output configuration is involved — it is the capture backend being released"),
         new("AsioOneDriverBothDirections", "one driver instance opened full duplex is a property of the driver and the shared device; there is no WASAPI half, and it runs only on real hardware when a driver is named"),
         new("AuditWakeHoldsTheTunerAndKeepsWhatItLearned", "a wake holds ALL THREE tuned lanes at once — WASAPI, ASIO and the Mixed route a WASAPI-only configuration tunes — and the test asserts every one of them directly, including that each keeps its learned floor. The configurations decide which lanes are live; a wake holds every lane regardless, so the behaviour is identical in all three and is checked on every lane rather than by looping the same wake three times. The restart that follows DOES depend on the configuration, through which lane the main slider drives, and AuditWakeRestartsTheAudioWithTheTuneFromBeforeSleep loops all three"),
         new("AuditOutputReopenIsNotJitter", "this is about output KIND, not configuration: a WASAPI output fault holds the WASAPI lane and the Mixed route (what a WASAPI-only configuration tunes), a missing ASIO output holds the ASIO lane alone, and the test asserts each mapping and that the other kind is left untouched. That covers every lane any configuration can have; looping configurations would repeat the same fault on the same lanes"),
@@ -90,6 +91,7 @@ internal static partial class SelfTest
         // configuration at all. ---------------------------------------------------------------------
         new("ServiceProfileIsolation", "the service profile is a separate store; the service never renders"),
         new("ServiceSendHostStream", "the service is WASAPI send-only and has no output lane"),
+        new("AuditServiceSendsAnApplicationStartedLater", "it names the WASAPI send mode only to choose specific applications; the service never opens ASIO and never renders, so there is no output configuration to vary"),
         new("ServiceSenderParity", "compares service and app SENDER settings; the receive configuration is not in scope"),
 
         // ---- Arithmetic and lane-independent policy. ----------------------------------------------

@@ -316,7 +316,11 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     /// enough that no healthy driver reaches it, and to LOG THE MEASURED CLOSE TIME every time so we
     /// accumulate real figures for real drivers instead of guessing twice. The bound now exists only
     /// for a driver that is genuinely never coming back. 2026-08-23 audit, finding S2.</para></summary>
-    private const int CloseTimeoutMs = 30_000;
+    internal const int CloseTimeoutMs = 30_000;
+
+    /// <summary>Gate seam: told the close bound every time this backend lets go of its driver, so a test
+    /// can see which bound a path uses without a real driver to close.</summary>
+    internal Action<int>? CloseBoundObservedForTest { get; set; }
 
     /// <summary>Shutdown gets a much shorter bound. At process exit the OS reclaims the device
     /// regardless, so waiting half a minute to quit is strictly worse than abandoning a slow close —
@@ -331,6 +335,7 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
 
     private void StopInternal(int closeTimeoutMs)
     {
+        CloseBoundObservedForTest?.Invoke(closeTimeoutMs);
         var shared = device;
         if (shared is not null)
         {

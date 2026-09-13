@@ -231,14 +231,18 @@ internal static class CommandLine
     /// <summary>--list-profiles: print the saved profile titles (read-only).</summary>
     private static int ListProfiles()
     {
-        var cfg = AppConfig.Load();
-        var store = new ProfileStore(cfg.ProfilesDirectory ?? AppConfig.ProfilesBaseDirectory);
+        var store = ProfileStoreForListing(AppConfig.Load());
         var titles = store.ListProfileTitles();
         if (titles.Count == 0) { Console.WriteLine("No saved profiles."); return 0; }
         Console.WriteLine($"Saved profiles ({titles.Count}):");
         foreach (var t in titles) Console.WriteLine($"  {t}");
         return 0;
     }
+
+    /// <summary>The store --list-profiles reads: exactly the one the app opens. Profiles live in a per-machine folder under
+    /// the profiles base directory, so reading the base directory itself — which this did — found none and printed "No
+    /// saved profiles" on every ordinary install. 2026-09-13 review.</summary>
+    internal static ProfileStore ProfileStoreForListing(AppConfig cfg) => cfg.CreateStore();
 
     /// <summary>--list-named-peers: print the machine-wide named-peers book (read-only) — the friendly
     /// names you've given peers, with where and when each was last seen.</summary>
@@ -292,8 +296,8 @@ internal static class CommandLine
         Console.WriteLine("  --connect <ip[:port]> Start and connect to a peer at this address. With no");
         Console.WriteLine("                        --profile, starts on a fresh profile connected to it.");
         Console.WriteLine("  --minimized, --tray   Start minimized to the notification area.");
-        Console.WriteLine("  --config-dir <folder> Use an explicit folder for this run's settings, profiles,");
-        Console.WriteLine("                        logs and sounds, instead of the usual location. Lets a test");
+        Console.WriteLine("  --config-dir <folder> Use an explicit folder for this run's settings, profiles");
+        Console.WriteLine("                        and logs, instead of the usual location. Lets a test");
         Console.WriteLine("                        exercise RemSound without touching your real settings.");
         Console.WriteLine("                        Works with any command (e.g. --selftest --config-dir ...).");
         Console.WriteLine("  --silent              Play no cue sounds and show no missing-sound pop-ups for");
@@ -301,7 +305,7 @@ internal static class CommandLine
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  RemSound.exe --devices");
-        Console.WriteLine("  RemSound.exe --selftest --opus");
+        Console.WriteLine("  RemSound.exe --list-profiles");
         Console.WriteLine("  RemSound.exe --diagnostics");
         Console.WriteLine("  RemSound.exe --profile \"Studio\" --minimized");
         Console.WriteLine("  RemSound.exe --connect 192.168.1.42");
@@ -428,15 +432,31 @@ internal static class CommandLine
         return 0;
     }
 
+    /// <summary>How long <c>--close</c> gives the running copy to close by itself before ending it. Closing finishes a
+    /// recording and lets an ASIO driver go, which can take several seconds.</summary>
+    internal static readonly TimeSpan GracefulCloseWait = TimeSpan.FromSeconds(20);
+
     private static int CloseRunning()
     {
-        bool closed;
-        try { closed = SingleInstanceCoordinator.ForceCloseOtherInstances(); }
+        try
+        {
+            if (!SingleInstanceCoordinator.AnyOtherInstanceRunning())
+            {
+                Console.WriteLine("No running copy of RemSound was found.");
+                return 0;
+            }
+            // Ask first: the running copy closes the way File, Exit does — a recording gets its ending, the router's port
+            // mapping is released, the log is closed. Only a copy still there afterwards is ended outright. This used to
+            // end it outright every time. 2026-09-13 review.
+            var closed = SingleInstanceCoordinator.RequestGracefulClose()
+                && SingleInstanceCoordinator.WaitForOtherInstancesToExit(GracefulCloseWait);
+            if (!closed) closed = SingleInstanceCoordinator.ForceCloseOtherInstances();
+            Console.WriteLine(closed
+                ? "Closed the running copy of RemSound."
+                : "The running copy of RemSound could not be closed - it may be running as administrator.");
+            return closed ? 0 : 1;
+        }
         catch (Exception ex) { Console.WriteLine($"Could not close RemSound: {ex.Message}"); return 1; }
-        Console.WriteLine(closed
-            ? "Closed the running copy of RemSound."
-            : "No running copy of RemSound was found (or it could not be closed - it may be running as administrator).");
-        return 0;
     }
 
     /// <summary>Build the support diagnostics report text for a given config (version, settings,

@@ -466,16 +466,27 @@ public sealed class AudioSender : IDisposable
     /// inside its own Stop — froze the window for the duration even with the close on the apartment
     /// thread, because the caller still blocked on it. Now: the callback is unhooked IMMEDIATELY (a
     /// volatile write, no driver call — so the old driver stops feeding the lanes before the new one
-    /// starts), and the actual Stop/Dispose runs on a worker, where the apartment's 8 s bound still
-    /// backstops a wedged driver. Known edge, accepted: re-selecting the SAME driver within the close
-    /// window can find the card still held and fail to open — the capture-start failure is logged, and
-    /// picking the driver again once the close finishes recovers it.</summary>
+    /// starts), and the actual close runs on a worker.
+    ///
+    /// <para>With the INTERACTIVE bound. This used to call Dispose, which is the shutdown path and gives a
+    /// driver only 3 s — right for quitting, when the OS reclaims the card anyway, and wrong here: the
+    /// Audient takes 5 to 8 s to close, so the close was abandoned half way and the card could still be
+    /// held when something opened it next. Stop waits as long as an interactive close deserves; nobody
+    /// is waiting on this thread. 2026-09-13 review.</para>
+    ///
+    /// <para>Known edge, accepted: re-selecting the SAME driver while its close is still running can find
+    /// the card still held and fail to open — the capture-start failure is logged, and picking the driver
+    /// again once the close finishes recovers it.</para></summary>
     private void ReleaseAsioBackendInBackground(AsioCaptureBackend backend, string why)
     {
         backend.SetCallback(_ => { });
         Task.Run(() =>
         {
-            try { backend.Dispose(); }
+            try
+            {
+                backend.Stop();
+                backend.Dispose();
+            }
             catch (Exception ex) { diagnostic?.Invoke($"asio: background {why} release threw {ex.GetType().Name}: {ex.Message}"); }
         });
     }

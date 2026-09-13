@@ -35,6 +35,33 @@ internal static class ServiceUpdate
     /// update landed). Reads the on-disk exe's file version; never throws.</summary>
     public static bool UpdateLanded() => IsNewer(RunningVersion(), OnDiskVersion());
 
+    /// <summary>
+    /// Pure and testable: is the app folder's build ready to be taken?
+    ///
+    /// <para>A newer RemSound.exe is not enough. The app's updater swaps the folder file by file, retrying each for up to a
+    /// minute, and RemSound.exe can be new while DLLs beside it are still old — a poll landing mid-swap copied that mix into
+    /// the service. So the swap must be finished (its backup folder gone) and the same newer version must have been seen at
+    /// the previous poll too. 2026-09-13 review.</para>
+    /// </summary>
+    internal static bool ReadyToApply(Version? running, string? onDiskNow, string? onDiskAtLastPoll, bool swapInProgress) =>
+        !swapInProgress
+        && !string.IsNullOrWhiteSpace(onDiskNow)
+        && string.Equals(onDiskNow, onDiskAtLastPoll, StringComparison.Ordinal)
+        && IsNewer(running, onDiskNow);
+
+    /// <summary>True while the app's updater is part way through a swap in the recorded app folder: it moves the old files
+    /// into <see cref="UpdateApplier.BackupFolderName"/> first and removes that folder only once the swap has finished or
+    /// rolled back. Anything that cannot be read counts as "in progress" — never act on uncertainty.</summary>
+    public static bool SwapInProgress()
+    {
+        try { return SwapInProgressIn(ServiceStore.LoadAppSourcePath()); }
+        catch { return true; }
+    }
+
+    /// <summary>Testable core of <see cref="SwapInProgress"/> for a given app folder.</summary>
+    internal static bool SwapInProgressIn(string? appDir) =>
+        !string.IsNullOrEmpty(appDir) && Directory.Exists(Path.Combine(appDir, UpdateApplier.BackupFolderName));
+
     /// <summary>The version of RemSound.exe in the recorded APP-SOURCE folder (the app's install location,
     /// which its auto-updater swaps in place), or null if the folder is unknown/unreadable.</summary>
     public static string? OnDiskVersion()

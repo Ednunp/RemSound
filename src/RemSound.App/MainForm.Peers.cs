@@ -355,17 +355,21 @@ public sealed partial class MainForm
     }
 
     /// <summary>
-    /// Wipes the rolling max-gap window and pushes <see cref="lastSourceChangeUtc"/> forward,
-    /// so the next continuous auto-tune tick has nothing to react to. Called whenever a user
+    /// Throws away every reading the tuner decides from and pushes <see cref="lastSourceChangeUtc"/>
+    /// forward, so the next continuous auto-tune tick has nothing to react to. Called whenever a user
     /// action (peer (de)selection, source list toggle, manually moving the latency slider) is
     /// likely to produce a measured "gap" that doesn't reflect the network — e.g. the user
     /// reselecting localhost after a 5 s pause records a 5 s inter-arrival gap, which would
     /// otherwise pin the auto-tune to its 200 ms cap for half a minute.
+    ///
+    /// <para>EVERY reading, through the one routine that does it. This cleared only the two shared gap
+    /// windows, while the tuner reads each lane's own render-gap and low-water windows first — so a
+    /// descent step straight after a peer or source change could still be decided on readings from
+    /// before it. What the tuner LEARNED (the sliders and floors) is kept, as before. 2026-09-13 review.</para>
     /// </summary>
     private void InvalidateAutoTuneHistory()
     {
-        recentMaxGaps.Clear();
-        recentRenderCbGaps.Clear();
+        ForgetTuneReadings();
         lastSourceChangeUtc = DateTime.UtcNow;
     }
 

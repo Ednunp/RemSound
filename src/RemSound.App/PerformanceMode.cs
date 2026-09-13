@@ -7,7 +7,7 @@ namespace RemSound.App;
 /// "Full CPU speed" mode for the current profile. When enabled, pulls every documented
 /// Windows lever to keep our process running at full clock — no EcoQoS downclocking, no
 /// migration to E-cores, no deep-C-state idling, 1 ms scheduler quantum, High priority
-/// class. All five mechanisms are per-process or per-thread: nothing affects other apps,
+/// class. Every mechanism is scoped to this process: nothing affects other apps,
 /// and nothing here changes the system power plan (which is global) or anyone else's
 /// scheduling. Untoggling reverses every change cleanly.
 ///
@@ -35,10 +35,12 @@ namespace RemSound.App;
 ///         match every <c>timeBeginPeriod</c> with a <c>timeEndPeriod</c> when the
 ///         feature is disabled, otherwise the OS keeps the elevated rate forever (the
 ///         old global-period gotcha is long gone but we're tidy anyway).</item>
-///   <item><b>SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)</b>. Older
-///         API but additive to #2; prevents the system from idle-sleeping. Negligible
-///         cost. ES_DISPLAY_REQUIRED is deliberately omitted — we don't need the
-///         screen on while we're running, just the CPU.</item>
+///   <item><b>PowerSetRequest(SYSTEM_REQUIRED)</b>, on the same request as #2; prevents the
+///         system from idle-sleeping. Negligible cost. No display request — we don't need the
+///         screen on while we're running, just the CPU. This used to be SetThreadExecutionState,
+///         which belongs to the THREAD that calls it: the service switches this mode on and off
+///         from different threads, so switching it off could leave "system required" set on
+///         another thread for good. A power request belongs to the process. 2026-09-13 review.</item>
 /// </list>
 ///
 /// Trade-offs the user should know about:
@@ -81,7 +83,6 @@ internal static class PerformanceMode
                 TryStartPowerRequest(log);
                 TryRaisePriority(log);
                 TryBeginTimePeriod(log);
-                TrySetThreadExecutionState(keepAwake: true, log);
                 TrySetMemoryPriorityNormal(log);
                 TryLockWorkingSetMin(log);
                 currentlyEnabled = true;
@@ -93,7 +94,6 @@ internal static class PerformanceMode
                 TryStopPowerRequest(log);
                 TryRestorePriority(log);
                 TryEndTimePeriod(log);
-                TrySetThreadExecutionState(keepAwake: false, log);
                 TryRelaxWorkingSet(log);
                 currentlyEnabled = false;
                 log?.Invoke("priority mode: OFF (all overrides cleared, defaults restored)");
@@ -158,6 +158,10 @@ internal static class PerformanceMode
                 CloseHandle(handle);
                 return;
             }
+            // Keep the system out of idle sleep on the same handle (the class remarks say why not SetThreadExecutionState).
+            // A failure here leaves the execution request in place.
+            if (!PowerSetRequest(handle, PowerRequestSystemRequired))
+                log?.Invoke($"performance mode: PowerSetRequest(system required) failed (win32={Marshal.GetLastWin32Error()})");
             powerRequestHandle = handle;
         }
         catch (Exception ex)
@@ -171,6 +175,7 @@ internal static class PerformanceMode
         if (powerRequestHandle == IntPtr.Zero) return;
         try
         {
+            PowerClearRequest(powerRequestHandle, PowerRequestSystemRequired);
             PowerClearRequest(powerRequestHandle, PowerRequestExecutionRequired);
             CloseHandle(powerRequestHandle);
         }
@@ -259,24 +264,6 @@ internal static class PerformanceMode
         }
     }
 
-    // === 5. SetThreadExecutionState ===
-
-    private static void TrySetThreadExecutionState(bool keepAwake, Action<string>? log)
-    {
-        try
-        {
-            var flags = keepAwake
-                ? ES_CONTINUOUS | ES_SYSTEM_REQUIRED
-                : ES_CONTINUOUS;
-            var prev = SetThreadExecutionState(flags);
-            if (prev == 0) log?.Invoke("priority mode: SetThreadExecutionState returned 0 (call rejected)");
-        }
-        catch (Exception ex)
-        {
-            log?.Invoke($"priority mode: SetThreadExecutionState threw: {ex.GetType().Name}: {ex.Message}");
-        }
-    }
-
     // === 6. Process memory priority ===
 
     // Setting our process's memory priority explicitly to NORMAL. The OS default is
@@ -352,11 +339,10 @@ internal static class PerformanceMode
     private const uint ProcessPowerThrottlingCurrentVersion = 1;
     private const uint ProcessPowerThrottlingExecutionSpeed = 0x1;
     private const uint ProcessPowerThrottlingIgnoreTimerResolution = 0x4;
+    private const int PowerRequestSystemRequired = 1;
     private const int PowerRequestExecutionRequired = 3;
     private const uint PowerRequestContextVersion = 0;
     private const uint PowerRequestContextSimpleString = 0x1;
-    private const uint ES_CONTINUOUS = 0x80000000;
-    private const uint ES_SYSTEM_REQUIRED = 0x00000001;
     private const uint MemoryPriorityNormal = 5;
     private const int QUOTA_LIMITS_HARDWS_MIN_ENABLE = 0x1;
     private const int QUOTA_LIMITS_HARDWS_MIN_DISABLE = 0x2;
@@ -419,7 +405,4 @@ internal static class PerformanceMode
 
     [DllImport("winmm.dll")]
     private static extern uint timeEndPeriod(uint uMilliseconds);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint SetThreadExecutionState(uint esFlags);
 }

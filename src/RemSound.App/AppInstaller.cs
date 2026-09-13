@@ -186,7 +186,9 @@ internal static class AppInstaller
                 if (wantService == DialogResult.Yes)
                 {
                     log?.Invoke("install: user opted to install the service too");
-                    var rc = RunElevatedResponsive(owner, ServiceControl.InstallVerb, "Installing the RemSound service...");
+                    // Installed FROM the installed copy's folder, not this portable one: the service watches the folder it
+                    // was installed from for updates, and updates now land there.
+                    var rc = RunElevatedResponsive(owner, ServiceControl.InstallVerb, "Installing the RemSound service...", serviceSource: target);
                     if (rc == 0)
                     {
                         // Offer to start it now — otherwise it only comes up at the next boot, so a
@@ -215,6 +217,20 @@ internal static class AppInstaller
                     }
                 }
             }
+            else
+            {
+                // The service is already here — perhaps installed from the portable copy this install ran from. It watches
+                // the folder it was installed from for updates, and updates now land in the installed copy, so point it
+                // there. The account that installed the service can write its folder, so there's no administrator prompt;
+                // any other account can't, and the service keeps following its old folder. 2026-09-13 review.
+                var recorded = RemSound.Core.ServiceStore.LoadAppSourcePath();
+                if (RepointServiceSource(recorded, source, target, folder =>
+                    {
+                        RemSound.Core.ServiceStore.SaveAppSourcePath(folder);
+                        return SameFolder(RemSound.Core.ServiceStore.LoadAppSourcePath(), folder);
+                    }))
+                    log?.Invoke($"install: the service now follows the installed copy for updates (it was following \"{recorded}\")");
+            }
         }
         catch (Exception ex) { log?.Invoke($"install: optional service step skipped ({ex.GetType().Name}: {ex.Message})"); }
 
@@ -232,7 +248,7 @@ internal static class AppInstaller
     /// hang class as the service install-freeze). This runs the elevated helper on a worker while a tiny
     /// modal "working…" shell pumps messages: the app stays responsive, the user can't double-trigger
     /// anything, NVDA announces what's happening, and the call still returns the exit code in-line.</summary>
-    private static int RunElevatedResponsive(IWin32Window owner, string verb, string statusText)
+    private static int RunElevatedResponsive(IWin32Window? owner, string verb, string statusText, string? serviceSource = null)
     {
         var rc = -1;
         using var wait = new Form
@@ -257,7 +273,7 @@ internal static class AppInstaller
         });
         wait.Shown += (_, _) => Task.Run(() =>
         {
-            try { rc = ServiceControl.RunElevated(verb); }
+            try { rc = ServiceControl.RunElevated(verb, serviceSource); }
             catch { rc = -1; }
             try { wait.BeginInvoke(new Action(wait.Close)); } catch { /* already closed */ }
         });
@@ -288,7 +304,9 @@ internal static class AppInstaller
         if (options is null) return; // cancelled
 
         log?.Invoke($"uninstall: starting (removeProfilesConfigLogs={options.RemoveProfilesConfigLogs}, " +
-                    $"removeRecordings={options.RemoveRecordings})");
+                    $"removeRecordings={options.RemoveRecordings}, removePlugin={options.RemovePlugin}, removeService={options.RemoveService})");
+        var leftBehind = RemoveChosenComponents(options, PluginInstaller.Uninstall,
+            () => RunElevatedResponsive(owner, ServiceControl.UninstallVerb, "Removing the RemSound service..."), log);
         TearDownIntegration();
         try { StartDeleteAfterExit(target, options.RemoveProfilesConfigLogs, options.RemoveRecordings); }
         catch (Exception ex)
@@ -302,9 +320,8 @@ internal static class AppInstaller
 
         // Uninstall doesn't relaunch — just tell the user it's done, then close (the remover finishes
         // deleting the folder the moment this process exits).
-        MessageBox.Show(owner,
-            "RemSound has been removed from this PC. Press OK to finish.",
-            "RemSound uninstalled", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        MessageBox.Show(owner, FinishedUninstallMessage(leftBehind),
+            "RemSound uninstalled", MessageBoxButtons.OK, leftBehind is null ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
         Environment.Exit(0);
     }
 
@@ -332,6 +349,8 @@ internal static class AppInstaller
         // Close any running RemSound (the installed copy) so its files unlock; the remover also retries,
         // so exact timing doesn't matter.
         try { SingleInstanceCoordinator.ForceCloseOtherInstances(); } catch { /* remover retries regardless */ }
+        var leftBehind = RemoveChosenComponents(options, PluginInstaller.Uninstall,
+            () => RunElevatedResponsive(null, ServiceControl.UninstallVerb, "Removing the RemSound service..."), null);
         TearDownIntegration();
         try { StartDeleteAfterExit(target, options.RemoveProfilesConfigLogs, options.RemoveRecordings); }
         catch (Exception ex)
@@ -342,10 +361,38 @@ internal static class AppInstaller
             return;
         }
 
-        MessageBox.Show(
-            "RemSound has been removed from this PC. Press OK to finish.",
-            "RemSound uninstalled", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        MessageBox.Show(FinishedUninstallMessage(leftBehind),
+            "RemSound uninstalled", MessageBoxButtons.OK, leftBehind is null ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
     }
+
+    /// <summary>
+    /// Take away the separately installed parts the user ticked, before the folder goes: the DAW plugin, and the service
+    /// (removed elevated). Returns a sentence for the closing message about anything that could not be removed, or null.
+    /// </summary>
+    internal static string? RemoveChosenComponents(UninstallOptions options, Func<(bool Ok, string Message)> removePlugin,
+        Func<int> removeService, Action<string>? log)
+    {
+        var problems = new List<string>();
+        if (options.RemovePlugin)
+        {
+            var (ok, message) = removePlugin();
+            log?.Invoke($"uninstall: DAW plugin — {message}");
+            if (!ok) problems.Add("The DAW plugin could not be removed — close your music software and remove it from its plugin folder.");
+        }
+        if (options.RemoveService)
+        {
+            var rc = removeService();
+            log?.Invoke($"uninstall: removing the service finished with code {rc}");
+            if (rc != 0) problems.Add("The RemSound service was not removed (administrator permission was declined, or it failed), so it is still installed.");
+        }
+        return problems.Count == 0 ? null : string.Join(Environment.NewLine, problems);
+    }
+
+    internal static string FinishedUninstallMessage(string? leftBehind) =>
+        leftBehind is null
+            ? "RemSound has been removed from this PC. Press OK to finish."
+            : "RemSound has been removed from this PC." + Environment.NewLine + Environment.NewLine + leftBehind
+              + Environment.NewLine + Environment.NewLine + "Press OK to finish.";
 
     /// <summary>Remove everything the install put OUTSIDE its own folder — desktop + Start-menu
     /// shortcuts, the login auto-start entry, and the Windows "Installed apps" registration. The
@@ -728,10 +775,12 @@ internal static class AppInstaller
         public bool CopyLogs;
     }
 
-    private sealed class UninstallOptions
+    internal sealed class UninstallOptions
     {
         public bool RemoveProfilesConfigLogs;
         public bool RemoveRecordings;
+        public bool RemovePlugin;
+        public bool RemoveService;
     }
 
     /// <summary>The install tick-box dialog. Tab order is: every check-box first, THEN Install, THEN
@@ -854,10 +903,35 @@ internal static class AppInstaller
 
     /// <summary>The uninstall confirmation. Two independent opt-ins — remove profiles/config/logs, and
     /// remove recordings — both unticked by default, so the safe outcome (keep my data) is the default.
+    /// Below them, only when they are installed, the DAW plugin and the service: ticked, because they are
+    /// parts of RemSound rather than the user's data, and neither is any use without it.
     /// OK to go ahead, Cancel to back out.</summary>
     private static UninstallOptions? ShowUninstallConfirmDialog(IWin32Window? owner, string target)
     {
-        using var dialog = new Form
+        var (pluginInstalled, serviceInstalled) = InstalledComponents();
+        using var dialog = BuildUninstallConfirmDialog(owner, target, pluginInstalled, serviceInstalled, out var readOptions);
+        var result = owner is null ? dialog.ShowDialog() : dialog.ShowDialog(owner);
+        return result == DialogResult.OK ? readOptions() : null;
+    }
+
+    /// <summary>Which separately installed parts of RemSound are on this PC. Never throws.</summary>
+    private static (bool Plugin, bool Service) InstalledComponents()
+    {
+        bool plugin = false, service = false;
+        try { plugin = PluginInstaller.IsInstalled(); } catch { /* treat as not installed */ }
+        try { service = ServiceIsInstalled(); } catch { /* the service types could not load: nothing to offer */ }
+        return (plugin, service);
+    }
+
+    // A method of its own, so the service types load only when it runs (ServiceEntry explains why that matters).
+    private static bool ServiceIsInstalled() => ServiceControl.IsInstalled();
+
+    /// <summary>Builds the uninstall confirmation without showing it, so the gate can check what it offers.
+    /// <paramref name="readOptions"/> reads the ticks once the user has answered.</summary>
+    internal static Form BuildUninstallConfirmDialog(IWin32Window? owner, string target, bool pluginInstalled, bool serviceInstalled,
+        out Func<UninstallOptions> readOptions)
+    {
+        var dialog = new Form
         {
             Text = "Uninstall RemSound from this PC",
             StartPosition = owner is null ? FormStartPosition.CenterScreen : FormStartPosition.CenterParent,
@@ -891,7 +965,14 @@ internal static class AppInstaller
                    "RemSound will close when the uninstall starts.",
         };
         var removeDataBox = MakeCheck("Remove &profiles, config and logs", "Remove profiles, config and logs", false);
-        var removeRecBox = MakeCheck("Remove re&cordings", "Remove recordings", false);
+        // Alt+R. It was "re&cordings", which shared Alt+C with Cancel.
+        var removeRecBox = MakeCheck("Remove &recordings", "Remove recordings", false);
+        // The DAW plugin and the service were left behind without a word: the plugin with nothing to connect to, the
+        // service still sending at the lock screen and following a folder that no longer exists, so it never updated
+        // again. 2026-09-13 review.
+        var removePluginBox = MakeCheck("Remove the &DAW plugin too", "Remove the DAW plugin", true);
+        var removeServiceBox = MakeCheck("Remove the RemSound &service too (Windows will ask for administrator permission)",
+            "Remove the RemSound service", true);
 
         var okButton = new Button
         {
@@ -910,22 +991,34 @@ internal static class AppInstaller
         buttons.Controls.Add(okButton);
         buttons.Controls.Add(cancelButton);
 
-        foreach (var c in new Control[] { heading, intro, removeDataBox, removeRecBox, buttons }) layout.Controls.Add(c);
+        var rows = new List<Control> { heading, intro, removeDataBox, removeRecBox };
+        if (pluginInstalled) rows.Add(removePluginBox); else dialog.Disposed += (_, _) => removePluginBox.Dispose();
+        if (serviceInstalled) rows.Add(removeServiceBox); else dialog.Disposed += (_, _) => removeServiceBox.Dispose();
+        rows.Add(buttons);
+        foreach (var c in rows) layout.Controls.Add(c);
         dialog.Controls.Add(layout);
 
-        // Tab order: the two check-boxes, then OK, then Cancel. No default button, so Enter on a box
-        // doesn't fire OK — the user tabs to OK deliberately. Escape cancels.
+        // Tab order: the check-boxes, then OK, then Cancel — set on the button row itself, since OK and Cancel sit
+        // inside it. No default button, so Enter on a box doesn't fire OK — the user tabs to OK deliberately.
+        // Escape cancels.
         removeDataBox.TabIndex = 0;
         removeRecBox.TabIndex = 1;
-        okButton.TabIndex = 2;
-        cancelButton.TabIndex = 3;
+        removePluginBox.TabIndex = 2;
+        removeServiceBox.TabIndex = 3;
+        buttons.TabIndex = 4;
+        okButton.TabIndex = 0;
+        cancelButton.TabIndex = 1;
         dialog.CancelButton = cancelButton;
         dialog.AcceptButton = null;
 
-        var result = owner is null ? dialog.ShowDialog() : dialog.ShowDialog(owner);
-        return result == DialogResult.OK
-            ? new UninstallOptions { RemoveProfilesConfigLogs = removeDataBox.Checked, RemoveRecordings = removeRecBox.Checked }
-            : null;
+        readOptions = () => new UninstallOptions
+        {
+            RemoveProfilesConfigLogs = removeDataBox.Checked,
+            RemoveRecordings = removeRecBox.Checked,
+            RemovePlugin = pluginInstalled && removePluginBox.Checked,
+            RemoveService = serviceInstalled && removeServiceBox.Checked,
+        };
+        return dialog;
     }
 
     /// <summary>Run a best-effort integration step, logging (never throwing) on failure — so a blocked
@@ -938,4 +1031,24 @@ internal static class AppInstaller
 
     private static string NormalizeFolder(string path) =>
         Path.GetFullPath(path ?? "").TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+    /// <summary>
+    /// Pure, testable: point an already-installed service at the installed copy when it follows the portable folder this
+    /// install ran from, or no folder at all. A service following some other folder follows a copy somebody chose, and is
+    /// left alone. <paramref name="save"/> writes the folder and reports whether the write took. Returns true only when
+    /// this call moved the service to <paramref name="installedFolder"/>.
+    /// </summary>
+    internal static bool RepointServiceSource(string? recorded, string portableFolder, string installedFolder, Func<string, bool> save)
+    {
+        if (SameFolder(recorded, installedFolder)) return false;
+        if (!string.IsNullOrWhiteSpace(recorded) && !SameFolder(recorded, portableFolder)) return false;
+        return save(installedFolder);
+    }
+
+    internal static bool SameFolder(string? a, string? b)
+    {
+        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b)) return false;
+        try { return string.Equals(NormalizeFolder(a), NormalizeFolder(b), StringComparison.OrdinalIgnoreCase); }
+        catch { return false; }
+    }
 }

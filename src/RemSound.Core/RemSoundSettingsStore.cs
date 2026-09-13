@@ -503,12 +503,18 @@ public sealed class RemSoundSettingsStore
     }
 
     /// <summary>Receiver-side concealment artifact pick. See <see cref="ConcealmentArtifact"/>
-    /// for what each value sounds like. Default is <see cref="ConcealmentArtifact.NoiseBurst"/>
-    /// — the cosine-tone defaults were removed in Phase 3 cleanup (they sounded harsh on
-    /// orchestral content). Old profiles holding a CosineTone* enum value still load fine;
-    /// the dialog dropdown coerces them to NoiseBurst on display.</summary>
+    /// for what each value sounds like. Default is <see cref="ConcealmentArtifact.NoiseBurst"/>.
+    /// The cosine tones were taken out of the choice (they sounded harsh on orchestral content), and
+    /// a profile still holding one loads as NoiseBurst — what the dropdown already showed. Until
+    /// 2026-09-13 it loaded as it was, so the receiver played the tone while the dropdown said
+    /// "Noise burst".</summary>
     public ConcealmentArtifact LoadConcealmentArtifact(ConcealmentArtifact defaultValue = ConcealmentArtifact.NoiseBurst) =>
-        Try(() => Load()?.ConcealmentArtifact is ConcealmentArtifact v ? v : (ConcealmentArtifact?)null) ?? defaultValue;
+        WithRetiredTonesAsNoiseBurst(
+            Try(() => Load()?.ConcealmentArtifact is ConcealmentArtifact v ? v : (ConcealmentArtifact?)null) ?? defaultValue);
+
+    /// <summary>The retired cosine tones become <see cref="ConcealmentArtifact.NoiseBurst"/>; every other value is kept.</summary>
+    public static ConcealmentArtifact WithRetiredTonesAsNoiseBurst(ConcealmentArtifact value) =>
+        value is ConcealmentArtifact.CosineToneShort or ConcealmentArtifact.CosineToneLow ? ConcealmentArtifact.NoiseBurst : value;
 
     public void SaveConcealmentArtifact(ConcealmentArtifact value)
     {

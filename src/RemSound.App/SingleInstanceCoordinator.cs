@@ -23,6 +23,8 @@ namespace RemSound.App;
 ///     The owning copy runs a background thread waiting on it; when a second copy sets it
 ///     (the user chose "switch to the running copy"), the thread raises
 ///     <see cref="ActivateRequested"/>, which Program.Main routes to the live window.
+///   * A second named event is the "please close" signal behind <c>RemSound --close</c>. The same
+///     thread raises <see cref="CloseRequested"/>, and the window closes the way File, Exit does.
 ///   * <see cref="ForceCloseOtherInstances"/> terminates any other RemSound process with
 ///     Process.Kill (TerminateProcess), so a hung copy dies regardless of its message-loop
 ///     state. If a copy is running elevated and we are not, the kill is retried via an
@@ -36,10 +38,14 @@ internal sealed class SingleInstanceCoordinator : IDisposable
 {
     private const string MutexName = "RemSound.SingleInstance.Mutex.v1";
     private const string ActivateEventName = "RemSound.SingleInstance.Activate.v1";
+    private const string CloseEventName = "RemSound.SingleInstance.Close.v1";
 
     private readonly Mutex mutex;
+    private readonly string activateEventName;
+    private readonly string closeEventName;
     private bool ownsMutex;
     private EventWaitHandle? activateEvent;
+    private EventWaitHandle? closeEvent;
     private Thread? listenerThread;
     private volatile bool stopListener;
 
@@ -47,9 +53,19 @@ internal sealed class SingleInstanceCoordinator : IDisposable
     /// Program.Main marshals it onto the running window.</summary>
     public event Action? ActivateRequested;
 
-    public SingleInstanceCoordinator()
+    /// <summary>Raised on a background thread when <c>RemSound --close</c> asks this copy to close.
+    /// Program.Main routes it to the running window.</summary>
+    public event Action? CloseRequested;
+
+    public SingleInstanceCoordinator() : this(MutexName, ActivateEventName, CloseEventName) { }
+
+    /// <summary>Explicit names, for the gate: a test that used the real names would reach the RemSound the user
+    /// has open — and asking that one to close is exactly what the close signal does.</summary>
+    internal SingleInstanceCoordinator(string mutexName, string activateEventName, string closeEventName)
     {
-        mutex = new Mutex(initiallyOwned: false, MutexName);
+        mutex = new Mutex(initiallyOwned: false, mutexName);
+        this.activateEventName = activateEventName;
+        this.closeEventName = closeEventName;
     }
 
     /// <summary>True once we hold the single-instance lock.</summary>
@@ -74,38 +90,36 @@ internal sealed class SingleInstanceCoordinator : IDisposable
     }
 
     /// <summary>Start the background listener that surfaces this copy when a later copy
-    /// signals it. Only meaningful on the primary instance.</summary>
+    /// signals it, and closes it when <c>--close</c> asks. Only meaningful on the primary instance.</summary>
     public void StartActivationListener()
     {
-        try
-        {
-            activateEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ActivateEventName);
-        }
-        catch
-        {
-            // Can't create the signal — "switch to the running copy" just won't surface this
-            // window automatically. Not fatal; the user can still reach it via the tray.
-            activateEvent = null;
-            return;
-        }
+        // Can't create the activate signal — "switch to the running copy" just won't surface this
+        // window automatically. Not fatal; the user can still reach it via the tray.
+        try { activateEvent = new EventWaitHandle(false, EventResetMode.AutoReset, activateEventName); }
+        catch { activateEvent = null; }
+        // Can't create the close signal — --close then ends the process outright, as it always used to.
+        try { closeEvent = new EventWaitHandle(false, EventResetMode.AutoReset, closeEventName); }
+        catch { closeEvent = null; }
+        if (activateEvent is null && closeEvent is null) return;
         listenerThread = new Thread(ListenLoop) { IsBackground = true, Name = "RemSound-Activation" };
         listenerThread.Start();
     }
 
     private void ListenLoop()
     {
-        var ev = activateEvent;
-        if (ev is null) return;
+        var handles = new List<WaitHandle>(2);
+        if (activateEvent is not null) handles.Add(activateEvent);
+        if (closeEvent is not null) handles.Add(closeEvent);
+        var waitOn = handles.ToArray();
         while (!stopListener)
         {
             try
             {
                 // Short timeout so Dispose can stop us promptly even if no signal arrives.
-                if (ev.WaitOne(500))
-                {
-                    if (stopListener) return;
-                    ActivateRequested?.Invoke();
-                }
+                var which = WaitHandle.WaitAny(waitOn, 500);
+                if (which == WaitHandle.WaitTimeout || stopListener) continue;
+                if (ReferenceEquals(waitOn[which], closeEvent)) CloseRequested?.Invoke();
+                else ActivateRequested?.Invoke();
             }
             catch
             {
@@ -156,6 +170,47 @@ internal sealed class SingleInstanceCoordinator : IDisposable
         // would churn and the grant could be consumed before it's used. Invisible to the user —
         // our dialog has already closed and we have no window.
         try { Thread.Sleep(600); } catch { /* ignore */ }
+    }
+
+    /// <summary>
+    /// Ask the running copy to close the way File, Exit does. Returns true when a running copy was listening for the
+    /// request — which says nothing yet about whether it has closed; wait with <see cref="WaitForOtherInstancesToExit"/>.
+    ///
+    /// <para><c>RemSound --close</c> used to go straight to <see cref="ForceCloseOtherInstances"/>: an ended process leaves a
+    /// recording without its ending, the router's port mapping in place and the log without its last line. 2026-09-13
+    /// review.</para>
+    /// </summary>
+    public static bool RequestGracefulClose() => RequestGracefulClose(CloseEventName);
+
+    internal static bool RequestGracefulClose(string closeEventName)
+    {
+        try
+        {
+            if (!EventWaitHandle.TryOpenExisting(closeEventName, out var ev)) return false;
+            using (ev) ev.Set();
+            return true;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>True when another RemSound this guard could close is running in this Windows session.</summary>
+    public static bool AnyOtherInstanceRunning()
+    {
+        var others = OtherInstances(Environment.ProcessId);
+        foreach (var p in others) p.Dispose();
+        return others.Count > 0;
+    }
+
+    /// <summary>Wait up to <paramref name="timeout"/> for every other RemSound in this session to exit. True when none is left.</summary>
+    public static bool WaitForOtherInstancesToExit(TimeSpan timeout)
+    {
+        var deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
+        while (true)
+        {
+            if (!AnyOtherInstanceRunning()) return true;
+            if (Environment.TickCount64 >= deadline) return false;
+            Thread.Sleep(250);
+        }
     }
 
     /// <summary>Force every OTHER RemSound process to terminate. Returns true if no other
@@ -288,6 +343,7 @@ internal sealed class SingleInstanceCoordinator : IDisposable
         try { activateEvent?.Set(); } catch { /* wake the listener so it can exit */ }
         try { listenerThread?.Join(1000); } catch { /* ignore */ }
         try { activateEvent?.Dispose(); } catch { /* ignore */ }
+        try { closeEvent?.Dispose(); } catch { /* ignore */ }
         if (ownsMutex)
         {
             try { mutex.ReleaseMutex(); } catch { /* ignore */ }

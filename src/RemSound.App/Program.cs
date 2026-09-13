@@ -248,6 +248,9 @@ internal static class Program
         // route that request to whichever main window is open at the time.
         instance.StartActivationListener();
         instance.ActivateRequested += () => activeMainForm?.RestoreFromTray();
+        // RemSound --close asks this copy to close the way File, Exit does before anything is forced. With no main
+        // window yet (the profile picker is up) nothing happens here, and --close ends the process after its wait.
+        instance.CloseRequested += () => activeMainForm?.CloseFromCommandLine();
 
         // Hold the interactive-presence token for this copy's whole lifetime, so the send-only
         // lock-screen service (if installed) yields to us — it suspends its own sending while an
@@ -516,8 +519,7 @@ internal static class Program
                  + "called \"user settings and logs\":\n\n"
                  + "- Your settings (global config)\n"
                  + "- Your saved profiles\n"
-                 + "- Your logs\n"
-                 + "- Your cue sounds\n\n"
+                 + "- Your logs\n\n"
                  + "Nothing was lost and RemSound works exactly as before. From now on, RemSound updates "
                  + "leave that folder completely untouched. You will only see this message once.",
             Icon = TaskDialogIcon.Information,
@@ -533,6 +535,13 @@ internal static class Program
         catch { /* a notice must never stop RemSound from starting */ }
     }
 
+    /// <summary>The cue names the earliest builds shipped, loose beside the exe.</summary>
+    private static readonly string[] LegacyRootCueBaseNames =
+    {
+        "connect", "disconnect", "record start", "record stop",
+        "save", "profile", "profile menu open", "update",
+    };
+
     /// <summary>Delete cue WAVs and their .sfk peak files left loose in the install ROOT by
     /// pre-2026-05-28 builds (the cues moved into <c>sounds\</c> then; an update copies the new
     /// tree but never removes the old root copies). Best-effort and idempotent — runs
@@ -543,12 +552,7 @@ internal static class Program
         try
         {
             var root = AppContext.BaseDirectory;
-            string[] cueBaseNames =
-            {
-                "connect", "disconnect", "record start", "record stop",
-                "save", "profile", "profile menu open", "update",
-            };
-            foreach (var baseName in cueBaseNames)
+            foreach (var baseName in LegacyRootCueBaseNames)
             {
                 foreach (var fileName in new[] { baseName + ".wav", baseName + ".sfk", baseName + ".wav.sfk" })
                 {
@@ -564,29 +568,71 @@ internal static class Program
         catch { /* never let cleanup disturb startup */ }
     }
 
-    /// <summary>Delete the two defunct old cue-sounds folders an upgrader might still have on disk,
+    /// <summary>Tidy the two defunct old cue-sounds folders an upgrader might still have on disk,
     /// whichever version they came from. Sounds now live install-side in
     /// <see cref="AppConfig.SoundsDirectory"/> (<c>&lt;exe&gt;\default sounds\</c>), which updates
-    /// always refresh; both old locations are dead and only cause confusion / stale reads if left:
+    /// always refresh; both old locations are dead:
     ///   * <c>&lt;exe&gt;\sounds\</c> — the install-side folder cue WAVs lived in from ~v3.1 to v3.4.
     ///     A user jumping STRAIGHT from that era to this version never ran the v3.5 consolidation that
     ///     used to move-and-delete it, so it can still be sitting there.
     ///   * <c>...\user settings and logs\sounds\</c> — the per-user folder cues lived in from v3.5 to
     ///     v3.9.1, with a never-overwrite seed that meant a changed default could never reach an
     ///     existing user (the whole reason for the 2026-06-13 move).
-    /// Best-effort + idempotent — a no-op once they're gone. The user's REAL custom sounds were never
-    /// in either folder (they're explicit Browse-picked file paths elsewhere), so nothing is lost.</summary>
+    /// <para>Only copies of sounds RemSound shipped are removed, and a folder only once that leaves it empty.
+    /// Both folders used to be deleted outright on every launch — and the per-user one is documented
+    /// (<see cref="AppConfig.UserDataFolderName"/>) as having held people's own cue WAVs. Anything else in
+    /// them now stays where it is. 2026-09-13 review.</para>
+    /// Best-effort + idempotent.</summary>
     private static void RemoveLegacySoundFolders()
     {
+        var shipped = ShippedCueFileNames();
         foreach (var legacy in new[]
                  {
                      Path.Combine(AppContext.BaseDirectory, "sounds"),  // ~v3.1–v3.4 install-side
                      AppConfig.LegacyUserSoundsDirectory,                 // v3.5–v3.9.1 per-user
                  })
+            RemoveShippedCueCopies(legacy, shipped);
+    }
+
+    /// <summary>The cue file names RemSound is known to have shipped: whatever is in today's default sounds
+    /// folder, plus the names the earliest builds used.</summary>
+    internal static HashSet<string> ShippedCueFileNames()
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var baseName in LegacyRootCueBaseNames) names.Add(baseName + ".wav");
+        try
         {
-            try { if (Directory.Exists(legacy)) Directory.Delete(legacy, recursive: true); }
-            catch { /* leave it if locked / unreadable — it's just unused clutter now */ }
+            if (Directory.Exists(AppConfig.SoundsDirectory))
+                foreach (var file in Directory.EnumerateFiles(AppConfig.SoundsDirectory))
+                    names.Add(Path.GetFileName(file));
         }
+        catch { /* the old names alone still tidy the oldest leftovers */ }
+        return names;
+    }
+
+    /// <summary>Remove from <paramref name="folder"/> the sound files whose names RemSound shipped, with their
+    /// .sfk peak files, then the folder itself if nothing else is left in it. Anything else — a sound somebody
+    /// put there — stays, and so does the folder. Returns how many files were removed. Never throws.</summary>
+    internal static int RemoveShippedCueCopies(string folder, IReadOnlySet<string> shippedNames)
+    {
+        var removed = 0;
+        try
+        {
+            if (!Directory.Exists(folder)) return 0;
+            foreach (var file in Directory.GetFiles(folder))
+            {
+                var name = Path.GetFileName(file);
+                var isPeakFile = name.EndsWith(".sfk", StringComparison.OrdinalIgnoreCase);
+                if (!isPeakFile && !name.EndsWith(".wav", StringComparison.OrdinalIgnoreCase)) continue;
+                // "connect.wav.sfk" and "connect.sfk" are both the peak file of "connect.wav".
+                var sound = isPeakFile ? name[..^4] : name;
+                if (!shippedNames.Contains(sound) && !shippedNames.Contains(sound + ".wav")) continue;
+                try { File.Delete(file); removed++; } catch { /* locked — leave it */ }
+            }
+            if (Directory.GetFileSystemEntries(folder).Length == 0) Directory.Delete(folder);
+        }
+        catch { /* unreadable — it's just unused clutter */ }
+        return removed;
     }
 
     /// <summary>Play the startup cue once if the machine-wide setting is on. Resolves the WAV the
