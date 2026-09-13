@@ -103,8 +103,9 @@ internal sealed class HostCaptureBackend : ICaptureBackend
     }
 
     /// <summary>Push one block through the resampler and report how many 48 kHz frames came out.
-    /// Split out so the gate can drive it directly with a known tone and assert the pitch is
-    /// preserved — "it ran" is not evidence that a resampler is correct.</summary>
+    /// The gate reaches it through <see cref="SubmitHostBlock"/> with a 44.1 kHz host and a known
+    /// tone, and measures the pitch on the wire — "it ran" is not evidence that a resampler is
+    /// correct.</summary>
     private int Resample(int inFrames)
     {
         var needed = resampler.ResamplePrepare(inFrames, Channels, out var inBuf, out var inOffset);

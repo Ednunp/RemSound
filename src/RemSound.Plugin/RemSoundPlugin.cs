@@ -19,10 +19,10 @@ namespace RemSound.Plugin;
 /// people talking while they are listening to your production session" (Anthony Reyers, 2026-09-01),
 /// and making that mean three plugin instances on three tracks is the tool getting in the way. So a
 /// receiving instance carries a SET of peers, and the app mixes them into the one block it already
-/// sends back — the plugin's audio path is unchanged, one ring and one resampler however many people
-/// are on the track. The trade is that there is no per-peer trim inside the plugin; RemSound's own
-/// per-peer volume, pan and EQ already shape what arrives here, so that control exists where the user
-/// already knows it.</para>
+/// sends back — the plugin's audio path is unchanged, one reply per block and one resampler however
+/// many people are on the track. The trade is that there is no per-peer trim inside the plugin;
+/// RemSound's own per-peer volume, pan and EQ already shape what arrives here, so that control exists
+/// where the user already knows it.</para>
 ///
 /// <para>Splitting a single machine's devices into separate streams is a different question and is
 /// still deliberately not done: each stream gets its own jitter buffer and its own drift correction,
@@ -196,8 +196,9 @@ public class RemSoundPlugin : AudioPluginBase
     /// window and parameter paths could only be tested in halves.</summary>
     internal static int BridgePortForTest;
 
-    /// <summary>Gate seams: drive the real job change and the real parameter write, and read back what
-    /// was persisted, rather than a parallel copy of either.</summary>
+    // Gate seams: drive the real job change and the real parameter write, and read back what was
+    // persisted, rather than a parallel copy of either.
+
     /// <summary>Choose these people, exactly as the window does: remember them by address FIRST, then
     /// apply the job. Doing only the second half would be a seam that behaves unlike the thing it is
     /// standing in for.</summary>
@@ -242,9 +243,11 @@ public class RemSoundPlugin : AudioPluginBase
 
     /// <summary>
     /// The cursor and the tick, as last seen. A set of people cannot ride on one continuous parameter,
-    /// and fixed "peer 1..4" slots would cap what is really an open-ended thing. But a checked LIST is
+    /// and fixed "peer 1..4" slots would cap it at however many slots there were. But a checked LIST is
     /// a cursor plus a tick, and those are two numbers: move the cursor to name somebody, and the tick
-    /// says whether they are on this track. Unbounded, and it reads aloud properly.
+    /// says whether they are on this track. The only limit is the link's own
+    /// (<see cref="PluginBridgeProtocol.MaxClaimedPeers"/>, the cursor's top value), and it reads aloud
+    /// properly.
     ///
     /// <para>These two fields are what tells the cursor MOVING (which changes nothing and republishes
     /// the tick for the person now under it) from the tick BEING CHANGED (which adds or removes that
@@ -253,17 +256,15 @@ public class RemSoundPlugin : AudioPluginBase
     private int lastCursorPosition = -1;
     private bool lastIncludeValue;
 
-    /// <summary>Take what the parameters now say and make it so. Shared by the parameter list and the
-    /// window, deliberately: two routes to the same decision must not be two implementations of it,
-    /// or the fallback would drift into behaving differently from the thing it is a fallback for.</summary>
     /// <summary>Set while <see cref="PushJobToParameters"/> is writing, so the parameter changes it
     /// makes do not come straight back in as decisions.
     ///
-    /// <para>All three parameters raise PropertyChanged into <see cref="ApplyParameters"/>, and
-    /// SetParameter writes EditValue and ProcessValue, so one push fired ApplyParameters up to four
-    /// times WHILE the push was half done. Each of those re-read a mixture of new and old values —
-    /// most damagingly the old chosen address, which was assigned last — and called SetJob
-    /// with the PREVIOUS peer. The user picked somebody in the window, the window claimed them
+    /// <para>Every parameter raises PropertyChanged into <see cref="ApplyParameters"/>, and
+    /// SetParameter writes EditValue and ProcessValue, so one push fired ApplyParameters several times
+    /// over WHILE the push was half done (up to four times when there were three parameters). Each of
+    /// those re-read a mixture of new and old values — most damagingly the old chosen address, which
+    /// was assigned last — and called SetJob with the PREVIOUS peer. The user picked somebody in the
+    /// window, the window claimed them
     /// correctly, and then the parameter push immediately claimed the person they had just moved away
     /// from. That is Anthony Reyers' "iPhone gave me HOMESERV's sound and the other way around",
     /// 2026-08-29: the first instance often escaped it because it had no previous peer to go back to.
@@ -292,6 +293,10 @@ public class RemSoundPlugin : AudioPluginBase
     private bool lastPushReceive;
     private string? lastPushPeerText;
 
+    /// <summary>Take what the parameters now say and make it so, through the same <see cref="SetJob"/>
+    /// the window ends in, deliberately: two routes to the same decision must not be two
+    /// implementations of it, or the fallback would drift into behaving differently from the thing it
+    /// is a fallback for.</summary>
     internal void ApplyParameters()
     {
         if (bridge is null) return;
@@ -418,7 +423,7 @@ public class RemSoundPlugin : AudioPluginBase
     /// user does is involved: somebody joined or left. It matters most with "all peers", where the
     /// whole point is that the track follows the session, but it also brings a remembered peer back
     /// onto the track when they reconnect. Cheap and safe to call repeatedly — an unchanged set is a
-    /// no-op inside the client, and the ring is not disturbed.</para>
+    /// no-op inside the client, and its queue of replies is not disturbed.</para>
     /// </summary>
     private void RefreshPeerSet()
     {
@@ -620,9 +625,9 @@ public class RemSoundPlugin : AudioPluginBase
         // wrong the window becomes unreachable with no way back.
         //
         // Named parameters are that way back: every DAW exposes a plain parameter list, and in Reaper
-        // with OSARA that list is fully keyboard-navigable and spoken. So the same three decisions the
-        // window offers are also parameters, with names that make sense read aloud out of context —
-        // "Receive instead of send", not "Mode".
+        // with OSARA that list is fully keyboard-navigable and spoken. So every decision the window
+        // offers is also a parameter, with a name that makes sense read aloud out of context —
+        // "Send this track to your peers", not "Mode".
         //
         // They are also what a host would automate, which is harmless here: nobody automates who is on
         // a track mid-take, but a host that saves parameter values gets the instance's setup restored
@@ -648,10 +653,11 @@ public class RemSoundPlugin : AudioPluginBase
             DefaultValue = 0,
         });
         // THE CURSOR AND THE TICK, which together are a checked list expressed as two knobs. A set of
-        // people cannot ride on one continuous parameter, and fixed slots would cap at whatever number
-        // we picked; this does not. Move the cursor to name somebody, then tick to put them on the
-        // track. The tick READS BACK the person under the cursor, so it also answers "is this one on?"
-        // without opening the window.
+        // people cannot ride on one continuous parameter, and fixed slots would need a knob per person
+        // and cap at however many we made; this is two knobs, up to the most people the link carries on
+        // one track (MaxClaimedPeers, the cursor's top value). Move the cursor to name somebody, then
+        // tick to put them on the track. The tick READS BACK the person under the cursor, so it also
+        // answers "is this one on?" without opening the window.
         AddParameter(peerParameter = new AudioPluginParameter
         {
             ID = "peer",
@@ -748,9 +754,10 @@ public class RemSoundPlugin : AudioPluginBase
         }, null, PeerRefreshMs, PeerRefreshMs);
     }
 
-    /// <summary>Stale replies the ring threw away since the last tick, as one line. A few hundred
+    /// <summary>Stale replies the bridge client dropped since the last tick, as one line. A few hundred
     /// frames at start are the app's first replies coming back later than a DAW block; a count that
-    /// keeps growing means replies are routinely late. See PluginBridgeClient.ReadPeerBlock.</summary>
+    /// keeps growing means replies are routinely late. See PluginBridgeClient.ReadPeerBlock. (The line
+    /// still starts "ring:", after the byte ring the client's reply queue replaced.)</summary>
     private void ReportSkippedFrames()
     {
         var total = bridge?.SkippedFrames ?? 0;

@@ -129,10 +129,11 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
     private string lastStatus = "";
 
     /// <summary>Non-zero while the panel is writing its OWN controls — seeding them from the engine,
-    /// or rebuilding the peer list. Assigning SelectedIndex fires SelectedIndexChanged exactly as a
-    /// keystroke does, and WinForms gives no way to tell the two apart, so the difference has to be
-    /// recorded here. Without it every programmatic write is indistinguishable from a user decision
-    /// and gets announced back to the engine as one.</summary>
+    /// or rebuilding the peer list. Setting a tick box, a level, a list item's check or the list's
+    /// selection fires the same event a keystroke does, and WinForms gives no way to tell the two apart,
+    /// so the difference has to be recorded here. Without it every programmatic write is
+    /// indistinguishable from a user decision: a tick or a level would be announced back to the engine
+    /// as one, and a rebuild would move the remembered cursor.</summary>
     private int suppressAnnounce;
 
     /// <summary>Where the keyboard was in the list, by ADDRESS. A rebuild puts the user back on the

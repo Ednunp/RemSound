@@ -17,16 +17,17 @@ public delegate int PeerAudioReader(IPAddress peer, Span<float> destination, int
 /// know to stop that peer also coming out of the speakers, and the user would hear the same person
 /// twice, slightly apart. Here it solves itself — a claim arrives, the peer leaves the mix.</para>
 ///
-/// <para><b>The DAW is the clock.</b> A plugin sends <see cref="PluginBridgeMessage.ClaimPeer"/> every
-/// audio block carrying the number of frames it just consumed; we read exactly that many from that
-/// peer and send them back. One message therefore does three jobs — it claims the peer, it is the
-/// heartbeat that keeps the claim alive, and it is the request for the next block. Pumping on a timer
-/// of our own instead would give the peer two clocks, and the ring between us would drift.</para>
+/// <para><b>The DAW is the clock.</b> A plugin sends <see cref="PluginBridgeMessage.ClaimPeers"/> every
+/// audio block carrying the number of frames it just consumed and the people on its track; we read
+/// exactly that many frames of each of them, sum them, and send the block back. One message therefore
+/// does three jobs — it claims the peers, it is the heartbeat that keeps the claims alive, and it is
+/// the request for the next block. Pumping on a timer of our own instead would give each peer two
+/// clocks, and what we send would drift against the DAW's blocks.</para>
 ///
 /// <para><b>Nothing here blocks a DAW.</b> Requests are served on the bridge's receive thread and the
-/// answer is fired back as a datagram; the plugin's audio thread reads from its own ring and never
-/// waits on us. If we are slow, the plugin gets a short block — the same failure the network path
-/// already handles — rather than a stall in someone's session.</para>
+/// answer is fired back as a datagram; the plugin's audio thread plays whatever reply has already
+/// arrived and never waits on us. If we are slow, the plugin plays silence for that block — the same
+/// failure the network path already handles — rather than a stall in someone's session.</para>
 ///
 /// <para><b>Instances are forgotten if they go quiet.</b> A DAW that crashes cannot send Goodbye, and
 /// a peer left claimed forever would be silent everywhere with no obvious way back. Claims lapse on
@@ -126,8 +127,10 @@ public sealed class PluginBridgeHost : IDisposable
     /// diagnosing a crackle and guessing at it.</summary>
     public long ShortReads => Interlocked.Read(ref shortReads);
 
-    /// <summary>Requests for a peer we have no audio for — a plugin pointed at somebody who has gone.
-    /// Silent on the track, and invisible without this.</summary>
+    /// <summary>Requests that got no audio back from anybody in the set — their buffers are still
+    /// filling, or the plugin is pointed at people who have gone. Silent on the track, and invisible
+    /// without this. The name cannot tell those two apart; it matches the <c>unknownPeer=</c> key in
+    /// the log line, which is kept as it is.</summary>
     public long UnknownPeerRequests => Interlocked.Read(ref unknownPeerRequests);
 
     /// <summary>Malformed datagrams on our port. Rising means something else is talking to it.</summary>
@@ -599,8 +602,8 @@ public sealed class PluginBridgeHost : IDisposable
         if (handler is null)
         {
             if (Interlocked.Increment(ref trackBlocksDropped) == 1)
-                Notable?.Invoke("a plugin is sending its track, but nothing in the app is taking that audio yet - "
-                              + "sending FROM a DAW track is not wired up in this build");
+                Notable?.Invoke("a plugin is sending its track, but nothing in the app is taking that audio - "
+                              + "the blocks are counted and dropped (blocksInDropped)");
             return;
         }
         Guid id;

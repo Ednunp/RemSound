@@ -98,8 +98,10 @@ public sealed class PluginPeerClaims
         }
     }
 
-    /// <summary>How many instances hold this peer — for the diagnostic log, so "why is Andre silent
-    /// in the app" is answerable from a log file rather than by guesswork.</summary>
+    /// <summary>How many instances hold this peer. Read by the gate, to prove that two tracks on one
+    /// person are both counted and that one letting go leaves the other's claim standing. The log line
+    /// reports the claimed set instead (<see cref="ClaimedPeers"/>, via
+    /// <see cref="PluginBridgeHost.DescribeForLog"/>).</summary>
     public int ClaimCount(IPAddress peer)
     {
         lock (gate)

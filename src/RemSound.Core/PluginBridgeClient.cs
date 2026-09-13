@@ -18,9 +18,10 @@ namespace RemSound.Core;
 /// allocation on the audio thread can stall every plugin in the DAW, not just this one. Every buffer
 /// here is sized at construction and reused.</para>
 ///
-/// <para><b>Asking is the heartbeat.</b> Each block sends one ClaimPeer carrying the frames just
-/// consumed. That claims the peer (so it leaves the app's speakers), keeps the claim alive, and asks
-/// for the next block, all in one message. Stop playing and the claim lapses on its own — which is
+/// <para><b>Asking is the heartbeat.</b> Each block sends one ClaimPeers carrying the frames just
+/// consumed, the people on this track and the ask number. That claims them (so they leave the app's
+/// speakers), keeps the claims alive, and asks for the next block, all in one message. Stop playing
+/// and the claims lapse on their own — which is
 /// the right direction to fail, since a peer stuck silent everywhere is far worse than one that comes
 /// back through the speakers.</para>
 /// </summary>
@@ -110,8 +111,9 @@ public sealed class PluginBridgeClient : IDisposable
     /// <summary>Has the app answered us at all? Drives the plugin's status line.</summary>
     public bool Connected { get; private set; }
 
-    /// <summary>Blocks where the ring had nothing for the DAW. A few at startup are normal — the ring
-    /// is filling. A number that keeps climbing means the app isn't keeping up, and it belongs in the
+    /// <summary>Blocks the DAW got less than a full reply for: the reply for that block had not come,
+    /// or came back short, and the rest was left silent. A few at startup are normal — nothing has been
+    /// answered yet. A number that keeps climbing means the app isn't keeping up, and it belongs in the
     /// status readout rather than being left as a mystery crackle.</summary>
     public long StarvedBlocks => Interlocked.Read(ref blocksStarved);
 
@@ -134,7 +136,8 @@ public sealed class PluginBridgeClient : IDisposable
 
     /// <summary>How much audio is waiting for the DAW right now, in frames: the replies queued ahead
     /// of the block being played. Read on the log thread; a slot changing under it costs one wrong
-    /// number in a log line, nothing more.</summary>
+    /// number in a log line, nothing more. Named for the byte ring this queue replaced; the name is
+    /// kept because it is also the plugin log's column header.</summary>
     public int RingFrames
     {
         get
