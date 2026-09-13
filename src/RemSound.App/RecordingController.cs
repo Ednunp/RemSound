@@ -59,11 +59,6 @@ internal sealed class RecordingController
 
     public bool IsRecording => active is not null || meRecorder is not null || peerTracks is not null;
 
-    /// <summary>UTC clock at which the current recording started, or null when nothing is
-    /// recording. Captured by <see cref="Start"/> and cleared by <see cref="Stop"/>. Nothing
-    /// reads it at present.</summary>
-    public DateTime? RecordingStartedUtc { get; private set; }
-
     /// <summary>Optional callback fired when the user starts or stops a recording. The
     /// MainForm hooks this to flip the menu item text "Start recording" ↔ "Stop recording"
     /// and announce the change to NVDA.</summary>
@@ -146,7 +141,6 @@ internal sealed class RecordingController
                 MessageBoxIcon.Warning));
             return;
         }
-        RecordingStartedUtc = DateTime.UtcNow;
         RecordingStateChanged?.Invoke(true);
     }
 
@@ -170,7 +164,6 @@ internal sealed class RecordingController
         meRecorder = null;
         peerTracks = null;
         rawMixLen = 0;
-        RecordingStartedUtc = null;
 
         StopRecorder(single);
         StopRecorder(me);
