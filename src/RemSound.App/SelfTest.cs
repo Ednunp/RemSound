@@ -309,6 +309,12 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT: tight-latency capture reads integer PCM", AuditPushModeReadsIntegerCapture);
         RunStep(results, "AUDIT: a gate run touches no real settings and opens no real output", AuditGateRunTouchesNoRealSettingsOrOutputs);
         RunStep(results, "AUDIT: the About box carries only recent notes, and the history is kept in the repository", AuditAboutCarriesOnlyRecentNotes);
+        RunStep(results, "AUDIT: the About box's newest notes cover the whole release", AuditAboutNewestNotesCoverTheRelease);
+        RunStep(results, "AUDIT: the About notes call the jitter buffer by its name", AuditAboutNotesCallTheJitterBufferByItsName);
+        RunStep(results, "AUDIT: the colour theme's next-launch hint reaches a screen reader", AuditThemeHintReachesAScreenReader);
+        RunStep(results, "AUDIT: the missing-manual message speaks to users, not builders", AuditHelpMessageSpeaksToUsers);
+        RunStep(results, "AUDIT: Preferences messages name controls that exist", AuditPreferencesMessagesNameRealControls);
+        RunStep(results, "AUDIT: the jitter buffer box has one name, whatever it starts as", AuditJitterBufferHasOneName);
         RunStep(results, "AUDIT: re-opening an output is not network jitter (both output kinds)", AuditOutputReopenIsNotJitter);
         RunStep(results, "AUDIT: a settling WASAPI endpoint is not taken as a clock", AuditSettlingEndpointIsNotTakenAsAClock);
         RunStep(results, "AUDIT: after a wake the report bursts and splits network gaps from render gaps", AuditPostWakeBurstSplitsNetworkFromRender);

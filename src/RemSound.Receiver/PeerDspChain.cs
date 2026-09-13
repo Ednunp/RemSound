@@ -118,8 +118,8 @@ public sealed class PeerDspChain
     private static BiQuadFilter MakeBand(PeerEqMode mode, int index, int count, float freq, float gainDb)
     {
         // 3-band tone control: bass is a low shelf, treble a high shelf, mids a peaking band — the
-        // natural shape for a simple bass/mid/treble control. 10-band graphic EQ: peaking throughout,
-        // with a Q suited to roughly one-octave band spacing.
+        // natural shape for a simple bass/mid/treble control. The graphic EQ (twelve bands since it grew from
+        // ten; the enum keeps its old name): peaking throughout, with a Q suited to roughly one-octave spacing.
         if (mode == PeerEqMode.Simple3Band && index == 0)
             return BiQuadFilter.LowShelf(PeerEqBands.MixSampleRate, freq, 0.7f, gainDb);
         if (mode == PeerEqMode.Simple3Band && index == count - 1)

@@ -398,7 +398,9 @@ internal sealed class PreferencesDialog : Form
     {
         DropDownStyle = ComboBoxStyle.DropDownList,
         Width = 200,
-        AccessibleName = "Colour theme (Alt+T)",
+        // The "takes effect next launch" hint is a separate grey label a screen reader never reaches, so the
+        // name carries it too.
+        AccessibleName = "Colour theme, takes effect next launch (Alt+T)",
     };
 
     // Appearance tab — reorder the main-window tabs, and toggle the Connectivity-tab peer lists.
@@ -1325,7 +1327,7 @@ internal sealed class PreferencesDialog : Form
                 if (startupProfileList.Items.Count == 0)
                 {
                     MessageBox.Show(this,
-                        "You don't have any saved profiles yet. Save a profile first (File menu -> Save profile as), then come back here and pick it.",
+                        "You don't have any saved profiles yet. Save a profile first (File menu, Save as), then come back here and pick it.",
                         "No saved profiles", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     startWithProfileBox.Checked = false;
                     return;
@@ -1622,7 +1624,7 @@ internal sealed class PreferencesDialog : Form
         {
             MessageBox.Show(this,
                 $"No sound is currently configured for the {cue.DisplayName.ToLowerInvariant()}. " +
-                $"Use the Browse button on this row to pick a WAV file.",
+                "Pick one in the Choose sound list, or use the Browse button to choose your own WAV file.",
                 "RemSound", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }

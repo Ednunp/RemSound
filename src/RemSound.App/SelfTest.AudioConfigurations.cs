@@ -113,6 +113,7 @@ internal static partial class SelfTest
         new("PluginSendsWithNoCaptureDevice", "sender side, with nothing ticked in the app: that one state is the case under test, and the tag it reads is the sender's lane, not an output"),
         new("PluginLaneObeysTheHouseRules", "sender side: no password, mute and the recorder tap are the same SenderLane code in every sender mode; the route it reads is the plugin lane's own tag"),
         new("ThreeConcurrentStreamsFromOneSender", "about session identity on the receiver: three streams from one peer, one per lane tag, stay three sessions and a shared tag still supersedes; decode only, so no output is opened"),
+        new("AuditJitterBufferHasOneName", "reads the source for one stale name and anchors on the WASAPI-only label; the wording each configuration shows is set in UpdateBothIndependentVisibility, which the control suite runs in all three"),
     ];
 
     /// <summary>

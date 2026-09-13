@@ -299,7 +299,7 @@ public sealed partial class MainForm : Form
     private readonly ListBox sendRateBox = new() { Width = 240, Height = 40, IntegralHeight = false, AccessibleName = "Packet size (Alt+P)" };
     // Min 1 ms is intentionally aggressive — for LAN/localhost users who want to push it.
     // Values below ~10 ms cause audible crackling on any network with real jitter.
-    private readonly NumericUpDown maxLatencyBox = new() { Minimum = 1, Maximum = 500, Increment = 1, Value = 80, Width = 90, AccessibleName = "Jitter buffer in milliseconds (Alt+L)" };
+    private readonly NumericUpDown maxLatencyBox = new() { Minimum = 1, Maximum = 500, Increment = 1, Value = 80, Width = 90, AccessibleName = "Audio jitter buffer in milliseconds (Alt+L)" };
     // One-shot "Tune latency for best sound" button retired — continuous auto-tune covers
     // the same job, and the manual button confused users by sitting next to the auto-tune
     // checkbox doing almost the same thing in a less convenient one-shot shape.
@@ -1235,8 +1235,6 @@ public sealed partial class MainForm : Form
         };
         healthLabel.AccessibleName = "Connection health";
         statusLabel.AccessibleName = "Status";
-        codecBox.AccessibleName = "Audio codec (Alt+C)";
-        maxLatencyBox.AccessibleName = "Jitter buffer in milliseconds (Alt+L)";
 
         // --- Populate static choices ---
         // Three transport choices, ordered most-tolerant-of-bad-networks to most-demanding:

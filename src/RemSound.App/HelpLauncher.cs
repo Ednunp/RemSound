@@ -24,7 +24,7 @@ internal static class HelpLauncher
         if (!File.Exists(path))
         {
             MessageBox.Show(
-                $"Manual not found at:\n\n{path}\n\nThe readme.html file should sit next to RemSound.exe. Re-publishing the build will restore it.",
+                $"Manual not found at:\n\n{path}\n\nThe readme.html file should sit next to RemSound.exe. Unzipping RemSound again, or reinstalling it, will put it back.",
                 "Manual not found",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);

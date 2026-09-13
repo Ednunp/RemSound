@@ -29,17 +29,21 @@ internal sealed class AboutDialog : Form
 
         You install it from the new DAW plugin menu, which puts it in your own plugin folder — no administrator password, nothing outside your account touched. Keep RemSound open while you work; it holds the connection and the plugin asks it for audio, so your password, peers and audio settings stay where you already set them.
 
-        When a track takes somebody, they stop coming out of RemSound's own output, so you never hear anyone twice. Let the track go and they come straight back. There is nothing to set.
+        When a track takes somebody, they stop coming out of RemSound's own output, so you never hear anyone twice. Let the track go and they come straight back. A peer's volume, pan and EQ come through to the track as well; untick "Apply pan and EQ to plugin audio" in the DAW plugin menu if you would rather have the raw signal.
 
         The plugin's window is built from ordinary Windows controls, so a screen reader reads it the way it reads RemSound itself. If your music software makes that window awkward to reach, the same three choices are also plugin parameters, which every DAW lists.
 
-        Section 25 of the manual walks through all of it.
+        One limit worth knowing: your music software cannot allow for the network delay, so a track recorded through the plugin sits a little late and needs nudging back.
+
+        If you do not use a DAW, nothing changes. RemSound listens for plugins on your own machine only, and "Let plugins connect to RemSound" in the DAW plugin menu turns even that off. Section 25 of the manual walks through all of it.
+
+        The rest of this release is a careful pass over sending, receiving and recording. Turning off Send my audio now stops the ASIO side too. With both kinds of output ticked, recordings keep every block, and a WAV recording stops cleanly at the 4 GB limit. The Total latency box reads the outputs you are actually using and no longer counts the jitter buffer twice. An output that Windows quietly stops comes back on its own within a few seconds, including after sleep, and waking the computer restarts the audio with the buffer sizes you had before. Several capture sources sent at once now stay in time with each other. Every Alt key has been checked against what the screen says, and with logging on, what you change is written to the log.
 
         RemSound v5.9
 
-        The audio latency control now works properly while you're listening.
+        The jitter buffer control now works properly while you're listening.
 
-        On most setups, moving the latency control while sound was playing did nothing at all — neither up nor down. It only took effect if you set it before connecting. Two things were wrong: the control was writing its value where the audio never looked, and even when it landed, a change crept in so slowly that a big move took over two minutes to arrive. Both are fixed. Move it now and the delay follows within a few seconds, with no gap or click — raising it stretches the sound very slightly for a moment while the extra cushion builds up, which is the change happening. Automatic latency tuning was affected by the same fault and now works too.
+        On most setups, moving the jitter buffer control while sound was playing did nothing at all — neither up nor down. It only took effect if you set it before connecting. Two things were wrong: the control was writing its value where the audio never looked, and even when it landed, a change crept in so slowly that a big move took over two minutes to arrive. Both are fixed. Move it now and the delay follows within a few seconds, with no gap or click — raising it stretches the sound very slightly for a moment while the extra cushion builds up, which is the change happening. Automatic tuning of the jitter buffer was affected by the same fault and now works too.
 
         Setups with separate WASAPI and ASIO controls were the one case that already worked, and they keep their two independent settings exactly as before.
 
