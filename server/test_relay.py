@@ -172,5 +172,65 @@ class HeaderGate(unittest.TestCase):
         self.assertEqual(len(r.v2_clients), 0)
 
 
+class _CapturedLog(logging.Handler):
+    """Keeps every formatted log message so a test can read what the relay actually wrote."""
+
+    def __init__(self):
+        super().__init__(logging.INFO)
+        self.messages: list[str] = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+def _key_values(line: str) -> dict[str, str]:
+    """Split an event=... log line into its key=value fields (words without '=' are ignored)."""
+    return dict(part.split("=", 1) for part in line.split() if "=" in part)
+
+
+class StatsLog(unittest.TestCase):
+    """The address-proof counters are the evidence for deciding when --require-addr-check can be
+    switched on. They used to be counted and never written anywhere, so nobody could see them."""
+
+    def _relay_with_log(self, require_addr_check: bool):
+        log = logging.getLogger(f"remsound-relay-test-stats-{uuid.uuid4()}")
+        log.propagate = False
+        log.setLevel(logging.INFO)
+        captured = _CapturedLog()
+        log.addHandler(captured)
+        return relay.Relay(FakeSocket(), log, 10, require_addr_check=require_addr_check), captured
+
+    def test_addr_check_counters_logged_each_interval_then_reset(self):
+        for enforce, mode in ((False, "watch-only"), (True, "ENFORCED")):
+            with self.subTest(mode=mode):
+                r, captured = self._relay_with_log(require_addr_check=enforce)
+                # Distinct values, so a counter written under the wrong name cannot pass.
+                r.stats.addr_checks_verified = 3
+                r.stats.blocked_unverified = 5
+                r.stats.would_block_unverified = 7
+                r.stats.rejected_ip_cap = 11
+                start = r.last_stats_log
+                r.maybe_log_stats(start + relay.STATS_INTERVAL_SECONDS / 2)
+                self.assertFalse(any(m.startswith("event=addr_check_stats") for m in captured.messages),
+                                 "nothing is logged before the stats interval has passed")
+                r.maybe_log_stats(start + relay.STATS_INTERVAL_SECONDS + 1)
+                lines = [m for m in captured.messages if m.startswith("event=addr_check_stats ")]
+                self.assertEqual(len(lines), 1, "one address-proof stats line per interval")
+                fields = _key_values(lines[0])
+                self.assertEqual(fields.get("addr_check"), mode, "the line must say whether enforcement is on")
+                self.assertEqual(fields.get("addr_checks_verified"), "3")
+                self.assertEqual(fields.get("blocked_unverified"), "5")
+                self.assertEqual(fields.get("would_block_unverified"), "7")
+                self.assertEqual(fields.get("rejected_ip_cap"), "11")
+                self.assertTrue(any(m.startswith("event=stats forwarded=") for m in captured.messages),
+                                "the existing event=stats line must still be written")
+                self.assertEqual(
+                    (r.stats.addr_checks_verified, r.stats.blocked_unverified,
+                     r.stats.would_block_unverified, r.stats.rejected_ip_cap),
+                    (0, 0, 0, 0),
+                    "the counters start again from zero for the next interval",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,7 +13,8 @@
 # Never hand-zip publish/ again. Run this. If it aborts, the release does not ship.
 #
 # Usage:
-#   powershell -ExecutionPolicy Bypass -File build-release.ps1 -Tag v1.7
+#   powershell -ExecutionPolicy Bypass -File build-release.ps1 -Tag v<Version>
+#   (for example -Tag v6.0 when src\RemSound.App\RemSound.App.csproj has <Version>6.0</Version>)
 #
 # The -Tag value must match the GitHub release tag. The zip is named RemSound-<Tag>.zip
 # because the in-app updater downloads exactly that asset name (AssetNameTemplate in
@@ -85,21 +86,16 @@ if ($sfk.Count -gt 0) {
 $syncScript = Join-Path $repo 'sync-manual.py'
 if (Test-Path $syncScript) {
     Write-Host "Syncing MANUAL.md from readme.html..." -ForegroundColor Cyan
-    # Look for a real Python interpreter — must actually RUN, not just exist. Windows ships
-    # "Microsoft Store" execution aliases for 'py' and 'python' that fail with exit 9009 and
-    # a "go install from the Store" message instead of running anything, so a plain
-    # Get-Command check isn't enough. Test each candidate with 'python --version' first and
-    # only treat a 0-exit result as a real install. Falls back to a couple of known user-
-    # local install paths if no PATH-resolved candidate works.
-    # Find a real Python interpreter. Tricky on Windows because:
-    #   - The 'py' launcher passes --version queries but can refuse to run scripts when its
-    #     registry-based interpreter lookup misses (seen on this dev box: 'py --version'
-    #     prints 3.11.9 but 'py sync-manual.py' falls through to the Microsoft Store stub).
-    #   - The 'python' command is by default an execution alias to the Microsoft Store install
-    #     prompt — it accepts the call, exits with 9009, and prints "go install from the Store".
-    # So we run an actual one-line script via -c with each candidate and accept the candidate
-    # only if the script ran (output matches our expected sentinel). User-local Python install
-    # paths come first because they're the most reliable way to skip past the Store alias.
+    # Find a Python that really RUNS and has html2text, the module sync-manual.py imports. Checking
+    # that a command exists is not enough on Windows:
+    #   - 'python' is by default a Microsoft Store execution alias: it accepts the call, exits 9009
+    #     and prints "go install from the Store" instead of running anything.
+    #   - The 'py' launcher can answer --version yet fail to run a script when its registry lookup
+    #     misses (seen on the dev box: 'py --version' printed 3.11.9, 'py sync-manual.py' hit the
+    #     Store stub).
+    # So each candidate must run a one-line script and print a sentinel, and then show that it can
+    # import html2text. User-local installs come first: they are the most reliable way past the
+    # Store alias.
     $candidates = @(
         (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313\python.exe'),
         (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe'),
@@ -108,27 +104,47 @@ if (Test-Path $syncScript) {
         'py', 'python3', 'python'
     )
     $pythonCmd = $null
+    $pythonWithoutHtml2text = $null
     foreach ($candidate in $candidates) {
         if (-not $candidate) { continue }
         try {
             $sentinel = & $candidate -c "print('PYOK')" 2>&1
-            if ($LASTEXITCODE -eq 0 -and ($sentinel -join '') -match 'PYOK') {
+            if ($LASTEXITCODE -ne 0 -or ($sentinel -join '') -notmatch 'PYOK') { continue }
+        } catch { continue }
+        # A real interpreter. Now html2text. find_spec answers on stdout either way, so a missing
+        # module can't turn into a stderr error record under $ErrorActionPreference = 'Stop'.
+        try {
+            $probe = & $candidate -c "import importlib.util; print('H2T-OK' if importlib.util.find_spec('html2text') else 'H2T-MISSING')" 2>&1
+            if ($LASTEXITCODE -eq 0 -and ($probe -join '') -match 'H2T-OK') {
                 $pythonCmd = $candidate
                 break
             }
-        } catch { continue }
+        } catch { }
+        if (-not $pythonWithoutHtml2text) { $pythonWithoutHtml2text = $candidate }
     }
-    if (-not $pythonCmd) { throw "Python not found - cannot sync MANUAL.md. Install Python 3.x and re-run." }
+    if (-not $pythonCmd) {
+        if ($pythonWithoutHtml2text) {
+            throw "Python found ($pythonWithoutHtml2text) but it has no html2text module, which sync-manual.py needs. Install it with: & '$pythonWithoutHtml2text' -m pip install html2text  - then re-run."
+        }
+        throw "Python not found - cannot sync MANUAL.md. Install Python 3.x and its html2text module (python -m pip install html2text), then re-run."
+    }
     Write-Host "Using Python: $pythonCmd" -ForegroundColor DarkGray
     & $pythonCmd $syncScript
     if ($LASTEXITCODE -ne 0) { throw "sync-manual.py failed (exit $LASTEXITCODE)" }
 
-    # Refuse to ship a release when MANUAL.md is uncommitted relative to readme.html.
-    # 'git diff --quiet -- MANUAL.md' exits 0 if no change, 1 if there is one.
-    & git -C $repo diff --quiet -- MANUAL.md
-    if ($LASTEXITCODE -eq 1) {
+    # Refuse to ship a release when MANUAL.md differs from the last COMMIT. Compare with HEAD, not
+    # with the staging area: plain 'git diff' compares the working tree with the index, so a
+    # regenerated MANUAL.md that had been 'git add'ed but never committed looked clean and got past.
+    # 'git diff --quiet HEAD -- MANUAL.md' exits 0 = same as HEAD, 1 = different, other = git error.
+    & git -C $repo diff --quiet HEAD -- MANUAL.md
+    $manualDiffExit = $LASTEXITCODE
+    if ($manualDiffExit -ne 0 -and $manualDiffExit -ne 1) {
+        Write-Host "RELEASE ABORTED - git could not compare MANUAL.md with the last commit (git exit $manualDiffExit)." -ForegroundColor Red
+        exit 1
+    }
+    if ($manualDiffExit -eq 1) {
         Write-Host ""
-        Write-Host "RELEASE PAUSED - MANUAL.md was regenerated and now differs from the committed copy." -ForegroundColor Yellow
+        Write-Host "RELEASE PAUSED - MANUAL.md differs from the committed copy (changed, or staged but not committed)." -ForegroundColor Yellow
         Write-Host "Commit the updated MANUAL.md alongside this release before re-running build-release.ps1:" -ForegroundColor Yellow
         Write-Host "    git add MANUAL.md" -ForegroundColor Yellow
         Write-Host "    git commit -m 'Refresh MANUAL.md from readme.html'" -ForegroundColor Yellow
@@ -160,9 +176,10 @@ if (Test-Path $gate) {
 # Anything matching these must NEVER appear in a release. Folders by name; files by
 # extension / exact name. RemSound.deps.json and RemSound.runtimeconfig.json are
 # legitimate app files and are deliberately NOT matched (different names).
-# 'user settings and logs' added 2026-06-10: that one folder now holds global config, profiles,
-# logs AND cue sounds, so forbidding it catches all the user state in one rule. The legacy 'config',
-# 'profiles' and 'remsound.config.json' rules stay for any pre-migration leftovers.
+# 'user settings and logs' is the one folder that holds all per-user state (global config, profiles
+# and logs), so forbidding it catches all of it in one rule. The legacy 'config', 'profiles' and
+# 'remsound.config.json' rules stay for any pre-migration leftovers. (The shipped cue sounds are not
+# user state: they live in 'default sounds\' and are meant to ship.)
 $forbiddenFolders = @('logs', 'profiles', 'recordings', 'config', 'user settings and logs')
 function Test-Forbidden([string]$path) {
     $p = $path -replace '\\', '/'
@@ -225,16 +242,24 @@ if ($leaked.Count -gt 0) {
     exit 1
 }
 
-Remove-Item $staging -Recurse -Force
-
 # 6. SIGN the zip (2026-07-27). The updater REFUSES any release without a valid signature, so an
 #    unsigned zip would be rejected by every 5.6+ install - failing the pipeline here is the kind
 #    failure. --sign-update signs with the private key (outside the repo) and self-checks against
-#    the public key embedded in this very build, so a key/embed mismatch also stops the release.
+#    the public key embedded in the build, so a key/embed mismatch also stops the release.
+#    It signs with THIS run's build: the RemSound.exe in the staging folder the zip was just made
+#    from. Never publish\RemSound.exe - that is a hand-test copy, which can be stale (an older
+#    embedded key) or missing altogether on a fresh clone. The zip is already finished and checked
+#    above, so anything the exe writes into staging as it starts cannot reach it, and staging is
+#    deleted straight after.
 $sigPath = "$zipPath.sig"
-& (Join-Path $repo 'publish\RemSound.exe') --sign-update $zipPath | Write-Host
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $sigPath)) {
+& (Join-Path $staging 'RemSound.exe') --sign-update $zipPath | Write-Host
+$signExit = $LASTEXITCODE
+Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue
+if ($signExit -ne 0 -or -not (Test-Path -LiteralPath $sigPath)) {
     Write-Host "RELEASE ABORTED - could not sign the zip (see message above). Nothing published." -ForegroundColor Red
+    # An unsigned zip must not be left in dist\ where it could be uploaded by hand.
+    Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+    Remove-Item $sigPath -Force -ErrorAction SilentlyContinue
     exit 1
 }
 Write-Host "Signed: $sigPath" -ForegroundColor Green

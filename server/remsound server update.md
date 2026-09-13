@@ -1,3 +1,5 @@
+> **Historical design document, not current.** It was written before the lobby relay was built, and the shipped relay differs from it: for example, the lobby lives in `remsound-relay.py` and there is no `remsound-lobby.py`. For the current relay, see [README.md](README.md).
+
 # RemSound relay upgrade — lobby model with auto-updates
 
 Design + ops handover for upgrading the existing `remsound-relay.py` from a two-slot pairing reflector to a small lobby-style multi-peer relay. Same bundle works on a Raspberry Pi (the existing deployment) and on a full Linux host (Andre's box). Includes a self-update mechanism so once a host is on the new bundle, future releases roll out without anyone manually copying files.
@@ -374,7 +376,7 @@ When we cut a new server release:
 1. Bump version in `VERSION` and in `remsound-relay.py`'s startup-log line.
 2. Tag: `git tag server-v2.1 && git push origin server-v2.1`.
 3. `tar czf remsound-server-v2.1.tar.gz remsound-server-v2.1/` (where the folder is a staging area with the bundle contents).
-4. `gh release create server-v2.1 remsound-server-v2.1.tar.gz --title "server v2.1" --notes "…"`.
+4. `gh release create server-v2.1 remsound-server-v2.1.tar.gz --latest=false --title "server v2.1" --notes "…"`. Always `--latest=false` (GitHub's "Latest" label belongs to the Windows app) and never `--prerelease` (the relay updater skips pre-releases).
 5. Within an hour, every running relay's updater catches the release, downloads it, restarts the service.
 
 We can additionally publish a `.sha256` alongside if we want signature-style integrity checks; not strictly required because GitHub serves the tarball over HTTPS.

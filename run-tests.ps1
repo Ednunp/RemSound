@@ -26,8 +26,7 @@ $csprojText = Get-Content -LiteralPath $proj -Raw
 $expectedVersion = if ($csprojText -match '<Version>([^<]+)</Version>') { $Matches[1].Trim() } else { '' }
 $expectedMM = ($expectedVersion -split '\.')[0..1] -join '.'   # major.minor, e.g. 3.9
 
-# ---- 1. BUILD: publish to a throwaway folder (the app is never run here yet, so the bundled
-#         sounds\ folder stays intact for the package checks below) ----
+# ---- 1. BUILD: publish to a throwaway folder ----
 # A STABLE folder, deliberately not a fresh GUID per run. Windows Firewall keys its allow rules
 # on the program path, so a new random path meant a brand-new "allow RemSound to communicate on
 # these networks?" prompt on EVERY gate run — the app binds UDP 47821 (discovery) and 47830 (audio)
@@ -74,6 +73,11 @@ foreach ($extra in @('key 1.wav', 'passkey.wav')) {
 }
 if (Test-Path -LiteralPath (Join-Path $publishDir 'readme.html')) { Pass "readme.html (F1 manual) bundled" } else { Fail "readme.html missing" }
 if (Test-Path -LiteralPath (Join-Path $publishDir 'runtimes\win-x64\native\opus.dll')) { Pass "native opus.dll bundled" } else { Fail "native opus.dll missing (runtimes\win-x64\native\)" }
+# The VST plugin ships in a plugin\ folder next to the exe. RemSound.App.csproj copies it in after
+# publish with ContinueOnError, so a failed copy would not stop the build. The DAW plugin menu's
+# Install plugin copies from that folder, so an empty or missing one leaves it nothing to install.
+$pluginFiles = @(Get-ChildItem -LiteralPath (Join-Path $publishDir 'plugin') -File -Recurse -ErrorAction SilentlyContinue)
+if ($pluginFiles.Count -gt 0) { Pass "VST plugin bundled (plugin\ holds $($pluginFiles.Count) files)" } else { Fail "plugin\ folder missing or empty - the DAW plugin menu's Install plugin would have nothing to install" }
 if (Test-Path -LiteralPath (Join-Path $publishDir 'coreclr.dll')) { Fail "self-contained build (coreclr.dll present) - releases must be framework-dependent" } else { Pass "framework-dependent (no coreclr.dll)" }
 
 # built assembly version must match the csproj
@@ -137,15 +141,14 @@ else {
     Remove-Item $rtOut, $rtErr -Force -ErrorAction SilentlyContinue
     if ($rp.ExitCode -eq 0) {
         $ran = if ($rtText -match 'Ran (\d+) test') { $Matches[1] } else { '?' }
-        Pass "relay logic tests passed ($ran tests: addr-proof, enforce/watch, IP cap, rebind, forged-BYE, header gate)"
+        Pass "relay logic tests passed ($ran tests: addr-proof, enforce/watch, IP cap, rebind, forged-BYE, header gate, stats log)"
     }
     else {
         Fail "relay logic tests FAILED:`n$rtText"
     }
 }
 
-# ---- 4. CLI SURFACE + IN-APP SELF-TEST (these launch the app, which consolidates sounds away;
-#         that's why the package checks ran first) ----
+# ---- 4. CLI SURFACE + IN-APP SELF-TEST (these launch the app) ----
 # The gate is run from a throwaway PUBLISH folder, so it cannot find the source tree by looking
 # around itself. One check needs it: the event-coverage guard reads every "+=" handler wiring out of
 # the source and insists each one is named in a spec. Handing it the repo path here is what keeps
@@ -219,9 +222,10 @@ else {
         if (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) { Pass "GUI cold-started and stayed up (minimized to tray)" }
         else { Fail "GUI exited or crashed during cold start" }
 
-        # The process creates its user-data folder at the --config-dir override (MigrateLegacyLayout),
-        # so the override folder existing afterwards proves it honoured --config-dir and left the real
-        # settings alone. (Sounds are NOT here - they're install-side now.)
+        # The process creates its user-data folder at the --config-dir override
+        # (AppConfig.MigrateLegacyLayoutIfNeeded), so the override folder existing afterwards proves it
+        # honoured --config-dir and left the real settings alone. (Cue sounds are never in that folder:
+        # the shipped defaults live in 'default sounds\' next to the exe.)
         if (Test-Path -LiteralPath $testCfg) { Pass "ran against the isolated --config-dir folder (real settings untouched)" }
         else { Fail "--config-dir folder was not created - config isolation may not be working" }
 

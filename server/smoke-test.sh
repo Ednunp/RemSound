@@ -1,9 +1,15 @@
 #!/bin/bash
 # smoke-test.sh — Quick health check for the RemSound relay + auto-updater.
 #
-# Run after install. Confirms the relay service is running, listening on
+# Run straight after install. Confirms the relay service is running, listening on
 # UDP 47830, accepts both a v1 and a v2 valid RemSound header, and that
 # the auto-updater scaffolding is in place.
+#
+# INSTALL TIME ONLY. The synthetic v1 and v2 packets come from 127.0.0.1 and
+# the relay treats them as real clients: each holds a slot until it has been
+# idle for 60 seconds. On a relay that is in use, the v1 packet can take the
+# second pair slot and lock a real peer out for up to a minute. Run it before
+# anyone connects, never on a relay people are using.
 
 set -u
 

@@ -9,6 +9,11 @@
 server/*.sh text eol=lf
 server/*.py text eol=lf
 server/*.service text eol=lf
+server/*.timer text eol=lf
 
 # .ps1 stays as-is — PowerShell handles either, but Windows tooling prefers CRLF.
 *.ps1 text eol=crlf
+
+# Windows batch files keep CRLF. cmd.exe can misread labels and GOTO targets in a batch file that
+# has LF-only line endings.
+*.cmd text eol=crlf
