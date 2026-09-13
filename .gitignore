@@ -47,3 +47,21 @@ gh-token.txt
 
 # Personal side-projects that must never ship to GitHub (untracked by design)
 pi-sender/
+
+# Personal data: tester and user log bundles, evidence zips, anything zipped at the top of the repo.
+# Logs carry IP addresses and a profile can carry a recoverable password; none of it belongs in a
+# public repository. Release zips live in dist/, ignored above.
+/*.zip
+
+# Working notes that name testers or local folders. Kept on the author's machine only.
+AUDIT-*.md
+FINDINGS-*.md
+PLUGIN-*.md
+TEST-QUALITY-*.md
+
+# Old build copies and generated output.
+_deploy/
+__pycache__/
+lab-*.txt
+latency-lab-*.txt
+suite-*.txt
