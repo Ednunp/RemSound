@@ -9,11 +9,10 @@ namespace RemSound.Receiver;
 /// <list type="bullet">
 ///   <item>WasapiOnly: WASAPI child reads <see cref="PlayoutEngine"/> directly; no ASIO in
 ///         the path. Used when no ASIO driver is selected.</item>
-///   <item>BothIndependent: WASAPI and ASIO children each get their own consumer view from a
-///         shared <see cref="FanOutSource"/>. The FanOut pulls from PlayoutEngine on demand
-///         and caches so both views see the same samples without one consumer slowing the
-///         other. Neither backend pays the classic-Both master-producer tee's ~5–10 ms
-///         buffer headroom — each lane runs at its native callback rate.</item>
+///   <item>BothIndependent: WASAPI and ASIO children each read their own lane-filtered surface
+///         from PlayoutEngine (<see cref="PlayoutEngine.WasapiLaneOutput"/> /
+///         <see cref="PlayoutEngine.AsioLaneOutput"/>) — no shared source, no cache, and each
+///         lane runs at its native callback rate.</item>
 /// </list>
 /// BothIndependent without a driver name runs as WasapiOnly.
 /// </summary>
@@ -23,13 +22,10 @@ internal sealed class CompositeRenderBackend : IRenderBackend
     private readonly Action<string>? onDiagnostic;
     private readonly object gate = new();
 
-    // BothIndependent no longer uses a shared FanOut between the two render backends — each
-    // backend reads directly from its own lane-filtered source (PlayoutEngine.WasapiLaneOutput /
-    // AsioLaneOutput). Those surfaces filter PlayoutEngine's session snapshot by RenderRoute,
-    // so the WASAPI consumer's Read only advances WasapiLane sessions and the ASIO consumer's
-    // Read only advances AsioLane sessions. The two lanes are fully independent — no shared
-    // cache, no cross-lane interference, neither lane pays a cache-age penalty when the other
-    // is also playing.
+    // In BothIndependent each backend reads directly from its own lane-filtered source
+    // (PlayoutEngine.WasapiLaneOutput / AsioLaneOutput), which filter PlayoutEngine's session
+    // snapshot by RenderRoute. No shared cache, and neither lane pays a cache-age penalty when the
+    // other is also playing.
     private readonly MultiOutputPlayout? wasapi;
     private readonly AsioRenderBackend? asio;
     // What is actually TICKED, so the log can name the configuration rather than only the mode.
@@ -52,9 +48,8 @@ internal sealed class CompositeRenderBackend : IRenderBackend
 
         if (!usesAsio)
         {
-            // MultiOutputPlayout reads PlayoutEngine directly — no master producer, no tee.
-            // Sessions in WasapiOnly mode are all on RenderRoute.Mixed (the legacy single-knob
-            // world), and the all-sessions Read does the right thing.
+            // MultiOutputPlayout reads PlayoutEngine's all-sessions Read directly, which sums every
+            // stream whatever lane it is tagged with — the single-lane world.
             wasapi = new MultiOutputPlayout(source, msg => onDiagnostic?.Invoke($"wasapi out: {msg}"));
         }
         else
@@ -66,8 +61,8 @@ internal sealed class CompositeRenderBackend : IRenderBackend
             // Each consumer's Read only advances its own lane's sessions, so the two
             // consumers can run on independent threads at independent rates without one
             // starving the other. Crucially: neither lane pays a cache-age overhead. ASIO
-            // reads its own audio at its native callback latency, exactly as it would in a
-            // hypothetical AsioOnly setup — even when WASAPI is also actively playing.
+            // reads its own audio at its native callback latency, exactly as it would in an
+            // ASIO-only configuration — even when WASAPI is also actively playing.
             // The previous implementation wrapped a single FanOut around the whole engine,
             // which (a) made both lanes play the combined mix instead of per-lane audio and
             // (b) added up to one WASAPI tick (~10 ms) of cache-age latency to whichever
@@ -84,12 +79,6 @@ internal sealed class CompositeRenderBackend : IRenderBackend
     /// through the ticked-device set, so there is no equivalent flag to raise here. See
     /// <see cref="MultiOutputPlayout.HasFaultedOutput"/> for what this is for. 2026-08-26.</summary>
     public bool HasFaultedOutput => wasapi?.HasFaultedOutput ?? false;
-
-    // TakeMaxFanOutCacheBytes removed 2026-05-23. The FanOutSource architecture was retired
-    // in mid-May when each lane got its own filtered PlayoutEngine source — there's no shared
-    // cache to measure any more, so the method always returned 0. The receiver-side
-    // pass-through (AudioReceiver.TakeMaxFanOutCacheMs) and the fanCacheMs= diag column were
-    // removed alongside it.
 
     public string ActiveDeviceSummary
     {
@@ -196,10 +185,8 @@ internal sealed class CompositeRenderBackend : IRenderBackend
         }
         if (wasapi is not null) wasapi.SetOutputDevices(wasapiIds);
         if (asio is not null) asio.SetOutputDevices(asioIds);
-        // No FanOut bookkeeping any more — each lane's source is independent, so consumer
-        // activity / inactivity doesn't affect the other lane's read path. The "skip the
-        // pull when no outputs are ticked" behaviour now lives inside MultiOutputPlayout's
-        // producer loop, which short-circuits source.Read when outputs.Count == 0.
+        // The "skip the pull when no outputs are ticked" behaviour lives inside MultiOutputPlayout's
+        // producer loop, which skips source.Read while no output is open.
 
         // Tell the PlayoutEngine which lanes have an active output device. ReadForRoute
         // uses this to route "orphan" sessions (those whose announced lane has no active
@@ -252,9 +239,4 @@ internal sealed class CompositeRenderBackend : IRenderBackend
     /// </summary>
     internal static string RenderStartLabel(string modeLabel, bool wasapiTicked, bool asioTicked) =>
         $"configuration={RemSound.Core.AudioConfigurations.From(wasapiTicked, asioTicked).Describe()}, mode={modeLabel}";
-
-    // FanOutSource and SwitchableSource have been removed (2026-05-13). The BothIndependent
-    // rewiring put each lane on its own filtered PlayoutEngine.{Wasapi,Asio}LaneOutput
-    // surface, so there is no shared source for two consumers to fight over and no cache
-    // to manage. Either class can be reintroduced if a future routing shape needs them.
 }

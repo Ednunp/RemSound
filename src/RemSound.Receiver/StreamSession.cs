@@ -6,10 +6,11 @@ using RemSound.Core;
 namespace RemSound.Receiver;
 
 /// <summary>
-/// Owns the per-sender decode pipeline. One sender = one StreamSession at a time. When a new
-/// sender appears (different remote endpoint, or stream/codec change), the receiver swaps in a
-/// new session — old buffered audio drains out of the playout buffer naturally during the
-/// swap rather than being thrown away mid-playback.
+/// Owns the decode pipeline for one incoming stream, keyed by (sender endpoint, stream id) — a
+/// sender with several lanes has one per lane. When a stream's format changes, the receiver swaps
+/// in a new StreamSession over the same SessionPlayout, so buffered audio drains out naturally
+/// rather than being thrown away mid-playback; a stream id the sender has rotated away from on
+/// the same lane is superseded and closed.
 ///
 /// All work runs on the network listener's thread. No locks; the only cross-thread interaction
 /// is writing decoded float frames to the SPSC <see cref="AudioRingBuffer"/>.

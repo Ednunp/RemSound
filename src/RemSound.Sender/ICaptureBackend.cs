@@ -3,15 +3,17 @@ using RemSound.Core;
 namespace RemSound.Sender;
 
 /// <summary>
-/// Abstraction over the capture-side audio backend so <see cref="AudioSender"/> can be wired
-/// to either a WASAPI implementation (today's <see cref="MixingEngine"/>) or an ASIO
-/// implementation (<see cref="AsioCaptureBackend"/>) without caring which is in use.
+/// Abstraction over the capture-side audio backend so <see cref="AudioSender"/> doesn't care which
+/// is in use. It holds a <see cref="CompositeCaptureBackend"/>, which runs a WASAPI implementation
+/// (<see cref="MixingEngine"/>, or <see cref="PushModeWasapiBackend"/> for a single source in tight
+/// latency) and, when an ASIO driver is chosen, <see cref="AsioCaptureBackend"/>. The VST plugin
+/// implements it too, with the DAW as the device.
 ///
-/// Both backends produce 48 kHz stereo float frames via the constructor-supplied
-/// <c>onMixedSamples</c> callback and accept the same <see cref="CaptureSourceSpec"/> identity
+/// Every backend produces 48 kHz stereo float frames via the constructor-supplied
+/// <c>onMixedSamples</c> callback and accepts the same <see cref="CaptureSourceSpec"/> identity
 /// model. ASIO specs use a synthetic <see cref="CaptureSourceSpec.DeviceId"/> of the form
-/// <c>"asio:&lt;driver-name&gt;|&lt;channel-pair-index&gt;"</c>; WASAPI specs use the
-/// MMDevice ID.
+/// <c>"asio:&lt;channel-pair-index&gt;"</c>; WASAPI specs use the MMDevice ID, and a
+/// per-application source uses <c>"proc:&lt;pid&gt;"</c>.
 /// </summary>
 internal interface ICaptureBackend : IDisposable
 {
@@ -107,7 +109,7 @@ internal interface ICaptureBackend : IDisposable
     void Start(IReadOnlyList<CaptureSourceSpec> specs);
 
     /// <summary>Live-update of the active source set without stopping the mix loop. Adds/removes
-    /// only the sources that actually changed. Behaviour parity expected from both backends.</summary>
+    /// only the sources that actually changed. Behaviour parity expected from every backend.</summary>
     void UpdateSources(IReadOnlyList<CaptureSourceSpec> specs);
 
     void Stop();

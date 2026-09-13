@@ -7,7 +7,7 @@ namespace RemSound.Sender;
 /// <summary>
 /// Public static helpers for the App layer to enumerate ASIO drivers and probe their channel
 /// counts and channel names without needing access to the internal
-/// <see cref="AsioCaptureBackend"/> / <see cref="AsioRenderBackend"/> implementation classes.
+/// <see cref="AsioCaptureBackend"/> / <c>AsioRenderBackend</c> (RemSound.Receiver) implementation classes.
 /// These are read-only queries: opening the driver briefly to read its info, then closing —
 /// does NOT claim the device for streaming.
 /// </summary>

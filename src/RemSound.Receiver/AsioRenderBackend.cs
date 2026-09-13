@@ -12,19 +12,19 @@ namespace RemSound.Receiver;
 /// Spec identity: each output ID is a synthetic <c>"asio:&lt;channel-pair-index&gt;"</c>. Pair 0
 /// = ASIO output channels 0+1, pair 1 = 2+3, etc. The driver itself is locked at construction.
 ///
-/// Same simplifications as <see cref="AsioCaptureBackend"/>: 48 kHz fixed; driver is single
-/// per session. Always opens the AsioOut with the driver's full output channel count so that
-/// adding/removing channel pairs never requires reopening the driver — important when the
-/// sender and receiver are both holding the same single-client driver (Komplete Audio etc.):
-/// reopening one while the other is alive caused 15-second freezes.
+/// Same simplifications as the sender's <c>AsioCaptureBackend</c>: 48 kHz fixed; driver is single
+/// per session. The driver is opened full duplex through <see cref="SharedAsioDevice"/> with its
+/// full output channel count, so adding/removing channel pairs never requires reopening it —
+/// important on single-client drivers (Komplete Audio etc.), where reopening one side while the
+/// other was alive once caused 15-second freezes.
 /// </summary>
 internal sealed class AsioRenderBackend : IRenderBackend
 {
     private const int MixSampleRate = 48000;
     private const int MixChannels = 2;
 
-    // Same reasoning as MultiOutputPlayout — source typed as IWaveProvider so the composite
-    // backend can hand us a tee'd buffer.
+    // Typed as IWaveProvider, like MultiOutputPlayout's, so the composite backend can hand us
+    // PlayoutEngine's ASIO lane surface rather than the engine itself.
     private readonly IWaveProvider source;
     private readonly Action<string>? onDiagnostic;
     private readonly string driverName;
@@ -65,7 +65,7 @@ internal sealed class AsioRenderBackend : IRenderBackend
     }
 
     /// <summary>ASIO pulls straight from the playout engine — there is no intermediate buffer to
-    /// queue in. Always zero. See <see cref="IRenderBackend.OutputQueueMs"/>.</summary>
+    /// queue in. Always zero. See <see cref="IRenderBackend.OutputQueueMsFor"/>.</summary>
     private const double NoQueue = 0;   // ASIO pulls straight from the engine — nothing is buffered here
 
     /// <summary>This backend IS the ASIO lane and has nothing to say about WASAPI. See
@@ -105,7 +105,7 @@ internal sealed class AsioRenderBackend : IRenderBackend
     {
         // ASIO render starts lazily when SetOutputDevices is given a non-empty list. There's no
         // useful "open driver but render to nothing" state — that just locks the device with no
-        // benefit. The MixingEngine equivalent (producer loop) for WASAPI runs continuously
+        // benefit. The WASAPI equivalent (MultiOutputPlayout's producer loop) runs continuously
         // even with zero outputs to keep state alive; ASIO doesn't need that since the AsioOut
         // *is* the output and there's nothing to keep alive when no channels are wanted.
         // Caller is expected to call SetOutputDevices first; this method is a no-op when empty.

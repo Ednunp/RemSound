@@ -13,9 +13,9 @@ namespace RemSound.Receiver;
 /// all of them per render callback, summing into the mix bus.
 ///
 /// Drift correction: each sender has its own audio crystal that runs at slightly different
-/// rate from the receiver's. This class compensates with a slow integrator that drops or
-/// repeats one stereo frame at a time when sustained drift is detected, with a short cosine
-/// crossfade across each splice for inaudibility. See <c>DriftGain</c> / <c>DriftCrossfadeFrames</c>.
+/// rate from the receiver's. This class compensates with a fixed-ratio resampler on the read
+/// side, re-measured over a multi-second window, plus a small depth term that walks the ring back
+/// to target. See the "Drift correction (Phase 4)" field block.
 ///
 /// Threading: <see cref="Write"/> runs on the network thread (per-sender producer);
 /// <see cref="ReadFloats"/> runs on the WASAPI/ASIO render thread (single consumer). The
@@ -142,7 +142,7 @@ internal sealed class SessionPlayout : IDisposable
     // below the ~5 % human pitch-discrimination threshold and even below tuning precision.
     // Genuinely inaudible.
     //
-    // Safety net: the legacy click-trim block above stays in place and fires only at
+    // Safety net: the click-trim in ReadFloats stays in place and fires only at
     // catastrophic buffer levels (target + ~23 ms or 1 second worst-case cap). The discrete
     // splice corrector (drop / repeat with crossfade) is GONE — the resampler handles
     // steady-state drift smoothly. If the resampler somehow can't keep up (transient
@@ -190,18 +190,11 @@ internal sealed class SessionPlayout : IDisposable
     // we don't realloc on the hot path.
     private float[] resamplerInputScratch = new float[2048];
 
-    // driftDropFramesTotal + driftRepeatFramesTotal fields removed 2026-05-23. They were
-    // Phase-2/3 splice-corrector counters that the Phase-4 fixed-ratio resampler design
-    // never incremented; they sat at zero and fed dead diag-log columns that have also been
-    // removed. The current corrector's "where is the buffer" signal is filteredErrorFrames
-    // (below) — that one IS still active and IS still surfaced via FilteredDriftErrorFrames.
-    // Live state for the diag log — the current buffer-level offset from target, low-pass
-    // filtered. Lets the diag line continue to surface "where the buffer is sitting".
-    // Updated each Read; no longer drives any correction logic itself.
+    // Live state — the current buffer-level offset from target, low-pass filtered. Surfaced on the
+    // diag line ("where the buffer is sitting") and used to classify short reads for the auto-tune
+    // (see ReadThroughResampler). Updated each Read; it drives no drift correction itself.
     private double filteredErrorFrames;
     private long prevDriftSampleTicks;
-    // Integrator gain. Lowered 2026-05-06 (10×) after an empirical test where the previous
-    // gain (0.05) produced ~10 corrections per second on the user's hardware (two free-running
     // Drift-measurement window for the fixed-ratio resampler. After this many seconds of
     // sustained streaming, we compute (bytes_written / bytes_output) over the window and
     // smooth-update the resampler's input rate. Long enough that brief network jitter or
@@ -255,11 +248,6 @@ internal sealed class SessionPlayout : IDisposable
     private const double FastDepthBias = 0.05;          // 5% => ~50 ms of catch-up per second
     private const double FastApplyIntervalSec = 0.2;    // recompute 5x/sec while converging
     private const double FastApproachDoneMs = 15.0;     // close enough — hand back to steady state
-    // Number of stereo frames each side of a splice point that get blended when a drop or
-    // repeat fires. Cosine crossfade over this window smooths the discontinuity into an audio
-    // DriftDropFramesTotal / DriftRepeatFramesTotal accessors removed 2026-05-23 alongside
-    // their backing fields — they only ever surfaced two always-zero columns in the diag log,
-    // and the columns have been removed too.
     /// <summary>Diagnostic accessor — current smoothed sender-rate-ratio applied to the
     /// resampler. 1.0 = no resampling (matched clocks). Values like 1.0002 = sender running
     /// 200 ppm faster than receiver; 0.9998 = 200 ppm slower.</summary>
@@ -320,23 +308,18 @@ internal sealed class SessionPlayout : IDisposable
     /// running above target on average (sender clock faster); negative = buffer below
     /// target. Magnitude shows how off-target the buffer's average position is right now.</summary>
     public double FilteredDriftErrorFrames => filteredErrorFrames;
-    // DriftAccumulator accessor removed 2026-05-23. The Phase-4 fixed-ratio resampler design
-    // never sets an integrator accumulator value; the property always returned 0. Removed
-    // along with the driftAcc= diag column.
 
     public IPEndPoint Endpoint { get; }
     /// <summary>The stream ID this session was opened for. Sessions are keyed by
     /// (Endpoint, StreamId) so a single peer can produce multiple simultaneous streams
     /// (e.g. WASAPI lane + ASIO lane in the native-independent mode). For single-lane
     /// modes there's still one session per peer with whatever streamId the sender chose
-    /// (currently 1).</summary>
+    /// (a random one, re-rolled whenever the stream restarts or changes format).</summary>
     public ushort StreamId { get; }
-    /// <summary>Which render route this session's audio belongs to. Set by AudioReceiver
-    /// from the format packet's Lane byte at session-creation (and updated on the rare
-    /// in-place format change that keeps the same SessionPlayout alive). PlayoutEngine
-    /// uses this to decide which of its per-route IWaveProvider surfaces this session
-    /// contributes to. Defaults to <see cref="RenderRoute.Mixed"/> — the value an old
-    /// sender or a classic-mode (WasapiOnly / AsioOnly / Both) sender writes.</summary>
+    /// <summary>Which output lane this session renders on. Assigned by PlayoutEngine against the
+    /// output lanes that have a device ticked — the sender's announced Lane byte does not decide it.
+    /// PlayoutEngine uses this to decide which of its per-route IWaveProvider surfaces this session
+    /// contributes to. <see cref="RenderRoute.Mixed"/> until a lane is assigned.</summary>
     public RenderRoute Route { get; set; } = RenderRoute.Mixed;
     /// <summary>Ring capacity this session was sized to (bytes) — so a mirror replica for another
     /// output lane can be created with the same capacity.</summary>
@@ -540,8 +523,8 @@ internal sealed class SessionPlayout : IDisposable
         }
     }
 
-    /// <summary>Disarm and request a drain on the next read — used when the user raises or
-    /// lowers the latency knob. The mix bus continues with whatever's already armed.</summary>
+    /// <summary>Disarm and request a drain on the next read — used when the user lowers the
+    /// latency knob. The mix bus continues with whatever's already armed.</summary>
     public void DisarmAndRequestDrain()
     {
         playbackArmed = false;
@@ -622,9 +605,9 @@ internal sealed class SessionPlayout : IDisposable
         // target + trimMargin) we drop the excess down to target. Causes a brief click at the
         // drop point but holds the queue right at the user's chosen latency.
         //
-        // Largely a safety net post-Phase 2: the drift corrector below keeps the buffer near
+        // Largely a safety net: the drift resampler and its depth term below keep the buffer near
         // target in normal operation, so the trim only fires under catastrophic conditions
-        // (large step changes the slow integrator can't keep up with). Replaced an earlier
+        // (large step changes the slow depth correction can't keep up with). Replaced an earlier
         // resampler-rate controller that pitch-shifted music while correcting drift — clicks
         // turned out to be the lesser evil, and the trim itself is a direct DropOldest on the
         // ring buffer (no resampler involved), so it's guaranteed to fire when needed.
@@ -1053,8 +1036,8 @@ internal sealed class SessionPlayout : IDisposable
             output[i] = v;
         }
         // Zero-fill if the resampler didn't produce as many frames as we asked for. Should
-        // only happen in pathological cases (just after session start with empty filter
-        // delay line, or after a Reset).
+        // only happen in pathological cases (just after session start, while the filter
+        // delay line is still empty).
         if (produced < outFrames)
         {
             output.Slice(producedFloats, (outFrames - produced) * MixChannels).Clear();

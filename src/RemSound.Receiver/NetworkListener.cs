@@ -6,7 +6,7 @@ using RemSound.Core;
 namespace RemSound.Receiver;
 
 /// <summary>
-/// Owns the UDP receive socket and a single dedicated foreground thread that drains it.
+/// Owns the UDP receive socket and a single dedicated background thread that drains it.
 /// Hands raw packets (byte buffer + length + remote endpoint) up to a callback supplied by the
 /// owner — has no idea what's inside the packets.
 ///

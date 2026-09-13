@@ -22,8 +22,9 @@ namespace RemSound.Sender;
 ///     starts a <see cref="SilentRenderKeepAlive"/> on every loopback source's device to keep
 ///     callbacks firing continuously.
 ///   • Per-source clock drift between independent audio devices is unavoidable across long
-///     sessions. The 250 ms ring + DiscardOnBufferOverflow tolerates it for realistic
-///     conversation lengths. A proper drift-correcting micro-resample is a future addition.
+///     sessions. While more than one source is live, each source's CaptureDriftCorrector
+///     resamples it onto the mix clock; a lone source is left untouched (see
+///     <see cref="ActiveSourceCount"/>).
 ///
 /// Source-list changes are LIVE: <see cref="UpdateSources"/> diffs the desired set against the
 /// active set and only adds/removes the sources that actually changed, using NAudio's
@@ -120,7 +121,8 @@ internal sealed class MixingEngine : ICaptureBackend
     /// <summary>MixingEngine doesn't track per-callback timing — its mix tick is timer-driven
     /// rather than callback-driven, so the metric isn't directly meaningful here. Returning 0
     /// is fine: the sender's diag log treats "0 means n/a or no spike". Tight Latency mode in
-    /// WASAPI uses <see cref="PushModeWasapiBackend"/> instead, which is callback-driven.</summary>
+    /// WASAPI uses <see cref="PushModeWasapiBackend"/> instead, which is callback-driven but does
+    /// not track the gap yet either; only the ASIO backend reports one.</summary>
     public int TakeMaxCallbackGapMs() => 0;
 
     public string? FirstCaptureFormatDescription
@@ -265,8 +267,8 @@ internal sealed class MixingEngine : ICaptureBackend
         {
             // If the engine was started with no sources (specs.Count==0 returns early in
             // Start, so mixTask is never created), a later UpdateSources adding sources used
-            // to silently no-op. That broke the BothIndependent flow where a user starts in
-            // AsioOnly→BothIndependent with no WASAPI ticks, then later ticks a WASAPI source
+            // to silently no-op. That broke the BothIndependent flow where a user starts with
+            // only ASIO sources ticked, then later ticks a WASAPI source
             // — the lane would never come alive. Mirror AsioCaptureBackend's pattern: when
             // not running and the new spec set is non-empty, just delegate to Start. The
             // existing empty-specs case (still not running, still no sources to add) stays a

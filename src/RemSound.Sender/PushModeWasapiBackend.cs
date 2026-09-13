@@ -8,9 +8,9 @@ using RemSound.Core;
 namespace RemSound.Sender;
 
 /// <summary>
-/// Single-source WASAPI capture backend with PUSH-DRIVEN timing — the WASAPI capture event
-/// callback is the encode/send trigger, so the audio pipeline runs on the audio device's
-/// hardware clock instead of the OS scheduler's Stopwatch+WaitHandle clock.
+/// Single-source WASAPI capture backend with PUSH-DRIVEN timing — each buffer the WASAPI capture
+/// delivers is the encode/send trigger, so the audio pipeline runs at the device's own period
+/// instead of the OS scheduler's Stopwatch+WaitHandle clock.
 ///
 /// Why this exists: <see cref="MixingEngine"/> uses a Stopwatch-driven 10 ms mix tick that
 /// pulls audio through a sample-provider chain. That tick is woken by
@@ -21,10 +21,11 @@ namespace RemSound.Sender;
 /// ~13 ms lower (closer to the underrun edge), producing audible clicks at tight target
 /// latency.
 ///
-/// Push mode eliminates the mix tick entirely. The WASAPI callback already fires at the
-/// device's hardware-clocked period (sub-millisecond precision), and we run the
+/// Push mode eliminates the mix tick entirely. The capture delivers at the device's own period
+/// where the device's event signals — a loopback device whose event never does is polled at half a
+/// buffer instead (see <see cref="LowLatencyWasapiLoopbackCapture"/>) — and we run the
 /// resample / stereo-mixdown / soft-clamp / hand-off-to-encoder pipeline directly on the
-/// callback thread. Same architectural shape as <see cref="AsioCaptureBackend"/> already has.
+/// capture thread. Same architectural shape as <see cref="AsioCaptureBackend"/> already has.
 ///
 /// Constraints (deliberate scope reduction so we ship something testable):
 ///   • Single source only. <see cref="Start"/> with multiple specs throws — caller is
@@ -37,9 +38,9 @@ namespace RemSound.Sender;
 ///     callback returns silence; caller can fall back to <see cref="MixingEngine"/> in that
 ///     case (which uses NAudio's <c>ToSampleProvider</c> conversion path that handles all
 ///     formats).
-///   • Resampling is performed inline using <see cref="WdlResampler"/> (sinc filter). Same
-///     resampler the existing pull path uses — kept identical to keep audio quality
-///     comparable.
+///   • Resampling is performed inline using <see cref="WdlResampler"/> in sinc mode (64 taps,
+///     32 sub-phases). That is NOT the pull path's configuration: the WdlResamplingSampleProvider
+///     in <see cref="CaptureSource"/> runs the same resampler with sinc off (filter count 2).
 ///
 /// Threading: NAudio's WASAPI callback runs on its own thread, which becomes the audio
 /// thread for our purposes. <see cref="onMixedSamples"/> is invoked synchronously from
@@ -172,9 +173,10 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
                 if (fmt.SampleRate != MixSampleRate)
                 {
                     resampler = new WdlResampler();
-                    // Same configuration the existing CaptureSource pull path uses — sinc filter,
-                    // 64-tap, 32 sub-phase. Quality matches the pull path so any audible
-                    // difference vs MixingEngine is timing-driven, not filter-quality-driven.
+                    // Sinc filter, 64-tap, 32 sub-phase. This is NOT what the CaptureSource pull path
+                    // runs (NAudio's WdlResamplingSampleProvider sets sinc off, filter count 2), so an
+                    // audible difference against MixingEngine on a non-48 kHz device may come from the
+                    // filter as well as the timing.
                     resampler.SetMode(true, 2, true, 64, 32);
                     resampler.SetFilterParms();
                     resampler.SetFeedMode(false); // pull mode internally; we drive the pull from our callback
@@ -230,7 +232,7 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
 
     public void UpdateSources(IReadOnlyList<CaptureSourceSpec> specs)
     {
-        // Single-source backend; live add/remove like MixingEngine V2 isn't applicable.
+        // Single-source backend; live add/remove like MixingEngine's isn't applicable.
         // If the spec list shape is unchanged, no-op. Otherwise restart.
         // A faulted lane must NOT count as "no change" — that early return is what kept a dead
         // capture on the same device alive-looking forever, because the spec set never changes when

@@ -48,8 +48,8 @@ internal sealed class SenderLane
     private readonly byte[] outboundScratch = new byte[2048];
 
     // Audio encryption (always on as of the 2026-05-31 encryption feature). Each lane keeps its
-    // OWN AES-GCM cipher because AES-GCM isn't thread-safe and the two lanes run on separate
-    // capture threads. Rebuilt only when the key reference changes (rare — a password change);
+    // OWN AES-GCM cipher because AES-GCM isn't thread-safe and the lanes run on separate
+    // producer threads. Rebuilt only when the key reference changes (rare — a password change);
     // null when no password is set, in which case the lane sends nothing (mandatory encryption).
     // cipherScratch holds the per-frame ciphertext (plaintext + 28 bytes overhead); 4096 covers
     // the largest single frame (Opus 20 ms or PCM 5 ms) with room to spare.
@@ -61,8 +61,7 @@ internal sealed class SenderLane
     // Per-stream sequence counters. audioSequence is what the receiver's gap-detector and Opus
     // FEC look at — it must stay monotonic per stream. formatSequence is used for the periodic
     // format-announce packet; receiver doesn't sequence-check format packets but having a
-    // separate counter keeps the audio FEC clean (see AudioSender.audioSequence comment for
-    // the original reasoning).
+    // separate counter keeps the audio FEC clean.
     private uint audioSequence;
     private uint pcmFrameId;
     private uint formatSequence;
@@ -145,13 +144,12 @@ internal sealed class SenderLane
         return (int)(ticks * 1000 / System.Diagnostics.Stopwatch.Frequency);
     }
 
-    // Which render route this lane announces in its format packets. The receiver reads the
-    // Lane byte on the wire and tags the matching SessionPlayout, which makes PlayoutEngine
-    // route the lane's audio to the corresponding per-route IWaveProvider surface (lane
-    // backends in BothIndependent mode; the legacy Mixed surface in every classic mode).
-    // Default Mixed = classic-mode behaviour, indistinguishable from a pre-2026-05-11 sender.
-    // BothIndependent assigns WasapiLane / AsioLane to the two SenderLanes at mode-change
-    // time via SetRoute.
+    // Which render route this lane announces in its format packets. RemSound's own receiver no
+    // longer decides where a stream plays by it — every stream plays on every ticked output — but
+    // the supersede rule on every port only retires a session whose lane MATCHES, so two live lanes
+    // from one sender must never announce the same value. AudioSender assigns routes via SetRoute:
+    // Mixed (the pre-2026-05-11 value) on the default lane in WasapiOnly, WasapiLane / AsioLane on
+    // the capture lanes in BothIndependent, and whichever is left free on the plugin lane.
     private volatile RenderRoute route = RenderRoute.Mixed;
     public RenderRoute Route => route;
 
@@ -417,10 +415,8 @@ internal sealed class SenderLane
         // AudioFormatInfo doc comment for the semantic-shift rationale.
         var codec = owner.Codec;
         var opusFrameSamples = owner.OpusFrameSamplesPerChannel;
-        // Pass this lane's current Route as the Lane field. In classic-mode senders this is
-        // Mixed and the receiver routes the session to its legacy mix bus; in BothIndependent
-        // senders this is WasapiLane or AsioLane and the receiver routes to the matching
-        // per-route IWaveProvider surface.
+        // Pass this lane's current Route as the Lane field — see the route field for what
+        // receivers do with it.
         // OUR OWN capture latency travels with the format, so the receiving end can report the real
         // journey instead of substituting its own 10 ms guess for a stage that happens HERE. One
         // figure, not one per lane: this machine mixes every ticked capture source into a single
@@ -431,12 +427,10 @@ internal sealed class SenderLane
             ? new AudioFormatInfo(48000, 2, 16, 1, 4, 192_000, (int)AudioTransportCodec.Opus, opusFrameSamples, route, captureLatencyMs)
             : new AudioFormatInfo(48000, 2, 24, 1, 6, 288_000, (int)AudioTransportCodec.Pcm, owner.PcmFrameSamplesPerChannel, route, captureLatencyMs);
 
-        // Allocate the extended (36-byte) format payload — see RemPacket.FormatPayloadExtendedSize
-        // for the backward-compat contract. Old receivers parse the first 32 bytes and ignore
-        // the rest; new receivers read the Lane byte to decide which render route this stream
-        // belongs to. The Lane value carried here comes from the AudioFormatInfo constructed
-        // above, which currently always sets Mixed for the default lane; Stage 4 will set
-        // WasapiLane / AsioLane on the second lane in BothIndependent mode.
+        // Allocate room for the longest format payload (RemPacket.FormatPayloadWithCaptureSize, 46
+        // bytes) — see RemPacket for the backward-compat contract. Old receivers parse the first 32
+        // bytes and ignore the rest; newer ones read the Lane byte from the extension. The Lane value
+        // carried here is this lane's current route, passed into the AudioFormatInfo above.
         Span<byte> packet = stackalloc byte[RemPacket.HeaderSize + RemPacket.FormatPayloadWithCaptureSize];
         RemPacket.WriteHeader(packet, RemPacketType.Format, streamId, ++formatSequence);
         // Append our password fingerprint so the peer can tell whether its profile password

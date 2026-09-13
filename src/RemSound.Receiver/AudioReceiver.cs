@@ -6,7 +6,7 @@ namespace RemSound.Receiver;
 
 /// <summary>
 /// Public façade for the receiver pipeline. Routes raw packets from <see cref="NetworkListener"/>
-/// to one <see cref="StreamSession"/> per remote sender, all of which write to their own
+/// to one <see cref="StreamSession"/> per incoming stream (sender endpoint and stream id), all of which write to their own
 /// <see cref="SessionPlayout"/>; the <see cref="PlayoutEngine"/> then mixes those at render time.
 ///
 /// Multi-source rationale: the previous design held a single <c>activeSession</c> and reset the
@@ -105,12 +105,6 @@ public sealed class AudioReceiver : IDisposable
         }
     }
 
-    /// <summary>True if decoded audio from <paramref name="address"/> has been written to a
-    /// playout buffer within <paramref name="within"/>. The app uses this to drive the
-    /// connect/disconnect cues off the ACTUAL audio stream rather than the heartbeat alone —
-    /// so a heartbeat blip while audio keeps flowing never fires a false "disconnect" cue, and
-    /// the connect cue can fire the moment audio starts. Returns false when not receiving (no
-    /// sessions), so the caller falls back to the heartbeat for send-only setups. 2026-05-31.</summary>
     /// <summary>
     /// The largest capture latency any peer sending to us has ANNOUNCED, or 0 if nobody has.
     ///
@@ -159,6 +153,12 @@ public sealed class AudioReceiver : IDisposable
         return false;
     }
 
+    /// <summary>True if decoded audio from <paramref name="address"/> has been written to a
+    /// playout buffer within <paramref name="within"/>. The app uses this to drive the
+    /// connect/disconnect cues off the ACTUAL audio stream rather than the heartbeat alone —
+    /// so a heartbeat blip while audio keeps flowing never fires a false "disconnect" cue, and
+    /// the connect cue can fire the moment audio starts. Returns false when not receiving (no
+    /// sessions), so the caller falls back to the heartbeat for send-only setups. 2026-05-31.</summary>
     public bool IsAudioFlowingFrom(IPAddress address, TimeSpan within)
     {
         var cutoff = DateTime.UtcNow - within;
@@ -198,11 +198,6 @@ public sealed class AudioReceiver : IDisposable
         listener = new NetworkListener(HandleRawPacket, msg => diagnosticSink?.Invoke($"network: {msg}"));
     }
 
-    /// <summary>
-    /// Sets the audio backend mode (and ASIO driver, when ASIO is involved) for the render side.
-    /// Mirrors AudioSender.SetAudioMode. The App should re-issue SetOutputDevices afterwards with
-    /// the current device-id selection.
-    /// </summary>
     /// <summary>Tell the receiver whether the UI is showing two latency sliders. Public and separate
     /// from <see cref="SetAudioMode"/> because it is NOT a backend operation: a headless/test host
     /// skips the backend switch (it can open a real ASIO driver) and would otherwise leave the lane
@@ -221,12 +216,6 @@ public sealed class AudioReceiver : IDisposable
     /// still know to stay out of the way. One array per peer; addresses not listed are unaffected.</summary>
     public void SetPeerAddressGroups(IReadOnlyList<IPAddress[]>? groups) => playoutEngine.SetPeerAddressGroups(groups);
 
-    /// <summary>Which output lanes have a ticked device. Normally derived by CompositeRenderBackend
-    /// from <see cref="SetOutputDevices"/> — exposed because this, NOT the audio mode, is what decides
-    /// which lane an incoming stream is tagged with, and therefore which latency control governs it.
-    /// A user with an ASIO driver chosen but only ASIO outputs ticked is a genuinely different
-    /// configuration from one with both kinds ticked, and the control suite has to be able to build
-    /// all three without opening real hardware (Ed, 2026-08-15 — the suite covered two of three).</summary>
     /// <summary>Create the playout state an arriving stream would get, so a test can assert WHICH
     /// LANE it lands on — the relationship the 2026-08-14 dead-slider bug broke (a stream tagged with
     /// one lane while the slider wrote another). Internal: a diagnostic seam, not app API.</summary>
@@ -241,12 +230,23 @@ public sealed class AudioReceiver : IDisposable
     /// Nothing in the app reads this — the live count is otherwise visible only in a log line.</summary>
     internal int LiveSessionCountForTest { get { lock (sessionsLock) return sessions.Count; } }
 
+    /// <summary>Which output lanes have a ticked device. Normally derived by CompositeRenderBackend
+    /// from <see cref="SetOutputDevices"/> — exposed because this, NOT the audio mode, is what decides
+    /// which lane an incoming stream is tagged with, and therefore which latency control governs it.
+    /// A user with an ASIO driver chosen but only ASIO outputs ticked is a genuinely different
+    /// configuration from one with both kinds ticked, and the control suite has to be able to build
+    /// all three without opening real hardware (Ed, 2026-08-15 — the suite covered two of three).</summary>
     public void SetActiveOutputLanes(bool wasapiActive, bool asioActive)
     {
         playoutEngine.SetLaneActive(RenderRoute.WasapiLane, wasapiActive);
         playoutEngine.SetLaneActive(RenderRoute.AsioLane, asioActive);
     }
 
+    /// <summary>
+    /// Sets the audio backend mode (and ASIO driver, when ASIO is involved) for the render side.
+    /// Mirrors AudioSender.SetAudioMode. The App should re-issue SetOutputDevices afterwards with
+    /// the current device-id selection.
+    /// </summary>
     public void SetAudioMode(AudioMode mode, string? asioDriverName)
     {
         var wasRunning = multiOutput.IsRunning;
@@ -263,14 +263,11 @@ public sealed class AudioReceiver : IDisposable
     /// <summary>Sets the Buffer-smoothness knob (1 = aggressive — clicks the buffer back
     /// to target on any drift, holds the user's latency tightly; 10 = smooth — no clicks
     /// but the queue can creep up under jitter or sustained clock drift). Knob drives a
-    /// click-based DropOldest trim in <see cref="SessionPlayout.ReadFloats"/>. As of the
-    /// 2026-05-06 cleanup (Phase 3) this is mostly a safety knob — the Phase-2 drift
-    /// corrector keeps the buffer near target so the trim should rarely fire regardless of
-    /// this value.</summary>
+    /// click-based DropOldest trim in <see cref="SessionPlayout.ReadFloats"/>. This is mostly a
+    /// safety knob — SessionPlayout's drift resampler keeps the buffer near target so the trim
+    /// should rarely fire regardless of this value.</summary>
     public void SetSmoothness(int value) => playoutEngine.SetSmoothness(value);
 
-    /// <summary>Live read-back of smoothness / gap-artifact, for the control suite to prove those
-    /// controls reach the audio path rather than merely persisting (see PlayoutEngine.SmoothnessValue).</summary>
     /// <summary>Whether incoming audio is being played. Read-back for the control suite (the Receive
     /// audio control must reach this), alongside SetPlaybackEnabled which drives it.</summary>
     public bool PlaybackEnabled => playbackEnabled;
@@ -298,6 +295,8 @@ public sealed class AudioReceiver : IDisposable
     /// departed device is no longer evidence. See <see cref="LaneActivity"/>.</summary>
     public bool LaneIsConsuming(RenderRoute route) => playoutEngine.LaneIsConsuming(route);
 
+    /// <summary>Live read-back of smoothness / gap-artifact, for the control suite to prove those
+    /// controls reach the audio path rather than merely persisting (see PlayoutEngine.SmoothnessValue).</summary>
     public int SmoothnessValue => playoutEngine.SmoothnessValue;
     public ConcealmentArtifact ConcealmentArtifactValue => playoutEngine.ConcealmentArtifactValue;
 
@@ -360,8 +359,9 @@ public sealed class AudioReceiver : IDisposable
     ///
     /// The filter is applied at packet receipt — Format and Audio packets from non-allowed
     /// endpoints are counted but discarded, no SessionPlayout is created, no playout buffer
-    /// fills. Discovery and heartbeat (separate UDP ports) are unaffected, so non-allowed
-    /// peers still appear as "discovered" in the UI ready to be ticked.
+    /// fills. Discovery (its own UDP port) and heartbeats (this socket, dispatched before the
+    /// gate) are unaffected, so non-allowed peers still appear as "discovered" in the UI ready
+    /// to be ticked.
     /// </summary>
     public void SetAllowedSenders(IEnumerable<IPEndPoint>? allowed)
     {
@@ -493,11 +493,6 @@ public sealed class AudioReceiver : IDisposable
         return (w * scale, a * scale, m * scale);
     }
 
-    // TakeMaxFanOutCacheMs removed 2026-05-23. Originally measured the FanOutSource cache age
-    // between WASAPI and ASIO consumers in BothIndependent mode. The FanOut architecture was
-    // removed in May when each lane got its own filtered PlayoutEngine source — there is no
-    // shared cache to measure any more, so the method always returned 0. Removed alongside
-    // CompositeRenderBackend.TakeMaxFanOutCacheBytes and the fanCacheMs= diag column.
     public string OutputDeviceName => multiOutput.ActiveDeviceSummary;
     /// <summary>Hand the receiver the plugin claim registry, so peers taken over by a VST instance
     /// stop coming out of this machine's speakers (see PluginPeerClaims).</summary>
@@ -511,8 +506,9 @@ public sealed class AudioReceiver : IDisposable
     public int TargetLatencyMs => playoutEngine.TargetLatencyMs;
 
     /// <summary>
-    /// Frame duration of the most-recently-active stream (10 ms PCM, 20 ms Opus). null when no
-    /// stream is active. With multiple senders this picks the largest frame duration as the
+    /// Frame duration of the active streams (PCM frames are 5 ms, or 2.5 ms in Tight; Opus frames
+    /// are whatever the sender chose). null when no stream is active. With multiple streams this
+    /// picks the largest frame duration as the
     /// codec floor — most conservative for the auto-tune. Returns ms (rounded up to the next
     /// integer if the underlying sample-count yields a fractional duration, e.g. 2.5 ms → 3),
     /// so the auto-tune always overestimates rather than underestimates the codec floor.
@@ -611,8 +607,8 @@ public sealed class AudioReceiver : IDisposable
     }
 
     /// <summary>Soft variant: same as setting MaxLatencyMs, but on a LOWER does not drain
-    /// the buffer / disarm the session. The drift corrector's adaptive gain shrinks the
-    /// buffer gradually over a few seconds instead. Used by auto-tune so its slider
+    /// the buffer / disarm the session. SessionPlayout's depth correction walks the buffer
+    /// down gradually instead. Used by auto-tune so its slider
     /// adjustments are inaudible — the user didn't ask for an immediate change and shouldn't
     /// hear one. On a RAISE behaves identically to the regular setter (no drain ever fires
     /// on raise).</summary>
@@ -620,8 +616,8 @@ public sealed class AudioReceiver : IDisposable
         playoutEngine.SetMaxLatencyMs(value, drainOnLower: false);
 
     /// <summary>Per-route latency accessors — used in BothIndependent mode where the WASAPI
-    /// lane and the ASIO lane each have their own slider. In classic modes only the Mixed
-    /// route has sessions, so the route-specific values are configured but never observed.</summary>
+    /// lane and the ASIO lane each have their own slider. With one slider every route resolves
+    /// to the one shared value (see PlayoutEngine.LatencyFor).</summary>
     public int MaxLatencyMsFor(RenderRoute route) => playoutEngine.MaxLatencyMsFor(route);
     public int TargetLatencyMsFor(RenderRoute route) => playoutEngine.TargetLatencyMsFor(route);
     public void SetMaxLatencyMsFor(RenderRoute route, int value) =>
@@ -632,21 +628,17 @@ public sealed class AudioReceiver : IDisposable
     /// BothIndependent the WASAPI lane's underruns should not make the ASIO auto-tune defer
     /// (and vice versa); reading per-route fixes that.</summary>
     public long UnderrunsFor(RenderRoute route) => playoutEngine.AggregateUnderrunsFor(route);
-    /// <summary>True when at least one stream session is currently tagged for this route —
-    /// used by MainForm's continuous auto-tune to skip routes with no audio in flight, so a
-    /// lane's auto-tune can't pre-inflate its target by reacting to shared network-gap data
-    /// from a different lane's packets.</summary>
     /// <summary>Whether a peer claimed by a DAW plugin arrives carrying the pan and EQ set for them
     /// here, or raw for the DAW to shape itself. The menu item behind this did nothing at all until
     /// 2026-09-06 — see PlayoutEngine.SetPluginShaping.</summary>
     public void SetPluginShaping(bool applyShaping) => playoutEngine.SetPluginShaping(applyShaping);
 
+    /// <summary>True when at least one stream session is currently tagged for this route —
+    /// used by MainForm's continuous auto-tune to skip routes with no audio in flight, so a
+    /// lane's auto-tune can't pre-inflate its target by reacting to shared network-gap data
+    /// from a different lane's packets.</summary>
     public bool HasSessionsForRoute(RenderRoute route) => playoutEngine.HasSessionsForRoute(route);
 
-    /// <summary>Any output device sitting dead after WASAPI invalidated it mid-stream. The app's
-    /// per-second tick watches this and re-applies the device set, which re-opens it — recovery that
-    /// used to depend on a hot-plug notification that never arrives when the device stays present.
-    /// See <see cref="MultiOutputPlayout.HasFaultedOutput"/>. 2026-08-26.</summary>
     /// <summary>Test seam: report a faulted output without a real device having to die. An
     /// <c>OutputEntry</c> needs a live MMDevice and WasapiOut, so the fault itself cannot be staged —
     /// but the CHAIN from "an output faulted" to "the app re-applies its devices" can be, and that
@@ -654,6 +646,10 @@ public sealed class AudioReceiver : IDisposable
     /// green. 2026-08-27.</summary>
     internal bool ForceFaultedOutputForTest;
 
+    /// <summary>Any output device sitting dead after WASAPI invalidated it mid-stream. The app's
+    /// per-second tick watches this and re-applies the device set, which re-opens it — recovery that
+    /// used to depend on a hot-plug notification that never arrives when the device stays present.
+    /// See <see cref="MultiOutputPlayout.HasFaultedOutput"/>. 2026-08-26.</summary>
     public bool HasFaultedOutput =>
         ForceFaultedOutputForTest || (multiOutput is CompositeRenderBackend composite && composite.HasFaultedOutput);
 
@@ -687,9 +683,6 @@ public sealed class AudioReceiver : IDisposable
     public long TrimDropBytes => playoutEngine.AggregateTrimDropBytes;
     public long DrainDropBytes => playoutEngine.AggregateDrainDropBytes;
     public long TrimFireCount => playoutEngine.AggregateTrimFireCount;
-    // DriftDropFrames / DriftRepeatFrames accessors removed 2026-05-23. They aggregated
-    // Phase-2 splice-corrector counters that the Phase-4 fixed-ratio resampler design never
-    // increments. Always-zero. Surfaced two unhelpful diag-log columns that are now gone.
     /// <summary>Cumulative count of FULL-empty playout reads (framesRead == 0) — the audible
     /// underrun events that trigger noise-burst concealment + fade-in. Separated from
     /// <see cref="Underruns"/> (which conflates full and partial short reads) so the diag
@@ -702,8 +695,6 @@ public sealed class AudioReceiver : IDisposable
     /// <summary>Live LP-filtered drift error of the primary active session (stereo frames,
     /// signed). Negative = buffer running below target on average; positive = above.</summary>
     public double FilteredDriftErrorFrames => playoutEngine.PrimaryFilteredDriftErrorFrames;
-    // DriftAccumulator removed 2026-05-23. Phase-4 fixed-ratio resampler never sets an
-    // integrator value; always returned 0. Removed alongside the driftAcc= diag column.
     /// <summary>The worst single-sample step out of the ring buffer (after decode +
     /// SessionPlayout.Write, before resampler) since the last call, split cross/within buffer.</summary>
     public float TakeMaxPostRingReadStepCrossBuffer() => playoutEngine.TakeMaxPostRingReadStepCrossBuffer();
@@ -820,10 +811,10 @@ public sealed class AudioReceiver : IDisposable
     public bool IsMuted { get => playoutEngine.IsMuted; set => playoutEngine.IsMuted = value; }
 
     /// <summary>
-    /// Sets the list of output devices to render received audio to. The receiver mixes once and
-    /// fans out to every device in this list — pass an empty list to mute all output without
-    /// stopping the receive path. Per session policy, the App does NOT persist this selection;
-    /// every session starts with no outputs ticked.
+    /// Sets the list of output devices to render received audio to. Every device in this list
+    /// plays the received streams — pass an empty list to mute all output without stopping the
+    /// receive path. Which devices are ticked, and whether that is remembered, is the app's
+    /// business.
     /// </summary>
     public void SetOutputDevices(IReadOnlyList<string> deviceIds) => multiOutput.SetOutputDevices(deviceIds);
 
@@ -1164,8 +1155,8 @@ public sealed class AudioReceiver : IDisposable
     /// Inject a packet that arrived on a non-listener socket (e.g. the AudioSender's socket
     /// in relay mode). Runs the same dispatch logic as the listener thread. Caller is
     /// responsible for filtering out packet types it has handled itself (typically Heartbeat,
-    /// which goes to <see cref="HeartbeatService"/>) — passing a Heartbeat packet here is
-    /// safe (it'll be counted and dropped) but wasteful.
+    /// which goes to <see cref="HeartbeatService"/>) — a Heartbeat packet passed here is routed to
+    /// <see cref="OnHeartbeatReceived"/> exactly as one from the listener would be.
     /// </summary>
     public void InjectExternalPacket(byte[] packet, int length, IPEndPoint remote)
     {

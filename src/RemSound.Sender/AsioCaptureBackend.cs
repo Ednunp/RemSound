@@ -16,12 +16,13 @@ namespace RemSound.Sender;
 /// session, configured through the Connectivity &amp; transport dialog).
 ///
 /// Limitations vs the WASAPI backend (deliberate to keep this manageable):
-///   • Driver is locked at <see cref="Start"/> time. Switching drivers means Stop + new instance.
-///   • We always open the AsioOut with the driver's full input channel count, regardless of
-///     which pairs the user selected. The unused channels are pulled but discarded. This
-///     trades a tiny amount of buffer memory for a big stability win: adding or removing a
-///     channel pair never requires reopening the driver, which means we don't fight a
-///     concurrent receiver-side AsioOut on single-client drivers (Komplete Audio etc.).
+///   • The driver name is fixed at construction. Switching drivers means a new instance;
+///     AudioSender releases the old one in the background.
+///   • The driver is always opened with its full input channel count, regardless of which
+///     pairs the user selected. The unused channels are pulled but discarded. This trades a
+///     tiny amount of buffer memory for a big stability win: adding or removing a channel pair
+///     never requires reopening the driver, which the playback side may be holding open through
+///     the same <see cref="SharedAsioDevice"/> on single-client drivers (Komplete Audio etc.).
 ///   • Sample rate is fixed at 48 kHz; if the driver doesn't support that, capture fails to
 ///     start (the diagnostic line says so). All modern pro audio interfaces support 48 kHz.
 ///   • Hardware loopback channels (e.g. EVO 8's Loop-back 1/2) are just regular ASIO inputs
@@ -57,7 +58,8 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     // the driver's real-time thread. It used to take `gate` to do so — but StopInternal holds `gate` for
     // the WHOLE close, so a callback already in flight when a close began could not return until the
     // close finished. That is the opposite of what the close needs: it unhooks the callback and sleeps
-    // 60 ms precisely to let an in-flight callback DRAIN, and the callback could not drain while the
+    // 60 ms precisely to let an in-flight callback DRAIN (that sequence now runs inside
+    // SharedAsioDevice.Close, still under our `gate`), and the callback could not drain while the
     // closing thread held the lock it was waiting on. The driver's own Stop typically waits for its
     // callback thread, so the two could deadlock until the bounded Invoke gave up.
     // The list is only ever REPLACED wholesale (UpdateSources, Start, StopInternal) and never mutated in

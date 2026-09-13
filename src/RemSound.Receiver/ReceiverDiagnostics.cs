@@ -8,10 +8,9 @@ namespace RemSound.Receiver;
 /// at audio-rate resolution. All counters are interlocked or volatile so the
 /// network thread, render thread, and App thread can read/write without locks.
 ///
-/// Naming convention:
-///   *PerSecond  → reset on every second-boundary read
-///   *Rolling    → averaged over the last second
-///   *Cumulative → since session start
+/// Record* methods are called on the network and render threads; <see cref="Take"/> snapshots
+/// and resets the rolling counters once a second. The per-lane render period is read, and reset,
+/// separately through <see cref="MaxRenderCallbackGapMsFor"/>.
 /// </summary>
 public sealed class ReceiverDiagnostics
 {
@@ -31,10 +30,10 @@ public sealed class ReceiverDiagnostics
     private int maxRenderReadBytes;
     private int renderReadCount;
 
-    // Render-callback timing — the parallel of sender's capture-callback gap. PlayoutEngine.Read
-    // is invoked by the audio device's render callback (NAudio's WASAPI or ASIO output wrapper).
-    // Healthy systems show sub-ms variance from a strict period (= ASIO buffer / sample rate, or
-    // WASAPI engine period). Spikes here mean the audio output thread is being scheduled with
+    // Render-read timing — the parallel of sender's capture-callback gap. On the ASIO lane the
+    // engine is read from the driver's own callback, so the period is the ASIO buffer / sample
+    // rate; on the WASAPI lane it is read by MultiOutputPlayout's 10 ms producer tick, which feeds
+    // each device's buffer. Spikes here mean the thread doing that read is being scheduled with
     // jitter — which manifests as audible discontinuities even when RemSound's playout buffer is
     // healthy, because the audio HARDWARE expects samples on a rigid clock and gets them late.
     // RemSound's "Underruns" counter measures whether RemSound's buffer ran dry; this measures

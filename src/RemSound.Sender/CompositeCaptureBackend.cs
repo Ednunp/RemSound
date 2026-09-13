@@ -13,7 +13,8 @@ namespace RemSound.Sender;
 ///         selected (or none is installed). Lowest latency for WASAPI-only setups.</item>
 ///   <item>BothIndependent: WASAPI child + persistent ASIO child running side by side. Each
 ///         delivers samples to its own callback; there is no mix loop, no shared buffer, no
-///         tee. ASIO keeps its native sub-5 ms pipeline; WASAPI keeps its WASAPI-event rate.</item>
+///         tee. ASIO keeps its native sub-5 ms pipeline; WASAPI keeps its own clock (the mix
+///         engine's 10 ms tick, or the capture itself in push mode).</item>
 /// </list>
 /// BothIndependent without a driver name or a borrowed ASIO instance runs as WasapiOnly.
 /// </summary>
