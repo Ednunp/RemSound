@@ -435,12 +435,7 @@ public sealed class PluginBridgeHost : IDisposable
         public int Available = -1;
         /// <summary>Who has been served this round. One of them asking again is the DAW moving on.</summary>
         public readonly HashSet<Guid> Served = [];
-        /// <summary>The first few dozen asks in order, logged once: whether a DAW interleaves its tracks
-        /// (A B A B) or runs each in a burst (A A A A B B B B) decides whether ask-order rounds can pair
-        /// them, and nothing but a log from the real DAW can say which it does.</summary>
-        public List<string>? Trace = new(RoundTraceLength);
     }
-    private const int RoundTraceLength = 32;
 
     /// <summary>The round in progress, per DAW and peer.</summary>
     private readonly Dictionary<(Guid Group, IPAddress Peer), Round> rounds = new();
@@ -539,15 +534,6 @@ public sealed class PluginBridgeHost : IDisposable
             }
 
             round.Served.Add(instance);
-            if (round.Trace is { } trace)
-            {
-                trace.Add(Short(instance));
-                if (trace.Count >= RoundTraceLength)
-                {
-                    round.Trace = null;
-                    Notable?.Invoke($"round order on {peer} for one DAW, first {RoundTraceLength} asks: {string.Join(" ", trace)}");
-                }
-            }
             var give = Math.Min(frames, round.Available);
             if (give <= 0) return 0;
             var offset = (int)(round.Start - stream.Start) * 2;
