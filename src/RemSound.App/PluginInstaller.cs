@@ -28,8 +28,12 @@ internal static class PluginInstaller
         "Programs", "Common", "VST3", "RemSound");
 
     /// <summary>Written at install time listing every file placed, so uninstall can be exact rather
-    /// than enthusiastic. Kept inside our own subfolder alongside the files it describes.</summary>
-    private const string ManifestName = "remsound-plugin-files.txt";
+    /// than enthusiastic. Kept inside our own subfolder alongside the files it describes.
+    ///
+    /// <para>Internal rather than private so the gate can tamper with it: the path-containment guard
+    /// in <see cref="UninstallCore"/> had no test at all until 2026-08-24, and what it protects is
+    /// somebody ELSE's plugin.</para></summary>
+    internal const string ManifestName = "remsound-plugin-files.txt";
 
     /// <summary>Where the built plugin files sit in a RemSound install — a <c>plugin\</c> folder next
     /// to the exe, populated by the build.</summary>

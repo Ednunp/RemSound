@@ -125,6 +125,38 @@ public sealed class AudioReceiver : IDisposable
     /// so a heartbeat blip while audio keeps flowing never fires a false "disconnect" cue, and
     /// the connect cue can fire the moment audio starts. Returns false when not receiving (no
     /// sessions), so the caller falls back to the heartbeat for send-only setups. 2026-05-31.</summary>
+    /// <summary>
+    /// The largest capture latency any peer sending to us has ANNOUNCED, or 0 if nobody has.
+    ///
+    /// <para>The total-latency readout measures their microphone to your ears, and capture happens on
+    /// THEIR machine. A receive-only rig cannot measure that stage, so it used to substitute its own
+    /// local WASAPI estimate of 10 ms — and Ed's 2026-08-24 logs show the cost: his laptop reported
+    /// <c>capture=10.0[est]</c> for audio whose sending desktop had measured 0.7 ms. Senders now
+    /// state the figure in the format packet (see <c>RemPacket.FormatPayloadWithCaptureSize</c>), so
+    /// the receiver can report what actually happened rather than what it would have cost here.</para>
+    ///
+    /// <para>The WORST across peers, matching the sender's own rule: with several people sending, the
+    /// readout is a single number and the honest one is the longest journey, not the shortest. Zero
+    /// from a peer means "not stated" — an older build, or a device that will not say — and is
+    /// skipped rather than counted as a very fast capture, which would quietly flatter the total.</para>
+    /// </summary>
+    public double AnnouncedCaptureLatencyMs
+    {
+        get
+        {
+            var worst = 0.0;
+            lock (sessionsLock)
+            {
+                foreach (var session in sessions.Values)
+                {
+                    var announced = session.Format.CaptureLatencyMs;
+                    if (announced > worst) worst = announced;
+                }
+            }
+            return worst;
+        }
+    }
+
     /// <summary>True when audio from ANY peer has hit a live session within the window. The app's
     /// Priority-mode scoping reads this as its "receiving right now" signal (2026-07-26 resource
     /// audit — the power levers now engage only while audio actually moves).</summary>
@@ -148,7 +180,9 @@ public sealed class AudioReceiver : IDisposable
         {
             foreach (var session in sessions.Values)
             {
-                if (session.Endpoint.Address.Equals(address) && session.LastWriteUtc >= cutoff)
+                // The PERSON, not the path: a session folded from this peer's other address is still
+                // this peer sending. See SessionEndpointFor.
+                if (playoutEngine.SamePerson(session.Endpoint.Address, address) && session.LastWriteUtc >= cutoff)
                 {
                     return true;
                 }
@@ -196,6 +230,11 @@ public sealed class AudioReceiver : IDisposable
     public int ReadClaimedPeer(IPAddress peer, Span<float> destination, int frames)
         => playoutEngine.ReadClaimedPeer(peer, destination, frames);
 
+    /// <summary>Tell the receiver which addresses belong to the same peer, so a plugin holding one path
+    /// of a dual-homed sender still gets them when their audio arrives on the other, and the speakers
+    /// still know to stay out of the way. One array per peer; addresses not listed are unaffected.</summary>
+    public void SetPeerAddressGroups(IReadOnlyList<IPAddress[]>? groups) => playoutEngine.SetPeerAddressGroups(groups);
+
     /// <summary>Which output lanes have a ticked device. Normally derived by CompositeRenderBackend
     /// from <see cref="SetOutputDevices"/> — exposed because this, NOT the audio mode, is what decides
     /// which lane an incoming stream is tagged with, and therefore which latency control governs it.
@@ -207,6 +246,14 @@ public sealed class AudioReceiver : IDisposable
     /// one lane while the slider wrote another). Internal: a diagnostic seam, not app API.</summary>
     internal SessionPlayout GetOrCreateSessionForTest(IPEndPoint remote, ushort streamId) =>
         playoutEngine.GetOrCreateSession(remote, streamId, MaxBufferCapacityBytes(MaxLatencyForSizingMs));
+
+    /// <summary>How many stream sessions are live right now. Test seam: the gate proves that THREE
+    /// concurrent streams from one sender coexist (three streamIds, three distinct Lane bytes) and
+    /// that the supersede rule still fires when two of them share a lane. Two concurrent streams is
+    /// what BothIndependent ships; three is what a plugin lane alongside both capture lanes would
+    /// need, and "the code looks like it should cope" is not the same thing as knowing it does.
+    /// Nothing in the app reads this — the live count is otherwise visible only in a log line.</summary>
+    internal int LiveSessionCountForTest { get { lock (sessionsLock) return sessions.Count; } }
 
     public void SetActiveOutputLanes(bool wasapiActive, bool asioActive)
     {
@@ -254,6 +301,16 @@ public sealed class AudioReceiver : IDisposable
 
     /// <inheritdoc cref="ReportedOutputLatencyMsFor"/>
     public double OutputQueueMsFor(RenderRoute route) => multiOutput.OutputQueueMsFor(route);
+
+    /// <summary>One reading per live WASAPI output stage — the stage the ASIO lane does not have.
+    /// Feeds the long-run report; see <see cref="WasapiOutputStage"/> for why it earns its own
+    /// line.</summary>
+    public IReadOnlyList<WasapiOutputStage> OutputStages() => multiOutput.OutputStages();
+
+    /// <summary>Is this lane actually playing audio right now — ticked AND being read? The auto-tune
+    /// uses it to notice a lane coming back after an absence, at which point what it learned about the
+    /// departed device is no longer evidence. See <see cref="LaneActivity"/>.</summary>
+    public bool LaneIsConsuming(RenderRoute route) => playoutEngine.LaneIsConsuming(route);
 
     public int SmoothnessValue => playoutEngine.SmoothnessValue;
     public ConcealmentArtifact ConcealmentArtifactValue => playoutEngine.ConcealmentArtifactValue;
@@ -439,6 +496,17 @@ public sealed class AudioReceiver : IDisposable
     public double TakeRenderWorkMs() =>
         playoutEngine.TakeCumulativeRenderTicks() * 1000.0 / Stopwatch.Frequency;
 
+    /// <summary>The same figure split BY LANE, taken in one call so no lane can be starved by a
+    /// second reader. Answers "which lane spent the render time" — the question a machine-wide total
+    /// cannot, and the one that matters the moment one lane starts under-running while the other is
+    /// fine. See <see cref="PlayoutEngine.TakeRenderTicksByRoute"/>. 2026-08-24.</summary>
+    public (double WasapiMs, double AsioMs, double MixedMs) TakeRenderWorkMsByLane()
+    {
+        var (w, a, m) = playoutEngine.TakeRenderTicksByRoute();
+        var scale = 1000.0 / Stopwatch.Frequency;
+        return (w * scale, a * scale, m * scale);
+    }
+
     // TakeMaxFanOutCacheMs removed 2026-05-23. Originally measured the FanOutSource cache age
     // between WASAPI and ASIO consumers in BothIndependent mode. The FanOut architecture was
     // removed in May when each lane got its own filtered PlayoutEngine source — there is no
@@ -599,7 +667,32 @@ public sealed class AudioReceiver : IDisposable
     /// used by MainForm's continuous auto-tune to skip routes with no audio in flight, so a
     /// lane's auto-tune can't pre-inflate its target by reacting to shared network-gap data
     /// from a different lane's packets.</summary>
+    /// <summary>Whether a peer claimed by a DAW plugin arrives carrying the pan and EQ set for them
+    /// here, or raw for the DAW to shape itself. The menu item behind this did nothing at all until
+    /// 2026-09-06 — see PlayoutEngine.SetPluginShaping.</summary>
+    public void SetPluginShaping(bool applyShaping) => playoutEngine.SetPluginShaping(applyShaping);
+
     public bool HasSessionsForRoute(RenderRoute route) => playoutEngine.HasSessionsForRoute(route);
+
+    /// <summary>Any output device sitting dead after WASAPI invalidated it mid-stream. The app's
+    /// per-second tick watches this and re-applies the device set, which re-opens it — recovery that
+    /// used to depend on a hot-plug notification that never arrives when the device stays present.
+    /// See <see cref="MultiOutputPlayout.HasFaultedOutput"/>. 2026-08-26.</summary>
+    /// <summary>Test seam: report a faulted output without a real device having to die. An
+    /// <c>OutputEntry</c> needs a live MMDevice and WasapiOut, so the fault itself cannot be staged —
+    /// but the CHAIN from "an output faulted" to "the app re-applies its devices" can be, and that
+    /// chain is the part that failed in the field on 2026-08-27 while the pure decision it feeds was
+    /// green. 2026-08-27.</summary>
+    internal bool ForceFaultedOutputForTest;
+
+    public bool HasFaultedOutput =>
+        ForceFaultedOutputForTest || (multiOutput is CompositeRenderBackend composite && composite.HasFaultedOutput);
+
+    /// <summary>The output device ids actually OPEN right now, across both lanes. Compared against
+    /// what the user has ticked, this is how the app spots a device that is wanted but never opened —
+    /// the state a wireless device leaves behind when it comes back later than the resume re-init.
+    /// 2026-08-26.</summary>
+    public IReadOnlyList<string> ActiveOutputDeviceIds => multiOutput.ActiveDeviceIds;
 
     public long Underruns => playoutEngine.AggregateUnderruns;
     public long Drops => playoutEngine.AggregateDrops + Interlocked.Read(ref packetsDropped);
@@ -933,7 +1026,7 @@ public sealed class AudioReceiver : IDisposable
         var now = DateTime.UtcNow;
         foreach (var sp in playoutEngine.ActiveSessions)
         {
-            if (!sp.Endpoint.Address.Equals(address)) continue;
+            if (!playoutEngine.SamePerson(sp.Endpoint.Address, address)) continue;
             if (now - sp.LastWriteUtc <= SessionIdleTimeout) return true;
         }
         return false;
@@ -949,7 +1042,7 @@ public sealed class AudioReceiver : IDisposable
         SessionPlayout? freshest = null;
         foreach (var sp in playoutEngine.ActiveSessions)
         {
-            if (!sp.Endpoint.Address.Equals(address)) continue;
+            if (!playoutEngine.SamePerson(sp.Endpoint.Address, address)) continue;
             if (now - sp.LastWriteUtc > SessionIdleTimeout) continue;
             if (freshest is null || sp.LastWriteUtc > freshest.LastWriteUtc) freshest = sp;
         }
@@ -976,7 +1069,7 @@ public sealed class AudioReceiver : IDisposable
         var fresh = new List<SessionPlayout>();
         foreach (var sp in playoutEngine.ActiveSessions)
         {
-            if (!sp.Endpoint.Address.Equals(address)) continue;
+            if (!playoutEngine.SamePerson(sp.Endpoint.Address, address)) continue;
             if (now - sp.LastWriteUtc > SessionIdleTimeout) continue;
             fresh.Add(sp);
         }
@@ -1154,6 +1247,11 @@ public sealed class AudioReceiver : IDisposable
         // fingerprint they advertised in this format packet. The app reads this to tell the user
         // about a password mismatch (or an out-of-date peer) instead of leaving silence a mystery.
         UpdatePeerSecurity(remote.Address, peerFingerprint);
+
+        // ONE STREAM IS ONE SESSION, however many of the peer's addresses it arrives on. See
+        // SessionEndpointFor: without this, a peer who is on the LAN and on a VPN at the same time
+        // opens two sessions for one stream and each gets a fraction of the packets.
+        remote = SessionEndpointFor(remote, streamId, out _);
 
         SessionPlayout sp;
         StreamSession? newSession = null;
@@ -1349,19 +1447,72 @@ public sealed class AudioReceiver : IDisposable
         // Make sure the decryptor reflects the current profile password before the session
         // tries to decrypt (cheap reference check; rebuild only happens on a password change).
         decryptor.EnsureKey(audioKey);
+        // The same fold as the format path: audio from the peer's other address belongs to the session
+        // this stream already has, not to nothing. Without it the packets arriving on the second path
+        // were dropped silently here until a format packet opened a second session for them.
+        var sessionEndpoint = SessionEndpointFor(remote, streamId, out var merged);
         StreamSession? session;
         lock (sessionsLock)
         {
-            sessions.TryGetValue((remote, streamId), out session);
+            sessions.TryGetValue((sessionEndpoint, streamId), out session);
         }
         // Key lookup guarantees streamId match — kept the defensive check anyway in case of
         // future restructuring (cheap and clarifies intent).
         if (session is null) return;
         if (session.StreamId != streamId) return;
+        if (merged && !session.IsMultiPath)
+        {
+            // Once per session, not once per packet. Whoever reads this log next is trying to work out
+            // why somebody sounded odd, and "this peer is reaching us two ways" is the sentence that
+            // answers it.
+            session.NoteAlternatePath();
+            diagnosticSink?.Invoke($"receiver: {remote.Address} is the same peer as {sessionEndpoint.Address} on stream {streamId} "
+                                 + "- folding both paths onto one session rather than splitting the stream between two");
+        }
         if (!session.HandleAudioPayload(sequence, payload))
         {
             Interlocked.Increment(ref packetsDropped);
         }
+    }
+
+    /// <summary>
+    /// Which session does a packet from this address belong to?
+    ///
+    /// <para>Normally itself. But a peer can be reachable at two addresses at once — on the LAN and on
+    /// a VPN, which is ordinary rather than exotic — and their packets can then reach us from either.
+    /// Sessions are keyed by (source endpoint, streamId), so ONE stream became TWO sessions, each fed
+    /// a fraction of the packets, each starving and being pruned on the four-second rule, alternately.
+    /// That is around a hundred concealments a second for as long as it lasts, and it is what Anthony
+    /// Reyers heard as the iPhone breaking up on 2026-09-01.</para>
+    ///
+    /// <para>None of the existing multi-homing guards covered it, which is worth stating because
+    /// believing they did is the mistake that was made: the pinned send endpoint governs where we
+    /// SEND, the widened allow-list governs whether inbound audio is ACCEPTED (it was — that is why
+    /// two sessions opened), and SetPeerAddressGroups governs whether the mix treats two addresses as
+    /// one person. The gap was session KEYING, and this is it.</para>
+    ///
+    /// <para>Costs nothing when nobody is multi-homed: the exact key is tried first, and the scan
+    /// below does not run at all unless the app has told us somebody has two addresses.</para>
+    /// </summary>
+    /// <param name="merged">True when this packet came in on a path other than the one its session
+    /// lives at — the caller tells the session, so it can drop what the other path already delivered.</param>
+    private IPEndPoint SessionEndpointFor(IPEndPoint remote, ushort streamId, out bool merged)
+    {
+        merged = false;
+        if (!playoutEngine.HasPeerAddressGroups) return remote;
+        lock (sessionsLock)
+        {
+            if (sessions.ContainsKey((remote, streamId))) return remote;
+            foreach (var key in sessions.Keys)
+            {
+                if (key.Item2 != streamId) continue;
+                if (key.Item1.Equals(remote)) continue;
+                if (!playoutEngine.SamePerson(key.Item1.Address, remote.Address)) continue;
+                merged = true;
+                return key.Item1;
+            }
+        }
+        return remote;
     }
 
     private static int MaxBufferCapacityBytes(int maxLatencyMs) =>

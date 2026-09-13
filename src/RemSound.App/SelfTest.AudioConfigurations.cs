@@ -48,11 +48,22 @@ internal static partial class SelfTest
         // combination a user has selected. --------------------------------------------------------
         new("AsioApartmentThread", "the apartment thread's contract is the same however many lanes exist"),
         new("AuditAsioParkStopsDelivery", "parking is a property of the ASIO capture lane itself; there is no WASAPI equivalent to compare"),
+        new("AsioOneDriverBothDirections", "one driver instance opened full duplex is a property of the driver and the shared device; there is no WASAPI half, and it runs only on real hardware when a driver is named"),
+        new("AuditWakeHoldsTheTunerAndKeepsWhatItLearned", "a wake holds ALL THREE tuned lanes at once — WASAPI, ASIO and the Mixed route a WASAPI-only configuration tunes — and the test asserts every one of them directly, including that each keeps its learned floor. The configurations decide which lanes are live; a wake holds every lane regardless, so the behaviour is identical in all three and is checked on every lane rather than by looping the same wake three times. The restart that follows DOES depend on the configuration, through which lane the main slider drives, and AuditWakeRestartsTheAudioWithTheTuneFromBeforeSleep loops all three"),
+        new("AuditOutputReopenIsNotJitter", "this is about output KIND, not configuration: a WASAPI output fault holds the WASAPI lane and the Mixed route (what a WASAPI-only configuration tunes), a missing ASIO output holds the ASIO lane alone, and the test asserts each mapping and that the other kind is left untouched. That covers every lane any configuration can have; looping configurations would repeat the same fault on the same lanes"),
+        new("AuditPostWakeBurstSplitsNetworkFromRender", "a log cadence and format check: the burst and the network/render gap split are written the same way whichever outputs are ticked, and a lane that does not exist prints a dash. The test formats both a both-lanes line and a WASAPI-only line; driving the timer in each configuration would exercise the same code three times"),
+        new("AuditReturningOutputForgetsItsOldFloor","this is ONE lane's tune memory reacting to its own output coming and going, and the test drives both lanes that can exist — WASAPI and ASIO — with the identical rule. The three configurations decide WHICH lanes exist; they do not change what a single lane's memory does when its device leaves and returns, so looping them would run the same two cases three times over"),
+        new("AuditCaptureSurvivesADeadDeviceEvent", "this is WASAPI loopback CAPTURE, and the ASIO lane cannot reach this code at all — ASIO capture runs on its own driver callback with no WASAPI event anywhere in it, so there is nothing to compare. The three configurations are decided by which OUTPUT devices are ticked and have no bearing whatever on how a capture device is polled: the same loop would run identically in all three"),
+        new("AuditNothingCreepsOverHours", "the three things soaked here — the WASAPI cushion target, the drift loop and the tuner's learned floor — are driven directly as arithmetic, and the WASAPI output stage has NO ASIO counterpart at all: ASIO pulls straight from the engine, with no device buffer, no cushion target and no rate-trimming resampler. That asymmetry is the SUBJECT of the test (the fault appears on WASAPI and never on ASIO), not a gap in it. Running the same arithmetic three times would add nothing"),
+        new("AuditLongRunReportIsActuallyWritten", "this is a WIRING check, not a behaviour one: it drives the real per-second tick with NOTHING running — no receiver, no sender, no device ticked — because that is precisely the state in which the per-second diagnostic line goes silent and produced five lines in fourteen hours. There is no audio configuration in that state to vary. What the line SAYS in each of the three is covered by AuditLongRunReportSaysWhatCreeps, which loops all three"),
+        new("AuditUntickedLaneIsNotFedForever", "this IS the both-lanes configuration and cannot be anything else — it is about switching one of two lanes off, and WASAPI-only and ASIO-only have no second lane to switch off. With one active lane no mirror replica is ever made, so there is nothing that can be left written-but-unread: those two configurations cannot REACH this bug rather than being untested for it. The test does run both ways round, ASIO off with WASAPI surviving and WASAPI off with ASIO surviving, because nothing in the read path is lane-specific"),
+        new("AuditPluginShapingSwitchActuallySwitches", "a claimed peer belongs to a DAW TRACK, which has no output lane — ReadClaimedPeer deliberately does not filter by lane, and the shaping runs inside the peer's own session read before any lane is involved. The three configurations decide which SPEAKER lanes exist, and a claimed peer is excluded from every one of them"),
 
         // ---- Pure arithmetic and decision cores, tested by feeding values directly. Covering three
         // configurations would mean feeding the same function the same numbers three times. --------
         new("AuditLatencyUsesDeviceReportedFigures", "pure arithmetic over supplied values — the configuration is the caller's business, and AuditOutputLatencyIsReportedPerLane covers the picking"),
         new("AuditAudioLoopsAreNotAsync", "a reflection check on two methods' compiler attributes; no audio runs at all"),
+        new("AuditWakePutsBackTheSettledTuneNotTheLastMoment", "pure arithmetic over a supplied history — which samples the median and the floors are taken from. It names WASAPI and ASIO only because those are the two sliders it reads; which lane each slider drives in each configuration is AuditWakeRestartsTheAudioWithTheTuneFromBeforeSleep's job, and that loops all three"),
 
         // ---- Plugin. One instance is one track and one peer; the DAW is the device, so the machine's
         // own output configuration is not part of what is being tested. ---------------------------
@@ -65,12 +76,15 @@ internal static partial class SelfTest
         // ---- Settings, profiles and lists. Persistence and list semantics are identical whatever is
         // ticked; the ticked state is DATA these round-trip, not behaviour that varies. -------------
         new("ProfileRoundTrip", "settings persistence — the audio mode is a value being saved, not behaviour under test"),
+        new("SettingsRoundTrip", "save/load arithmetic over the settings store, and the clamp-symmetry sweep already covers BOTH lanes' jitter-buffer settings by name — what is ticked changes none of it"),
+        new("V5ConfigRoundTrip", "serialisation and the DEFAULTS a blank profile carries, including both lanes' jitter buffers by name — a default is a stored number, not behaviour that varies with what is ticked"),
         new("MainWindowProfileRoundTrip", "the window's save/reload path; the configuration is one of the values it carries"),
         new("ProfileDriftTripwire", "reflects over every settings property to catch one that stops persisting"),
         new("AsioTickMemory", "per-driver tick memory is about remembering a selection, not about rendering it"),
         new("SendAppListSemantics", "the active/remembered app lists are WASAPI-only by construction"),
         new("AppSendEnumeration", "enumerates audio sessions; per-application capture exists only on the WASAPI path"),
         new("DefaultOutputFollower", "the 'follow the Windows default' entry is a WASAPI device concept — ASIO has no default"),
+        new("SessionStartWatcher", "it watches Windows audio SESSIONS on the default RENDER endpoint, which is a WASAPI-only notion — an ASIO driver creates no session for it to see, so there is no second or third configuration to compare against"),
 
         // ---- Service. Send-only, WASAPI-only, and it never renders — so it has no output
         // configuration at all. ---------------------------------------------------------------------
@@ -103,6 +117,8 @@ internal static partial class SelfTest
 
         var touching = new List<string>();      // test methods that mention the axis
         var covering = new List<string>();      // ...and demonstrably cover all three
+        var decorative = new List<string>();    // ...whose loop contains no assertion at all
+        var split = new Dictionary<string, (int Inside, int Outside)>(StringComparer.Ordinal);
         var methodPattern = TestMethodPattern();
 
         foreach (var file in Directory.GetFiles(srcDir, "SelfTest*.cs", SearchOption.TopDirectoryOnly))
@@ -116,7 +132,21 @@ internal static partial class SelfTest
             {
                 if (!axis.IsMatch(body.Body)) continue;
                 touching.Add(body.Name);
-                if (coversAll.IsMatch(body.Body)) covering.Add(body.Name);
+                if (!coversAll.IsMatch(body.Body)) continue;
+                covering.Add(body.Name);
+
+                // AND HOW MUCH OF IT ACTUALLY RUNS IN THERE.
+                //
+                // Containing a three-configuration loop was the whole test, and it is not enough: once
+                // a method had one anywhere in its body it counted as covering FOREVER, and every
+                // assertion added afterwards — which get appended at the end, always — sat outside it
+                // unnoticed. That is exactly how the measured-latency readout came to have its new
+                // arithmetic checked in one shape only while this guard stayed green (Ed, 2026-08-24,
+                // and not for the first time). A guard that checks a shape exists rather than what it
+                // covers is the disease, not the cure.
+                var (inside, outside) = CountAssertionsInsideConfigurationLoop(body.Body);
+                split[body.Name] = (inside, outside);
+                if (inside == 0) decorative.Add(body.Name);
             }
         }
 
@@ -137,6 +167,11 @@ internal static partial class SelfTest
             + "RemSound has THREE configurations — WASAPI only, ASIO only, and both — decided by which OUTPUT "
             + "DEVICES are ticked, NOT by the audio-mode setting. Loop over AudioConfigurations.All, or add an "
             + "entry to AudioAxisExemptions saying why one configuration is genuinely enough.");
+
+        // A DECORATIVE LOOP is worse than none: it satisfies the check above while asserting nothing.
+        Check(decorative.Count == 0,
+            $"{decorative.Count} test(s) loop over the three configurations but make no assertion inside the loop, so the "
+            + $"loop is decoration that satisfies this guard and proves nothing: {string.Join(", ", decorative)}");
 
         // Stale exemptions: a reason recorded for a test that no longer touches the axis (or no longer
         // exists) is reassurance about nothing, and it hides the next real gap behind noise.
@@ -177,8 +212,50 @@ internal static partial class SelfTest
               && AudioConfiguration.Both.SingleRoute() is null,
             "a single-lane configuration has one route; both-lanes deliberately has NONE, so callers are forced to ask per lane");
 
+        // REPORT THE SPLIT, every run. A method whose assertions have drifted outside its loop is the
+        // failure this guard could not see, so the numbers are printed rather than left to be
+        // discovered: a test showing 3 inside and 40 outside is telling you where the next gap is.
+        var lopsided = split.Where(kv => kv.Value.Outside > kv.Value.Inside)
+            .OrderByDescending(kv => kv.Value.Outside - kv.Value.Inside)
+            .Select(kv => $"{kv.Key} ({kv.Value.Inside} in / {kv.Value.Outside} out)")
+            .ToList();
+
         return $"{touching.Count} gate test(s) touch the WASAPI/ASIO axis: {covering.Distinct().Count()} cover all three "
-             + $"configurations, {exempt.Count} are exempt with a written reason, 0 unaccounted for";
+             + $"configurations, {exempt.Count} are exempt with a written reason, 0 unaccounted for"
+             + (lopsided.Count == 0
+                 ? "; every covering test asserts more inside its three-configuration loop than outside it"
+                 : $"; MORE ASSERTIONS OUTSIDE THE LOOP THAN INSIDE in {lopsided.Count}: {string.Join(", ", lopsided)}");
+    }
+
+    /// <summary>How many assertions in this method body sit INSIDE a three-configuration loop, and how
+    /// many outside it. Brace-matched from each <c>AudioConfigurations.All</c> loop.
+    ///
+    /// <para>The number that matters is the second one. A method keeps its "covers all three" mark for
+    /// as long as it contains a loop, so assertions appended after it — and they are always appended
+    /// after it — accumulate outside, unseen.</para></summary>
+    private static (int Inside, int Outside) CountAssertionsInsideConfigurationLoop(string body)
+    {
+        var total = CountOccurrences(body, "Check(") + CountOccurrences(body, "Require(");
+        var inside = 0;
+        for (var i = body.IndexOf("AudioConfigurations.All", StringComparison.Ordinal); i >= 0;
+             i = body.IndexOf("AudioConfigurations.All", i + 1, StringComparison.Ordinal))
+        {
+            var open = body.IndexOf('{', i);
+            if (open < 0) continue;
+            var depth = 0;
+            var close = -1;
+            for (var j = open; j < body.Length; j++)
+            {
+                if (body[j] == '{') depth++;
+                else if (body[j] == '}' && --depth == 0) { close = j; break; }
+            }
+            if (close < 0) continue;
+            var block = body[open..close];
+            inside += CountOccurrences(block, "Check(") + CountOccurrences(block, "Require(");
+            // Skip past this loop so a nested AudioConfigurations.All is not counted twice.
+            i = close;
+        }
+        return (inside, Math.Max(0, total - inside));
     }
 
     /// <summary>Split a source file into test-method bodies by brace matching, so the axis check is

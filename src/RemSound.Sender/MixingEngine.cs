@@ -61,6 +61,28 @@ internal sealed class MixingEngine : ICaptureBackend
     }
 
     public bool IsRunning => mixTask is { IsCompleted: false };
+
+    /// <summary>How many capture sources are live. Drives the drift correctors: with ONE source there
+    /// is nothing to stay aligned with, so correction stays off and the commonest setup of all is
+    /// untouched.</summary>
+    internal int ActiveSourceCount { get { lock (gate) return active.Count; } }
+
+    /// <summary>Per-source ring depth and applied drift ratio, for the diag line — so two sources
+    /// pulling apart becomes something a log can SHOW rather than something you have to hear. Ordered
+    /// as the sources were added.</summary>
+    internal IReadOnlyList<(string Name, int BufferedMs, double Ratio)> SourceDrift
+    {
+        get
+        {
+            lock (gate)
+            {
+                var list = new List<(string, int, double)>(active.Count);
+                foreach (var a in active) list.Add((a.Source.Name, a.Source.BufferedMilliseconds, a.Source.AppliedDriftRatio));
+                return list;
+            }
+        }
+    }
+
     public long ClippedSampleCount => Interlocked.Read(ref clippedSampleCount);
     public long MixTickCount => Interlocked.Read(ref mixTickCount);
 
@@ -201,6 +223,7 @@ internal sealed class MixingEngine : ICaptureBackend
             {
                 var entry = OpenSource(spec);
                 if (entry is null) continue;
+                entry.Source.CorrectionWanted = () => ActiveSourceCount > 1;
                 mixer.AddMixerInput(entry.Source.Provider);
                 active.Add(entry);
             }
@@ -285,6 +308,7 @@ internal sealed class MixingEngine : ICaptureBackend
                 if (existingKeys.Contains(SourceKey(spec.DeviceId, spec.Kind))) continue;
                 var entry = OpenSource(spec);
                 if (entry is null) continue;
+                entry.Source.CorrectionWanted = () => ActiveSourceCount > 1;
                 mixer.AddMixerInput(entry.Source.Provider);
                 active.Add(entry);
                 try

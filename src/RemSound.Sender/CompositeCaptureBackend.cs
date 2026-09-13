@@ -38,6 +38,11 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
     // supported (rendezvous-of-N-callback-streams problem) — multi-source falls back to
     // MixingEngine.
     private ICaptureBackend? wasapi;
+    /// <summary>Per-source ring depth and drift ratio from the WASAPI mixing engine, for the diag
+    /// line. Empty unless the mixing engine is the active WASAPI path. 2026-09-07.</summary>
+    internal IReadOnlyList<(string Name, int BufferedMs, double Ratio)> SourceDrift =>
+        (wasapi as MixingEngine)?.SourceDrift ?? [];
+
     // ASIO child. BORROWED — AudioSender owns the persistent instance and keeps the driver
     // open across audio-mode rebuilds (so Audient and similar drivers don't get a rapid
     // close+reopen, which they hate). The composite uses this reference but does NOT

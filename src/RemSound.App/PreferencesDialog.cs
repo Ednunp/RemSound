@@ -237,10 +237,59 @@ internal sealed class PreferencesDialog : Form
         ];
     }
 
+    /// <summary>
+    /// Persist a preference — and RECORD what the user just changed.
+    ///
+    /// <para>Ed, 2026-08-24: "change this control, does the right thing get logged." For this dialog
+    /// the answer was no, twenty-one times over: every preference in it — the theme, the update
+    /// window, the log-size warnings, auto-save, the tray and profile startup choices — persisted
+    /// silently, so nothing a user changed here could be accounted for afterwards.</para>
+    ///
+    /// <para>Recorded by DIFFING what is on disk against what is about to be written, rather than by
+    /// a hand-written line per control. This dialog has twenty-odd settings, and hand-written lists
+    /// go stale — which is the whole reason we are here, since the existing logs were added by hand
+    /// and never checked. A diff cannot drift: a preference added next month reports itself, named
+    /// correctly, with nobody having to remember. Collections are skipped, because the cue-path map
+    /// and the list orders would be noise rather than signal.</para>
+    ///
+    /// <para>It goes out through <see cref="UiChangeLog"/>, which the main window points at its own
+    /// configuration-stamping logger — so a preference change lands in the log tagged with the audio
+    /// configuration it was made in, without this dialog needing to know configurations exist.</para>
+    /// </summary>
     private static void TrySaveConfig(AppConfig cfg)
     {
+        RecordChangedPreferences(cfg);
         try { cfg.Save(); } catch { /* harmless — the choice just won't survive a restart */ }
     }
+
+    private static void RecordChangedPreferences(AppConfig cfg)
+    {
+        if (UiChangeLog.Sink is null) return;   // no main window listening: nothing to record into
+        try
+        {
+            var before = AppConfig.Load();
+            foreach (var p in typeof(AppConfig).GetProperties())
+            {
+                if (!p.CanRead || p.GetIndexParameters().Length > 0) continue;
+                var was = p.GetValue(before);
+                var now = p.GetValue(cfg);
+                // Collections compare by reference and would report a change on every single save;
+                // their contents are their own story (peer lists, cue paths) and belong in their own
+                // lines rather than as a rename of the whole collection.
+                if (was is System.Collections.IEnumerable && was is not string) continue;
+                if (Equals(was, now)) continue;
+                UiChangeLog.Record($"preference: {p.Name}", $"{DescribePreference(was)} → {DescribePreference(now)}");
+            }
+        }
+        catch { /* recording a change must never cost the user the change itself */ }
+    }
+
+    private static string DescribePreference(object? value) => value switch
+    {
+        null => "(unset)",
+        bool b => b ? "on" : "off",
+        _ => value.ToString() ?? "",
+    };
 
     private readonly AccessibleCheckBox acceptRemoteVolumeBox = new()
     {
@@ -568,6 +617,7 @@ internal sealed class PreferencesDialog : Form
             if (string.IsNullOrWhiteSpace(picker.SelectedPath)) return;
             var cfg = AppConfig.Load();
             cfg.ProfilesDirectory = picker.SelectedPath;
+            RecordChangedPreferences(cfg);
             try
             {
                 cfg.Save();
@@ -691,7 +741,7 @@ internal sealed class PreferencesDialog : Form
             if (autoSaveList.SelectedIndex < 0) return;
             var cfg = AppConfig.Load();
             cfg.AutoSaveNonReadOnlyMinutes = AutoSaveMinuteOptions[autoSaveList.SelectedIndex];
-            try { cfg.Save(); } catch { /* harmless — choice just won't survive a restart */ }
+            TrySaveConfig(cfg);
             onAutoSaveIntervalChanged();
         };
         autoSaveLabel.Click += (_, _) => autoSaveList.Focus();
@@ -726,20 +776,20 @@ internal sealed class PreferencesDialog : Form
         {
             var cfg = AppConfig.Load();
             cfg.CheckForUpdatesOnStartup = checkForUpdatesOnStartupBox.Checked;
-            try { cfg.Save(); } catch { /* harmless — choice just won't survive a restart */ }
+            TrySaveConfig(cfg);
         };
         updateFrequencyBox.SelectedIndexChanged += (_, _) =>
         {
             var cfg = AppConfig.Load();
             cfg.UpdateCheckFrequency = (UpdateCheckFrequency)updateFrequencyBox.SelectedIndex;
-            try { cfg.Save(); } catch { /* harmless — choice just won't survive a restart */ }
+            TrySaveConfig(cfg);
             onUpdateFrequencyChanged();
         };
         silentlyInstallUpdatesBox.CheckedChanged += (_, _) =>
         {
             var cfg = AppConfig.Load();
             cfg.SilentlyInstallUpdates = silentlyInstallUpdatesBox.Checked;
-            try { cfg.Save(); } catch { /* harmless */ }
+            TrySaveConfig(cfg);
         };
 
         // Update install window: 96 quarter-hour slots in each list ("00:00" … "23:45"). The lists
@@ -766,7 +816,7 @@ internal sealed class PreferencesDialog : Form
             cfg.UpdateWindowEnabled = updateWindowBox.Checked;
             cfg.UpdateWindowStartMinutes = Math.Max(0, updateWindowStartBox.SelectedIndex) * UpdateWindow.SlotMinutes;
             cfg.UpdateWindowEndMinutes = Math.Max(0, updateWindowEndBox.SelectedIndex) * UpdateWindow.SlotMinutes;
-            try { cfg.Save(); } catch { /* harmless */ }
+            TrySaveConfig(cfg);
         }
         updateWindowBox.CheckedChanged += (_, _) => { SyncUpdateWindowEnabled(); SaveUpdateWindow(); };
         updateWindowStartBox.SelectedIndexChanged += (_, _) => SaveUpdateWindow();
@@ -776,7 +826,7 @@ internal sealed class PreferencesDialog : Form
         {
             var cfg = AppConfig.Load();
             cfg.ShowWhatsNewAfterUpdate = showWhatsNewAfterUpdateBox.Checked;
-            try { cfg.Save(); } catch { /* harmless */ }
+            TrySaveConfig(cfg);
         };
         checkForUpdatesNowButton.Click += (_, _) => checkForUpdatesNow();
 
@@ -786,7 +836,7 @@ internal sealed class PreferencesDialog : Form
         {
             var cfg = AppConfig.Load();
             cfg.UpnpEnabled = upnpEnabledBox.Checked;
-            try { cfg.Save(); } catch { /* harmless */ }
+            TrySaveConfig(cfg);
             applyUpnpEnabled(upnpEnabledBox.Checked);
             RefreshUpnpStatusLabel();
         };
@@ -795,7 +845,7 @@ internal sealed class PreferencesDialog : Form
         {
             var cfg = AppConfig.Load();
             cfg.ShowPanEqTab = showPanEqTabBox.Checked;
-            try { cfg.Save(); } catch { /* harmless — choice just won't survive a restart */ }
+            TrySaveConfig(cfg);
         };
 
         themeBox.Items.AddRange(["Match Windows (system)", "Light", "Dark"]);
@@ -809,7 +859,7 @@ internal sealed class PreferencesDialog : Form
         {
             var cfg = AppConfig.Load();
             cfg.ThemeMode = themeBox.SelectedIndex switch { 1 => "light", 2 => "dark", _ => "system" };
-            try { cfg.Save(); } catch { /* harmless — choice just won't survive a restart */ }
+            TrySaveConfig(cfg);
         };
         var themeLabel = new MnemonicLabel { Text = "Colour &theme (Alt+T)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = themeBox };
         var themeHint = new Label { Text = "— takes effect next launch", AutoSize = true, ForeColor = SystemColors.GrayText, Anchor = AnchorStyles.Left, Padding = new Padding(8, 4, 0, 0) };
@@ -834,7 +884,7 @@ internal sealed class PreferencesDialog : Form
         {
             var cfg = AppConfig.Load();
             cfg.MainTabOrder = tabOrderList.Items.Cast<TabOrderItem>().Select(t => t.Key).ToList();
-            try { cfg.Save(); } catch { /* harmless — order just won't survive a restart */ }
+            TrySaveConfig(cfg);
         }
         void MoveTab(int delta)
         {
@@ -861,14 +911,14 @@ internal sealed class PreferencesDialog : Form
         {
             var cfg = AppConfig.Load();
             cfg.ShowDiscoveredPeers = enableDiscoveredPeersBox.Checked;
-            try { cfg.Save(); } catch { /* harmless */ }
+            TrySaveConfig(cfg);
         };
         enableRememberedPeersBox.Checked = cfgForLoad.ShowRememberedPeers;
         enableRememberedPeersBox.CheckedChanged += (_, _) =>
         {
             var cfg = AppConfig.Load();
             cfg.ShowRememberedPeers = enableRememberedPeersBox.Checked;
-            try { cfg.Save(); } catch { /* harmless */ }
+            TrySaveConfig(cfg);
         };
 
         // Live UPnP status — the RouterPortMapper raises StatusChanged from a thread-pool
@@ -1232,7 +1282,7 @@ internal sealed class PreferencesDialog : Form
         {
             var c = AppConfig.Load();
             c.StartMinimised = startMinimisedBox.Checked;
-            try { c.Save(); } catch (Exception ex) { ShowStartupWarning("Could not save Start minimised preference: " + ex.Message); }
+            RecordChangedPreferences(c); try { c.Save(); } catch (Exception ex) { ShowStartupWarning("Could not save Start minimised preference: " + ex.Message); }
         };
 
         startWithUserBox.CheckedChanged += (_, _) =>
@@ -1297,14 +1347,14 @@ internal sealed class PreferencesDialog : Form
         if (startupProfileList.SelectedItem is not string title || string.IsNullOrWhiteSpace(title)) return;
         var c = AppConfig.Load();
         c.StartWithProfileTitle = title;
-        try { c.Save(); } catch (Exception ex) { ShowStartupWarning("Could not save the start-with-profile choice: " + ex.Message); }
+        RecordChangedPreferences(c); try { c.Save(); } catch (Exception ex) { ShowStartupWarning("Could not save the start-with-profile choice: " + ex.Message); }
     }
 
     private void ClearStartupProfileSelection()
     {
         var c = AppConfig.Load();
         c.StartWithProfileTitle = null;
-        try { c.Save(); } catch (Exception ex) { ShowStartupWarning("Could not save the start-with-profile choice: " + ex.Message); }
+        RecordChangedPreferences(c); try { c.Save(); } catch (Exception ex) { ShowStartupWarning("Could not save the start-with-profile choice: " + ex.Message); }
     }
 
     private void ShowStartupWarning(string message) =>
@@ -1424,6 +1474,12 @@ internal sealed class PreferencesDialog : Form
         if (cue.IsProfileSetting) ChangedAnyProfileSetting = true;
         var cfg = AppConfig.Load();
         cfg.DefaultCueSounds[cue.CueId] = chosenFile;
+        // Recorded by hand, because this one lands in a DICTIONARY and the property diff in
+        // RecordChangedPreferences deliberately skips collections — a dictionary compares by
+        // reference and would otherwise report a change on every save. Which cue sound is chosen is
+        // exactly the sort of thing asked about later ("why does it make that noise now"), so it gets
+        // its own line rather than falling into that exemption. 2026-08-24.
+        UiChangeLog.Record($"cue sound: {cue.CueId}", chosenFile);
         TrySaveConfig(cfg);
         RefreshCueActionButtons();
 

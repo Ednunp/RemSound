@@ -176,10 +176,34 @@ internal static partial class SelfTest
                 $"flat sliders in {mode} must build no chain at all");
 
         // Gain is clamped, so a wild value cannot produce a screaming boost.
+        //
+        // The bar is an ABSOLUTE figure, not "MaxGainDb + 3". Measuring the clamp against the very
+        // constant that sets it is self-referential: raise MaxGainDb to 24 and the bar moves to 27,
+        // so a measured 24 dB still passes and the step reports a clamp it never checked. Found
+        // 2026-08-24 by doubling the constant and watching this step stay green.
+        //
+        // 15 dB is the ±12 dB the sliders offer plus the margin a real filter's measured peak needs.
+        // It is written out because 12 is a DECISION — the range of every EQ control in the app —
+        // and a change to it should have to come here and be argued for.
         var overdriven = new PeerShaping { EqMode = PeerEqMode.Simple3Band };
         overdriven.SimpleBandsDb[1] = 100f;
-        Check(GainDb(overdriven, 1000) < PeerEqBands.MaxGainDb + 3,
+        Check(GainDb(overdriven, 1000) < 15f,
             $"a band gain beyond the slider's range must be clamped, not applied (measured {GainDb(overdriven, 1000):0.0} dB)");
+        // The parametric band cap is a UI-only rule — it gates the Add-band button and an early return
+        // in MainForm — so no DSP test could ever see it move, and cutting it to one band left the
+        // whole gate green (2026-08-24). It is the number of bands Ed is offered, so it is a decision
+        // and belongs written down.
+        Check(PeerEqBands.ParametricMaxBands == 16,
+            $"the parametric EQ offers 16 bands. The cap lives only in the UI (the Add-band button's enabled state and "
+            + $"an early return), so nothing else can notice it moving (got {PeerEqBands.ParametricMaxBands})");
+        Check(PeerEqBands.ParametricMinHz == 20f && PeerEqBands.ParametricMaxHz == 20000f,
+            $"and the band range is 20 Hz to 20 kHz — the audible range the dialog offers "
+            + $"(got {PeerEqBands.ParametricMinHz}–{PeerEqBands.ParametricMaxHz})");
+
+        Check(Math.Abs(PeerEqBands.MaxGainDb - 12f) < 0.001f,
+            $"the EQ range is ±12 dB. Every slider, the curve control and the parametric dialog derive their range from "
+            + $"PeerEqBands.MaxGainDb, so changing it silently re-scales the whole EQ UI — and every saved profile's "
+            + $"slider positions come to mean something different (got {PeerEqBands.MaxGainDb})");
 
         return string.Join("; ", findings) + "; the mode chooser changes the result; flat is a no-op in all three; gain is clamped";
     }

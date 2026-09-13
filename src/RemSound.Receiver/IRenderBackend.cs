@@ -38,6 +38,12 @@ internal interface IRenderBackend : IDisposable
     /// <inheritdoc cref="ReportedOutputLatencyMsFor"/>
     double OutputQueueMsFor(RemSound.Core.RenderRoute route);
 
+    /// <summary>One reading per live WASAPI output stage; EMPTY for a backend that has no such stage.
+    /// ASIO returning empty is the point rather than a gap: the stage exists on one lane and not the
+    /// other, which is exactly why it is where to look when a fault appears on one lane only. See
+    /// <see cref="WasapiOutputStage"/>.</summary>
+    IReadOnlyList<WasapiOutputStage> OutputStages();
+
     void Start();
 
     void Stop();

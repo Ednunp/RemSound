@@ -104,6 +104,33 @@ public static class RemPacket
     public const int FormatPayloadWithFingerprintSize = 44;
     /// <summary>Length of the password fingerprint carried in the extended format payload.</summary>
     public const int PasswordFingerprintSize = 8;
+    /// <summary>
+    /// Format payload with the sender's own CAPTURE LATENCY appended (44 + 2 = 46). Sent by
+    /// 2026-08-24+ builds so the receiving end can report the real length of the journey instead of
+    /// guessing at the half of it that happens on somebody else's machine.
+    ///
+    /// <para><b>Why it exists.</b> The total-latency readout measures their microphone to your ears,
+    /// but a receive-only machine has no way to know what the FAR END's capture stage costs — so it
+    /// substituted the local 10 ms WASAPI estimate. Ed's 2026-08-24 pair of logs shows the cost: the
+    /// laptop reported <c>capture=10.0[est]</c> for audio whose sending desktop had measured
+    /// <c>capture=0.7[dev]</c>. Overstated by more than 9 ms, and receive-only is the common case
+    /// rather than the exception.</para>
+    ///
+    /// <para><b>Compatibility.</b> Appended after the fingerprint, exactly like the Lane byte and the
+    /// fingerprint before it, and read only when <c>payload.Length &gt;= FormatPayloadWithCaptureSize</c>.
+    /// Every existing reader takes a MINIMUM length and ignores trailing bytes, so older peers — the
+    /// iOS app, an old desktop build, the send-only service — parse exactly what they parsed before.
+    /// The relay never looks inside a Format payload at all; it forwards the datagram whole. Written
+    /// only on the fingerprint path, because without a fingerprint the payload stops at 36 and
+    /// offsets 36–43 would have to be zero-filled — which a reader would then mistake for a genuine
+    /// all-zero fingerprint.</para>
+    /// </summary>
+    public const int FormatPayloadWithCaptureSize = 46;
+    /// <summary>Capture latency travels as a <see cref="ushort"/> in TENTHS of a millisecond: 0.1 ms
+    /// resolution (fine enough for a 0.7 ms ASIO input) under a 6.5 second ceiling nothing can
+    /// exceed. Zero means "not stated" — the same convention
+    /// <c>ICaptureBackend.ReportedInputLatencyMs</c> uses for a device that will not say.</summary>
+    public const double CaptureLatencyTicksPerMs = 10.0;
     // KeepAlivePayloadSize removed 2026-05-23 — no code reads or writes this payload any more
     // (see top-of-file comment). RemPacketType.KeepAlive itself is retained for wire safety.
     /// <summary>
@@ -196,6 +223,21 @@ public static class RemPacket
         if (passwordFingerprint.Length == PasswordFingerprintSize && destination.Length >= FormatPayloadWithFingerprintSize)
         {
             passwordFingerprint.CopyTo(destination.Slice(36, PasswordFingerprintSize));
+
+            // Our own CAPTURE LATENCY at offset 44, so the far end can report the real journey
+            // rather than guessing at the half of it that happens here. Appended after the
+            // fingerprint and length-gated on the way in, so a peer that has never heard of it reads
+            // 44 bytes exactly as before. Only on the fingerprint path — see
+            // FormatPayloadWithCaptureSize for why 36-byte payloads cannot carry it.
+            if (destination.Length >= FormatPayloadWithCaptureSize)
+            {
+                var ticks = format.CaptureLatencyMs * CaptureLatencyTicksPerMs;
+                var clamped = ticks <= 0 ? (ushort)0
+                    : ticks >= ushort.MaxValue ? ushort.MaxValue
+                    : (ushort)Math.Round(ticks);
+                BinaryPrimitives.WriteUInt16LittleEndian(destination[44..], clamped);
+                return FormatPayloadWithCaptureSize;
+            }
             return FormatPayloadWithFingerprintSize;
         }
         return FormatPayloadExtendedSize;
@@ -244,6 +286,15 @@ public static class RemPacket
             passwordFingerprint = payload.Slice(36, PasswordFingerprintSize).ToArray();
         }
 
+        // The sender's own capture latency, when the sender is new enough to state it. Length-gated
+        // like every extension before it: an older peer simply stops short and this stays zero,
+        // which the receiver reads as "not stated" and falls back to its own estimate.
+        var captureLatencyMs = 0.0;
+        if (payload.Length >= FormatPayloadWithCaptureSize)
+        {
+            captureLatencyMs = BinaryPrimitives.ReadUInt16LittleEndian(payload[44..]) / CaptureLatencyTicksPerMs;
+        }
+
         var lane = RenderRoute.Mixed;
         if (payload.Length >= FormatPayloadExtendedSize)
         {
@@ -266,7 +317,8 @@ public static class RemPacket
             BinaryPrimitives.ReadInt32LittleEndian(payload[20..]),
             BinaryPrimitives.ReadInt32LittleEndian(payload[24..]),
             BinaryPrimitives.ReadInt32LittleEndian(payload[28..]),
-            lane);
+            lane,
+            captureLatencyMs);
         return true;
     }
 

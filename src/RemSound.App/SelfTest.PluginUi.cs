@@ -30,8 +30,8 @@ internal static partial class SelfTest
         var status = "Not connected.";
         panel.StatusSource = () => status;
 
-        (bool Sending, string? Peer)? lastJob = null;
-        panel.JobChanged += (sending, peer) => lastJob = (sending, peer);
+        (bool Send, bool Receive, IReadOnlyList<string> Peers, bool All, float SendDb, float ReceiveDb)? lastJob = null;
+        panel.JobChanged += (send, receive, chosen, all, sl, rl) => lastJob = (send, receive, chosen, all, sl, rl);
 
         // --- The peer list comes from the app, with NAMES -----------------------------------------
         panel.Refresh(fromTimer: false);
@@ -43,47 +43,128 @@ internal static partial class SelfTest
         // re-announces every item and moves the user's place — the control would be unusable, and
         // nothing about it would look wrong to a sighted tester.
         panel.SelectPeerForTest(1);
+        var rebuildsBefore = panel.PeerListRebuildsForTest;
         panel.Refresh(fromTimer: true);
         panel.Refresh(fromTimer: true);
         Check(panel.SelectedPeerIndexForTest == 1,
             "a refresh with an unchanged list must leave the user exactly where they were");
+        // And it must not have REBUILT. Checking only where the selection landed cannot see this:
+        // the rebuild restores the selection by address afterwards, so the index comes back to the
+        // right row either way — forcing a rebuild on every refresh left this step green
+        // (2026-08-24). The harm is the rebuild itself. NVDA re-announces a list every time it is
+        // repopulated, and this refresh runs once a second.
+        Check(panel.PeerListRebuildsForTest == rebuildsBefore,
+            $"two refreshes over an unchanged list rebuilt it {panel.PeerListRebuildsForTest - rebuildsBefore} time(s). "
+            + "Every rebuild makes a screen reader re-announce the whole list — once a second, the control is unusable, "
+            + "and nothing about it looks wrong on screen");
 
-        // ...but a real change must land, and must keep the user on the same PERSON if they are
-        // still there, rather than on the same row number.
+        // --- Both switches start OFF ---------------------------------------------------------------
+        // A plugin dropped on a track must do nothing until it is told to. The alternative is an
+        // instance broadcasting a track the moment it is inserted, which for a screen-reader user is
+        // an invisible surprise.
+        Check(!panel.SendChecked && !panel.ReceiveChecked,
+            "a fresh panel must have neither direction ticked - inserting a plugin must not start sending a track on its own");
+        Check(!panel.PeerListEnabledForTest, "and the peer list must be disabled until receiving is ticked");
+        Check(!panel.AllPeersChecked, "and it must not be taking all peers either");
+
+        // --- Receiving, and SEVERAL people on one track --------------------------------------------
+        panel.SetReceiveForTest(true);
+        Check(lastJob is { Receive: true, Send: false }, "ticking receive must tell the engine to receive, and only to receive");
+        Check(panel.PeerListEnabledForTest, "the peer list must be usable when receiving");
+
+        panel.SetPeerCheckedForTest(1, true);
+        Check(lastJob?.Peers.SequenceEqual(new[] { "192.168.1.51" }) == true,
+            $"ticking a peer must put THAT peer on the track (got {string.Join(",", lastJob?.Peers ?? [])})");
+
+        // The whole reason the list is checkable: three people talking while you work should be one
+        // plugin instance, not three.
+        panel.SetPeerCheckedForTest(0, true);
+        Check(lastJob?.Peers.OrderBy(a => a).SequenceEqual(new[] { "192.168.1.50", "192.168.1.51" }) == true,
+            $"a second tick must ADD, not replace - one track carrying two people is the point of the control "
+            + $"(got {string.Join(",", lastJob?.Peers ?? [])})");
+
+        // MOVING THE CURSOR MUST NOT CHOOSE ANYBODY. Arrowing down a list and finding you had put
+        // somebody on your track by passing over them would be a trap, and an invisible one.
+        var peersBeforeArrow = lastJob?.Peers.ToList() ?? [];
+        panel.SelectPeerForTest(0);
+        Check(lastJob?.Peers.OrderBy(a => a).SequenceEqual(peersBeforeArrow.OrderBy(a => a)) == true,
+            "moving the selection must change nothing - it is a cursor, not a choice");
+
+        panel.SetPeerCheckedForTest(0, false);
+        Check(lastJob?.Peers.SequenceEqual(new[] { "192.168.1.51" }) == true, "and unticking must remove just that one");
+
+        // --- A list that changes underneath the user -----------------------------------------------
+        // Somebody joining shifts every position after them. Positions are therefore used for nothing
+        // but the cursor: who is ON the track is held by address and must not move.
         peers.Insert(0, ("192.168.1.49", "Jonathan"));
         panel.Refresh(fromTimer: true);
         Check(panel.PeerItemCountForTest == 3, "a peer appearing in RemSound must appear here without reopening the plugin");
-        Check(panel.ChosenPeerAddress == "192.168.1.51",
-            $"the user must stay on the same PERSON when the list changes, not the same row (landed on {panel.ChosenPeerAddress})");
+        Check(panel.PeerCheckedForTest(2) && !panel.PeerCheckedForTest(0) && !panel.PeerCheckedForTest(1),
+            "a peer joining must not move who is on the track - the ticks follow the PERSON, not the row");
+        Check(panel.SelectedPeerIndexForTest == 1,
+            $"and the keyboard must stay on the same person, who is now row 1 (landed on {panel.SelectedPeerIndexForTest})");
 
-        // --- One person per track: the job the user picked must reach the engine -------------------
-        panel.SelectJobForTest(1);   // receive
-        Check(lastJob is { Sending: false }, "choosing 'receive' must tell the engine to receive");
-        Check(lastJob?.Peer == "192.168.1.51", $"...and which peer (got {lastJob?.Peer})");
-        Check(panel.PeerListEnabledForTest, "the peer chooser must be usable when receiving");
+        // Somebody LEAVING must not be forgotten. They are off the screen, not off the track: when
+        // they come back the track picks them up again, which is what anybody who set it up once
+        // expects. Reading the ticks off the control instead would silently drop them.
+        peers.RemoveAll(p => p.Item1 == "192.168.1.51");
+        panel.Refresh(fromTimer: true);
+        Check(panel.CheckedPeersForTest.Contains("192.168.1.51"),
+            "a peer who disconnects must stay on this track's list - dropping them would mean setting the track up again every reconnect");
+        peers.Insert(2, ("192.168.1.51", "Chris"));
+        panel.Refresh(fromTimer: true);
+        Check(panel.PeerCheckedForTest(2), "...and must come back ticked when they return");
 
-        panel.SelectJobForTest(0);   // send
-        Check(lastJob is { Sending: true, Peer: null },
-            "choosing 'send' must release the peer — otherwise they stay mute in RemSound with the plugin no longer playing them");
+        // --- All peers ------------------------------------------------------------------------------
+        panel.SetAllPeersForTest(true);
+        Check(lastJob?.All == true, "the all-peers tick must reach the engine");
         Check(!panel.PeerListEnabledForTest,
-            "the peer chooser must be disabled, not hidden, when sending — hiding it would shift the tab order under a screen-reader user mid-session");
+            "and the individual list must be disabled while it is on - it is disabled rather than hidden so the tab order never shifts");
+        panel.SetAllPeersForTest(false);
+        Check(lastJob?.All == false && lastJob?.Peers.Contains("192.168.1.51") == true,
+            "unticking all-peers must go back to exactly the people who were chosen before it");
+
+        // --- AND BOTH DIRECTIONS AT ONCE, which is the whole point of two switches -------------------
+        panel.SetSendForTest(true);
+        Check(lastJob is { Send: true, Receive: true },
+            "both directions must be able to run on ONE instance - that is what saves a track needing two plugins");
+        Check(lastJob?.Peers.Count > 0, "and the chosen peers must survive switching sending on beside it");
+
+        panel.SetReceiveForTest(false);
+        Check(lastJob is { Send: true, Receive: false } && lastJob?.Peers.Count == 0,
+            "unticking receive must release the peers - otherwise they stay mute in RemSound with the plugin no longer playing them");
+        Check(!panel.PeerListEnabledForTest,
+            "the peer list must be disabled, not hidden, when not receiving - hiding it would shift the tab order under a screen-reader user mid-session");
+
+        // --- The levels are in DECIBELS -------------------------------------------------------------
+        // "1 for unity is not intuitive for daw users" (Anthony Reyers, 2026-09-01). 0 dB is.
+        Check(panel.LevelMinimumForTest <= -60m && panel.LevelMaximumForTest >= 12m,
+            $"the level controls must run from a real off to some boost ({panel.LevelMinimumForTest}..{panel.LevelMaximumForTest})");
+        panel.SetSendLevelForTest(-6f);
+        Check(lastJob is not null && Math.Abs(lastJob.Value.SendDb + 6f) < 0.001f,
+            $"the send level must reach the engine in dB (got {lastJob?.SendDb})");
+        panel.SetReceiveLevelForTest(3f);
+        Check(lastJob is not null && Math.Abs(lastJob.Value.ReceiveDb - 3f) < 0.001f,
+            $"the receive level must reach the engine in dB (got {lastJob?.ReceiveDb})");
 
         // --- Active is the user's own bypass ------------------------------------------------------
-        panel.SelectJobForTest(1);
-        Check(lastJob is { Sending: false }, "back to receiving");
+        panel.SetReceiveForTest(true);
+        Check(lastJob is { Receive: true }, "back to receiving");
         panel.SetActiveForTest(false);
-        Check(lastJob is { Sending: true, Peer: null },
-            "unticking Active must hand the peer back to RemSound's speakers, not leave them playing nowhere");
+        Check(lastJob is { Send: false, Receive: false } && lastJob?.Peers.Count == 0,
+            "unticking Active must stop BOTH directions and hand the peers back to RemSound's speakers, not leave them playing nowhere");
         panel.SetActiveForTest(true);
-        Check(lastJob?.Peer == "192.168.1.51", "re-ticking Active must take the peer back");
+        Check(lastJob is { Send: true, Receive: true } && lastJob?.Peers.Contains("192.168.1.51") == true,
+            "re-ticking Active must restore exactly what was on before, peers included - it is a bypass, not a reset");
 
         // --- The status line must say what is true, including the awkward cases -------------------
         status = "Receiving Andre onto this track.";
         panel.Refresh(fromTimer: true);
         Check(panel.StatusTextForTest.Contains("Receiving Andre"), "the status line must show what the engine reports");
 
-        return "peer list arrives from the app with names; an unchanged refresh never moves the user; a changed list keeps them on the same person; "
-             + "job and peer reach the engine; Active works as a bypass that returns the peer";
+        return "peer list arrives from the app with names; an unchanged refresh never rebuilds; ticks and cursor follow the PERSON when "
+             + "the list changes; a disconnected peer stays on the track and returns ticked; two people on one track; all-peers; "
+             + "levels in dB; Active works as a bypass that returns everybody";
     }
 
     /// <summary>THE PROPERTIES A HOST NEEDS BEFORE IT WILL LOAD ANYTHING.
@@ -153,7 +234,7 @@ internal static partial class SelfTest
             plugin.Initialize();
 
             // --- Send mode must pass the track through ------------------------------------------
-            plugin.SetJobForTest(sending: true, peer: null);
+            plugin.SetJobForTest(send: true, receive: false, peer: null);
             var input = (AudioIOPortManaged)plugin.InputPorts[0];
             var output = (AudioIOPortManaged)plugin.OutputPorts[0];
             var left = input.GetAudioBuffer(0);
@@ -190,11 +271,54 @@ internal static partial class SelfTest
 
             // --- State: what the window sets must be what the host saves --------------------------
             var peer = IPAddress.Parse("192.168.1.50");
-            plugin.PushJobToParametersForTest(sending: false, peer: peer);
-            var job = plugin.Parameters.First(p => p.ID == "job");
-            Check(Math.Abs(job.ProcessValue - 1) < 0.001,
+            plugin.PushJobToParametersForTest(send: false, receive: true, peer: peer);
+            var receiveParam = plugin.Parameters.First(p => p.ID == "receive");
+            Check(Math.Abs(receiveParam.ProcessValue - 1) < 0.001,
                 $"the window must write ProcessValue, not just EditValue - ProcessValue is what the host saves, and writing "
-              + $"only EditValue is why the plugin reverted to sending within seconds (got {job.ProcessValue})");
+              + $"only EditValue is why the plugin reverted within seconds (got {receiveParam.ProcessValue})");
+
+            // --- A PUSH MUST NOT BE READ BACK WHILE IT IS HALF WRITTEN --------------------------
+            // All three parameters raise PropertyChanged into ApplyParameters, and SetParameter writes
+            // EditValue and ProcessValue, so one push used to re-enter ApplyParameters up to four
+            // times mid-write. ApplyParameters prefers the remembered ADDRESS over the index, and the
+            // address was assigned LAST — so it kept resolving to the person the user had just moved
+            // away from and calling SetJob with them. That is why choosing a peer in the window could
+            // leave the track playing the previous one (Anthony Reyers, 2026-08-29: "iPhone gave me
+            // HOMESERV's sound and the other way around"). A first instance often escaped it, having
+            // no previous peer to fall back to; later instances did not.
+            //
+            // Checked by watching what the instance's own state looks like AT THE MOMENT a parameter
+            // changes: against the old order this sees the previous address, which is the bug itself.
+            // Park on "send" first, so the push under test genuinely moves the job parameter and the
+            // watcher below has something to fire on. (With no app running there are no known peers,
+            // so the peer INDEX stays 0 either way and never raises an event of its own.)
+            plugin.PushJobToParametersForTest(send: true, receive: false, peer: null);
+
+            var second = IPAddress.Parse("192.168.1.51");
+            // The decision is made first and the parameters are told afterwards, which is the real
+            // order: the window applies the change, then mirrors it into the parameters.
+            plugin.SetJobForTest(send: false, receive: true, peer: second);
+
+            string? addressDuringPush = null;
+            var jobParameter = plugin.Parameters.First(p => p.ID == "receive");
+            void Watch(object? _, System.ComponentModel.PropertyChangedEventArgs __)
+                => addressDuringPush ??= plugin.ChosenPeerForTest?.ToString() ?? "nothing";
+            jobParameter.PropertyChanged += Watch;
+            try { plugin.PushJobToParametersForTest(send: false, receive: true, peer: second); }
+            finally { jobParameter.PropertyChanged -= Watch; }
+
+            Check(addressDuringPush is not null,
+                "the push must actually move the receive parameter, or this check is proving nothing");
+            Check(addressDuringPush == "192.168.1.51",
+                $"while a peer change is being written to the parameters, the instance must already know the NEW peer - "
+              + $"anything reading it mid-push resolves to the person the user just left, and puts them back on the track "
+              + $"(saw '{addressDuringPush ?? "nothing"}' where 192.168.1.51 was being set)");
+            Check(plugin.SavedPeerAddressForTest == "192.168.1.51",
+                $"and the push must finish on the peer it was given (got {plugin.SavedPeerAddressForTest ?? "nothing"})");
+
+            // Back to the first peer, so the saved-state checks below read what they always did.
+            plugin.SetJobForTest(send: false, receive: true, peer: peer);
+            plugin.PushJobToParametersForTest(send: false, receive: true, peer: peer);
 
             var saved = plugin.SaveState();
             Check(saved is { Length: > 0 }, "the plugin must save state");
@@ -297,19 +421,25 @@ internal static partial class SelfTest
             // And it must reach the audio code, because that is where the missing pieces actually bit.
             // Initialize builds the ports, the parameters and the resamplers - the NAudio types whose
             // absence is what Reaper silently swallowed.
-            var initialize = pluginType!.GetMethod("Initialize");
-            var hostProperty = pluginType.GetProperty("Host");
-            Check(hostProperty is not null, "the plugin must expose Host, or the DAW cannot hand it one");
-            hostProperty!.SetValue(instance, new StubAudioHost());
-            try { initialize!.Invoke(instance, null); }
+            var initialize = Require(pluginType!.GetMethod("Initialize"),
+                "the plugin must expose Initialize, or a DAW can never start it");
+            var hostProperty = Require(pluginType.GetProperty("Host"),
+                "the plugin must expose Host, or the DAW cannot hand it one");
+            hostProperty.SetValue(instance, new StubAudioHost());
+            try { initialize.Invoke(instance, null); }
             catch (Exception ex)
             {
                 var inner = ex.InnerException ?? ex;
                 Check(false, $"the plugin must INITIALISE from the shipped folder, not just construct: {inner.GetType().Name}: {inner.Message}");
             }
 
-            // Tidy up: close its link and log rather than leaving a socket open in the gate.
-            try { pluginType.GetMethod("CloseForTest", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?.Invoke(instance, null); }
+            // Tidy up: close its link and log rather than leaving a socket open in the gate. The
+            // LOOKUP must not be swallowed — a renamed CloseForTest would leak a socket per run and
+            // nothing would say so. Only the invoke is best-effort, because teardown failing is not
+            // this test's subject.
+            var closeForTest = Require(pluginType.GetMethod("CloseForTest", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance),
+                "the plugin must expose CloseForTest, or this test leaves its loopback socket open every run");
+            try { closeForTest.Invoke(instance, null); }
             catch { }
 
             var shipped = Directory.GetFiles(folder, "*.dll").Length;
@@ -334,10 +464,10 @@ internal static partial class SelfTest
         plugin.Initialize();
 
         var parameters = plugin.Parameters?.ToList() ?? [];
-        Check(parameters.Count >= 3,
-            $"the three decisions the window offers must ALSO be parameters, or a host with broken window focus leaves no way in ({parameters.Count} found)");
+        Check(parameters.Count >= 8,
+            $"EVERY decision the window offers must ALSO be a parameter, or a host with broken window focus leaves no way in ({parameters.Count} found)");
 
-        foreach (var id in new[] { "job", "peer", "active" })
+        foreach (var id in new[] { "send", "receive", "peer", "peerinclude", "allpeers", "sendlevel", "receivelevel", "active" })
         {
             var parameter = parameters.FirstOrDefault(p => p.ID == id);
             Check(parameter is not null, $"parameter '{id}' must exist");
@@ -347,19 +477,44 @@ internal static partial class SelfTest
                 $"parameter '{id}' is named '{parameter.Name}' - it must read as plain English when spoken alone");
         }
 
-        var job = parameters.First(p => p.ID == "job");
+        var send = parameters.First(p => p.ID == "send");
+        var receive = parameters.First(p => p.ID == "receive");
         var peer = parameters.First(p => p.ID == "peer");
+        var sendLevel = parameters.First(p => p.ID == "sendlevel");
+        var receiveLevel = parameters.First(p => p.ID == "receivelevel");
         var active = parameters.First(p => p.ID == "active");
 
-        Check(Math.Abs(job.DefaultValue) < 0.001, "a fresh instance must default to SENDING - it cannot know whose audio you wanted");
-        Check(Math.Abs(active.DefaultValue - 1) < 0.001, "and to being active, or the plugin would appear to do nothing when first added");
+        // BOTH DIRECTIONS OFF. A plugin that started sending the moment it was inserted would put a
+        // track on the network before the user had said anything, and for somebody working by screen
+        // reader that is invisible until a peer mentions it.
+        Check(Math.Abs(send.DefaultValue) < 0.001, "a fresh instance must NOT send until it is told to");
+        Check(Math.Abs(receive.DefaultValue) < 0.001, "and must not receive - it cannot know whose audio you wanted");
+        Check(Math.Abs(active.DefaultValue - 1) < 0.001, "but it must be active, or the two switches would appear to do nothing");
         Check(Math.Abs(peer.DefaultValue) < 0.001, "with no peer chosen");
+        Check(Math.Abs(sendLevel.DefaultValue) < 0.001, "and both levels at 0 dB, so switching a direction on changes nothing else");
+        Check(Math.Abs(receiveLevel.DefaultValue) < 0.001, "...the receive level too");
+        Check(plugin.SendGainForTest is 1f && plugin.ReceiveGainForTest is 1f,
+            "and the engine must agree with those defaults - 0 dB is a multiply of exactly 1");
 
         // Moving a parameter must reach the engine. With no app running there are no known peers, so
         // the peer choice can only resolve to nobody - which is the point of the next check.
-        job.EditValue = 1;
+        receive.EditValue = 1;
         plugin.ApplyParameters();
-        Check(!plugin.IsSending, "setting 'receive' must switch the instance to receiving");
+        Check(plugin.ReceiveEnabled, "setting 'receive' must switch receiving on");
+        Check(!plugin.SendEnabled, "...without switching sending on behind it");
+
+        send.EditValue = 1;
+        plugin.ApplyParameters();
+        Check(plugin.SendEnabled && plugin.ReceiveEnabled,
+            "the two switches are INDEPENDENT - one instance must be able to do both, which is the whole reason they are two");
+
+        sendLevel.EditValue = -12;
+        receiveLevel.EditValue = 6;
+        plugin.ApplyParameters();
+        Check(Math.Abs(plugin.SendGainForTest - 0.2512f) < 0.001f,
+            $"the send level must reach the engine as a multiply (-12 dB is 0,251; got {plugin.SendGainForTest:0.0000})");
+        Check(Math.Abs(plugin.ReceiveGainForTest - 1.9953f) < 0.001f,
+            $"the receive level must reach the engine as a multiply (+6 dB is 1,995; got {plugin.ReceiveGainForTest:0.0000})");
 
         peer.EditValue = 5;                 // a peer that isn't there
         plugin.ApplyParameters();
@@ -368,12 +523,14 @@ internal static partial class SelfTest
 
         active.EditValue = 0;
         plugin.ApplyParameters();
-        Check(plugin.IsSending, "unticking Active must release the peer, exactly as the window's Active box does");
+        Check(!plugin.SendEnabled && !plugin.ReceiveEnabled,
+            "unticking Active must stop BOTH directions and release the peer, exactly as the window's Active box does");
 
         plugin.Stop();   // releases the peer and closes the link, as a host deactivating the instance does
         plugin.CloseForTest();   // ...and drop its log, so it is not still ticking during the logging test
-        return $"{parameters.Count} named parameters, defaulting to send/active/nobody; job and Active reach the engine; "
-             + "an out-of-range peer resolves to nobody rather than wrapping onto somebody else";
+        return $"{parameters.Count} named parameters; both directions default OFF, active on, levels at 0 dB; "
+             + "each direction and each level reaches the engine, the two directions are independent, and an out-of-range "
+             + "peer resolves to nobody rather than wrapping onto somebody else";
     }
 
 

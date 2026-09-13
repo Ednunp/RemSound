@@ -116,6 +116,13 @@ internal sealed class StreamSession : IDisposable
 
     public bool HandleAudioPayload(uint sequence, ReadOnlySpan<byte> payload)
     {
+        // Already had it on the peer's other path. Handled, not failed: counting it as a drop would
+        // make a healthy merged session look like a lossy one. See AlreadyDelivered.
+        if (AlreadyDelivered(sequence))
+        {
+            Interlocked.Increment(ref duplicatePathPackets);
+            return true;
+        }
         diagnostics.RecordPacketArrived();
         TrackWireSequence(sequence);
         return Codec switch
@@ -178,6 +185,64 @@ internal sealed class StreamSession : IDisposable
             // Do NOT roll expectedNextWireSequence backwards — that would re-count the
             // already-missing packets when the originally-expected packet arrives.
         }
+    }
+
+    // ---- One stream arriving on two of the peer's addresses ---------------------------------------
+    //
+    // A peer on the LAN and on a VPN at once can have its packets reach us from either address, and
+    // the receiver now folds both onto ONE session rather than opening a second one that splits the
+    // stream (see AudioReceiver.SessionEndpointFor). Folding them together raises a question the
+    // single-path case never had: if the sender is DUPLICATING to both paths rather than alternating
+    // between them, every packet would arrive twice and be decoded twice, and the buffer would fill at
+    // double rate. What we saw in the log was alternation, not duplication - but "what we saw once" is
+    // not a guarantee, and the failure would be a peer who sounds wrong for reasons nothing reports.
+    //
+    // So a merged session keeps a 64-packet replay window and drops what it has already had. It is
+    // armed ONLY once a second path has actually been seen, so an ordinary session pays one boolean
+    // per packet and nothing else.
+
+    private bool multiPath;
+    private uint replayHighest;
+    private ulong replayMask;
+    private long duplicatePathPackets;
+
+    /// <summary>This stream has now arrived from a second address belonging to the same peer.</summary>
+    public void NoteAlternatePath() => multiPath = true;
+
+    /// <summary>Has this stream been seen on more than one of its peer's paths?</summary>
+    public bool IsMultiPath => multiPath;
+
+    /// <summary>Packets dropped because the other path had already delivered them.</summary>
+    public long DuplicatePathPackets => Interlocked.Read(ref duplicatePathPackets);
+
+    /// <summary>Have we already delivered this wire sequence? Only ever true for a merged session.
+    /// A sequence too far back to judge is let through: being wrong in that direction costs one
+    /// packet's worth of doubling, and being wrong the other way silences real audio.</summary>
+    private bool AlreadyDelivered(uint sequence)
+    {
+        if (!multiPath) return false;
+        if (replayMask == 0)
+        {
+            replayHighest = sequence;
+            replayMask = 1;
+            return false;
+        }
+        if (sequence == replayHighest) return true;
+
+        var forward = sequence - replayHighest;      // unsigned: wraps correctly
+        if (forward < 1_000_000U)
+        {
+            replayMask = forward >= 64 ? 1UL : (replayMask << (int)forward) | 1UL;
+            replayHighest = sequence;
+            return false;
+        }
+
+        var back = replayHighest - sequence;
+        if (back >= 64) return false;
+        var bit = 1UL << (int)back;
+        if ((replayMask & bit) != 0) return true;
+        replayMask |= bit;
+        return false;
     }
 
     public void Dispose()

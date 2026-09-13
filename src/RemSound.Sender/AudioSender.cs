@@ -58,6 +58,18 @@ public sealed class AudioSender : IDisposable
     // (no capture child wired to it) in classic modes and the memory cost is trivial.
     private readonly SenderLane defaultLane;
     private readonly SenderLane asioLane;
+    // Third lane: a VST plugin instance's DAW track, fed straight from the bridge by
+    // <see cref="SubmitPluginBlock"/>. Deliberately NOT wired into CompositeCaptureBackend — it has
+    // no capture child, and the DAW's audio thread is already this lane's clock, exactly as the ASIO
+    // driver's callback thread is asioLane's. Putting it through MixingEngine would hand it a SECOND
+    // clock (the mixer's free-running 10 ms tick) and give it something to drift against for no gain.
+    //
+    // It carries whichever RenderRoute value the current audio mode leaves unused: AsioLane in
+    // WasapiOnly, Mixed in BothIndependent. See SetAudioMode for why one is always free. Three
+    // concurrent lane bytes from one sender is a shape every port already copes with — the supersede
+    // rule keys on (endpoint, streamId) and only drops a session whose lane MATCHES, on Windows, iOS
+    // and Android alike. Proven here by the "Three concurrent streams from one sender" gate step.
+    private readonly SenderLane pluginLane;
     // Persistent AsioCaptureBackend that survives audio-mode changes. The composite borrows
     // a reference to it; mode rebuilds rewire its callback (via SetCallback) rather than
     // tearing it down and reopening the driver. This avoids Audient (and similar single-
@@ -174,10 +186,12 @@ public sealed class AudioSender : IDisposable
     {
         var a = defaultLane.TakeMaxPreEncodeStep();
         var b = asioLane.TakeMaxPreEncodeStep();
-        return a > b ? a : b;
+        var c = pluginLane.TakeMaxPreEncodeStep();
+        return Math.Max(a, Math.Max(b, c));
     }
     public float TakeMaxPreEncodeStepWasapiLane() => defaultLane.TakeMaxPreEncodeStep();
     public float TakeMaxPreEncodeStepAsioLane() => asioLane.TakeMaxPreEncodeStep();
+    public float TakeMaxPreEncodeStepPluginLane() => pluginLane.TakeMaxPreEncodeStep();
 
     /// <summary>Loudest absolute pre-encode sample across both lanes since the last call (resets on
     /// read). ~0 means we're sending silence; surfaced on the diag line as capPeak.</summary>
@@ -185,8 +199,14 @@ public sealed class AudioSender : IDisposable
     {
         var a = defaultLane.TakeMaxPreEncodePeak();
         var b = asioLane.TakeMaxPreEncodePeak();
-        return a > b ? a : b;
+        var c = pluginLane.TakeMaxPreEncodePeak();
+        return Math.Max(a, Math.Max(b, c));
     }
+
+    /// <summary>Loudest absolute pre-encode sample on the PLUGIN lane since the last call. Split out
+    /// from the aggregate because "the DAW track is silent" and "the microphone is silent" are
+    /// different faults with different fixes, and the aggregate cannot tell them apart.</summary>
+    public float TakeMaxPreEncodePeakPluginLane() => pluginLane.TakeMaxPreEncodePeak();
 
     /// <summary>Total audio frames both lanes actually handed to the wire since the last call
     /// (resets on read). Pairs with <see cref="TakeMaxSenderPreEncodePeak"/> on the diag line:
@@ -195,7 +215,7 @@ public sealed class AudioSender : IDisposable
     /// missing measurement behind the "mic only works in ASIO" report. In WasapiOnly mode only
     /// defaultLane fires, so this number IS the WASAPI mic lane's output.</summary>
     public long TakeSenderAudioFramesSent() =>
-        defaultLane.TakeAudioFramesSent() + asioLane.TakeAudioFramesSent();
+        defaultLane.TakeAudioFramesSent() + asioLane.TakeAudioFramesSent() + pluginLane.TakeAudioFramesSent();
 
     // Cross-buffer (boundary) and within-buffer (content) split — see AudioStepProbe for the
     // diagnostic distinction. Used by the per-second diag logger to emit two extra columns so
@@ -205,6 +225,21 @@ public sealed class AudioSender : IDisposable
     public float TakeMaxPreEncodeStepWasapiLaneWithinBuffer() => defaultLane.TakeMaxPreEncodeStepWithinBuffer();
     public float TakeMaxPreEncodeStepAsioLaneCrossBuffer() => asioLane.TakeMaxPreEncodeStepCrossBuffer();
     public float TakeMaxPreEncodeStepAsioLaneWithinBuffer() => asioLane.TakeMaxPreEncodeStepWithinBuffer();
+    public float TakeMaxPreEncodeStepPluginLaneCrossBuffer() => pluginLane.TakeMaxPreEncodeStepCrossBuffer();
+    public float TakeMaxPreEncodeStepPluginLaneWithinBuffer() => pluginLane.TakeMaxPreEncodeStepWithinBuffer();
+
+    /// <summary>Largest gap between two audio frames leaving each lane since the last call, in
+    /// milliseconds. Resets on read.
+    ///
+    /// <para>The number the far end's jitter buffer actually feels. A lane can hold a perfect
+    /// packets-per-second rate while emitting in clumps, and a clump plus a gap is what an underrun on
+    /// somebody else's machine is made of — so "the rate looked fine" is not evidence that the timing
+    /// was. The capture lanes are clocked by an audio callback; the plugin lane is fed from the
+    /// bridge's network receive thread, which is not one. Logging all three side by side is what makes
+    /// the comparison possible at all: the capture lane is the control.</para></summary>
+    public int TakeMaxEmitGapMsWasapiLane() => defaultLane.TakeMaxEmitGapMs();
+    public int TakeMaxEmitGapMsAsioLane() => asioLane.TakeMaxEmitGapMs();
+    public int TakeMaxEmitGapMsPluginLane() => pluginLane.TakeMaxEmitGapMs();
 
     // Raw capture-side step probe — now lives inside each <see cref="ICaptureBackend"/>
     // implementation so the ASIO path and the WASAPI path each measure their own buffers
@@ -221,7 +256,11 @@ public sealed class AudioSender : IDisposable
     // us whether the input signal is getting close enough to the rails that clipping is
     // active — clipping itself produces no step, but a flat-topped sample plateau plus a
     // following sharp drop can produce audible distortion that masquerades as a click.
-    public long ClippedSampleCount => engine.ClippedSampleCount;
+    /// <summary>Samples this sender has hard-clamped at the encoder boundary, capture engine and
+    /// plugin lane together. The plugin lane's share was missing, so a DAW track running over full
+    /// scale — which is what two tracks at 0 dB summed gives you — read as zero clipping all session
+    /// while the audio distorted (Anthony Reyers, 2026-09-01).</summary>
+    public long ClippedSampleCount => engine.ClippedSampleCount + Interlocked.Read(ref pluginClippedSamples);
 
     // === inbound dispatch (relay-mode) ===
     // The send socket is normally write-only, but in relay-mode the same socket is what
@@ -291,6 +330,13 @@ public sealed class AudioSender : IDisposable
         networkPriority.TryAttach(udp.Client, msg => diagnostic?.Invoke(msg));
         defaultLane = new SenderLane(this, opusFrameSamples, OpusBitrateLan);
         asioLane = new SenderLane(this, opusFrameSamples, OpusBitrateLan);
+        pluginLane = new SenderLane(this, opusFrameSamples, OpusBitrateLan);
+        // WasapiOnly is the startup mode and it puts Mixed on defaultLane, so the plugin lane must
+        // not be left on its Mixed default: two live streams from one endpoint sharing a lane byte
+        // supersede each other on every receiver, four times a second, and both go silent. That is
+        // the exact failure the lane-match qualifier was added for on 2026-05-11. SetAudioMode keeps
+        // the three in step from here on.
+        pluginLane.SetRoute(RenderRoute.AsioLane);
         // WasapiOnly at startup — no ASIO needed yet, so persistentAsio stays null.
         currentAudioMode = AudioMode.WasapiOnly;
         currentAsioDriverName = null;
@@ -342,6 +388,15 @@ public sealed class AudioSender : IDisposable
                 defaultLane.SetRoute(RenderRoute.Mixed);
                 asioLane.SetRoute(RenderRoute.Mixed); // idle; no callbacks will fire on it
             }
+            // The plugin lane takes the route the capture lanes are NOT using in this mode, so the
+            // three streams never share a lane byte. In WasapiOnly that is AsioLane: asioLane is set
+            // to Mixed just above but receives no callbacks at all (CompositeCaptureBackend does not
+            // build an ASIO child in that mode), and since EnsureFormatPacketSent runs only from
+            // inside SenderLane.OnMixedSamples, a lane with no callbacks emits nothing — not even a
+            // format announce. In BothIndependent the capture lanes hold WasapiLane and AsioLane, so
+            // Mixed is the free one. No new RenderRoute value is invented: both mobile ports clamp an
+            // unknown lane byte to Mixed, so a fourth value would collide there rather than route.
+            pluginLane.SetRoute(mode == AudioMode.WasapiOnly ? RenderRoute.AsioLane : RenderRoute.Mixed);
             EnsurePersistentAsioLocked();
             RebuildEngineLocked();
         }
@@ -468,6 +523,7 @@ public sealed class AudioSender : IDisposable
             // harmless there; in BothIndependent both lanes are active and both must roll.
             defaultLane.OnPcmFrameSizeChanged();
             asioLane.OnPcmFrameSizeChanged();
+            pluginLane.OnPcmFrameSizeChanged();
         }
     }
 
@@ -511,6 +567,12 @@ public sealed class AudioSender : IDisposable
     /// when nothing is open or the device won't say, in which case the caller keeps its own estimate.
     /// See <see cref="ICaptureBackend.ReportedInputLatencyMs"/> for why this replaced a constant.</summary>
     public double ReportedInputLatencyMs => engine.ReportedInputLatencyMs;
+
+    /// <summary>Per-source capture ring depth and applied drift ratio, so the diag line can SHOW two
+    /// sources pulling apart instead of leaving it to be heard. Empty on the ASIO or push paths, which
+    /// have one clock and nothing to correct. 2026-09-07.</summary>
+    public IReadOnlyList<(string Name, int BufferedMs, double Ratio)> CaptureSourceDrift =>
+        (engine as CompositeCaptureBackend)?.SourceDrift ?? [];
     public string? CaptureFormatDescription => engine.FirstCaptureFormatDescription;
     public string? LastCaptureError => engine.FirstCaptureLastError;
     public AudioTransportCodec Codec => codec;
@@ -542,6 +604,7 @@ public sealed class AudioSender : IDisposable
             // does (BothIndependent).
             defaultLane.OnCodecChanged(newCodec, clampedSamples);
             asioLane.OnCodecChanged(newCodec, clampedSamples);
+            pluginLane.OnCodecChanged(newCodec, clampedSamples);
         }
     }
 
@@ -636,8 +699,106 @@ public sealed class AudioSender : IDisposable
         // so an ASIO lane kept capturing, encoding and TRANSMITTING with "Send my audio" off.
         // Park it instead — Ed's own mechanism, no driver call at all. 2026-08-23 audit, S1.
         lock (configGate) persistentAsio?.Park();
+        // Stand the plugin lane down too. Stop() means "stop sending my audio", and a DAW track is
+        // audio being sent; leaving the flag up would keep encoding blocks that are still arriving on
+        // the bridge thread after the user switched sending off. The app re-arms it on its next tick
+        // if a plugin is genuinely still delivering blocks (see PluginTrackSource).
+        pluginSendActive = false;
         uptime.Stop();
     }
+
+    // === plugin lane (the DAW track) ===
+
+    // Whether the plugin lane is armed. Volatile because SubmitPluginBlock reads it on the bridge
+    // thread while the UI thread writes it. NOT derived from engine.IsRunning: the whole point of the
+    // plugin lane is that it works with no capture device ticked, where the capture engine never
+    // starts at all (StartEngineWithCurrentSources returns early on empty specs, and MixingEngine.Start
+    // does the same). The two lifecycles are deliberately separate.
+    private volatile bool pluginSendActive;
+
+    /// <summary>Is the plugin lane armed right now? The app folds this into its "should the sender be
+    /// running" decision, so a DAW track goes out whether or not "Send my audio" is also ticked.</summary>
+    public bool IsPluginSending => pluginSendActive;
+
+    /// <summary>This lane's current route and stream id, for the gate. The route is the whole
+    /// backward-compatibility argument in one byte, so it is asserted rather than assumed.</summary>
+    internal RenderRoute PluginLaneRouteForTest => pluginLane.Route;
+    internal ushort PluginLaneStreamIdForTest => pluginLane.StreamId;
+    internal RenderRoute DefaultLaneRouteForTest => defaultLane.Route;
+    internal RenderRoute AsioLaneRouteForTest => asioLane.Route;
+    internal ushort DefaultLaneStreamIdForTest => defaultLane.StreamId;
+    internal ushort AsioLaneStreamIdForTest => asioLane.StreamId;
+
+    /// <summary>
+    /// Arm or disarm the plugin lane. Called by <see cref="PluginTrackSource"/> when the first DAW
+    /// track starts arriving and when the last one stops (or times out, for a DAW that was killed).
+    ///
+    /// <para>Arming rotates the lane's stream id, so the receiver opens a fresh session rather than
+    /// continuing one it had already pruned. Disarming rotates nothing: the lane simply stops being
+    /// fed, and a lane that is not fed emits nothing at all — not even a format announce, because
+    /// <c>EnsureFormatPacketSent</c> is only reached from inside <c>OnMixedSamples</c>.</para>
+    /// </summary>
+    public void SetPluginSendActive(bool active)
+    {
+        lock (configGate)
+        {
+            if (pluginSendActive == active) return;
+            pluginSendActive = active;
+            if (active)
+            {
+                pluginLane.ResetForStart();
+                // Uptime is otherwise only started by the capture engine, and a plugin-only send has
+                // no capture engine. Without this the diagnostic line divides by a stopped clock.
+                if (!uptime.IsRunning) uptime.Restart();
+                diagnostic?.Invoke($"sender: plugin lane armed on route {pluginLane.Route}, stream {pluginLane.StreamId}");
+            }
+            else
+            {
+                diagnostic?.Invoke("sender: plugin lane disarmed");
+            }
+        }
+    }
+
+    /// <summary>
+    /// One block of a DAW track, 48 kHz interleaved stereo float, straight onto the wire.
+    ///
+    /// <para>Called from the plugin bridge's single receive thread — which is what satisfies
+    /// <see cref="SenderLane"/>'s one-producer-thread contract. <see cref="PluginTrackSource"/> is
+    /// the only caller and it submits from exactly that thread; audio from any OTHER connected DAW
+    /// is summed into the block before it gets here, never submitted separately.</para>
+    ///
+    /// <para>Silently ignored when the lane is not armed, which covers blocks still in flight on the
+    /// bridge at the moment sending is switched off.</para>
+    /// </summary>
+    public void SubmitPluginBlock(ReadOnlyMemory<float> stereoFloats)
+    {
+        if (!pluginSendActive) return;
+        var source = stereoFloats.Span;
+        if (source.Length == 0 || source.Length > pluginClampScratch.Length) return;
+
+        // THE SHARED ENCODER-BOUNDARY CLAMP, which this lane used to skip. Every other source goes
+        // through SampleClamp before it reaches a lane — the mix engine, the ASIO backend and the
+        // push-mode WASAPI backend all do — and the plugin lane was the one that did not, on the
+        // reasoning that nothing on its path could raise the level. True of our processing and wrong
+        // about the SOURCE: a DAW track is over 0 dBFS whenever the user's mix is, and two plugin
+        // instances summed together are 6 dB hotter than one.
+        //
+        // The clamp itself changes almost nothing audible, because the Opus encoder clips out-of-range
+        // input internally and PcmPack clamps as it packs. What it buys is the COUNT: without it
+        // ClippedSampleCount watches only the capture devices, so a track running at nearly +6 dB
+        // reads as zero clipping and the log cannot tell anyone why their audio is distorting.
+        source.CopyTo(pluginClampScratch);
+        var block = pluginClampScratch.AsSpan(0, source.Length);
+        var clipped = SampleClamp.ClampBuffer(block);
+        if (clipped > 0) Interlocked.Add(ref pluginClippedSamples, clipped);
+        pluginLane.OnMixedSamples(new ReadOnlyMemory<float>(pluginClampScratch, 0, source.Length));
+    }
+
+    // Clamp scratch for the plugin lane, sized to the largest block the bridge can carry. Touched
+    // only on the bridge's single receive thread, which is the same one-producer rule SenderLane
+    // itself relies on.
+    private readonly float[] pluginClampScratch = new float[PluginBridgeProtocol.MaxAudioBytes / sizeof(float)];
+    private long pluginClippedSamples;
 
     /// <summary>
     /// Start a background thread reading inbound packets from this sender's socket and
@@ -770,6 +931,7 @@ public sealed class AudioSender : IDisposable
 
         try { defaultLane.DisposeCrypto(); } catch { /* ignore */ }
         try { asioLane.DisposeCrypto(); } catch { /* ignore */ }
+        try { pluginLane.DisposeCrypto(); } catch { /* ignore */ }
     }
 
     // === wire path (shared across all lanes) ===

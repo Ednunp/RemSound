@@ -71,15 +71,37 @@ internal static class WinEventNotifier
 /// <see cref="Control.AccessibilityNotifyClients"/> path only fires the state event without
 /// the focus re-fire, which leaves NVDA silent.
 /// </summary>
-internal sealed class AccessibleCheckBox : CheckBox
+internal class AccessibleCheckBox : CheckBox
 {
     private const uint EVENT_OBJECT_FOCUS = 0x8005;
     private const uint EVENT_OBJECT_STATECHANGE = 0x800A;
     private const int OBJID_CLIENT = unchecked((int)0xFFFFFFFC);
     private const int CHILDID_SELF = 0;
 
-    [DllImport("user32.dll")]
-    private static extern void NotifyWinEvent(uint eventMin, nint hwnd, int idObject, int idChild);
+    [DllImport("user32.dll", EntryPoint = "NotifyWinEvent")]
+    private static extern void NotifyWinEventNative(uint eventMin, nint hwnd, int idObject, int idChild);
+
+    /// <summary>Every WinEvent this control raises, in order, while recording is switched on.
+    ///
+    /// <para>Here because the FOCUS re-fire below is the single load-bearing accessibility line in
+    /// this workspace, and nothing watched it. Delete it and the app looks and behaves identically
+    /// to anyone with sight — while NVDA goes completely silent every time Ed toggles any checkbox
+    /// in the application with the spacebar. The whole gate stayed green with it removed
+    /// (2026-08-24). Observing the real WinEvent from inside a headless gate needs a message pump
+    /// that is not there, so the calls are routed through this shim instead: production still makes
+    /// exactly the same P/Invoke, and the gate can see which events were raised and in what
+    /// order.</para></summary>
+    internal static List<uint>? RaisedWinEventsForTest;
+
+    private static void NotifyWinEvent(uint eventMin, nint hwnd, int idObject, int idChild)
+    {
+        RaisedWinEventsForTest?.Add(eventMin);
+        NotifyWinEventNative(eventMin, hwnd, idObject, idChild);
+    }
+
+    /// <summary>The two event ids the gate asserts on, named so the test reads as English.</summary>
+    internal const uint StateChangeEventForTest = EVENT_OBJECT_STATECHANGE;
+    internal const uint FocusEventForTest = EVENT_OBJECT_FOCUS;
 
     /// <summary>Optional gate, called with the new Checked state just before the generic checkbox
     /// tick/untick sound plays; return true to suppress it. The send/receive checkboxes set this so
@@ -96,13 +118,22 @@ internal sealed class AccessibleCheckBox : CheckBox
     /// CheckSoundService.Play at startup; the plugin leaves it null and is simply silent.</summary>
     public static Action<bool>? PlayToggleSound { get; set; }
 
+    /// <summary>Does this checkbox currently hold keyboard focus? Just <see cref="Control.Focused"/>,
+    /// but virtual so the gate can stand in for it.
+    ///
+    /// <para>A headless form has never been shown, so nothing on it can ever report Focused — which
+    /// means the focus half of the recipe below, the load-bearing half, could not be driven at all
+    /// without either showing a window (stealing focus from whoever is at the machine) or leaving it
+    /// untested. It was untested. 2026-08-24.</para></summary>
+    internal virtual bool HasKeyboardFocus => Focused;
+
     protected override void OnCheckedChanged(EventArgs e)
     {
         base.OnCheckedChanged(e);
         if (!IsHandleCreated) return;
 
         NotifyWinEvent(EVENT_OBJECT_STATECHANGE, Handle, OBJID_CLIENT, CHILDID_SELF);
-        if (Focused)
+        if (HasKeyboardFocus)
         {
             NotifyWinEvent(EVENT_OBJECT_FOCUS, Handle, OBJID_CLIENT, CHILDID_SELF);
             // Audible tick/untick feedback. Gated on Focused so it fires for a genuine user toggle

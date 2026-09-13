@@ -428,11 +428,25 @@ internal sealed class SessionPlayout : IDisposable
     private volatile SessionPlayout[] mirrors = [];
     public void SetMirrors(SessionPlayout[] value) => mirrors = value;
 
+    /// <summary>Set on every mirror so it can ask whether the lane it exists to feed is still taking
+    /// audio. Null on a primary, and null in tests that build a session directly.</summary>
+    internal Func<RenderRoute, bool>? LaneIsConsuming { get; set; }
+
     public void Write(ReadOnlySpan<byte> source)
     {
         WriteLocal(source);
         var mir = mirrors;
-        for (var i = 0; i < mir.Length; i++) mir[i].WriteLocal(source);
+        for (var i = 0; i < mir.Length; i++)
+        {
+            var m = mir[i];
+            // DO NOT FEED A LANE THAT IS NOT DRINKING. A mirror whose lane has stopped being read has
+            // nobody to play it, so every byte written here is a byte that will overflow. Ed,
+            // 2026-09-07: his ASIO lane stopped rendering while its output was still ticked, and this
+            // line ran 288,960 bytes a second into it for hours. The cost was never the bytes — it was
+            // the CPU, which starved the lane he was actually listening to. See LaneActivity.
+            if (m.LaneIsConsuming is { } consuming && !consuming(m.Route)) continue;
+            m.WriteLocal(source);
+        }
     }
 
     /// <summary>The single-instance write body — used directly for a mirror replica (so a mirror never
@@ -532,7 +546,7 @@ internal sealed class SessionPlayout : IDisposable
     /// the session is disarmed (or drained completely) the return is 0 and
     /// <paramref name="output"/> is untouched (caller is responsible for zero-fill).
     /// </summary>
-    public int ReadFloats(Span<float> output, int outFrames, int targetLatencyMs, int currentMaxLatencyMs, int smoothness = 3)
+    public int ReadFloats(Span<float> output, int outFrames, int targetLatencyMs, int currentMaxLatencyMs, int smoothness = 3, bool applyShaping = true)
     {
         // Drain on user knob change.
         if (drainRequested)
@@ -729,7 +743,11 @@ internal sealed class SessionPlayout : IDisposable
         // bug therefore presented as a hardware fault AND killed the output. The mixed-mix taps
         // either side of this are already wrapped with "recorder failure isolated from audio path";
         // these were missed. 2026-08-23 audit, finding R3.
-        var d = dsp;
+        // applyShaping = false is the DAW's "give me the raw peer" path: a plugin track that would
+        // rather do its own pan and EQ than inherit RemSound's. Safe to skip here because a peer a
+        // plugin has CLAIMED is excluded from the speaker mix entirely, so this session has exactly
+        // one consumer. See PlayoutEngine.ReadClaimedPeer. 2026-09-06.
+        var d = applyShaping ? dsp : null;
         if (d is not null)
         {
             try { d.Process(output, outFrames); }

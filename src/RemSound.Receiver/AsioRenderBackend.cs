@@ -30,24 +30,16 @@ internal sealed class AsioRenderBackend : IRenderBackend
     private readonly string driverName;
     private readonly object gate = new();
 
-    private AsioOut? asio;
+    // The driver, SHARED with the sender's capture side - one instance per driver name, full duplex.
+    // See SharedAsioDevice, and the matching field in AsioCaptureBackend for why.
+    private SharedAsioDevice? device;
     private List<int> activeChannelPairs = [];
     private BroadcastProvider? broadcaster;
 
-    /// <summary>
-    /// Every AsioOut control call — create, init, play, stop, dispose — goes through this one
-    /// dedicated STA thread with a live message pump.
-    ///
-    /// <para>The CAPTURE side has had this since "ASIO: own the whole driver lifecycle on one pumped
-    /// STA thread", whose commit message explains why: "The previous code made these calls on
-    /// whatever thread happened to call Start/Stop, with only a Sleep() before the close — so the
-    /// close ran with no pump and often on the wrong thread, and took the process down." That fix
-    /// touched AsioCaptureBackend only. THIS file was still the previous code, and did not even have
-    /// the Sleep — it opened and closed the same kind of COM object straight from the UI thread,
-    /// with no bound either, so a driver that wedged inside Stop hung the window indefinitely.
-    /// Same driver, same failure mode. 2026-08-23 audit, finding R1.</para>
-    /// </summary>
-    private readonly AsioApartment apartment;
+    // Every driver control call - create, init, play, stop, dispose - runs on the shared device's one
+    // dedicated pumped STA thread. That discipline came to this file in the 2026-08-23 audit (finding
+    // R1: the render side was opening and closing the COM object straight from the UI thread) and it
+    // is kept, one level down, by SharedAsioDevice.
 
     /// <summary>Generous, and NOT tuned to one card — see the matching constant on the capture side.
     /// Ed's Audient takes 7.94 s to close about one time in nine, another card could be slower, and
@@ -59,10 +51,9 @@ internal sealed class AsioRenderBackend : IRenderBackend
         this.driverName = driverName;
         this.source = source;
         this.onDiagnostic = onDiagnostic;
-        apartment = new AsioApartment($"asio-render:{driverName}", onDiagnostic);
     }
 
-    public bool IsRunning => asio is not null;
+    public bool IsRunning => device is not null;
 
     // The driver's own playback latency, read once at open. Volatile store so the UI thread can read
     // it while the apartment thread writes it.
@@ -84,6 +75,12 @@ internal sealed class AsioRenderBackend : IRenderBackend
 
     /// <inheritdoc cref="ReportedOutputLatencyMsFor"/>
     public double OutputQueueMsFor(RenderRoute route) => NoQueue;
+
+    /// <summary>Always empty, and that is a statement rather than a gap: ASIO pulls straight from the
+    /// playout engine, so there is no device buffer, no adaptive cushion target and no rate-trimming
+    /// resampler between the engine and the driver. Everything the WASAPI lane has here, ASIO does
+    /// without — which is why a fault seen on WASAPI and never on ASIO has to live in that stage.</summary>
+    public IReadOnlyList<WasapiOutputStage> OutputStages() => Array.Empty<WasapiOutputStage>();
 
     public string ActiveDeviceSummary
     {
@@ -142,7 +139,7 @@ internal sealed class AsioRenderBackend : IRenderBackend
             // First time we have any pairs → open the driver. Otherwise we never reopen on a
             // pair-set change, because we already opened with the driver's full channel count
             // at Start time. Just update the broadcaster's pair list and we're done.
-            if (asio is null)
+            if (device is null)
             {
                 OpenAsioLocked();
                 return;
@@ -156,23 +153,20 @@ internal sealed class AsioRenderBackend : IRenderBackend
     {
         try
         {
-            // Open + init + play, ALL on the apartment thread — see the apartment field. Mirrors
-            // AsioCaptureBackend.Start exactly, including the breadcrumbs, so a native death names
-            // the stage it died in.
-            apartment.Invoke(() =>
+            // Through the SHARED device - see SharedAsioDevice. The capture side may already hold this
+            // driver open; either way there is one instance, opened full duplex on the device's
+            // apartment thread with the same breadcrumbs as before.
+            var shared = SharedAsioDevice.Acquire(driverName, onDiagnostic);
+            device = shared;
+            try
             {
-                onDiagnostic?.Invoke($"asio render open: creating driver \"{driverName}\"");
-                asio = new AsioOut(driverName);
-                // Always open with the driver's full output channel count. Channels we don't
-                // immediately broadcast to are zero-filled by BroadcastProvider, which is
-                // essentially free. Trades a tiny bit of buffer memory for a big stability win:
-                // adding or removing an output pair never reopens the driver — see the type
-                // doc-comment for why this matters with single-client drivers.
-                var outputChannelCount = asio.DriverOutputChannelCount;
+                shared.EnsureOpen();
+                // The device opened the driver's full output channel count. Channels we don't
+                // broadcast to are zero-filled by BroadcastProvider, which is essentially free, and
+                // adding or removing an output pair never reopens anything.
+                var outputChannelCount = shared.OutputChannelCount;
                 if (outputChannelCount <= 0)
                     throw new InvalidOperationException($"driver \"{driverName}\" reports zero output channels");
-                // Sanity-check requested pairs are in range; warn if not but continue (out-of-range
-                // pairs simply get no audio).
                 var maxPair = activeChannelPairs.Max();
                 var highestNeededChannel = (maxPair + 1) * 2;
                 if (highestNeededChannel > outputChannelCount)
@@ -180,54 +174,42 @@ internal sealed class AsioRenderBackend : IRenderBackend
                     onDiagnostic?.Invoke($"asio render: driver \"{driverName}\" only has {outputChannelCount} output channels, but spec requests pair {maxPair} (channels {maxPair * 2 + 1}/{maxPair * 2 + 2})");
                 }
                 broadcaster = new BroadcastProvider(source, outputChannelCount, activeChannelPairs);
-                asio.ChannelOffset = 0;
-                onDiagnostic?.Invoke($"asio render open: init ({outputChannelCount} ch @ {MixSampleRate} Hz)");
-                asio.Init(broadcaster);
-                onDiagnostic?.Invoke("asio render open: starting stream (play)");
-                asio.Play();
-                // The DRIVER'S OWN figure for how long playback takes, in samples. This is the one
-                // number in the whole latency estimate that comes from the hardware rather than from
-                // us, and ASIO drivers generally include their converter path in it. Read once, here.
-                // 2026-08-24.
-                reportedOutputLatencyMs = asio.PlaybackLatency > 0
-                    ? asio.PlaybackLatency * 1000.0 / MixSampleRate
+                shared.AttachPlayback(broadcaster);
+                // The DRIVER'S OWN figure for how long playback takes, in samples - the one number in
+                // the latency estimate that comes from the hardware rather than from us.
+                reportedOutputLatencyMs = shared.PlaybackLatencySamples > 0
+                    ? shared.PlaybackLatencySamples * 1000.0 / MixSampleRate
                     : 0;
                 onDiagnostic?.Invoke(reportedOutputLatencyMs > 0
-                    ? $"asio render: driver reports {asio.PlaybackLatency} samples of playback latency = {reportedOutputLatencyMs:0.0} ms"
+                    ? $"asio render: driver reports {shared.PlaybackLatencySamples} samples of playback latency = {reportedOutputLatencyMs:0.0} ms"
                     : "asio render: driver did not report a playback latency — the estimate falls back to its own figure");
                 onDiagnostic?.Invoke($"asio render started \"{driverName}\" {MixSampleRate} Hz, {outputChannelCount} output channel(s); pairs={string.Join(",", activeChannelPairs)}");
-            });
+            }
+            catch
+            {
+                device = null;
+                shared.Release(onDiagnostic, CloseTimeoutMs);
+                throw;
+            }
         }
         catch (Exception ex)
         {
-            onDiagnostic?.Invoke($"asio render start failed: {ex.GetType().Name}: {ex.Message}");
+            onDiagnostic?.Invoke($"asio render start failed: {ex.GetType().Name}: {SharedAsioDevice.Explain(ex)}");
             StopInternal();
         }
     }
 
     private void StopInternal()
     {
-        var toClose = asio;
-        if (toClose is not null)
+        var shared = device;
+        if (shared is not null)
         {
-            // Close on the apartment thread, bounded, with the elapsed time logged — the same shape
-            // as AsioCaptureBackend.StopInternal. Before this, Stop and Dispose ran on the caller's
-            // thread (normally the UI thread), with no pump and no bound: the exact pattern that
-            // produced a native access violation on the capture side, and an indefinite window
-            // freeze if a driver wedged. 2026-08-23 audit, finding R1.
-            var closeStart = System.Diagnostics.Stopwatch.GetTimestamp();
-            var closed = apartment.Invoke(() =>
-            {
-                onDiagnostic?.Invoke("asio render close: stopping stream");
-                try { toClose.Stop(); } catch (Exception ex) { onDiagnostic?.Invoke($"asio render close: stop threw {ex.GetType().Name}: {ex.Message}"); }
-                onDiagnostic?.Invoke("asio render close: releasing driver (dispose)");
-                try { toClose.Dispose(); } catch (Exception ex) { onDiagnostic?.Invoke($"asio render close: dispose threw {ex.GetType().Name}: {ex.Message}"); }
-            }, timeoutMs: CloseTimeoutMs);
-            var elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - closeStart) * 1000 / System.Diagnostics.Stopwatch.Frequency;
-            onDiagnostic?.Invoke(closed
-                ? $"asio render close: complete in {elapsedMs} ms"
-                : $"asio render close: gave up waiting after {elapsedMs} ms (bound {CloseTimeoutMs} ms) — the close is STILL RUNNING on the apartment thread and may yet finish");
-            asio = null;
+            // Silence on our outputs at once (a volatile detach). The driver itself closes only when
+            // the capture side has let go as well, on the device's apartment thread, bounded and timed
+            // as the 2026-08-23 audit required - see SharedAsioDevice.Close.
+            shared.DetachPlayback();
+            device = null;
+            shared.Release(onDiagnostic, CloseTimeoutMs);
         }
         broadcaster = null;
         reportedOutputLatencyMs = 0;   // belongs to the stream we just closed
@@ -236,7 +218,6 @@ internal sealed class AsioRenderBackend : IRenderBackend
     public void Dispose()
     {
         Stop();
-        apartment.Dispose(); // shut the dedicated thread down last, after the driver is closed
     }
 
     private static List<int> ParsePairs(IReadOnlyList<string> deviceIds)

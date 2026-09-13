@@ -167,8 +167,26 @@ internal sealed class RemSoundLog : IDisposable
         }
     }
 
+    /// <summary>
+    /// Test tap: every event passes through here BEFORE the Enabled gate, so the gate can prove that
+    /// driving a control actually REPORTS what it did.
+    ///
+    /// <para>Ed, 2026-08-24: "we have spent months and months building logs on top of logs on top of
+    /// logs for every function. but the thing is, we've never tested those logs." He is right. The
+    /// control suite proved that moving a control changed the thing it governs and said nothing about
+    /// whether the change was recorded. A log nobody has tested is a log you discover is empty on the
+    /// night you need it — which is precisely the night there is no time to add one.</para>
+    ///
+    /// <para>Deliberately before the Enabled check. The question is whether the handler REPORTS what
+    /// it did, which is a property of the call site, not of whether the user happens to have the log
+    /// file switched on. Tapping here also means the gate never writes a real log file in order to
+    /// test logging. Same lesson as TICK1: behaviour must not sit behind the log switch.</para>
+    /// </summary>
+    internal Action<string>? EventTapForTest;
+
     public void Event(string message)
     {
+        EventTapForTest?.Invoke(message);
         if (!Enabled) return;
         lock (writeGate)
         {

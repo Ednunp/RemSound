@@ -33,6 +33,9 @@ internal sealed class CompositeRenderBackend : IRenderBackend
     // is also playing.
     private readonly MultiOutputPlayout? wasapi;
     private readonly AsioRenderBackend? asio;
+    // What is actually TICKED, so the log can name the configuration rather than only the mode.
+    private bool wasapiTicked;
+    private bool asioTicked;
     private readonly string? asioDriverName;
     private readonly RemSound.Core.AudioMode mode;
 
@@ -89,6 +92,12 @@ internal sealed class CompositeRenderBackend : IRenderBackend
 
     public bool IsRunning => started;
 
+    /// <summary>Any WASAPI output sitting dead awaiting a re-open. ASIO is deliberately not included:
+    /// its backend owns its driver outright and recovers through its own park/re-open path rather than
+    /// through the ticked-device set, so there is no equivalent flag to raise here. See
+    /// <see cref="MultiOutputPlayout.HasFaultedOutput"/> for what this is for. 2026-08-26.</summary>
+    public bool HasFaultedOutput => wasapi?.HasFaultedOutput ?? false;
+
     // TakeMaxFanOutCacheBytes removed 2026-05-23. The FanOutSource architecture was retired
     // in mid-May when each lane got its own filtered PlayoutEngine source — there's no shared
     // cache to measure any more, so the method always returned 0. The receiver-side
@@ -137,6 +146,11 @@ internal sealed class CompositeRenderBackend : IRenderBackend
         // ASIO pulls straight from the engine, so its queue is zero by construction.
         ForLane(route, wasapi?.OutputQueueMsFor(RenderRoute.WasapiLane) ?? 0, asio?.OutputQueueMsFor(RenderRoute.AsioLane) ?? 0);
 
+    /// <summary>The WASAPI lane's stages. The ASIO child has none by construction, so this is simply
+    /// the WASAPI child's list — see <see cref="WasapiOutputStage"/>.</summary>
+    public IReadOnlyList<WasapiOutputStage> OutputStages() =>
+        wasapi?.OutputStages() ?? Array.Empty<WasapiOutputStage>();
+
     /// <summary>The lane-picking rule, on its own so the gate can prove it actually PICKS.
     ///
     /// <para>This is a seam rather than an inline conditional because the bug it guards against is
@@ -162,7 +176,7 @@ internal sealed class CompositeRenderBackend : IRenderBackend
             catch (Exception ex) { onDiagnostic?.Invoke($"wasapi render failed to start: {ex.GetType().Name}: {ex.Message}"); }
             try { asio?.Start(); }
             catch (Exception ex) { onDiagnostic?.Invoke($"asio render failed to start: {ex.GetType().Name}: {ex.Message}"); }
-            onDiagnostic?.Invoke($"composite render started (mode={ModeLabel()})");
+            onDiagnostic?.Invoke($"composite render started ({RenderStartLabel(ModeLabel(), wasapiTicked, asioTicked)})");
         }
     }
 
@@ -208,6 +222,15 @@ internal sealed class CompositeRenderBackend : IRenderBackend
         // silence from that peer. 2026-05-15.
         source.SetLaneActive(RenderRoute.WasapiLane, wasapiIds.Count > 0);
         source.SetLaneActive(RenderRoute.AsioLane, asioIds.Count > 0);
+
+        // Record what is ticked, and say so when it changes. Without this the log only ever named
+        // the MODE, which claims "WASAPI + ASIO" whenever an ASIO driver is chosen — so an ASIO-only
+        // session read as though both lanes were live. See RenderStartLabel. 2026-08-24.
+        var previous = RenderStartLabel(ModeLabel(), wasapiTicked, asioTicked);
+        wasapiTicked = wasapiIds.Count > 0;
+        asioTicked = asioIds.Count > 0;
+        var now = RenderStartLabel(ModeLabel(), wasapiTicked, asioTicked);
+        if (started && now != previous) onDiagnostic?.Invoke($"output {now}");
     }
 
     public void Dispose()
@@ -223,6 +246,24 @@ internal sealed class CompositeRenderBackend : IRenderBackend
         RemSound.Core.AudioMode.BothIndependent => "independent lanes (WASAPI + ASIO, no mix)",
         _ => mode.ToString(),
     };
+
+    /// <summary>
+    /// What the render log says it started. The MODE alone is not enough — saying only the mode
+    /// actively misleads.
+    ///
+    /// <para>"independent lanes (WASAPI + ASIO, no mix)" is the label for BothIndependent, and
+    /// BothIndependent only means an ASIO driver has been CHOSEN. So an ASIO-only rig, with every
+    /// WASAPI output unticked, logged a line naming WASAPI. On 2026-08-24 that line convinced me Ed
+    /// had both lanes live while he was telling me he had turned WASAPI off. He was right and the
+    /// log was wrong: the mode-not-configuration trap, this time written into the diagnostics rather
+    /// than into the code — where it costs a misdiagnosis instead of a bug.</para>
+    ///
+    /// <para>The line now leads with the CONFIGURATION — what is actually ticked, and therefore what
+    /// is actually rendering — keeping the mode alongside for the driver question it really
+    /// answers.</para>
+    /// </summary>
+    internal static string RenderStartLabel(string modeLabel, bool wasapiTicked, bool asioTicked) =>
+        $"configuration={RemSound.Core.AudioConfigurations.From(wasapiTicked, asioTicked).Describe()}, mode={modeLabel}";
 
     // FanOutSource and SwitchableSource have been removed (2026-05-13). The BothIndependent
     // rewiring put each lane on its own filtered PlayoutEngine.{Wasapi,Asio}LaneOutput

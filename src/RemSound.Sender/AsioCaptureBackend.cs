@@ -47,12 +47,13 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     public string DriverName => driverName;
     private readonly object gate = new();
 
-    private AsioOut? asio;
-    // Every AsioOut control call (create / init / play / stop / dispose) is marshalled onto this one
-    // dedicated STA+message-pump thread. That single-threaded, pumped home is what lets the driver close
-    // WITHOUT the native crash we used to hit on "ASIO → none" and driver switches — see AsioApartment.
-    // Created in the ctor so it can announce its own thread up/down through the same diagnostic sink.
-    private readonly AsioApartment apartment;
+    // The driver, SHARED with the receiver's playback side: one instance per driver name for the whole
+    // process, opened full duplex, so capture and playback on one interface never ask a driver for a
+    // second instance. The Zoom H4essential refuses one ("Unable to instantiate ASIO"), which is what
+    // made "send AND receive on the Zoom" impossible (Anthony Reyers, 2026-09-04). The device owns the
+    // apartment thread and the open and close - the same single pumped STA thread that stopped the
+    // native crash on close; this backend attaches a callback and lets go. See SharedAsioDevice.
+    private SharedAsioDevice? device;
     // VOLATILE, not lock-guarded, and that is load-bearing. The ASIO audio callback reads this list on
     // the driver's real-time thread. It used to take `gate` to do so — but StopInternal holds `gate` for
     // the WHOLE close, so a callback already in flight when a close began could not return until the
@@ -94,7 +95,6 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
         this.driverName = driverName;
         this.onMixedSamples = onMixedSamples;
         this.onDiagnostic = onDiagnostic;
-        apartment = new AsioApartment($"asio-control:{driverName}", onDiagnostic);
     }
 
     /// <summary>
@@ -155,7 +155,7 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     /// than trusting that a method was called.</summary>
     public bool IsParked
     {
-        get { lock (gate) return asio is not null && activeChannelPairIndices.Count == 0; }
+        get { lock (gate) return device is not null && activeChannelPairIndices.Count == 0; }
     }
 
     /// <summary>The callback the driver's thread would invoke, so the gate can drive it directly and
@@ -169,7 +169,7 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     public float TakeMaxRawCaptureStepWithinBuffer() => rawCaptureStepProbe.TakeMaxWithinBuffer();
     public long TakeCumulativeCaptureTicks() => Interlocked.Exchange(ref cumulativeCaptureTicks, 0);
 
-    public bool IsRunning => asio is not null;
+    public bool IsRunning => device is not null;
 
     // Set from the driver's own reported buffer size when the stream opens; cleared on close.
     // Volatile because the UI thread reads it while the apartment thread writes it at open.
@@ -225,59 +225,49 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
 
             try
             {
-                // Open + init + play, ALL on the ASIO apartment thread (see the apartment field). A zero-
-                // channel driver becomes a throw so the catch below runs the same StopInternal cleanup.
-                apartment.Invoke(() =>
+                // Through the SHARED device - see SharedAsioDevice. The playback side may already hold
+                // this driver open; either way there is one instance, opened full duplex on the
+                // device's apartment thread with the same breadcrumbs as before. A failure to open
+                // becomes a throw, so the catch below runs the same StopInternal cleanup.
+                var shared = SharedAsioDevice.Acquire(driverName, onDiagnostic);
+                device = shared;
+                try
                 {
-                    // Step-by-step breadcrumbs, symmetric with the close path in StopInternal. If a
-                    // native call here takes the process down (as the driver used to do on close), the
-                    // last line in the log names exactly which stage died — with AutoFlush on, each line
-                    // is on disk before the next native call runs.
-                    onDiagnostic?.Invoke($"asio open: creating driver \"{driverName}\"");
-                    asio = new AsioOut(driverName);
-                    // Always open with the driver's full input channel count. Pulling channels we
-                    // don't immediately need is essentially free — the driver fills them anyway —
-                    // and it removes the need to ever reopen the AsioOut when the user toggles a
-                    // higher-numbered channel pair. Reopening is what previously caused 15-second
-                    // freezes when both sender and receiver held the same single-client driver
-                    // (Komplete Audio etc.) — see Andre's localhost lockup, 2026-04-30.
-                    recordChannelCount = asio.DriverInputChannelCount;
+                    shared.EnsureOpen();
+                    recordChannelCount = shared.InputChannelCount;
                     if (recordChannelCount <= 0)
                         throw new InvalidOperationException($"driver \"{driverName}\" reports zero input channels");
-                    asio.InputChannelOffset = 0;
-                    // Sanity-check that the requested pairs are within the driver's channel range.
-                    // We open the full count anyway, but if a saved spec references a pair above
-                    // the driver's range, the OnAudioAvailable mixer would silently emit zero —
-                    // surface that as a diagnostic so it's not mysterious.
+                    // Sanity-check that the requested pairs are within the driver's channel range. The
+                    // device opened the full count anyway, but if a saved spec references a pair above
+                    // it, the OnAudioAvailable mixer would silently emit zero - say so.
                     var maxPairIndex = activeChannelPairIndices.Max();
                     var highestNeededChannel = (maxPairIndex + 1) * 2;
                     if (highestNeededChannel > recordChannelCount)
                         onDiagnostic?.Invoke($"asio capture: driver \"{driverName}\" only has {recordChannelCount} input channels, but spec requests channel pair {maxPairIndex} (channels {maxPairIndex * 2 + 1}/{maxPairIndex * 2 + 2})");
-                    onDiagnostic?.Invoke($"asio open: init record+playback ({recordChannelCount} ch @ {MixSampleRate} Hz)");
-                    asio.InitRecordAndPlayback(null, recordChannelCount, MixSampleRate);
-                    asio.AudioAvailable += OnAudioAvailable;
-                    // Ask the DRIVER how big its buffer is, instead of assuming. Audio accumulates for
-                    // exactly one buffer before the callback fires, so this IS the capture wait — no
-                    // doubling (the render side is different, see AsioRenderBackend). Read once, here,
-                    // off the audio thread. 2026-08-24.
-                    reportedInputLatencyMs = asio.FramesPerBuffer > 0
-                        ? asio.FramesPerBuffer * 1000.0 / MixSampleRate
+                    // The DRIVER's buffer size, from the device. Audio accumulates for exactly one buffer
+                    // before the callback fires, so this IS the capture wait - no doubling.
+                    reportedInputLatencyMs = shared.FramesPerBuffer > 0
+                        ? shared.FramesPerBuffer * 1000.0 / MixSampleRate
                         : 0;
                     onDiagnostic?.Invoke(reportedInputLatencyMs > 0
-                        ? $"asio open: driver reports {asio.FramesPerBuffer} frames per buffer = {reportedInputLatencyMs:0.0} ms of capture latency"
+                        ? $"asio open: driver reports {shared.FramesPerBuffer} frames per buffer = {reportedInputLatencyMs:0.0} ms of capture latency"
                         : "asio open: driver did not report a buffer size — capture latency will fall back to an estimate");
                     captureFormat = $"{MixSampleRate} Hz, {recordChannelCount} input channel(s), 32-bit float (ASIO)";
-                    onDiagnostic?.Invoke("asio open: starting stream (play)");
-                    asio.Play();
-                    onDiagnostic?.Invoke("asio open: stream running");
-                });
+                    shared.AttachCapture(OnAudioAvailable);
+                }
+                catch
+                {
+                    device = null;
+                    shared.Release(onDiagnostic, CloseTimeoutMs);
+                    throw;
+                }
                 uptime.Restart();
                 onDiagnostic?.Invoke($"asio capture started \"{driverName}\" {captureFormat}; pairs={string.Join(",", activeChannelPairIndices)}");
             }
             catch (Exception ex)
             {
-                lastError = ex.Message;
-                onDiagnostic?.Invoke($"asio capture start failed: {ex.GetType().Name}: {ex.Message}");
+                lastError = SharedAsioDevice.Explain(ex);
+                onDiagnostic?.Invoke($"asio capture start failed: {ex.GetType().Name}: {lastError}");
                 StopInternal(CloseTimeoutMs);
             }
         }
@@ -341,53 +331,16 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
 
     private void StopInternal(int closeTimeoutMs)
     {
-        var toClose = asio;
-        if (toClose is not null)
+        var shared = device;
+        if (shared is not null)
         {
-            // Close the driver on the ASIO apartment thread — the same single, pumped thread it was opened
-            // on. That is the fix for the native access violation that used to kill the process here (it
-            // blew past these try/catch blocks with no managed stack). Step-by-step logging still pinpoints
-            // any native call that dies, and the callback is unhooked + drained before stop/dispose so the
-            // close isn't racing a live buffer callback (a common trigger for the crash).
-            //
-            // BOUNDED: a driver that wedges inside Stop/Dispose must not hang the CALLER forever —
-            // live driver-switches and the resume path close on the UI thread. See CloseTimeoutMs for
-            // why the bound is what it is and why the elapsed time below is logged unconditionally.
-            var closeStart = Stopwatch.GetTimestamp();
-            var stopMs = -1L;
-            var closed = apartment.Invoke(() =>
-            {
-                onDiagnostic?.Invoke("asio close: unhooking callback");
-                try { toClose.AudioAvailable -= OnAudioAvailable; } catch { /* ignore */ }
-                // Let an in-flight callback return before we touch the driver. This only actually
-                // works now that the callback no longer takes `gate` — see the field comment on
-                // activeChannelPairIndices.
-                System.Threading.Thread.Sleep(60);
-                onDiagnostic?.Invoke("asio close: stopping stream");
-                var stopStart = Stopwatch.GetTimestamp();
-                try { toClose.Stop(); } catch (Exception ex) { onDiagnostic?.Invoke($"asio close: stop threw {ex.GetType().Name}: {ex.Message}"); }
-                stopMs = (Stopwatch.GetTimestamp() - stopStart) * 1000 / Stopwatch.Frequency;
-                onDiagnostic?.Invoke($"asio close: releasing driver (dispose) — stop took {stopMs} ms");
-                var disposeStart = Stopwatch.GetTimestamp();
-                try { toClose.Dispose(); } catch (Exception ex) { onDiagnostic?.Invoke($"asio close: dispose threw {ex.GetType().Name}: {ex.Message}"); }
-                var disposeMs = (Stopwatch.GetTimestamp() - disposeStart) * 1000 / Stopwatch.Frequency;
-                onDiagnostic?.Invoke($"asio close: driver released cleanly — stop {stopMs} ms, dispose {disposeMs} ms");
-            }, timeoutMs: closeTimeoutMs);
-            var elapsedMs = (Stopwatch.GetTimestamp() - closeStart) * 1000 / Stopwatch.Frequency;
-            if (!closed)
-            {
-                // Say what actually happened. The old wording ("abandoning the driver") read as though
-                // the driver had failed, when in every observed case it was still closing and went on
-                // to finish. Name the bound so the next person can see whether it was too tight.
-                onDiagnostic?.Invoke(
-                    $"asio close: gave up waiting after {elapsedMs} ms (bound {closeTimeoutMs} ms) — the close is STILL RUNNING on the "
-                    + "apartment thread and may yet finish; the card may be briefly unavailable to a re-open");
-            }
-            else
-            {
-                onDiagnostic?.Invoke($"asio close: complete in {elapsedMs} ms");
-            }
-            asio = null;
+            // Let go of the shared driver. A volatile detach stops delivery on the very next callback;
+            // the driver itself closes only when the playback side has let go as well, on the device's
+            // apartment thread, bounded and timed exactly as this backend always did - see
+            // SharedAsioDevice.Close.
+            shared.DetachCapture();
+            device = null;
+            shared.Release(onDiagnostic, closeTimeoutMs);
         }
         uptime.Stop();
         activeChannelPairIndices = [];
@@ -400,7 +353,6 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
         // Shutdown path: a short bound. See ShutdownCloseTimeoutMs — at exit the OS reclaims the
         // device anyway, so a slow close must not hold the app's quit open for half a minute.
         lock (gate) StopInternal(ShutdownCloseTimeoutMs);
-        apartment.Dispose(); // shut down the dedicated ASIO thread last, after the driver is closed
     }
 
     private static List<int> ParseChannelPairIndices(IReadOnlyList<CaptureSourceSpec> specs)

@@ -33,9 +33,19 @@ internal sealed class CuePlayer : IDisposable
 
     public CuePlayer(string filePath) => this.filePath = filePath;
 
+    /// <summary>How many Plays have got PAST the mute gate and gone on to open a device.
+    ///
+    /// <para>Here because "muting holds" was a claim nothing checked: the gate asserted only that
+    /// <see cref="GloballyMuted"/> was still set after a muted Play — which Play never touches
+    /// either way. Deleting the mute gate left every test green, and a gate that chimes at whoever
+    /// is at the screen is precisely what happened to Ed on 2026-08-15. Counting is the only honest
+    /// form: muted must not increment, unmuted must. 2026-08-24.</para></summary>
+    internal static int PlaysStartedForTest;
+
     public void Play()
     {
         if (GloballyMuted) return;
+        System.Threading.Interlocked.Increment(ref PlaysStartedForTest);
         var path = filePath;
         Task.Run(() =>
         {

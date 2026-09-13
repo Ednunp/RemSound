@@ -66,7 +66,56 @@ internal sealed class PlayoutEngine : IWaveProvider
     {
         if (claims is null) return false;
         if (claims.IsClaimed(session.Endpoint.Address)) return true;
+        // Claimed at one of the SAME PERSON'S other addresses. Without this the plugin takes the peer
+        // on one path while the speakers keep playing the same peer arriving on the other, which is
+        // the double audio the claim register exists to prevent.
+        foreach (var alias in AliasesOf(session.Endpoint.Address))
+        {
+            if (claims.IsClaimed(alias)) return true;
+        }
         return claimedStreamOwners.TryGetValue(session.StreamId, out var owner) && claims.IsClaimed(owner);
+    }
+
+    /// <summary>Addresses that belong to the same peer, one array per peer, as the app currently knows
+    /// them. A device on a LAN and a VPN at once answers on both and can send from either, so an
+    /// address on its own does not identify a person. Replaced wholesale by the app whenever its peer
+    /// set changes; read without a lock because only the reference is ever swapped.</summary>
+    private volatile IPAddress[][] peerAddressGroups = [];
+
+    /// <summary>Tell the engine which addresses belong to the same peer. Empty (the default) restores
+    /// the old address-is-the-person behaviour exactly, so nothing depends on the app calling it.</summary>
+    public void SetPeerAddressGroups(IReadOnlyList<IPAddress[]>? groups)
+        => peerAddressGroups = groups is null ? [] : groups.Where(g => g.Length > 1).ToArray();
+
+    /// <summary>The other addresses this one is known to share a peer with. Empty for the common case
+    /// of a peer on a single path, which is why the whole thing costs nothing when nobody is dual-homed.</summary>
+    private IReadOnlyList<IPAddress> AliasesOf(IPAddress address)
+    {
+        var groups = peerAddressGroups;
+        foreach (var group in groups)
+        {
+            foreach (var member in group)
+            {
+                if (member.Equals(address)) return group;
+            }
+        }
+        return [];
+    }
+
+    /// <summary>Is anybody known to be reachable at more than one address? False for every ordinary
+    /// session, which is what keeps the multi-path checks off the packet path when nobody needs
+    /// them.</summary>
+    internal bool HasPeerAddressGroups => peerAddressGroups.Length > 0;
+
+    /// <summary>Are these two addresses the same person? Equal, or known to belong to one peer.</summary>
+    internal bool SamePerson(IPAddress a, IPAddress b)
+    {
+        if (a.Equals(b)) return true;
+        foreach (var member in AliasesOf(a))
+        {
+            if (member.Equals(b)) return true;
+        }
+        return false;
     }
     private readonly object sessionsLock = new();
     // Sessions are keyed by (Endpoint, StreamId) — 2026-05-11. One peer can produce
@@ -132,6 +181,25 @@ internal sealed class PlayoutEngine : IWaveProvider
     // Both default to true so a fresh PlayoutEngine that hasn't yet been told (e.g. in
     // unit tests, or before the first SetOutputDevices call) behaves like the old
     // strict-filter path.
+    /// <summary>
+    /// Does a peer handed to a DAW plugin arrive SHAPED — carrying the pan and EQ set for them here —
+    /// or raw? True by default: what you hear is what the track gets.
+    ///
+    /// <para>This is the "Apply pan and EQ to plugin audio" menu item, and until 2026-09-06 that item
+    /// did nothing whatsoever. It saved its tick, reloaded it and logged the change, and no code
+    /// anywhere read the value — so the DAW always got shaped audio however it was set. There was even
+    /// a test for it, and the test only checked that the setting SURVIVED A SAVE. That is the
+    /// dead-latency-slider trap exactly: proving a value is stored proves nothing about whether it
+    /// does anything. Menu items are not among the 76 controls the control suite drives, which is why
+    /// nothing caught it.</para>
+    ///
+    /// <para>Read on the bridge thread, written from the UI thread — hence volatile.</para>
+    /// </summary>
+    private volatile bool pluginShapingEnabled = true;
+
+    /// <summary>Set from the DAW plugin menu, and at startup from AppConfig.</summary>
+    public void SetPluginShaping(bool applyShaping) => pluginShapingEnabled = applyShaping;
+
     private volatile bool wasapiLaneActive = true;
     private volatile bool asioLaneActive = true;
     private volatile bool muted;
@@ -145,6 +213,28 @@ internal sealed class PlayoutEngine : IWaveProvider
     // callback, which costs more than the read does).
     private long cumulativeRenderTicks;
     public long TakeCumulativeRenderTicks() => Interlocked.Exchange(ref cumulativeRenderTicks, 0);
+
+    // PER-LANE render time. The total above is machine-wide, which cannot answer the question that
+    // actually gets asked: when one lane starts under-running, was that lane itself expensive, or was
+    // it starved while the OTHER lane hogged the render path? Ed hit exactly that on 2026-08-24 —
+    // adding a wireless headset on WASAPI alongside his ASIO interface took the render path from 8 ms
+    // per second to 50, and the ASIO lane under-ran 65 times in twenty seconds. The lanes are
+    // independent by construction (own ring, own resampler, no shared cache, no shared lock in the
+    // render path), so the only coupling left is the machine itself — and nothing in the log could
+    // show which lane had spent the time. Now it can.
+    private readonly long[] renderTicksByRoute = new long[8];
+
+    /// <summary>Take and reset EVERY lane's render time in ONE call.
+    ///
+    /// <para>Deliberately all-at-once. A per-route take would be a second self-resetting accessor,
+    /// and that is exactly the trap that cost a night on 2026-08-24: the per-lane render PERIOD has
+    /// one, a second caller was added, and the later reader silently got zero while the window it fed
+    /// fell back to a machine-wide figure. One call, one reader, nobody can be starved.</para>
+    /// </summary>
+    public (long Wasapi, long Asio, long Mixed) TakeRenderTicksByRoute() => (
+        Interlocked.Exchange(ref renderTicksByRoute[(int)RenderRoute.WasapiLane & 7], 0),
+        Interlocked.Exchange(ref renderTicksByRoute[(int)RenderRoute.AsioLane & 7], 0),
+        Interlocked.Exchange(ref renderTicksByRoute[(int)RenderRoute.Mixed & 7], 0));
     // 1 = stupid aggressive, 10 = perfectly smooth. Read on the audio thread, written from UI.
     // Now mostly a safety-knob for the click-trim catastrophic path; in normal operation the
     // Phase-2 drift corrector (in SessionPlayout) keeps the buffer near target so the trim
@@ -211,12 +301,14 @@ internal sealed class PlayoutEngine : IWaveProvider
         {
             if (chain is null) peerDspByAddress.Remove(address);
             else peerDspByAddress[address] = chain;
+            // The PERSON, not the path. A peer who moved between networks keeps a session at the
+            // address it opened on, and matching exactly would leave their volume slider inert.
             foreach (var s in sessions.Values)
-                if (s.Endpoint.Address.Equals(address)) s.SetDsp(chain);
+                if (SamePerson(s.Endpoint.Address, address)) s.SetDsp(chain);
             // Mirror replicas each need their OWN chain instance (independent biquad state) — a fresh
             // clone per mirror, or null to clear. Never share one chain across two output lanes.
             foreach (var (key, mirs) in mirrorsByKey)
-                if (key.Endpoint.Address.Equals(address))
+                if (SamePerson(key.Endpoint.Address, address))
                     foreach (var mir in mirs) mir.SetDsp(chain?.Clone());
         }
     }
@@ -295,18 +387,39 @@ internal sealed class PlayoutEngine : IWaveProvider
         };
     }
 
-    /// <summary>Aggregate buffered ms across all active sessions. Used by the App's diagnostic
-    /// snapshot row. Per-session levels are not currently exposed (single number is enough for
-    /// the existing snapshot column; the auto-tune doesn't depend on it).</summary>
+    /// <summary>
+    /// How deep the buffer is, as ONE number — the deepest LANE, never the sum of everything.
+    ///
+    /// <para>This used to add <c>BufferedBytes</c> across the whole session snapshot. That snapshot
+    /// holds primaries AND mirror replicas, so with both kinds of output ticked a single stream was
+    /// counted twice and the figure came out at roughly double the real depth — with several peers,
+    /// several times over. It is the status line's buffer column and the number a person reads when
+    /// they ask "why does this feel late", so it was wrong precisely when having two lanes made the
+    /// question hardest to answer.</para>
+    ///
+    /// <para>Ed, 2026-08-28, on a laptop with a headset on WASAPI and an interface on ASIO: "I put in
+    /// 20 at one point and it sounded nowhere near that." The column read 115 ms against a 20 ms
+    /// target; the real per-lane depth was about 55. The buffer WAS above target, but nothing like
+    /// what the number claimed — and I read that number at face value and told him the buffer was
+    /// refusing to hold its target. The meter was wrong.</para>
+    ///
+    /// <para>The honest single answer is the WORST LANE, because that is the delay somebody is
+    /// actually hearing. Per-lane averaging lives in <see cref="CurrentBufferMsFor"/> and was right
+    /// all along; this is the lane-free accessor that should never have summed. Same lesson as every
+    /// other instance of this: a lane-free number for a per-lane quantity is a trap left lying about.
+    /// 2026-09-06.</para>
+    /// </summary>
     public int CurrentBufferMs
     {
         get
         {
-            var snap = sessionsSnapshot;
-            if (snap.Length == 0) return 0;
-            var totalBytes = 0;
-            foreach (var s in snap) totalBytes += s.BufferedBytes;
-            return totalBytes / MixBytesPerFrame * 1000 / MixSampleRate;
+            var worst = 0;
+            foreach (var route in new[] { RenderRoute.WasapiLane, RenderRoute.AsioLane, RenderRoute.Mixed })
+            {
+                var depth = CurrentBufferMsFor(route);
+                if (depth > worst) worst = depth;
+            }
+            return worst;
         }
     }
 
@@ -358,6 +471,30 @@ internal sealed class PlayoutEngine : IWaveProvider
         wasapiLaneOutput = new LaneOutput(this, RenderRoute.WasapiLane);
         asioLaneOutput = new LaneOutput(this, RenderRoute.AsioLane);
     }
+
+    /// <summary>When each lane was last actually read. A lane can be ticked, flagged active and still
+    /// be consuming nothing; feeding one of those was what cost Ed hours of bad audio on 2026-09-07.
+    /// See <see cref="LaneActivity"/>.</summary>
+    private readonly LaneActivity laneActivity = new();
+
+    /// <summary>Optional log sink. Null in tests that do not care; the App wires it so a lane going
+    /// quiet, and coming back, both leave a line naming the lane.</summary>
+    public Action<string>? OnDiagnostic { get; set; }
+
+    /// <summary>Is this lane BOTH ticked and actually taking audio? Everything that used to ask only
+    /// "is the flag set" asks this instead. A lane that has stopped consuming is treated exactly like
+    /// one that was switched off: its copies stop being fed, and any stream whose own lane has gone
+    /// quiet falls through onto a lane that is still reading, so it stays audible.</summary>
+    internal bool LaneIsConsuming(RenderRoute route) => route switch
+    {
+        RenderRoute.WasapiLane => wasapiLaneActive && laneActivity.IsConsuming(route),
+        RenderRoute.AsioLane => asioLaneActive && laneActivity.IsConsuming(route),
+        _ => true,
+    };
+
+    /// <summary>Drive a lane stall from the gate without waiting out the real window.</summary>
+    internal void RewindLaneReadClockForTest(RenderRoute route, double seconds)
+        => laneActivity.RewindForTest(route, seconds);
 
     /// <summary>
     /// Optional callback invoked every time the engine produces a buffer of mixed received
@@ -481,7 +618,15 @@ internal sealed class PlayoutEngine : IWaveProvider
                 sp.SetConcealmentArtifact((ConcealmentArtifact)concealmentArtifactRaw);
                 // Inherit this peer's pan+EQ too, so a mid-stream / reconnect session is shaped from
                 // frame zero rather than only on the next SetPeerDsp call.
+                // Exact first, then the peer's other addresses: a session opening on the VPN path
+                // must inherit the shaping the user set while they were on the LAN.
                 if (peerDspByAddress.TryGetValue(endpoint.Address, out var chain)) sp.SetDsp(chain);
+                else foreach (var (shaped, other) in peerDspByAddress)
+                {
+                    if (!SamePerson(shaped, endpoint.Address)) continue;
+                    sp.SetDsp(other);
+                    break;
+                }
                 if (recordTap is not null) sp.SetRecordTap(recordTap, recordTapRaw);
                 sessions[key] = sp;
                 // Assigns the primary's output lane and creates a mirror replica per additional active
@@ -554,6 +699,8 @@ internal sealed class PlayoutEngine : IWaveProvider
             {
                 if (existing.Exists(x => x.Route == lane)) continue;
                 var mir = new SessionPlayout(primary.Endpoint, primary.StreamId, primary.Capacity) { Route = lane, IsMirror = true };
+                // So the write fan-out can stop feeding this copy the moment its lane stops reading.
+                mir.LaneIsConsuming = LaneIsConsuming;
                 mir.SetConcealmentArtifact((ConcealmentArtifact)concealmentArtifactRaw);
                 if (peerDspByAddress.TryGetValue(primary.Endpoint.Address, out var chain) && chain is not null)
                     mir.SetDsp(chain.Clone()); // its own filter state — must NOT share with the primary
@@ -898,7 +1045,10 @@ internal sealed class PlayoutEngine : IWaveProvider
         }
         var start = Stopwatch.GetTimestamp();
         var produced = ReadAllSessions(buffer, offset, count, mixScratch, sessionScratch, recordDiagnostics: true);
-        Interlocked.Add(ref cumulativeRenderTicks, Stopwatch.GetTimestamp() - start);
+        var elapsed = Stopwatch.GetTimestamp() - start;
+        Interlocked.Add(ref cumulativeRenderTicks, elapsed);
+        // The all-sessions read is the single-lane (Mixed) world.
+        Interlocked.Add(ref renderTicksByRoute[(int)RenderRoute.Mixed & 7], elapsed);
         return produced;
     }
 
@@ -918,13 +1068,22 @@ internal sealed class PlayoutEngine : IWaveProvider
         long workStart = 0;
         var diag = RemSound.Core.DiagnosticsGate.Enabled;
         if (diag) workStart = Stopwatch.GetTimestamp();
+        // Stamp the lane BEFORE the read. This is what separates a lane that is switched ON from a
+        // lane that is doing anything — see LaneActivity for the session that made it necessary.
+        laneActivity.Note(route);
         try
         {
             return ReadForRouteInner(buffer, offset, count, route, mixBuf, sessionBuf, recordDiagnostics);
         }
         finally
         {
-            if (diag) Interlocked.Add(ref cumulativeRenderTicks, Stopwatch.GetTimestamp() - workStart);
+            if (diag)
+            {
+                var elapsed = Stopwatch.GetTimestamp() - workStart;
+                Interlocked.Add(ref cumulativeRenderTicks, elapsed);
+                // ...and against THIS lane, so a log can say which one spent the time.
+                Interlocked.Add(ref renderTicksByRoute[(int)route & 7], elapsed);
+            }
         }
     }
 
@@ -967,10 +1126,14 @@ internal sealed class PlayoutEngine : IWaveProvider
         //
         // The "other lane is inactive" check is computed once per Read since the active-flag
         // state can only change via SetLaneActive (UI-thread driven).
+        // "Active" here now means ticked AND actually reading. A lane that has gone quiet without
+        // being unticked used to hold its sessions hostage: they matched a lane nobody read, so they
+        // were skipped here AND never fell through, and their rings overflowed for as long as the app
+        // stayed open. See LaneActivity. 2026-09-08.
         var otherLaneActive = route switch
         {
-            RenderRoute.WasapiLane => asioLaneActive,
-            RenderRoute.AsioLane => wasapiLaneActive,
+            RenderRoute.WasapiLane => LaneIsConsuming(RenderRoute.AsioLane),
+            RenderRoute.AsioLane => LaneIsConsuming(RenderRoute.WasapiLane),
             _ => true,  // Mixed never reaches this path (uses ReadAllSessions instead)
         };
         var aggregateBufferedBytes = 0;
@@ -987,7 +1150,13 @@ internal sealed class PlayoutEngine : IWaveProvider
             // Orphan = session tagged for the OTHER non-Mixed lane whose lane has no active
             // output — fall it through onto whichever lane IS being read so it stays audible
             // (2026-05-15).
+            // A MIRROR never falls through. It exists only to feed one specific lane, so if that lane
+            // has gone there is nothing for it to do — and letting it fall through onto the surviving
+            // lane would play its peer twice, since the primary falls through as well. Before lanes
+            // could go quiet without being unticked this could not arise: an unticked lane had its
+            // mirrors disposed outright. 2026-09-08.
             var isOrphanFromOtherLane = !matchesOwnLane
+                && !session.IsMirror
                 && session.Route != RenderRoute.Mixed
                 && !otherLaneActive;
             // A Mixed (plain) session belongs to NO lane — it's what a classic WASAPI-only sender
@@ -1092,7 +1261,23 @@ internal sealed class PlayoutEngine : IWaveProvider
         var scratch = claimedScratch;
         if (scratch.Length < outFloats) claimedScratch = scratch = new float[outFloats];
 
+        // TWO PASSES, AND A DIRECT MATCH ALWAYS WINS.
+        //
+        // This used to be one pass that accepted a session either at the peer's own address OR
+        // carrying a StreamId previously seen as theirs. A stream id is chosen by the SENDER and is
+        // not unique across senders — in every single-lane mode each peer sends on the same one — so
+        // two claimed peers collide on it as a matter of course, not as an edge case. Walking the
+        // snapshot for peer X recorded owner[1] = X, then reached peer Y's session, found owner[1]
+        // matching, and summed Y into X's track while draining Y's ring. Y's own instance then found
+        // owner[1] pointing at X and skipped its own audio entirely. Two instances receiving two
+        // different people therefore gave one a garbled mix of both and the other nothing at all,
+        // which is exactly how it was reported (Anthony Reyers, 2026-08-28).
+        //
+        // The adoption rule exists for a real case — a peer whose network path changed, whose stream
+        // now arrives from a different address — so it stays. It is just no longer allowed to outvote
+        // a session actually sitting at the address being asked for.
         var produced = 0;
+        var matchedDirectly = false;
         foreach (var session in sessionsSnapshot)
         {
             // PRIMARIES ONLY. The snapshot also holds a mirror replica per extra active output lane,
@@ -1102,13 +1287,37 @@ internal sealed class PlayoutEngine : IWaveProvider
             // the peer twice — about 6 dB hot, and comb-filtered as the two rings drifted apart.
             // Only bit when both a WASAPI and an ASIO output were ticked. 2026-08-23 audit, R2.
             if (session.IsMirror) continue;
-            // Their own address, or a stream we have already seen as theirs arriving from somewhere
-            // else. The second case is a peer whose path changed under us.
-            var atThisAddress = session.Endpoint.Address.Equals(peer);
-            if (atThisAddress) claimedStreamOwners[session.StreamId] = peer;
-            else if (!(claimedStreamOwners.TryGetValue(session.StreamId, out var owner) && owner.Equals(peer))) continue;
+            if (!SamePerson(session.Endpoint.Address, peer)) continue;
+            claimedStreamOwners[session.StreamId] = peer;
             var laneLatency = LatencyFor(session.Route);
-            var got = session.ReadFloats(scratch.AsSpan(0, outFloats), wanted, laneLatency.TargetMs, laneLatency.MaxMs, smoothness);
+            var got = session.ReadFloats(scratch.AsSpan(0, outFloats), wanted, laneLatency.TargetMs, laneLatency.MaxMs, smoothness, pluginShapingEnabled);
+            if (got <= 0) continue;
+            // A DIRECT MATCH ONLY WINS IF IT ACTUALLY PRODUCED AUDIO. Setting this before the read
+            // meant a session still sitting at the claimed address with a dry ring — which is exactly
+            // what a peer LEAVING that path looks like for the seconds before the session expires —
+            // counted as the answer and returned silence, and the adoption pass below (Ed's
+            // 2026-08-22 fix for a peer whose path moved) never ran. The track went quiet while the
+            // app itself still played the peer perfectly. Mine, introduced 2026-08-29 with the
+            // two-pass split, found the same day.
+            matchedDirectly = true;
+            produced = Math.Max(produced, got);
+            var summed = got * MixChannels;
+            for (var i = 0; i < summed; i++) destination[i] += scratch[i];
+        }
+        if (matchedDirectly) return produced;
+
+        // Nothing at their address. Now, and only now, adopt a stream we have previously seen as
+        // theirs — a peer whose path moved. Still never one sitting at an address some OTHER plugin
+        // instance has claimed, because that audio has an owner who is about to ask for it.
+        var otherClaims = pluginClaims;
+        foreach (var session in sessionsSnapshot)
+        {
+            if (session.IsMirror) continue;
+            if (!claimedStreamOwners.TryGetValue(session.StreamId, out var owner) || !owner.Equals(peer)) continue;
+            if (otherClaims is not null && !SamePerson(session.Endpoint.Address, peer)
+                && otherClaims.IsClaimed(session.Endpoint.Address)) continue;
+            var laneLatency = LatencyFor(session.Route);
+            var got = session.ReadFloats(scratch.AsSpan(0, outFloats), wanted, laneLatency.TargetMs, laneLatency.MaxMs, smoothness, pluginShapingEnabled);
             if (got <= 0) continue;
             produced = Math.Max(produced, got);
             var summed = got * MixChannels;

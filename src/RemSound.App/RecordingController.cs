@@ -264,9 +264,20 @@ internal sealed class RecordingController
         // SUM this peer's block into their per-render buffer, so a peer sending on more than one lane is
         // combined (recorded as it sounds) rather than the lanes stacking one after another.
         var span = block.Span;
-        if (t.Accum.Length < span.Length) t.Accum = new float[span.Length];
+        // GROW, don't replace: a fresh array throws away whatever the other lane already summed in
+        // this render. The flush below has always used Array.Resize — the two halves of the same
+        // mechanism simply disagreed.
+        if (t.Accum.Length < span.Length) { var grown = t.Accum; Array.Resize(ref grown, span.Length); t.Accum = grown; }
         for (int i = 0; i < span.Length; i++) t.Accum[i] += span[i];
-        t.Len = span.Length;
+        // The LONGEST block this render, not the last one.
+        //
+        // The two lanes have their own device periods, so their blocks are routinely different
+        // lengths. Recording the LAST length meant a long lane followed by a short one left Len
+        // short — and FlushPeerTracks pads "from Len to the render length" with silence, writing
+        // zeros straight over audio it had already summed in. Measured at 25% of the track lost with
+        // blocks of 480 and 240 frames. A recording that loses a quarter of somebody is discovered
+        // when the file is opened, which is far too late. 2026-08-24 audit, finding REC1.
+        t.Len = Math.Max(t.Len, span.Length);
     }
 
     // Audio thread. Once per render, flush each peer's summed block to their file. Every peer track gets
@@ -291,10 +302,13 @@ internal sealed class RecordingController
     // Audio thread. Sum a peer's raw block into the per-render mix for a single-file bypass recording.
     private void OnRawMixTap(IPEndPoint peer, ReadOnlyMemory<float> block)
     {
+        // Same two faults as OnPeerRecordBlock, and the same fix — this is the single-file bypass
+        // path, where several PEERS as well as both lanes sum into one buffer per render, so a short
+        // block arriving after a long one truncated the mix for everybody. See REC1.
         var span = block.Span;
-        if (rawMixAccum.Length < span.Length) rawMixAccum = new float[span.Length];
+        if (rawMixAccum.Length < span.Length) Array.Resize(ref rawMixAccum, span.Length);
         for (int i = 0; i < span.Length; i++) rawMixAccum[i] += span[i];
-        rawMixLen = span.Length;
+        rawMixLen = Math.Max(rawMixLen, span.Length);
     }
 
     // Audio thread. Flush the summed raw mix for this render to the single recorder, padding a silent

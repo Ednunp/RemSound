@@ -8,4 +8,9 @@
     <AssemblyName>RemSound.Core</AssemblyName>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- For SharedAsioDevice only: the one ASIO driver instance both the sender and the receiver
+         attach to. They may not reference each other, so the device lives here. -->
+    <PackageReference Include="NAudio" Version="2.3.0" />
+  </ItemGroup>
 </Project>

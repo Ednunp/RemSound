@@ -155,6 +155,49 @@ public sealed class PeerDiscoveryService : IDisposable
 
     public void Dispose() => Stop();
 
+    /// <summary>
+    /// Turn one received datagram into an announcement, or reject it.
+    ///
+    /// <para><b>This is a trust boundary and it was not treated as one.</b> Discovery is a broadcast
+    /// UDP port: anything on the network can send to it, and a corrupted packet can arrive without
+    /// anyone meaning harm. The announced AUDIO PORT went straight from the wire into
+    /// <c>PeerAnnouncement.AudioPort</c>, and from there into <c>new IPEndPoint(address, port)</c> on
+    /// the UI thread — which throws for anything outside 0–65535. Nothing wires
+    /// <c>Application.ThreadException</c>, so a single datagram announcing port 99999 took RemSound
+    /// down with the default unhandled-exception dialog. "RemSound just vanished" is a report class
+    /// this project has chased before. Found 2026-08-24.</para>
+    ///
+    /// <para>Split out and internal so the gate can feed it real malformed packets. Driving the live
+    /// listener instead would mean binding the fixed discovery port, which would fight whatever
+    /// RemSound the user has open.</para>
+    /// </summary>
+    internal static bool TryParseAnnouncement(byte[] payload, IPAddress from, Guid ownInstanceId, out PeerAnnouncement peer)
+    {
+        peer = default!;
+        if (payload is null || payload.Length == 0) return false;
+
+        DiscoveryMessage? message;
+        try { message = JsonSerializer.Deserialize<DiscoveryMessage>(Encoding.UTF8.GetString(payload)); }
+        catch { return false; }                                   // not ours, or garbled
+        if (message is null) return false;
+        if (message.InstanceId == ownInstanceId) return false;    // our own announcement coming back
+        if (message.InstanceId == Guid.Empty) return false;       // an all-zero id would collide with itself
+
+        // The port is the one that could crash us. A peer that cannot name a usable port is not a peer.
+        if (message.AudioPort is < 1 or > 65535) return false;
+
+        // A name is shown in lists, spoken by a screen reader and written into log lines, so an absurd
+        // one is its own small denial of service. Trim rather than reject — the rest of the
+        // announcement is still usable.
+        var name = string.IsNullOrWhiteSpace(message.Name) ? from.ToString() : message.Name.Trim();
+        if (name.Length > 128) name = name[..128];
+
+        peer = new PeerAnnouncement(
+            message.InstanceId, name, message.AudioPort,
+            message.CanSend, message.CanReceive, DateTime.UtcNow, from);
+        return true;
+    }
+
     private async Task ListenLoop(CancellationToken token)
     {
         while (!token.IsCancellationRequested)
@@ -162,18 +205,7 @@ public sealed class PeerDiscoveryService : IDisposable
             try
             {
                 var result = await listener!.ReceiveAsync(token).ConfigureAwait(false);
-                var json = Encoding.UTF8.GetString(result.Buffer);
-                var message = JsonSerializer.Deserialize<DiscoveryMessage>(json);
-                if (message is null || message.InstanceId == instanceId) continue;
-
-                var peer = new PeerAnnouncement(
-                    message.InstanceId,
-                    string.IsNullOrWhiteSpace(message.Name) ? result.RemoteEndPoint.Address.ToString() : message.Name.Trim(),
-                    message.AudioPort,
-                    message.CanSend,
-                    message.CanReceive,
-                    DateTime.UtcNow,
-                    result.RemoteEndPoint.Address);
+                if (!TryParseAnnouncement(result.Buffer, result.RemoteEndPoint.Address, instanceId, out var peer)) continue;
 
                 // Auto-add the source IP to our unicast targets so subsequent announcements go
                 // back the way they came. This is what makes discovery bidirectional over a
@@ -183,26 +215,7 @@ public sealed class PeerDiscoveryService : IDisposable
                 // that had typed the other's IP would see the other.
                 AddUnicastTarget(result.RemoteEndPoint.Address);
 
-                bool changed;
-                lock (gate)
-                {
-                    changed = !peers.TryGetValue(peer.InstanceId, out var existing)
-                        || existing.Name != peer.Name
-                        || existing.AudioPort != peer.AudioPort
-                        || existing.CanSend != peer.CanSend
-                        || existing.CanReceive != peer.CanReceive
-                        || !Equals(existing.Address, peer.Address);
-                    peers[peer.InstanceId] = peer;
-                    // Remember this source IP for the peer (multi-homed senders announce from several).
-                    if (!addressesById.TryGetValue(peer.InstanceId, out var addrs))
-                    {
-                        addrs = [];
-                        addressesById[peer.InstanceId] = addrs;
-                    }
-                    addrs[peer.Address] = peer.LastSeenUtc;
-                    PruneExpiredPeers();
-                }
-                if (changed) PeersChanged?.Invoke();
+                if (Record(peer)) PeersChanged?.Invoke();
             }
             catch (OperationCanceledException) { break; }
             catch (ObjectDisposedException) { break; }
@@ -212,6 +225,36 @@ public sealed class PeerDiscoveryService : IDisposable
             }
         }
     }
+
+    /// <summary>Files one announcement: the peer's record and the source address it came from. What
+    /// <see cref="ListenLoop"/> does with a parsed packet, minus the unicast bookkeeping and the event.
+    /// Returns whether anything a list shows has changed.</summary>
+    private bool Record(PeerAnnouncement peer)
+    {
+        lock (gate)
+        {
+            var changed = !peers.TryGetValue(peer.InstanceId, out var existing)
+                || existing.Name != peer.Name
+                || existing.AudioPort != peer.AudioPort
+                || existing.CanSend != peer.CanSend
+                || existing.CanReceive != peer.CanReceive
+                || !Equals(existing.Address, peer.Address);
+            peers[peer.InstanceId] = peer;
+            // Remember this source IP for the peer (multi-homed senders announce from several).
+            if (!addressesById.TryGetValue(peer.InstanceId, out var addrs))
+            {
+                addrs = [];
+                addressesById[peer.InstanceId] = addrs;
+            }
+            addrs[peer.Address] = peer.LastSeenUtc;
+            PruneExpiredPeers();
+            return changed;
+        }
+    }
+
+    /// <summary>Test seam: file an announcement as if it had arrived, so the gate can put a peer in
+    /// front of the app without a socket. Same code as the live path.</summary>
+    internal void RecordForTest(PeerAnnouncement peer) => Record(peer);
 
     private void AddUnicastTarget(IPAddress address)
     {

@@ -27,6 +27,11 @@ public sealed partial class MainForm : Form
     // Engines and helpers
     private readonly PeerDiscoveryService discovery = new();
     private readonly AudioSender sender = new();
+
+    /// <summary>Where a DAW track's audio goes: the app's end of the plugin's SEND direction. Owns
+    /// the decision about which connected DAW drives the plugin lane, and arms and disarms that lane
+    /// as plugins come and go. Built in the constructor because it needs the sender.</summary>
+    private readonly PluginTrackSource pluginTrackSource;
     private readonly AudioReceiver receiver = new();
 
     /// <summary>The app's end of the link to VST plugin instances, or null when the user has turned
@@ -469,7 +474,7 @@ public sealed partial class MainForm : Form
     /// and its OWN learned floor. Sharing them (which the first cut of the creep did, 2026-08-15, and
     /// Ed caught by asking whether the two tuners were genuinely independent) means one lane's
     /// shortfall sets the other lane's floor and each tick double-counts the other's quiet spell.</summary>
-    private sealed class LaneTuneMemory
+    internal sealed class LaneTuneMemory
     {
         /// <summary>Consecutive ticks on THIS lane with no tune-blocking short-reads. One quiet tick
         /// is luck; several is a pattern, and only a pattern earns a big evidence-backed step.</summary>
@@ -502,12 +507,60 @@ public sealed partial class MainForm : Form
 
         public void Reset()
         {
-            CleanTicks = 0;
+            ForgetReadings();
             Creep.Reset();
+        }
+
+        /// <summary>Throw away the READINGS — the clean-tick run, both windows and the underrun baseline — and keep what
+        /// this lane LEARNED. A wake needs exactly that: readings taken across a sleep are worthless, and the floor was
+        /// learned on the same network and the same devices the audio comes back to.</summary>
+        public void ForgetReadings()
+        {
+            CleanTicks = 0;
             RenderCbGaps.Clear();
             MinBuffers.Clear();
             // New conditions: the counter baseline describes the old ones too.
             NeedsUnderrunBaseline = true;
+        }
+
+        /// <summary>Whether this lane was playing audio at the previous look. Null before the first.</summary>
+        private bool? wasAudible;
+
+        /// <summary>
+        /// A LANE THAT COMES BACK RE-EARNS ITS FLOOR.
+        ///
+        /// <para>The learned floor describes how thin a particular output could safely run. When that
+        /// output goes away — unplugged, powered down, lost to a hibernate — the floor stops being
+        /// evidence about anything. Nothing removed it, though: the only thing that reset a lane's
+        /// memory was a NEW STREAM SESSION opening, and an output disappearing is not a new session.
+        /// The peer is still sending; it is the speaker that left.</para>
+        ///
+        /// <para>Measured on Ed's laptop, 2026-09-09: the WASAPI floor sat at 25 ms for seven and a
+        /// half hours on a lane with no device at all — no audio, no underruns, not one render read. It
+        /// had been learned in six noisy minutes at the start of the evening and then froze, because
+        /// the floor only relaxes on CLEAN TICKS and a dead lane produces no ticks to be clean. When
+        /// the device came back it would have been told, before measuring anything, that it could not
+        /// go below a number earned by different hardware in a different state hours earlier.</para>
+        ///
+        /// <para>So: on the transition from silent back to audible, forget. The lane will re-learn
+        /// within a minute or two from what it can actually see, which is the only evidence worth
+        /// having. Going silent does NOT reset anything — a lane that is merely paused should not lose
+        /// what it knows, and the reset happens on the way back precisely so a brief gap costs
+        /// nothing.</para>
+        ///
+        /// <para>Both lanes, deliberately. WASAPI is where devices vanish most (Bluetooth headsets,
+        /// USB interfaces, a resume), but an ASIO driver can be lost too, and a floor learned about a
+        /// departed ASIO device is exactly as stale.</para>
+        /// </summary>
+        /// <returns>True when this call forgot a floor, so the caller can log it.</returns>
+        public bool NoteLaneAudible(bool audible)
+        {
+            var previously = wasAudible;
+            wasAudible = audible;
+            if (!audible || previously is not false) return false;
+            if (Creep.DiscoveredFloorMs <= 0) return false;   // nothing learned, nothing to forget
+            Reset();
+            return true;
         }
     }
     /// <summary>End-to-end latency last measured, PER LANE. Cached because the per-lane callback-gap
@@ -859,6 +912,9 @@ public sealed partial class MainForm : Form
     {
         this.profileStore = profileStore;
         this.headless = headless;
+        // Before anything that could open the plugin link, so a plugin that says hello during startup
+        // never finds a half-built send path.
+        pluginTrackSource = new PluginTrackSource(sender, message => logFile.Event($"vst plugin: {message}"));
         currentProfileTitle = loadedTitle;
         // Resolve the active profile's full path from whichever bit of info Program.cs
         // passed in. If a path was explicitly given (Open-from-arbitrary-folder flow),
@@ -1284,6 +1340,8 @@ public sealed partial class MainForm : Form
         // checkbox writes through to both AppConfig.LoggingEnabled and logFile.Enabled when
         // the user toggles it.
         logFile.Enabled = AppConfig.Load().LoggingEnabled;
+        // Dialogs own no log of their own; point them at this one. See UiChangeLog.
+        WireDialogChangeLog();
         // Tell any VST plugin where this machine's RemSound keeps its logs. The plugin runs inside a
         // DAW, where it cannot work that out for itself.
         AppConfig.WritePluginPointer(logFile.Enabled);
@@ -1296,6 +1354,18 @@ public sealed partial class MainForm : Form
         // here so any early probe fires before the settings load are a no-op.
         DiagnosticsGate.Enabled = false;
         if (logFile.Enabled) AppendLogEntry("logging enabled at startup");
+        // WHICH BUILD IS THIS, EXACTLY?
+        //
+        // The version alone cannot answer it: every test build in a release cycle says v6.0, so a log
+        // from a machine running last week's copy is indistinguishable from one running this
+        // morning's. On 2026-08-27 that cost a whole diagnosis — Ed reported a fix not working, and
+        // nothing in his log could tell me whether the build he ran actually contained it.
+        //
+        // Each assembly is stamped separately and on purpose. These are deployed as loose files that
+        // sync between machines, so a half-delivered update is a real possibility: the app updated
+        // and the receiver not, or the other way round. One line per assembly makes that visible
+        // instead of leaving it as the explanation nobody can check.
+        if (logFile.Enabled) AppendLogEntry($"build: {DescribeAssemblyBuilds()}");
 
         // Sender diagnostic events (capture started, errors, etc.) get written to the log file.
         sender.Diagnostic = msg => logFile.Event($"sender: {msg}");
@@ -1334,7 +1404,14 @@ public sealed partial class MainForm : Form
         // When the dedicated cue is "(none)", these return false and the checkbox sound plays as normal.
         sendMyAudioCheckbox.SuppressCheckSound = on => on ? AppConfig.Load().EnableSendOnCue : AppConfig.Load().EnableSendOffCue;
         receiveAudioCheckbox.SuppressCheckSound = on => on ? AppConfig.Load().EnableReceiveOnCue : AppConfig.Load().EnableReceiveOffCue;
-        volumeBar.Scroll += (_, _) => { receiver.Volume = volumeBar.Value / 100f; MarkProfileDirty(); };
+        volumeBar.Scroll += (_, _) =>
+        {
+            receiver.Volume = volumeBar.Value / 100f;
+            MarkProfileDirty();
+            // "It went quiet" is one of the most common reports, and until 2026-08-24 the one
+            // control that makes it go quiet left no trace whatsoever.
+            LogUiChange("listening volume", $"{volumeBar.Value}%");
+        };
         WireCheckedListAccessibility(receiveOutputDevicesList, receiveOutputDevicesStatusLabel, "receive output device");
         receiveOutputDevicesList.ItemCheck += (_, e) =>
         {
@@ -1428,7 +1505,7 @@ public sealed partial class MainForm : Form
                 if (item.Codec == AudioTransportCodec.Opus) settings.SaveOpusFrameSamplesPerChannel(item.OpusFrameSamples);
                 var effectiveSamples = EffectiveOpusFrameSamples(item.Codec, item.OpusFrameSamples, settings.LoadSendRate());
                 sender.ConfigureCodec(item.Codec, effectiveSamples);
-                logFile.Event($"codec changed to {item.Codec}{(item.Codec == AudioTransportCodec.Opus ? $" {effectiveSamples / 48.0:0.##}ms" : "")}");
+                LogUiChange("codec", $"{item.Codec}{(item.Codec == AudioTransportCodec.Opus ? $" {effectiveSamples / 48.0:0.##}ms" : "")}");
                 MarkProfileDirty();
             }
         };
@@ -1469,6 +1546,12 @@ public sealed partial class MainForm : Form
             {
                 receiver.SetMaxLatencyMsFor(sliderRoute, (int)maxLatencyBox.Value);
             }
+            // WHO moved it, and to WHERE. The single number people ask about most, and until
+            // 2026-08-24 moving it left no trace at all — so a log showed the buffer's effects
+            // without ever showing the buffer being set. The route is named because in a
+            // single-slider configuration this control governs whichever lane is live.
+            LogUiChange($"jitter buffer ({sliderRoute}){(fromAutoTune ? ", by auto-tune" : ", by the user")}",
+                $"{(int)maxLatencyBox.Value} ms");
         };
         // Logging-enabled toggle wiring lives in PreferencesDialog now (it constructs its
         // own Enable-logs checkbox and writes through via the applyLoggingEnabled callback
@@ -2425,6 +2508,9 @@ public sealed partial class MainForm : Form
             logFile.Event($"vst plugin: link closing - {pluginHost?.DescribeForLog()}");
             pluginHost?.Dispose();
             pluginHost = null;
+            // Let the plugin lane go with it, or turning the link off in Preferences would leave the
+            // sender armed by a DAW it can no longer hear from.
+            pluginTrackSource.Dispose();
             // Drop the claim register too, or a peer claimed at the moment the link was switched off
             // would stay out of the speakers with nothing left to release it.
             receiver.SetPluginPeerClaims(null);
@@ -2436,6 +2522,11 @@ public sealed partial class MainForm : Form
         {
             pluginHost = new PluginBridgeHost(receiver.ReadClaimedPeer, port);
             pluginHost.PeerListSource = () => PeerListForPlugins();
+            // THE SEND DIRECTION. This subscription is the whole of what was missing: the plugin has
+            // been delivering its track all along, and the host counted the blocks and dropped them
+            // for want of a subscriber, which is the "sending FROM a DAW track is not wired up in
+            // this build" line.
+            pluginHost.TrackAudioReceived += pluginTrackSource.OnTrackBlock;
             // Every claim, release, hello, goodbye and timeout, in plain English. This is the app's
             // half of the story; the plugin writes the other half in its own file, because it lives in
             // the DAW's process. Either half alone leaves "it didn't work" unanswerable.
@@ -2461,8 +2552,26 @@ public sealed partial class MainForm : Form
         // The same question split recording already answers — "which peers could have a track of
         // their own" — so it uses the same two collections rather than a second, slightly different
         // idea of who is connected.
+        //
+        // ORDERED, AND ORDERED BY NAME. A plugin instance saves its peer as a POSITION in this list as
+        // well as an address, and the position is what a restored project falls back to. The source is
+        // a Dictionary, whose enumeration order is not defined and genuinely reshuffles when an entry
+        // is removed and re-added — which is exactly what happens when a peer's endpoint moves, and a
+        // phone reachable on both a LAN address and a Tailscale one moves constantly. Two plugin
+        // instances that asked at different moments could therefore be handed the same people in a
+        // different order, so "peer 2" meant one person on one track and somebody else on another
+        // (Anthony Reyers, 2026-08-29).
+        //
+        // By NAME rather than by address, deliberately: when that phone changes address its name does
+        // not change, so it keeps its place in the list and every instance pointing at it stays
+        // pointing at it. Sorting by address would move it the moment it switched networks, which is
+        // the very thing this is here to prevent. Address is only the tie-break, so the order is
+        // total and stable even for two peers sharing a name.
         return selectedPeerEndpoints
-            .Select(kv => (kv.Value.Address, selectedPeerLabels.GetValueOrDefault(kv.Key, kv.Value.Address.ToString())))
+            .Select(kv => (Address: kv.Value.Address, Name: selectedPeerLabels.GetValueOrDefault(kv.Key, kv.Value.Address.ToString())))
+            .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(p => p.Address.ToString(), StringComparer.Ordinal)
+            .Select(p => (p.Address, p.Name))
             .ToList();
     }
 
@@ -2489,7 +2598,11 @@ public sealed partial class MainForm : Form
             var cfg = AppConfig.Load();
             cfg.ApplyPeerShapingToPlugin = applyShaping.Checked;
             try { cfg.Save(); } catch { /* best-effort, like the app's other AppConfig writes */ }
-            logFile.Event($"vst plugin: pan/EQ into the DAW {(applyShaping.Checked ? "ON (what you hear)" : "OFF (raw)")}");
+            // AND TELL THE AUDIO PATH. Saving the tick was ALL this did until 2026-09-06 — nothing
+            // read the setting back, so unticking it changed nothing and the DAW always got shaped
+            // audio. See PlayoutEngine.SetPluginShaping.
+            receiver.SetPluginShaping(applyShaping.Checked);
+            LogUiChange("pan and EQ into the DAW", applyShaping.Checked ? "on (what you hear)" : "off (raw)");
         };
 
         // The link itself, on or off. A user with no DAW is entitled to have RemSound not listening
@@ -2524,6 +2637,9 @@ public sealed partial class MainForm : Form
             pluginUninstall.Enabled = installed;
             var cfg = AppConfig.Load();
             applyShaping.Checked = cfg.ApplyPeerShapingToPlugin;
+            // Push the saved choice into the audio path as well as onto the tick, so it holds from
+            // startup rather than only after the user opens the menu and clicks it.
+            receiver.SetPluginShaping(cfg.ApplyPeerShapingToPlugin);
             enableLink.Checked = cfg.EnableDawPluginLink;
         }
         refreshDawPluginMenu = Refresh;
@@ -3903,7 +4019,7 @@ public sealed partial class MainForm : Form
         {
             settings.SaveLockPeerAddresses(lockPeerAddressesBox.Checked);
             MarkProfileDirty();
-            logFile.Event($"lock peer addresses: {(lockPeerAddressesBox.Checked ? "on" : "off")}");
+            LogUiChange("lock peer addresses", lockPeerAddressesBox.Checked ? "on" : "off");
         };
         panel.Controls.Add(lockPeerAddressesBox, 0, 7);
         panel.SetColumnSpan(lockPeerAddressesBox, 2);
@@ -4096,6 +4212,10 @@ public sealed partial class MainForm : Form
             if (sendModeList.SelectedIndex == SendModeApplicationsIndex) ReconcileSendAppsList();
             MarkProfileDirty();
             ApplySendSources();
+            // Which of the two capture worlds is in play. "They can't hear me" reads completely
+            // differently depending on this, and it left no trace before 2026-08-24.
+            LogUiChange("send mode",
+                sendModeList.SelectedIndex == SendModeApplicationsIndex ? "applications" : "devices");
         };
 
         // Both app lists toggle the SAME send set: ticking an app in either the active or the remembered
@@ -4484,6 +4604,7 @@ public sealed partial class MainForm : Form
         priorityModeBox.CheckedChanged += (_, _) =>
         {
             settings.SavePriorityMode(priorityModeBox.Checked);
+            LogUiChange("priority mode (high priority + keep awake)", priorityModeBox.Checked ? "on" : "off");
             // Re-evaluate the streaming-scoped levers right away: unticking releases them
             // immediately; ticking engages them now if audio is moving (else on the next tick
             // once it is). See EvaluatePriorityModeScope.
@@ -4536,7 +4657,7 @@ public sealed partial class MainForm : Form
         var panel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 9, AutoScroll = true };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        enableAllPeerShapingBox.CheckedChanged += (_, _) => { if (!loadingPanEqControls) { logFile.Event($"shaping: master switch {(enableAllPeerShapingBox.Checked ? "on" : "off")} ({peerShaping.Count} peer(s) with saved shaping)"); MarkProfileDirty(); ApplyAllPeerShaping(); } };
+        enableAllPeerShapingBox.CheckedChanged += (_, _) => { if (!loadingPanEqControls) { LogUiChange("shaping: master switch", $"{(enableAllPeerShapingBox.Checked ? "on" : "off")} ({peerShaping.Count} peer(s) with saved shaping)"); MarkProfileDirty(); ApplyAllPeerShaping(); } };
         panEqPeerList.SelectedIndexChanged += (_, _) => OnPanEqPeerSelected();
         panEqPeerList.ItemCheck += OnPeerShapeToggled;
         // First-letter navigation on some Windows configs can accidentally toggle the checkbox; do the
@@ -5244,6 +5365,10 @@ public sealed partial class MainForm : Form
             continuousIntervalBox.Enabled = AnyAutoTuneEnabled();
             ApplyContinuousTuneTimer();
             MarkProfileDirty();
+            // Named by LANE. Auto-tune moves the buffer on its own, so a log that shows the buffer
+            // changing without showing who switched the tuner on cannot tell an auto-tune descent
+            // apart from the user dragging the slider.
+            LogUiChange("auto-tune (WASAPI lane)", continuousTuneEnabled ? "on" : "off");
         };
         continuousIntervalBox.SelectedIndexChanged += (_, _) =>
         {
@@ -5251,6 +5376,7 @@ public sealed partial class MainForm : Form
             settings.SaveContinuousAutoTuneIntervalSec(continuousTuneIntervalSec);
             ApplyContinuousTuneTimer();
             MarkProfileDirty();
+            LogUiChange("auto-tune interval", $"{continuousTuneIntervalSec}s");
         };
 
         // === Row 1: Buffer smoothness ===
@@ -5273,7 +5399,7 @@ public sealed partial class MainForm : Form
             var newSmoothness = 10 - smoothnessBox.SelectedIndex;
             settings.SaveSmoothness(newSmoothness);
             receiver.SetSmoothness(newSmoothness);
-            logFile.Event($"buffer smoothness changed to {newSmoothness}");
+            LogUiChange("buffer smoothness", $"{newSmoothness}");
             MarkProfileDirty();
         };
         // === Row 2: Total latency readout ===
@@ -5286,7 +5412,7 @@ public sealed partial class MainForm : Form
         // Order here IS tab order: this panel sets no TabIndex, so WinForms walks its children in the
         // order they were ADDED. Renumbering the rows alone would have moved it visually and left it
         // last in the tab walk — worse than leaving it alone. The block was moved, not renumbered.
-        measuredLatencyReadout.Text = FormatMeasuredLatency(false, 0, 0, 0, 0);
+        measuredLatencyReadout.Text = FormatMeasuredLatency(AudioConfiguration.WasapiOnly, 0, 0, 0, 0);
         var measuredLatencyLabel = new MnemonicLabel
         {
             Text = "&Total latency (Alt+M)",
@@ -5317,7 +5443,7 @@ public sealed partial class MainForm : Form
                 : ConcealmentArtifact.NoiseBurst;
             settings.SaveConcealmentArtifact(newArtifact);
             receiver.SetConcealmentArtifact(newArtifact);
-            logFile.Event($"concealment artifact changed to {newArtifact}");
+            LogUiChange("concealment artifact", $"{newArtifact}");
             MarkProfileDirty();
         };
         var artefactLabel = new Label { Text = "Artefact sound type (Alt+&A)", AutoSize = true, Anchor = AnchorStyles.Left };
@@ -5553,7 +5679,25 @@ public sealed partial class MainForm : Form
         {
             if (knownPeers.TryGetValue(id, out var known))
             {
-                desired.Add((new PeerListItem(known), id));
+                // THE ADDRESS WE ACTUALLY SEND TO, not the one discovery heard last.
+                //
+                // Discovery keeps ONE announcement per peer and overwrites it every time one arrives,
+                // so for somebody who is on the LAN and on a VPN at the same time it alternates
+                // between their two addresses about every 1,5 seconds. Two things went wrong with
+                // that. The row named an address the audio was not going to, because the send
+                // endpoint is deliberately pinned and only moves under strict conditions; and the
+                // address is part of StableKey, so the "stable identity" signature below changed
+                // twice a second and the whole list was cleared and rebuilt underneath the user.
+                // Under a screen reader that means the list is re-announced and their place in it
+                // thrown away, once a second, for as long as such a peer is connected. Anthony Reyers
+                // reported it from use as "homeserv was also changing IP every second", 2026-09-01.
+                //
+                // Discovery stays the source for the NAME and the capability flags; only the address
+                // and port come from the pinned endpoint.
+                var shown = known.Address.Equals(ep.Address) && known.AudioPort == ep.Port
+                    ? known
+                    : known with { Address = ep.Address, AudioPort = ep.Port };
+                desired.Add((new PeerListItem(shown), id));
             }
             else
             {
@@ -6261,7 +6405,13 @@ public sealed partial class MainForm : Form
         // keeps its mix task running over zero sources (produces silence), AsioCaptureBackend
         // keeps the driver open with zero active channel pairs (callbacks fire harmlessly).
         // The sender only actually stops when the user toggles off "send my audio" itself.
-        var wantSend = IsSendEnabled;
+        //
+        // A plugin in send mode counts as wanting to send, on its own. The user has already made that
+        // decision explicitly, on the track, and a second toggle over here is the "I forgot to tick
+        // it" failure mode - silence, with nothing to see. The app's OWN capture sources stay governed
+        // by the checkbox exactly as before; this only decides whether the sender stays up, and so
+        // whether Stop() stands the plugin lane down underneath a DAW that is still playing.
+        var wantSend = IsSendEnabled || pluginTrackSource.AnyHostSending;
 
         try
         {
@@ -6374,6 +6524,316 @@ public sealed partial class MainForm : Form
         {
             logFile.Event($"audio receivers updated: {armed.Length} active");
         }
+    }
+
+    // ---- Long-run report state. See LongRunReport for why this line exists at all. ----
+    private readonly DateTime longRunStartedUtc = DateTime.UtcNow;
+    private DateTime lastLongRunUtc = DateTime.MinValue;
+    private long lastLongRunUnderrunsWasapi, lastLongRunUnderrunsAsio;
+    /// <summary>Frames sent this window, accumulated from the per-second line's own reading. Same
+    /// reason as the render figures below: the counter resets as it is read, so it must be read once
+    /// per tick by one reader and shared, never read again here.</summary>
+    private long longRunSendFrames;
+    /// <summary>Render cost accumulated from the per-second line's OWN reading, never re-read from the
+    /// counter — it resets as it is read, and a second reader starves the first. Null until the
+    /// per-second line has run at least once in this window.</summary>
+    private double? longRunRenderWasapiMs, longRunRenderAsioMs;
+    private int longRunRenderSamples;
+    /// <summary>Set when the system resumes, so the next report says so and the one after it can be
+    /// compared against the night before it.</summary>
+    private string longRunTag = string.Empty;
+
+    /// <summary>Accumulate this second's render cost for the long-run report. Called from the
+    /// per-second diagnostic block with the values IT already read, so the destructive counter is
+    /// still read exactly once per tick.</summary>
+    private void NoteLongRunRender(double wasapiMs, double asioMs, long framesSent)
+    {
+        longRunRenderWasapiMs = (longRunRenderWasapiMs ?? 0) + wasapiMs;
+        longRunRenderAsioMs = (longRunRenderAsioMs ?? 0) + asioMs;
+        longRunSendFrames += framesSent;
+        longRunRenderSamples++;
+    }
+
+    /// <summary>
+    /// One compact line every few minutes, whenever logging is on — sending, receiving or idle.
+    ///
+    /// <para>Everything it reads is either non-destructive or a cumulative total this method deltas
+    /// itself, so adding it cannot starve any existing measurement. That constraint is the whole
+    /// design: the last thing this investigation needs is an instrument that changes what it
+    /// measures.</para>
+    /// </summary>
+    private void WriteLongRunReportIfDue()
+    {
+        // No `if (!logFile.Enabled) return` here on purpose. RemSoundLog.Event already writes nothing
+        // to disk when logging is off, and it fires the gate's tap BEFORE that check — deliberately, so
+        // a test can prove the app REPORTS what it did without a real log file existing. Returning
+        // early here would have made this report unobservable by the very test that has to prove it is
+        // written, which is the trap the per-second line fell into. Composing the reading costs
+        // nothing worth counting once every few minutes.
+        var now = DateTime.UtcNow;
+        var inBurst = longRunBurstStartUtc != DateTime.MinValue && now - longRunBurstStartUtc < LongRunReport.BurstLength;
+        var interval = inBurst ? LongRunReport.BurstInterval : LongRunReport.Interval;
+        if (!longRunForceNext && lastLongRunUtc != DateTime.MinValue && now - lastLongRunUtc < interval) return;
+        longRunForceNext = false;
+        // A forced report still divides by the REAL time since the previous one, so per-second rates stay true.
+        var windowSec = lastLongRunUtc == DateTime.MinValue ? 1.0 : Math.Max(1.0, (now - lastLongRunUtc).TotalSeconds);
+        lastLongRunUtc = now;
+        // During the post-wake burst every line says how long after the wake it was taken, so the episode reads
+        // as a timeline rather than something to reconstruct from timestamps.
+        var tag = inBurst ? $"after-resume +{(now - longRunBurstStartUtc).TotalSeconds:0}s" : longRunTag;
+
+        var underWas = receiver.UnderrunsFor(RenderRoute.WasapiLane);
+        var underAsi = receiver.UnderrunsFor(RenderRoute.AsioLane);
+
+        var reading = new LongRunReport.Reading(
+            Uptime: now - longRunStartedUtc,
+            Tag: tag,
+            Configuration: ActiveAudioConfiguration(),
+            WasapiBufferMs: receiver.CurrentBufferMsFor(RenderRoute.WasapiLane),
+            WasapiTargetMs: receiver.TargetLatencyMsFor(RenderRoute.WasapiLane),
+            WasapiUnderrunsPerSec: Math.Max(0, underWas - lastLongRunUnderrunsWasapi) / windowSec,
+            WasapiLearnedFloorMs: TuneMemoryFor(RenderRoute.WasapiLane).Creep.DiscoveredFloorMs,
+            WasapiRenderMsPerSec: longRunRenderSamples > 0 ? longRunRenderWasapiMs / longRunRenderSamples : null,
+            AsioBufferMs: receiver.CurrentBufferMsFor(RenderRoute.AsioLane),
+            AsioTargetMs: receiver.TargetLatencyMsFor(RenderRoute.AsioLane),
+            AsioUnderrunsPerSec: Math.Max(0, underAsi - lastLongRunUnderrunsAsio) / windowSec,
+            AsioLearnedFloorMs: TuneMemoryFor(RenderRoute.AsioLane).Creep.DiscoveredFloorMs,
+            AsioRenderMsPerSec: longRunRenderSamples > 0 ? longRunRenderAsioMs / longRunRenderSamples : null,
+            Stages: receiver.OutputStages(),
+            SendFramesPerSec: (long)(longRunSendFrames / windowSec),
+            SourceDrift: $"[{DescribeCaptureSourceDrift()}]",
+            NetGapMaxMs: longRunNetGapMax,
+            WasapiRenderGapMaxMs: longRunWasapiRenderGapMax,
+            AsioRenderGapMaxMs: longRunAsioRenderGapMax);
+
+        logFile.Event(LongRunReport.Format(reading));
+
+        lastLongRunUnderrunsWasapi = underWas;
+        lastLongRunUnderrunsAsio = underAsi;
+        longRunSendFrames = 0;
+        longRunRenderWasapiMs = null;
+        longRunRenderAsioMs = null;
+        longRunRenderSamples = 0;
+        longRunTag = string.Empty;
+        longRunNetGapMax = null;
+        longRunWasapiRenderGapMax = null;
+        longRunAsioRenderGapMax = null;
+    }
+
+    // ---- Wake detection and tuner evidence holds (2026-09-10). See TuneEvidenceHold. ----
+    private readonly SuspendDetector suspendDetector = new();
+    private readonly TuneEvidenceHold tuneHold = new();
+    /// <summary>What the tuner had, once a second — read after a wake to put back the tune from before the sleep.</summary>
+    private readonly TuneHistory tuneHistory = new();
+    /// <summary>The tune the last wake restart put back, and until when anything that would forget it puts it back instead.</summary>
+    private TuneSnapshot? wakeTune;
+    private DateTime wakeTuneUntilUtc = DateTime.MinValue;
+    private TuneSnapshot? WakeTuneFor(DateTime nowUtc) => nowUtc < wakeTuneUntilUtc ? wakeTune : null;
+    /// <summary>When the machine last woke, or the UI thread last came back from a long stall. Drives the
+    /// post-wake report burst.</summary>
+    private DateTime lastWakeUtc = DateTime.MinValue;
+    private DateTime longRunBurstStartUtc = DateTime.MinValue;
+    private bool longRunForceNext;
+    private int? longRunNetGapMax, longRunWasapiRenderGapMax, longRunAsioRenderGapMax;
+    /// <summary>The lanes the current output-heal episode is holding, so the recovery holds the same ones
+    /// again for as long as the outage's leftover gap takes to be read and discarded.</summary>
+    private RenderRoute[] lastHealLanes = [];
+
+    /// <summary>
+    /// Note a timer tick; if the gap since the last one shows the machine was asleep, treat it as a wake
+    /// before anything else in this tick acts. Called at the top of BOTH timers that can act on stale
+    /// evidence — the per-second tick and the auto-tune tick — because on 2026-09-10 the auto-tune timer
+    /// won the race and raised the buffer on the first second after waking, three seconds before Windows
+    /// reported the resume.
+    /// </summary>
+    private void DetectWakeFromTickGap()
+    {
+        if (suspendDetector.NoteTick(DateTime.UtcNow) is { } gap)
+            OnWakeDetected($"the app was not ticking for {gap.TotalSeconds:0} s (asleep, or stalled)");
+    }
+
+    /// <summary>
+    /// The ticks stopped for a while: the machine slept, or RemSound froze — it did, for 16 s, when the Roger On reconnected
+    /// on 2026-09-12. The readings taken across that gap are neither the network nor a device, so throw them away and hold
+    /// the tuner until the gap has been read and discarded. Nothing it learned is touched. A real sleep is then handled by
+    /// Windows' Resume notification, which restarts the audio (see <see cref="RestartAudioAfterWake"/>); this part is what a
+    /// freeze needs as well. It also starts the post-wake report burst.
+    /// </summary>
+    private void OnWakeDetected(string reason)
+    {
+        var now = DateTime.UtcNow;
+        var alreadyHandling = lastWakeUtc != DateTime.MinValue && now - lastWakeUtc < TimeSpan.FromSeconds(30);
+        ForgetTuneReadings();
+        tuneHold.HoldAll(now + TuneEvidenceHold.AfterWake);
+        if (!alreadyHandling)
+        {
+            longRunBurstStartUtc = now;
+            longRunForceNext = true;
+        }
+        lastWakeUtc = now;
+        logFile.Event($"auto-tune: {reason} — holding every lane for {TuneEvidenceHold.AfterWake.TotalSeconds:0} s and discarding "
+            + $"the readings taken across the gap; what it learned is kept [{ActiveAudioConfiguration().Describe()}]");
+    }
+
+    /// <summary>Throw away every window the tuner reads and every lane's underrun baseline, and keep the sliders and the
+    /// learned floors. See <see cref="LaneTuneMemory.ForgetReadings"/>.</summary>
+    private void ForgetTuneReadings()
+    {
+        recentMaxGaps.Clear();
+        recentRenderCbGaps.Clear();
+        recentCaptureCbGaps.Clear();
+        recentMinBuffers.Clear();
+        mixedTuneMemory.ForgetReadings();
+        wasapiTuneMemory.ForgetReadings();
+        asioTuneMemory.ForgetReadings();
+    }
+
+    /// <summary>
+    /// A new stream session has opened. New conditions, so every lane re-earns its evidence and forgets its learned floor —
+    /// EXCEPT in the minute after a wake restart. Those sessions are the restart's own streams coming back: the same peer,
+    /// the same network, the same devices. Forgetting at the wake is what let Ed's ASIO lane fall from 26 to 21 ms on the
+    /// first decision after it on 2026-09-12, and run short for minutes. They get the tune from before the sleep instead.
+    /// </summary>
+    private void OnNewStreamSessions()
+    {
+        var now = DateTime.UtcNow;
+        lastSourceChangeUtc = now;
+        if (WakeTuneFor(now) is { } tune)
+        {
+            RestoreTune(tune, "the restarted streams are back");
+            return;
+        }
+        recentMaxGaps.Clear();
+        recentRenderCbGaps.Clear();
+        recentCaptureCbGaps.Clear();
+        recentMinBuffers.Clear();
+        // New conditions: every lane re-earns its evidence and forgets its learned floor.
+        mixedTuneMemory.Reset();
+        wasapiTuneMemory.Reset();
+        asioTuneMemory.Reset();
+    }
+
+    /// <summary>An output that went silent and came back re-earns its floor (see <see cref="LaneTuneMemory.NoteLaneAudible"/>)
+    /// — except when it came back because the wake restart stopped and started it. That is the same device, so in the minute
+    /// after the restart it keeps the floor from before the sleep.</summary>
+    private void NoteLaneAudibility(RenderRoute route, bool consuming)
+    {
+        var memory = TuneMemoryFor(route);
+        if (!memory.NoteLaneAudible(consuming)) return;
+        if (WakeTuneFor(DateTime.UtcNow) is { } tune)
+        {
+            memory.Creep.RestoreFloor(tune.FloorFor(route));
+            logFile.Event($"auto-tune {route}: output came back after the wake restart — kept the floor from before the sleep "
+                + $"({tune.FloorFor(route)} ms) [{ActiveAudioConfiguration().Describe()}]");
+            return;
+        }
+        logFile.Event($"auto-tune {route}: output came back after being silent — forgetting the floor it "
+            + $"learned about the previous one [{ActiveAudioConfiguration().Describe()}]");
+    }
+
+    /// <summary>Put a recorded tune back: both sliders, every lane's floor, and fresh readings. The sliders move the way the
+    /// tuner moves them, so it is not taken for the user's hand and does not mark the profile changed, and both targets are
+    /// pushed to the receiver as well so they hold even when a slider already showed that value.</summary>
+    private void RestoreTune(TuneSnapshot tune, string why)
+    {
+        ForgetTuneReadings();
+        SetSliderAsTuner(maxLatencyBox, ref suppressUserSliderMoveTracking, tune.MainSliderMs);
+        SetSliderAsTuner(maxLatencyAsioBox, ref suppressUserAsioSliderMoveTracking, tune.AsioSliderMs);
+        receiver.SetMaxLatencyMsSoftFor(MaxLatencyBoxRoute, (int)maxLatencyBox.Value);
+        receiver.SetMaxLatencyMsSoftFor(RenderRoute.AsioLane, (int)maxLatencyAsioBox.Value);
+        mixedTuneMemory.Creep.RestoreFloor(tune.MixedFloorMs);
+        wasapiTuneMemory.Creep.RestoreFloor(tune.WasapiFloorMs);
+        asioTuneMemory.Creep.RestoreFloor(tune.AsioFloorMs);
+        logFile.Event($"auto-tune: {why} — put back the tune from before the sleep: {tune.Describe()} [{ActiveAudioConfiguration().Describe()}]");
+    }
+
+    private static void SetSliderAsTuner(NumericUpDown box, ref bool tunerIsMovingIt, int ms)
+    {
+        tunerIsMovingIt = true;
+        try { box.Value = Math.Clamp(ms, (int)box.Minimum, (int)box.Maximum); }
+        finally { tunerIsMovingIt = false; }
+    }
+
+    private TuneSnapshot CurrentTune(DateTime atUtc) => new(atUtc, (int)maxLatencyBox.Value, (int)maxLatencyAsioBox.Value,
+        mixedTuneMemory.Creep.DiscoveredFloorMs, wasapiTuneMemory.Creep.DiscoveredFloorMs, asioTuneMemory.Creep.DiscoveredFloorMs);
+
+    /// <summary>An output is being re-opened, or has just come back: hold the lanes it carries and throw away
+    /// their render and buffer evidence — including the SHARED windows, because the tuner falls back to those
+    /// whenever a lane's own window is empty, and the outage gap is in them too. The learned floor is left to
+    /// <see cref="LaneTuneMemory.NoteLaneAudible"/>, which forgets it when the output actually returns.</summary>
+    private void HoldLanesForOutputChange(RenderRoute[] lanes, TimeSpan hold, string why, bool log)
+    {
+        if (lanes.Length == 0) return;
+        tuneHold.Hold(lanes, DateTime.UtcNow + hold);
+        foreach (var lane in lanes)
+        {
+            var memory = TuneMemoryFor(lane);
+            memory.RenderCbGaps.Clear();
+            memory.MinBuffers.Clear();
+            memory.NeedsUnderrunBaseline = true;
+        }
+        recentRenderCbGaps.Clear();
+        recentMinBuffers.Clear();
+        if (log)
+            logFile.Event($"auto-tune: holding {string.Join(", ", lanes)} for {hold.TotalSeconds:0} s — {why} "
+                + $"[{ActiveAudioConfiguration().Describe()}]");
+    }
+
+    /// <summary>Is this lane's evidence usable right now? False while it is on hold — see
+    /// <see cref="TuneEvidenceHold"/>. Consulted both where evidence is collected and where the tuner ticks.</summary>
+    internal bool TuneLaneAllowed(RenderRoute route, DateTime nowUtc) => !tuneHold.IsHeld(route, nowUtc);
+
+    /// <summary>The worst network arrival gap this long-run window, handed over from the per-second line's
+    /// single read — that accessor resets as it reads, so it must never be read twice.</summary>
+    private void NoteLongRunNetGap(int ms)
+    {
+        if (ms > 0) longRunNetGapMax = Math.Max(longRunNetGapMax ?? 0, ms);
+    }
+
+    /// <summary>The worst render gap per lane this long-run window, from the tick's single per-lane read.</summary>
+    private void NoteLongRunRenderGaps(int wasapiMs, int asioMs)
+    {
+        if (wasapiMs > 0) longRunWasapiRenderGapMax = Math.Max(longRunWasapiRenderGapMax ?? 0, wasapiMs);
+        if (asioMs > 0) longRunAsioRenderGapMax = Math.Max(longRunAsioRenderGapMax ?? 0, asioMs);
+    }
+
+    // ---- Gate seams for the wake / hold / burst tests. ----
+    internal void SimulateWakeForTest() => OnWakeDetected("simulated wake (gate)");
+    internal void RewindTickClockForTest(TimeSpan ago) => suspendDetector.RewindForTest(ago);
+    internal void SimulateSystemResumeForTest() => ResumeFromSleep();
+    internal TuneSnapshot CurrentTuneForTest() => CurrentTune(DateTime.UtcNow);
+    internal void NoteTuneHistoryForTest(TuneSnapshot sample) => tuneHistory.Note(sample);
+    internal int TuneHistoryCountForTest => tuneHistory.Count;
+    /// <summary>Put the sliders and floors where a test wants them, the way the tuner would, without logging a restore.</summary>
+    internal void SetTuneForTest(TuneSnapshot tune)
+    {
+        SetSliderAsTuner(maxLatencyBox, ref suppressUserSliderMoveTracking, tune.MainSliderMs);
+        SetSliderAsTuner(maxLatencyAsioBox, ref suppressUserAsioSliderMoveTracking, tune.AsioSliderMs);
+        mixedTuneMemory.Creep.RestoreFloor(tune.MixedFloorMs);
+        wasapiTuneMemory.Creep.RestoreFloor(tune.WasapiFloorMs);
+        asioTuneMemory.Creep.RestoreFloor(tune.AsioFloorMs);
+    }
+    internal void NewStreamSessionsForTest() => OnNewStreamSessions();
+    internal void NoteLaneAudibilityForTest(RenderRoute route, bool consuming) => NoteLaneAudibility(route, consuming);
+    internal void EndWakeTuneWindowForTest() => wakeTuneUntilUtc = DateTime.UtcNow - TimeSpan.FromSeconds(1);
+    internal void ContinuousTuneTickForTest() => ContinuousTuneTick();
+    internal string StatusTextForTest() => ComputeStatusText();
+
+    internal void SeedTuneEvidenceForTest(RenderRoute route, int renderGapMs, int floorMs)
+    {
+        var memory = TuneMemoryFor(route);
+        memory.RenderCbGaps.Enqueue(renderGapMs);
+        memory.MinBuffers.Enqueue(renderGapMs * 2);
+        recentRenderCbGaps.Enqueue(renderGapMs);
+        recentMaxGaps.Enqueue(renderGapMs);
+        memory.Creep.NoteShortfallAt(atMs: floorMs + 10, justifiedMs: floorMs);
+        memory.NeedsUnderrunBaseline = false;
+    }
+
+    internal (int LaneRenderGaps, int SharedRenderGaps, int FloorMs, bool NeedsBaseline) TuneEvidenceForTest(RenderRoute route)
+    {
+        var memory = TuneMemoryFor(route);
+        return (memory.RenderCbGaps.Count, recentRenderCbGaps.Count, memory.Creep.DiscoveredFloorMs, memory.NeedsUnderrunBaseline);
     }
 
     /// <summary>True when the WASAPI send side is in "specific applications" mode (and the OS supports
@@ -7006,6 +7466,97 @@ public sealed partial class MainForm : Form
     private static string ComputeDeviceSignature(IReadOnlyList<AudioDeviceChoice> devices) =>
         string.Join(";", devices.Select(d => $"{d.DeviceId}|{d.Name}"));
 
+    // Rate-limit the self-heal: re-opening a device is real work, and a device that is genuinely gone
+    // will fault again the moment it is re-opened. Once every few seconds recovers a control-panel
+    // change or a resume fast enough for a person not to notice, without spinning on a dead card.
+    private static readonly TimeSpan FaultedOutputRetryInterval = TimeSpan.FromSeconds(3);
+    internal static TimeSpan FaultedOutputRetryIntervalForTest => FaultedOutputRetryInterval;
+    private DateTime lastFaultedOutputHealUtc = DateTime.MinValue;
+    private string[] lastAppliedOutputIds = [];
+    // Logged on TRANSITION only. A device that is genuinely gone would otherwise write a line every
+    // three seconds for as long as it stays unplugged, which buries the log it is meant to help.
+    private bool healingAnOutput;
+
+    /// <summary>
+    /// Re-apply the output devices when one of them has been invalidated under us, so the user does
+    /// not have to untick and re-tick it by hand. See the call site for the failure this fixes.
+    /// </summary>
+    private void HealFaultedOutputsIfAny()
+    {
+        // TWO ways an output ends up silent with nothing coming to fix it:
+        //   * FAULTED — WASAPI invalidated a live endpoint (sound-panel change, format change, driver
+        //     reset). The device is still present, so no hot-plug notification arrives.
+        //   * MISSING — it is ticked but never opened, because it was not ready when we last tried.
+        //     That is what a resume from hibernate leaves behind on a wireless device: Windows raises
+        //     Resume, the backend re-init runs 1.5 s later, and a Bluetooth headset simply is not back
+        //     yet. One attempt, failed, and nothing ever tried again.
+        var faulted = receiver.HasFaultedOutput;
+        var missing = MissingOutputIds();
+        if (!faulted && missing.Length == 0)
+        {
+            if (healingAnOutput)
+            {
+                healingAnOutput = false;
+                LogUiChange("output recovered", "playing again");
+                // The gap the outage left is still sitting in the diagnostics accumulator and is read on the next
+                // tick. Hold again for long enough that it is read and dropped rather than tuned on.
+                HoldLanesForOutputChange(lastHealLanes, TuneEvidenceHold.AfterRecovery,
+                    "an output has just come back, and the gap it left is still being measured", log: true);
+            }
+            return;
+        }
+
+        // Hold the tuner lanes this output carries while it is being re-opened, and throw away what they
+        // measured: an outage shows up as a render gap, and on 2026-09-10 a four-second re-open of the Roger On
+        // reached the tuner as 57 ms and pushed the buffer to 80 ms. Kept up on every tick the fault lasts;
+        // logged once per episode.
+        var faultLanes = OutputFaultLanes.For(faulted, missing);
+        if (faultLanes.Length > 0) lastHealLanes = faultLanes;
+        HoldLanesForOutputChange(faultLanes, TuneEvidenceHold.WhileReopening,
+            "an output is being re-opened, and the gap it leaves is not network jitter", log: !healingAnOutput);
+
+        var now = DateTime.UtcNow;
+        if (now - lastFaultedOutputHealUtc < FaultedOutputRetryInterval) return;
+        lastFaultedOutputHealUtc = now;
+
+        // Logged once per episode, not once per attempt: a device that is genuinely unplugged would
+        // otherwise write a line every three seconds for as long as it stays that way.
+        if (!healingAnOutput)
+        {
+            healingAnOutput = true;
+            LogUiChange(faulted ? "output invalidated by Windows — re-opening" : "ticked output is not open — re-opening",
+                missing.Length > 0 ? string.Join(", ", missing) : "faulted device");
+        }
+        try { ApplyReceiveDevices(); }
+        catch (Exception ex) { logFile.Event($"re-opening an output failed: {ex.GetType().Name}: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// The decision on its own: should the app re-apply the output devices this tick?
+    ///
+    /// <para>Pure, so the gate can pin it without a sound card. The two triggers are genuinely
+    /// different failures with the same symptom — silence that nothing comes to fix — and both were
+    /// reachable in the field. A device is re-opened when Windows invalidated it under us, OR when it
+    /// is ticked and simply is not open.</para>
+    /// </summary>
+    internal static bool ShouldReopenOutputs(bool anyFaulted, int missingCount, bool withinRetryInterval) =>
+        (anyFaulted || missingCount > 0) && !withinRetryInterval;
+
+    /// <summary>Output devices the user has ticked that are not actually open right now.</summary>
+    private string[] MissingOutputIds()
+    {
+        if (lastAppliedOutputIds.Length == 0) return [];
+        var live = receiver.ActiveOutputDeviceIds;
+        if (live.Count == 0 && lastAppliedOutputIds.Length == 0) return [];
+        var open = new HashSet<string>(live, StringComparer.OrdinalIgnoreCase);
+        var missing = new List<string>();
+        foreach (var id in lastAppliedOutputIds)
+        {
+            if (!open.Contains(id)) missing.Add(id);
+        }
+        return missing.ToArray();
+    }
+
     private void ApplyReceiveDevices()
     {
         // Combine WASAPI device-ids and ASIO synthetic-ids into one list. The
@@ -7032,6 +7583,10 @@ public sealed partial class MainForm : Form
             if (!string.IsNullOrEmpty(c.DeviceId) && added.Add(c.DeviceId)) ids.Add(c.DeviceId);
         }
         receiver.SetOutputDevices(ids);
+        // Remember what SHOULD be open, so the per-second heal can tell "the user unticked it" from
+        // "it is ticked but did not open" — a device that came back too late to be caught, which is
+        // the shape a resume from hibernate leaves behind.
+        lastAppliedOutputIds = ids.ToArray();
         // Ticking outputs is what decides how many jitter buffers are in play, so the auto-tune
         // interval's wording has to be re-evaluated here. See UpdateAutoTuneIntervalWording.
         UpdateAutoTuneIntervalWording();
@@ -7044,6 +7599,88 @@ public sealed partial class MainForm : Form
     /// chosen at all, which is a different question — with a driver chosen but only ASIO outputs
     /// ticked you are in ASIO-only, every stream reads the ASIO jitter buffer, and the WASAPI one
     /// governs nothing.</para></summary>
+    /// <summary>
+    /// Record a control the user just changed — and the audio CONFIGURATION it happened in.
+    ///
+    /// <para>Ed, 2026-08-24: "we have spent months and months building logs on top of logs on top of
+    /// logs for every function. but the thing is, we've never tested those logs. change this control,
+    /// does the right thing get logged." Testing them found the answer: ten of the sixteen controls
+    /// that change something logged NOTHING — including both jitter-buffer sliders, both auto-tune
+    /// switches, send on/off, receive on/off and the master volume. Every one of those is something
+    /// you would want to know had moved when reading a log after the fact, and the absence is only
+    /// ever discovered on the night the log was supposed to help.</para>
+    ///
+    /// <para>The CONFIGURATION goes on every line, because the same control means different things in
+    /// each and a log that does not say which one you were in cannot answer the question. That is not
+    /// theoretical: on 2026-08-24 a log line naming the audio MODE convinced me Ed had both lanes
+    /// live while he was telling me he had switched WASAPI off.</para>
+    /// </summary>
+    private void LogUiChange(string what, string value) =>
+        logFile.Event($"ui: {what} → {value} [{ActiveAudioConfiguration().Describe()}]");
+
+    /// <summary>Point <see cref="UiChangeLog"/> at this window's logger, so the sixteen dialogs —
+    /// which own no log of their own — record what a user changes in them, stamped with the audio
+    /// configuration, without a logger being threaded through sixteen constructors.</summary>
+    private void WireDialogChangeLog() => UiChangeLog.Sink = LogUiChange;
+
+    /// <summary>
+    /// Each capture source's ring depth and the rate ratio holding it on the mix clock, as
+    /// "name:depth@ppm". One entry per source, so two sources drifting apart is readable from a log.
+    /// </summary>
+    /// <remarks>Parts per million rather than a bare ratio because the numbers are tiny and ppm is
+    /// how clock error is normally quoted: +50 means that device runs 50 ppm fast against the mixer,
+    /// which is about 3 ms a minute of drift if nothing corrected it.</remarks>
+    private string DescribeCaptureSourceDrift()
+    {
+        var sources = sender.CaptureSourceDrift;
+        if (sources.Count == 0) return "";
+        var parts = new List<string>(sources.Count);
+        foreach (var (name, bufferedMs, ratio) in sources)
+        {
+            var ppm = (ratio - 1.0) * 1e6;
+            // Trim the device name: these lines are already long and the first word identifies it.
+            var shortName = name.Length > 18 ? name[..18] : name;
+            parts.Add($"{shortName}:{bufferedMs}ms@{ppm:+0;-0;0}ppm");
+        }
+        return string.Join(", ", parts);
+    }
+
+    /// <summary>
+    /// Identify the exact build of each RemSound assembly that is actually loaded.
+    ///
+    /// <para>The MVID is the compiler's own unique id for a build — two builds of identical source
+    /// still differ, and a copied file keeps it, so it survives the file-shuffling that deploying
+    /// loose files involves. The file's write time is logged beside it because that is what a human
+    /// can compare against a folder listing without any tooling.</para>
+    /// </summary>
+    internal static string DescribeAssemblyBuilds()
+    {
+        var parts = new List<string>();
+        foreach (var assembly in new[]
+                 {
+                     typeof(MainForm).Assembly,                          // RemSound.App
+                     typeof(RemSound.Receiver.AudioReceiver).Assembly,   // RemSound.Receiver
+                     typeof(RemSound.Core.RemPacket).Assembly,           // RemSound.Core
+                     typeof(RemSound.Sender.AudioSender).Assembly,       // RemSound.Sender
+                 })
+        {
+            try
+            {
+                var name = assembly.GetName().Name ?? "?";
+                var mvid = assembly.ManifestModule.ModuleVersionId.ToString("N")[..8];
+                var when = "";
+                var path = assembly.Location;
+                if (!string.IsNullOrEmpty(path) && File.Exists(path))
+                {
+                    when = $" {File.GetLastWriteTime(path):yyyy-MM-dd HH:mm}";
+                }
+                parts.Add($"{name}={mvid}{when}");
+            }
+            catch { /* a build stamp must never be the thing that stops the app starting */ }
+        }
+        return parts.Count > 0 ? string.Join(", ", parts) : "(unavailable)";
+    }
+
     private AudioConfiguration ActiveAudioConfiguration() => AudioConfigurations.From(
         wasapiOutputTicked: receiveOutputDevicesList.CheckedItems.Count > 0,
         asioOutputTicked: settings.LoadAudioMode() == AudioMode.BothIndependent
@@ -7269,6 +7906,11 @@ public sealed partial class MainForm : Form
                 if (!settings.LoadContinuousAutoTuneAsioEnabled()) MarkProfileDirty();
             }
             settings.SaveMaxLatencyMsAsio(value);
+            // WHO moved it, and on WHICH lane. Ed's 2026-08-24 log showed the ASIO buffer climbing
+            // 24 → 29 → 34 and descending again with nothing to say whether he or the tuner did it;
+            // the auto-tune's own lines answered that only by luck. A jitter buffer is the single
+            // number people ask about most, so its every move is now recorded either way.
+            LogUiChange($"jitter buffer (ASIO lane){(fromAutoTune ? ", by auto-tune" : ", by the user")}", $"{value} ms");
             // Soft path on auto-tune (no drain, drift corrector handles the lower); hard
             // path on a user-initiated change (immediate, responsive).
             if (fromAutoTune)
@@ -7284,6 +7926,7 @@ public sealed partial class MainForm : Form
         continuousTuneAsioBox.CheckedChanged += (_, _) =>
         {
             settings.SaveContinuousAutoTuneAsioEnabled(continuousTuneAsioBox.Checked);
+            LogUiChange("auto-tune (ASIO lane)", continuousTuneAsioBox.Checked ? "on" : "off");
             // The interval combo is shared between both lanes — keep it enabled whenever
             // either lane's auto-tune is on. Without this, ticking ASIO auto-tune (in
             // BothIndependent) left the interval combo greyed out and made the recheck
@@ -7516,7 +8159,7 @@ public sealed partial class MainForm : Form
     /// <summary>
     /// Called by <see cref="PowerResumeHandler"/> on a background thread after the system has
     /// woken from sleep / hibernate (plus a short USB-settle delay). Marshals onto the UI
-    /// thread and runs the audio-backend re-init. Swallows the form-already-torn-down race —
+    /// thread and restarts the audio. Swallows the form-already-torn-down race —
     /// the handler can fire just as the app is being closed.
     /// </summary>
     private void OnSystemResume()
@@ -7524,51 +8167,116 @@ public sealed partial class MainForm : Form
         try
         {
             if (IsDisposed) return;
-            BeginInvoke(ReinitAudioBackendsForResume);
+            BeginInvoke(new Action(ResumeFromSleep));
         }
         catch (ObjectDisposedException) { /* form torn down — nothing to do */ }
         catch (InvalidOperationException) { /* handle not created yet — same */ }
     }
 
     /// <summary>
-    /// Runs on the UI thread. Closes and reopens the audio backend on both sides (receiver
-    /// render and sender capture) so any post-sleep wedged state in the USB audio drivers is
-    /// cleared. Shows the audio-driver splash on its own thread while the reset happens, so
-    /// the user sees "Reconnecting to audio driver…" instead of a frozen window.
+    /// THE COMPUTER WOKE UP: STOP ALL THE AUDIO, START IT AGAIN, AND PUT BACK THE TUNE IT HAD BEFORE THE SLEEP.
     ///
-    /// Implementation note: the receiver's <see cref="RemSound.Receiver.AudioReceiver.SetAudioMode"/>
-    /// always tears down and rebuilds its render backend, which is exactly the reset we
-    /// want. The sender's <see cref="RemSound.Sender.AudioSender.SetAudioMode"/> persists
-    /// its ASIO driver across same-driver calls (to avoid an expensive reopen on every
-    /// device-tick change) — so we explicitly bounce the sender through <c>WasapiOnly</c>
-    /// first to force the ASIO driver to be disposed, then <see cref="ApplyAsioMode"/>
-    /// puts both sides back to the real configuration. The net effect is a full close-and-
-    /// reopen on both sides; same code path as a manual driver re-pick from the picker.
+    /// <para>Ed, 2026-09-12, after three versions of teaching the tuner which readings to believe after a wake: "RemSound
+    /// can detect a resume right? so just, stop and start the audio ... stop all the streams and restart them with the auto
+    /// tune before it went to sleep." Each earlier fix found a real way the tuner misread a wake, and each wake found
+    /// another. A restart gives every stream, buffer and device a clean start wherever stale state was hiding, and
+    /// putting the tune back means nothing has to be learned again.</para>
     /// </summary>
-    private void ReinitAudioBackendsForResume()
+    private void ResumeFromSleep() => RestartAudioAfterWake();
+
+    /// <summary>
+    /// Runs on the UI thread, in this order. STOP: the receiver closes its outputs and drops every stream session and
+    /// buffer, and the sender stops. PUT THE TUNE BACK, before anything plays again (see <see cref="TuneHistory"/>).
+    /// REBUILD: close and reopen the audio backend on both sides, so any post-sleep wedged state in the USB audio drivers
+    /// is cleared. START: whatever was running before starts again. Shows the audio-driver splash on its own thread
+    /// while it happens.
+    ///
+    /// <para>The sender's <see cref="RemSound.Sender.AudioSender.SetAudioMode"/> persists its ASIO driver across
+    /// same-driver calls (to avoid an expensive reopen on every device-tick change), so the sender is bounced through
+    /// <c>WasapiOnly</c> first to force that driver to be disposed, then <see cref="ApplyAsioMode"/> puts both sides back
+    /// to the real configuration. ApplyAsioMode also re-applies the audio runtime, which normally starts receive and send
+    /// again from their ticks; the explicit start afterwards covers the case where it did not.</para>
+    ///
+    /// <para>All three configurations alike. The main jitter buffer slider (the Mixed route in WASAPI-only, the WASAPI
+    /// lane with both kinds of output), the ASIO slider, and the floor of every lane are put back together.</para>
+    /// </summary>
+    private void RestartAudioAfterWake()
     {
         if (IsDisposed) return;
         var mode = settings.LoadAudioMode();
         var driver = settings.LoadAsioDriverName();
-        logFile.Event($"power: re-initialising audio backend after system resume (mode={mode}, driver={driver ?? "(none)"})");
+        // When the sleep began, from the history itself: nothing is recorded while the machine sleeps, so the gap is the sleep.
+        var sleptAt = tuneHistory.SleepStartedBefore(DateTime.UtcNow, SuspendDetector.Threshold);
+        var tune = sleptAt is { } began ? tuneHistory.BeforeSleep(began) : null;
+        logFile.Event($"power: woke up — stopping all audio and starting it again (mode={mode}, driver={driver ?? "(none)"}) "
+            + $"[{ActiveAudioConfiguration().Describe()}]");
 
-        var splash = AsioLoadingSplash.StartIfAsioDriverName(driver, "Reconnecting to audio driver, please wait...");
+        // A headless form shows no window and touches no real driver — the same rule ApplyAsioMode keeps.
+        var splash = headless ? null : AsioLoadingSplash.StartIfAsioDriverName(driver, "Reconnecting to audio driver, please wait...");
         try
         {
-            // Force the sender's persistent ASIO driver to be disposed by bouncing through
-            // WasapiOnly. Skipped when there's no ASIO in the current mode — nothing to dispose.
-            if (mode != AudioMode.WasapiOnly && !string.IsNullOrWhiteSpace(driver))
+            // 1. STOP. Every output, every stream session, every buffer.
+            var wasReceiving = receiver.IsRunning;
+            var wasSending = sender.IsRunning;
+            try
             {
-                try { sender.SetAudioMode(AudioMode.WasapiOnly, null); }
-                catch (Exception ex) { logFile.Event($"power: sender WasapiOnly bounce failed: {ex.GetType().Name}: {ex.Message}"); }
+                receiver.SetPlaybackEnabled(false);
+                if (wasSending) sender.Stop();
+                logFile.Event($"power: all audio stopped — every stream and buffer dropped (was receiving={wasReceiving}, sending={wasSending}) "
+                    + $"[{ActiveAudioConfiguration().Describe()}]");
             }
-            // ApplyAsioMode re-applies sender + receiver mode, refreshes device lists, and
-            // re-pushes the audio-runtime + receive-device configuration. The receiver's
-            // SetAudioMode call inside it does an unconditional render-backend rebuild; the
-            // sender's, post-bounce, recreates its persistent ASIO from scratch.
-            ClearAsioProbeCache();
-            ApplyAsioMode();
-            logFile.Event("power: audio backend re-initialised");
+            catch (Exception ex) { logFile.Event($"power: stopping the audio failed: {ex.GetType().Name}: {ex.Message}"); }
+
+            // 2. PUT THE TUNE BACK before anything plays, and keep putting it back for the minute the restarted streams take
+            //    to return — see OnNewStreamSessions and NoteLaneAudibility. Hold the tuner while the devices settle.
+            var now = DateTime.UtcNow;
+            if (tune is { } before)
+            {
+                wakeTune = before;
+                wakeTuneUntilUtc = now + TuneHistory.ReapplyAfterRestart;
+                RestoreTune(before, "woke up and restarted the audio");
+            }
+            else
+            {
+                wakeTune = null;
+                ForgetTuneReadings();
+                logFile.Event($"auto-tune: woke up — nothing was recorded before the sleep, so the settings stay as they are "
+                    + $"[{ActiveAudioConfiguration().Describe()}]");
+            }
+            tuneHold.HoldAll(now + TuneEvidenceHold.AfterBackendReinit);
+
+            // 3. REBUILD the devices on both sides.
+            try
+            {
+                if (!headless && mode != AudioMode.WasapiOnly && !string.IsNullOrWhiteSpace(driver))
+                {
+                    try { sender.SetAudioMode(AudioMode.WasapiOnly, null); }
+                    catch (Exception ex) { logFile.Event($"power: sender WasapiOnly bounce failed: {ex.GetType().Name}: {ex.Message}"); }
+                }
+                ClearAsioProbeCache();
+                ApplyAsioMode();
+                logFile.Event("power: audio backend re-initialised");
+            }
+            catch (Exception ex) { logFile.Event($"power: audio backend re-init failed: {ex.GetType().Name}: {ex.Message}"); }
+
+            // 4. START again whatever was running.
+            try
+            {
+                if (wasReceiving && !receiver.IsRunning)
+                {
+                    ApplyReceiveDevices();
+                    PushAllowedReceiveSenders();
+                    receiver.SetPlaybackEnabled(true);
+                }
+                if (wasSending && !sender.IsRunning)
+                {
+                    ApplySendSources();
+                    sender.Start();
+                }
+                logFile.Event($"power: all audio started again (receiving={receiver.IsRunning}, sending={sender.IsRunning}) "
+                    + $"[{ActiveAudioConfiguration().Describe()}]");
+            }
+            catch (Exception ex) { logFile.Event($"power: starting the audio again failed: {ex.GetType().Name}: {ex.Message}"); }
 
             // Re-poke the router. UPnP/NAT-PMP mappings often survive a sleep, but cheap
             // routers and ISP-supplied combo boxes sometimes drop their NAT table — easier
@@ -7669,19 +8377,108 @@ public sealed partial class MainForm : Form
     /// <summary>The measured end-to-end latency for ONE lane, or 0 when that lane isn't carrying
     /// audio. Shared terms (capture, encode, wire) plus that lane's OWN queue depth and output
     /// period — the two terms that make the two journeys different lengths.</summary>
-    private double LaneLatencyMs(RenderRoute route, double sharedMs, double fallbackTotalMs)
+    /// <param name="lanePeriodMs">This lane's measured callback period, ALREADY READ by the caller.
+    /// It must not be re-read here: the accessor resets the counter as it reads, so a second read in
+    /// the same tick returns zero.</param>
+    /// <param name="fallbackPeriodMs">The machine-wide period, for a lane that has not been timed
+    /// yet. A PERIOD, never a total — the old fallback handed back the whole end-to-end estimate,
+    /// which already contains the live jitter-buffer depth, and the readout then added the buffer
+    /// SETTING on top of it. That is the double count behind Ed's 70 ms ASIO reading.</param>
+    private double LaneLatencyMs(RenderRoute route, double sharedMs, int lanePeriodMs, int fallbackPeriodMs) =>
+        LaneHardwareMs(
+            receiver.HasSessionsForRoute(route),
+            receiver.ReportedOutputLatencyMsFor(route),
+            lanePeriodMs,
+            fallbackPeriodMs,
+            sharedMs,
+            receiver.OutputQueueMsFor(route));
+
+    /// <summary>
+    /// What ONE LANE'S HARDWARE adds — every stage of that lane's chain except the jitter buffer.
+    ///
+    /// <para>Pure, and it is HANDED the measured period rather than fetching it. That is the fix
+    /// itself, not a tidy-up. The period accessor RESETS the counter as it reads it, so whichever
+    /// code read it first in a tick left every later reader with zero. The per-second probe was the
+    /// first reader and this figure was the second — so on the very lane the user was listening to,
+    /// the period came back zero and the old code fell through to the whole end-to-end total. That
+    /// total already contains the LIVE jitter-buffer depth, and the readout then adds the buffer
+    /// SETTING on top, so the buffer was counted twice. Ed, 2026-08-24: a buffer set to 34 ms, a live
+    /// depth of 21 inside a 37 ms total, and a box reading about 70 ms one way when the honest figure
+    /// was about 50.</para>
+    ///
+    /// <para>A function that is given the period cannot re-read it. Taking the value as a parameter
+    /// makes the bug impossible rather than merely absent.</para>
+    /// </summary>
+    /// <param name="reportedOutputMs">The device's OWN stated latency, asked BEFORE any measured
+    /// period. An ASIO driver reports its playback latency at open and WASAPI states its engine
+    /// period; neither needs a callback to have been timed, nor diagnostics to be switched on. The
+    /// old order asked for a measured period first and gave up before it ever looked here, so a
+    /// driver that had plainly stated 3.6 ms was passed over in favour of a fallback.</param>
+    /// <param name="fallbackPeriodMs">The machine-wide period, for a lane not yet timed. A PERIOD,
+    /// never a total — handing back a total is what double-counted the buffer.</param>
+    internal static double LaneHardwareMs(
+        bool laneHasSessions,
+        double reportedOutputMs,
+        int lanePeriodMs,
+        int fallbackPeriodMs,
+        double sharedMs,
+        double outputQueueMs)
     {
-        if (!receiver.HasSessionsForRoute(route)) return 0;
-        var period = receiver.MaxRenderCallbackGapMsFor(route);
-        if (period <= 0) return fallbackTotalMs; // nothing measured for this lane yet
-        // THIS LANE'S OWN output figures. Both lanes run at the same time — Ed leaves both active and
-        // switches between them — so answering one lane with the other's numbers would hide exactly
-        // the difference this readout exists to show. The device's own figure where it gave one,
-        // otherwise the old estimate; plus the audio queued in that lane's device buffer, which is
-        // zero on ASIO because it pulls straight from the engine. 2026-08-24.
-        var reported = receiver.ReportedOutputLatencyMsFor(route);
-        var outputMs = reported > 0 ? reported : RenderBufferEstimateMs(period);
-        return sharedMs + receiver.CurrentBufferMsFor(route) + receiver.OutputQueueMsFor(route) + outputMs;
+        if (!laneHasSessions) return 0;
+        if (reportedOutputMs > 0) return ComposeLaneLatencyMs(sharedMs, outputQueueMs, reportedOutputMs);
+        var period = lanePeriodMs > 0 ? lanePeriodMs : fallbackPeriodMs;
+        // Nothing stated and nothing timed: say nothing rather than invent a figure. A plausible
+        // number in place of an unknown is exactly what "not receiving" exists to avoid.
+        if (period <= 0) return 0;
+        return ComposeLaneLatencyMs(sharedMs, outputQueueMs, RenderBufferEstimateMs(period));
+    }
+
+    /// <summary>The per-lane sum, as a pure function so every term can be checked to ARRIVE.
+    ///
+    /// <para>Split out 2026-08-24. Everything around this was tested for the NEGATIVE — that nothing
+    /// invents a figure with no device open — and for the arithmetic in isolation. Nothing proved the
+    /// positive: that a number a device really reported reaches the box the user reads. Ed's ASIO
+    /// driver reported 3.6 ms of playback latency, the log printed it, and the readout still told him
+    /// the sound card added nothing. A term that silently stopped contributing would look exactly the
+    /// same from outside, and no test would have moved.</para></summary>
+    internal static double ComposeLaneLatencyMs(double sharedMs, double outputQueueMs, double outputMs)
+        => sharedMs + outputQueueMs + outputMs;
+
+    /// <summary>
+    /// Which capture figure the readout should believe, in order of how much it actually knows.
+    ///
+    /// <para>The journey being measured starts at the OTHER person's microphone, so the capture stage
+    /// happens on their machine. Since 2026-08-24 senders state their own measured figure in the
+    /// format packet, and that beats anything this end can work out: a receive-only rig has no
+    /// capture device in the path at all, and substituting the local estimate is a guess about
+    /// somebody else's hardware. Ed's laptop called it 10 ms while the sending desktop had measured
+    /// 0.7 — nine milliseconds of pure invention in a number he reads to make decisions.</para>
+    ///
+    /// <para>Then our own device's figure, which is right when we are the other half of the pair, and
+    /// only then the estimate. Zero means "not stated" at every level, so an older peer or a device
+    /// that will not answer falls through rather than being believed as an instant capture.</para>
+    /// </summary>
+    internal static double PickCaptureLatencyMs(double announcedByPeerMs, double localDeviceMs, double estimateMs) =>
+        announcedByPeerMs > 0 ? announcedByPeerMs
+        : localDeviceMs > 0 ? localDeviceMs
+        : estimateMs;
+
+    /// <summary>Which lane's output figures should the estimate read?
+    ///
+    /// <para>The live lane where there is one. Where there is not, the lane this CONFIGURATION uses —
+    /// NOT the neutral Mixed route, which is deliberately answered with the WASAPI figure and is
+    /// therefore zero on an ASIO-only rig. That is what made Ed's desktop fall back to a 10 ms
+    /// estimate for its output period while the log, a minute earlier, carried "driver reports 171
+    /// samples of playback latency = 3.6 ms". Same lesson as the readout's own two-lane bug: ask the
+    /// configuration, not the mode, and never ask a question whose answer names a lane you do not
+    /// have. 2026-08-24.</para></summary>
+    internal static RenderRoute PickListeningRoute(bool asioHasSessions, bool wasapiHasSessions, AudioConfiguration configuration)
+    {
+        if (asioHasSessions) return RenderRoute.AsioLane;
+        if (wasapiHasSessions) return RenderRoute.WasapiLane;
+        // Nothing is arriving: answer for the lane that is actually open. Both-lanes has no single
+        // answer, and the readout reports the two apart anyway, so WASAPI is the sensible default there.
+        return configuration.SingleRoute() ?? RenderRoute.WasapiLane;
     }
 
     /// <summary>Fill the read-only measured-latency readout: what each lane is SET to, and what it is
@@ -7718,7 +8515,7 @@ public sealed partial class MainForm : Form
         // Found on 2026-08-24 by checking his claim that no app code needed branching — it mostly
         // did not, and this one did. See AudioConfiguration for why the mode is the wrong axis.
         var text = FormatMeasuredLatency(
-            ActiveAudioConfiguration().HasTwoLanes(),
+            ActiveAudioConfiguration(),
             receiver.TargetLatencyMsFor(RenderRoute.WasapiLane), committedWasapiAchievedMs,
             receiver.TargetLatencyMsFor(RenderRoute.AsioLane), committedAsioAchievedMs);
         // HOLD STILL WHILE IT IS BEING READ — the same rule RefreshStatusReadout already follows.
@@ -7835,8 +8632,23 @@ public sealed partial class MainForm : Form
     /// <summary>Pure and testable: the readout's wording. One line per lane in two-slider mode; one
     /// unlabelled line when there is only one lane, because naming a lane the user hasn't got is
     /// noise. "not receiving" rather than a zero, so a screen reader never reads a false figure.</summary>
+    /// <param name="wasapiHardwareMs">Everything in that lane's chain EXCEPT the jitter buffer:
+    /// capture, send packing, the network, the output queue and the output device's own buffer. Zero
+    /// or less means the lane is not carrying audio.</param>
+    /// <param name="configuration">THE CONFIGURATION, not a two-lane boolean. A bool answers "are
+    /// there two lanes" and nothing else, so the single-lane branch had no way to know WHICH lane it
+    /// had and always formatted the WASAPI pair. On an ASIO-only rig those slots are hard zero —
+    /// <see cref="LaneLatencyMs"/> returns 0 for a lane with no sessions — so the box told an
+    /// ASIO-only user the sound card added nothing, or that nothing was arriving, however loudly the
+    /// driver reported its real playback latency. Same root cause as every other instance of this
+    /// bug: a lane-free value was sitting there to be grabbed. Found 2026-08-24 while auditing the
+    /// EXISTING tests against all three configurations at Ed's insistence — and the test here had
+    /// baked the bug in as expected behaviour, asserting the two single-lane configurations must read
+    /// identically.</param>
     internal static string FormatMeasuredLatency(
-        bool bothLanes, int wasapiSetMs, double wasapiAchievedMs, int asioSetMs, double asioAchievedMs)
+        AudioConfiguration configuration,
+        int wasapiSetMs, double wasapiHardwareMs,
+        int asioSetMs, double asioHardwareMs)
     {
         // THREE NAMED PARTS, never "set" against "achieving".
         //
@@ -7850,10 +8662,30 @@ public sealed partial class MainForm : Form
         //                   each second, not a constant - the output buffer alone moves a few ms.
         //   Total latency   the sum, ONE WAY, from their microphone to your ears. Said explicitly
         //                   because an engineer reading "total" could fairly assume round trip.
-        static string Line(string lane, int setMs, double achievedMs)
+        static string Line(string lane, int setMs, double hardwareMs)
         {
-            if (achievedMs <= 0) return $"{lane}jitter buffer {setMs} ms, not receiving";
-            var rest = Math.Max(0, achievedMs - setMs);
+            if (hardwareMs <= 0) return $"{lane}jitter buffer {setMs} ms, not receiving";
+            // THE THREE NUMBERS ADD UP: what you set, plus what was measured, is the total.
+            //
+            // This used to compute the middle figure as total MINUS THE SETTING, which mixes a
+            // measurement with a setting and produced nonsense the moment the live buffer depth sat
+            // below the target. The target is a cap, not a fill level, and on ASIO the depth is
+            // routinely under it — so the subtraction went negative, the clamp made it zero, and the
+            // box told Ed the sound card and the network between two machines added nothing.
+            //
+            // His 2026-08-24 log, ASIO lane on the desktop: capture 0.7 (from the device), send
+            // accumulation 1.2, wire 0.0, output queue 0.0 and the driver's own 3.6 ms of playback
+            // latency — 5.5 ms of real hardware — against a jitter buffer SET to 10 sitting 0 deep.
+            // 5.5 − 10 clamped to 0, while the driver's 3.6 ms was in the log two minutes earlier.
+            //
+            // Ed's call on the arithmetic (2026-08-24): "we should add the jitter buffer that we set,
+            // plus the remaining measurements or it becomes nonsensical. so if we set it to 10, it
+            // should say 10." So the buffer term is the SETTING — which is what you will actually
+            // experience once it has filled, and what the control in front of you says — and the
+            // hardware term is measured, and the total is simply the two added. Nothing is derived by
+            // subtraction any more, so no figure can be squeezed to zero by another one.
+            var rest = hardwareMs;
+            var totalMs = setMs + hardwareMs;
             // "APPROXIMATELY", because most of the total is not directly measured (Ed, 2026-08-22 —
             // "if there is any made up or assumptions there we should say approximately"). Of the five
             // stages that make up the figure:
@@ -7868,11 +8700,18 @@ public sealed partial class MainForm : Form
             // Only the jitter buffer is a straight measurement. The rest is a good estimate and it
             // matched what a real listener heard, but calling it exact would be a lie told in a number.
             return $"{lane}jitter buffer {setMs} ms. Sound card and hardware add {rest:0} ms. "
-                 + $"Total latency approximately {achievedMs:0} ms one way.";
+                 + $"Total latency approximately {totalMs:0} ms one way.";
         }
-        return bothLanes
-            ? Line("WASAPI: ", wasapiSetMs, wasapiAchievedMs) + Environment.NewLine + Line("ASIO: ", asioSetMs, asioAchievedMs)
-            : Line("", wasapiSetMs, wasapiAchievedMs);
+        if (configuration.HasTwoLanes())
+        {
+            return Line("WASAPI: ", wasapiSetMs, wasapiHardwareMs) + Environment.NewLine
+                 + Line("ASIO: ", asioSetMs, asioHardwareMs);
+        }
+        // ONE lane — and it matters WHICH one. Naming it would be noise (there is only one), but
+        // reading the other lane's slots is silence: they are zero, because that lane has no sessions.
+        return configuration.UsesAsio()
+            ? Line("", asioSetMs, asioHardwareMs)
+            : Line("", wasapiSetMs, wasapiHardwareMs);
     }
 
     // ===================== Status / log =====================
@@ -7937,10 +8776,36 @@ public sealed partial class MainForm : Form
 
     private bool recordingDropWarningGiven;
 
+    /// <summary>Gate seam: run the once-a-second tick now, ignoring the throttle. Exists so the
+    /// always-on half of that tick can be DRIVEN rather than read — the plugin sweep and the
+    /// recording warning were both sitting below a diagnostics-only early return, and no test could
+    /// see it because none of them ran the tick. 2026-08-24.</summary>
+    internal void SnapshotTickForTest()
+    {
+        lastSnapshotUtc = DateTime.MinValue;
+        SnapshotLogIfDue();
+    }
+
     private void SnapshotLogIfDue()
     {
         if (DateTime.UtcNow - lastSnapshotUtc < TimeSpan.FromMilliseconds(950)) return;
         lastSnapshotUtc = DateTime.UtcNow;
+
+        // A WAKE FIRST, before anything in this tick acts on stale evidence. See DetectWakeFromTickGap.
+        DetectWakeFromTickGap();
+        // What the tuner has, once a second, so a wake can put back what it had before the sleep. See TuneHistory.
+        tuneHistory.Note(CurrentTune(DateTime.UtcNow));
+
+        // THE LONG-RUN REPORT, and it is here — at the very top, above every gate — on purpose.
+        //
+        // Further down this method sits `if (!DiagnosticsGate.Enabled) return`, and below that another
+        // gate wanting buffer samples or render reads. Those are why Ed's machine wrote five
+        // diagnostic lines in fourteen hours on 2026-09-08: a whole night of evidence that could not
+        // answer the question it was collected for. A report written to fix that, placed below the
+        // gate that caused it, would have been worse than useless — and it WAS placed there first.
+        // The gate test caught it. See LongRunReport. 2026-09-09.
+        WriteLongRunReportIfDue();
+
         // Prune any sessions on the receiver that haven't received packets in a while. This is
         // serialised on the network-thread lock inside the receiver, so doing it from the UI
         // tick is safe.
@@ -7983,6 +8848,42 @@ public sealed partial class MainForm : Form
         }
         // Detect peer health transitions and play connect/disconnect cues.
         DetectAndAnnouncePeerHealthTransitions();
+
+        // ---- WORK THAT MUST HAPPEN WHATEVER THE LOG SETTING SAYS --------------------------------
+        // Both of these used to sit at the BOTTOM of this method, below the DiagnosticsGate early
+        // return a few lines down — so with "write log file" turned off, and auto-tune off, neither
+        // ran at all. They were appended as the method grew and nobody noticed the return above them
+        // (found 2026-08-24).
+        //
+        // Expire plugin instances that have gone quiet. A DAW killed outright never says goodbye, and
+        // until this sweep the claimed peer stayed silent in RemSound until some other code path
+        // happened to ask — Anthony Reyers, 2026-08-16, "intermittent, the worst possible bug". That
+        // fix was quietly conditional on logging being on.
+        pluginHost?.Sweep();
+        // And forget any DAW that has stopped delivering track audio. Same reasoning as the sweep
+        // above, and the same failure without it: a DAW that is killed says no goodbye, and a plugin
+        // lane left armed keeps the sender running with nothing feeding it.
+        pluginTrackSource.Sweep();
+
+        // Re-open an output WASAPI killed under us. Also ALWAYS-ON, for the same reason as the sweep
+        // above: a user with logging off must not lose their audio in silence.
+        //
+        // An invalidated output is flagged and re-opened by the next SetOutputDevices — which the
+        // hot-plug notifier fires on unplug and replug. But an endpoint can be invalidated while the
+        // device stays perfectly present: change anything in its Windows sound-panel properties, a
+        // format change, a driver reset, a resume from hibernate. Nothing is added or removed, so no
+        // notification arrives, so nothing re-applies, and the output stays dead until the user
+        // unticks and re-ticks it by hand — which is only a manual SetOutputDevices.
+        //
+        // Ed, 2026-08-26: "i went into the laptops sound control panel ... messed about with some
+        // roger level settings ... and then when i closed it, no sound. I had to uncheck and recheck
+        // the roger for it to work." Exactly that. Now the app does the re-tick for him.
+        HealFaultedOutputsIfAny();
+
+        // Is the recording still actually recording? A disk that cannot keep up is caught here while
+        // there is still something to be done about it. Behind the log switch, a user with logging off
+        // lost audio in silence — which is the exact failure this warning exists to prevent.
+        WarnIfRecordingIsLosingAudio();
         // If neither logs nor auto-tune is active we have nothing to do — neither audience
         // wants the diag work. When logs are off but auto-tune is on (the gate is on for
         // auto-tune), we fall through and run the snapshot+drain so the auto-tune feed
@@ -8028,18 +8929,10 @@ public sealed partial class MainForm : Form
             maxLatencyMsAsio: asioMaxMs,
             targetLatencyMsAsio: asioTargetMs);
 
-        // The plugin link, once a second, but ONLY while a plugin is actually connected. A line a
-        // second saying "nothing" would bury the session somebody is trying to read.
-        // Expire plugins that have gone quiet, every second, whether or not anything is talking to
-        // us. A DAW killed outright never says goodbye, and a peer coming back must not wait on some
-        // other code path happening to ask.
-        pluginHost?.Sweep();
-
-        // Is the recording still actually recording? Both halves of that question: a writer that has
-        // died reports itself, and a disk that cannot keep up is caught here while there is still
-        // something to be done about it.
-        WarnIfRecordingIsLosingAudio();
-
+        // The plugin link's LOG LINE, once a second, but only while a plugin is actually connected —
+        // a line a second saying "nothing" would bury the session somebody is trying to read. This
+        // one belongs below the diagnostics gate; the sweep it used to sit next to did not, and has
+        // moved up.
         if (pluginHost is { } host && host.HasActivity)
         {
             var line = host.DescribeForLog();
@@ -8188,6 +9081,8 @@ public sealed partial class MainForm : Form
                 // thread, kernel batching, GC pause — rather than the sender stalling or
                 // RemSound's own decode/dispatch chain. 2026-05-21.
                 var rxNetGapMs = receiver.TakeMaxInterPacketGapMs();
+                // Handed on, never re-read: this accessor resets as it reads. See NoteLongRunNetGap.
+                NoteLongRunNetGap(rxNetGapMs);
                 // fanCacheMs reading + column removed 2026-05-23. The FanOutSource was retired
                 // mid-May (each lane reads its own filtered PlayoutEngine source directly); the
                 // measurement always returned 0 and surfaced an unhelpful diag column.
@@ -8218,6 +9113,13 @@ public sealed partial class MainForm : Form
                 var sendMs = sender.TakeSendWorkMs();
                 var recvMs = receiver.TakeReceiveWorkMs();
                 var renderMs = receiver.TakeRenderWorkMs();
+                // SPLIT BY LANE. The total alone cannot answer the question that gets asked the
+                // moment one lane starts under-running: was that lane expensive, or was it starved
+                // while the OTHER one hogged the render path? Ed's 2026-08-24 session went from 8 ms
+                // per second on ASIO alone to 50 with a wireless headset added on WASAPI, and the
+                // ASIO lane under-ran 65 times — with nothing in the log able to say which lane had
+                // spent it. Taken in one call so neither lane can be starved by a second reader.
+                var (renderWasapiMs, renderAsioMs, renderMixedMs) = receiver.TakeRenderWorkMsByLane();
                 // Per-stage discontinuity probes. Compare these to localise where in the
                 // pipeline a click is introduced:
                 //   stepPreEnc   = sender's float buffer just before encoding. Non-zero =
@@ -8257,7 +9159,19 @@ public sealed partial class MainForm : Form
                 var stepRawCapWB = sender.TakeMaxSenderRawCaptureStepWithinBuffer();
                 var stepRawCap = stepRawCapXB > stepRawCapWB ? stepRawCapXB : stepRawCapWB;
                 var capPeak = sender.TakeMaxSenderPreEncodePeak();
+                var capPeakPlg = sender.TakeMaxPreEncodePeakPluginLane();
+                // The gap between packets LEAVING each lane. capPeak says what reached the encoder;
+                // these say how evenly it left, which is the half a far-end dropout is made of and the
+                // half nothing measured. The WASAPI lane is the control — it is clocked by an audio
+                // callback, the plugin lane is fed from the bridge's network thread.
+                var emitGapWas = sender.TakeMaxEmitGapMsWasapiLane();
+                var emitGapAsi = sender.TakeMaxEmitGapMsAsioLane();
+                var emitGapPlg = sender.TakeMaxEmitGapMsPluginLane();
                 var sndAudFr = sender.TakeSenderAudioFramesSent();
+                // Hand the SAME readings to the long-run report rather than letting it read these
+                // counters again — they reset on read, and a second reader takes half the samples.
+                // Not hypothetical: that exact double-read starved the auto-tune on 2026-09-06.
+                NoteLongRunRender(renderWasapiMs, renderAsioMs, sndAudFr);
                 var clippedNow = sender.ClippedSampleCount;
                 var clippedDelta = clippedNow - prevDiagClippedSamples; prevDiagClippedSamples = clippedNow;
                 var stepPostDecXB = receiver.TakeMaxPostDecodeStepCrossBuffer();
@@ -8290,10 +9204,17 @@ public sealed partial class MainForm : Form
                     $"cpu={selfMeter.CpuPercentOneCore:0.0}% memMB={selfMeter.ManagedHeapMb:0.0} wsMB={selfMeter.WorkingSetMb:0.0} allocKBps={selfMeter.AllocatedKbPerSecond:0.0} " +
                     $"privMB={selfMeter.PrivateBytesMb:0.0} gcHeapMB={selfMeter.GcHeapMb:0.0} gcFragMB={selfMeter.GcFragmentedMb:0.0} gcCommitMB={selfMeter.GcCommittedMb:0.0} handles={selfMeter.HandleCount} threads={selfMeter.ThreadCount} " +
                     $"captureMs={captureMs:0.0} sendMs={sendMs:0.0} recvMs={recvMs:0.0} renderMs={renderMs:0.0} " +
+                    $"renderWasapiMs={renderWasapiMs:0.0} renderAsioMs={renderAsioMs:0.0} renderMixedMs={renderMixedMs:0.0} " +
+                    // Per capture source: its ring depth and the rate ratio holding it on the mix
+                    // clock. With two or more WASAPI sources summed into one stream this is the only
+                    // way to SEE them pulling apart — before this the drift was audible and invisible.
+                    $"srcDrift=[{DescribeCaptureSourceDrift()}] " +
                     $"trimB={trimBytes} trimN={trimFires} trimΔ={trimDelta} drainB={drainBytes} ovfB={ovfBytes} pktRej={pktRej} " +
                     $"concealΔ={concealDelta} shortReadΔ={shortReadDelta} devGulpΔ={deviceGulpDeltaDiag} " +
                     $"filtErr={filteredErrorFrames:0.0}f " +
-                    $"capPeak={capPeak:0.000} sndAudFrΔ={sndAudFr} stepRawCap={stepRawCap:0.000} stepPreEnc={stepPreEnc:0.000} stepPreEncWas={stepPreEncWas:0.000} stepPreEncAsi={stepPreEncAsi:0.000} stepPostDec={stepPostDec:0.000} stepPostRing={stepPostRing:0.000} stepPostRsm={stepPostRsm:0.000} " +
+                    $"capPeak={capPeak:0.000} capPeakPlg={capPeakPlg:0.000} " +
+                    $"emitGapWas={emitGapWas} emitGapAsi={emitGapAsi} emitGapPlg={emitGapPlg} " +
+                    $"sndAudFrΔ={sndAudFr} stepRawCap={stepRawCap:0.000} stepPreEnc={stepPreEnc:0.000} stepPreEncWas={stepPreEncWas:0.000} stepPreEncAsi={stepPreEncAsi:0.000} stepPostDec={stepPostDec:0.000} stepPostRing={stepPostRing:0.000} stepPostRsm={stepPostRsm:0.000} " +
                     $"stepRawCapXB={stepRawCapXB:0.000} stepRawCapWB={stepRawCapWB:0.000} " +
                     $"stepPreEncWasXB={stepPreEncWasXB:0.000} stepPreEncWasWB={stepPreEncWasWB:0.000} " +
                     $"stepPreEncAsiXB={stepPreEncAsiXB:0.000} stepPreEncAsiWB={stepPreEncAsiWB:0.000} " +
@@ -8381,6 +9302,33 @@ public sealed partial class MainForm : Form
             //   * render_buffer: rough estimate per audio mode
             // Logged whenever either side is active so we capture the latency picture even when
             // the local machine is send-only.
+            // EACH ROUTE'S MEASURED RENDER PERIOD, READ EXACTLY ONCE PER TICK AND SHARED.
+            //
+            // MaxRenderCallbackGapMsFor RESETS the counter as it reads it, so whoever reads first
+            // leaves every later reader with zero. Two things in this tick want it: the latency
+            // probe below, and the auto-tune's per-lane windows further down. Reading it in both
+            // places meant the auto-tune's windows were never fed at all — every enqueue saw zero
+            // and was skipped — so each lane fell through to the MACHINE-WIDE window, which is the
+            // one thing the per-lane windows exist to prevent: "sharing them let one lane be sized
+            // by the other's hardware".
+            //
+            // On Ed's 2026-08-24 22:20 session — a Roger On headset on WASAPI alongside the Audient
+            // on ASIO — that meant the ASIO lane was sized by a Bluetooth device's callback period
+            // instead of its own 2 ms. The ASIO buffer climbed to 44 ms and would not come back down.
+            // He spotted it from the log: "i've never seen it sit there ... have we done something
+            // that caused more underruns". He was right, and it was mine, from earlier the same day.
+            var periodByRoute = new Dictionary<RenderRoute, int>
+            {
+                [RenderRoute.WasapiLane] = receiver.MaxRenderCallbackGapMsFor(RenderRoute.WasapiLane),
+                [RenderRoute.AsioLane] = receiver.MaxRenderCallbackGapMsFor(RenderRoute.AsioLane),
+                [RenderRoute.Mixed] = receiver.MaxRenderCallbackGapMsFor(RenderRoute.Mixed),
+            };
+            // The same single readings, handed to the long-run report. In a WASAPI-only configuration the WASAPI
+            // output renders on the Mixed route, so the WASAPI figure is the worse of the two.
+            NoteLongRunRenderGaps(
+                Math.Max(periodByRoute[RenderRoute.WasapiLane], periodByRoute[RenderRoute.Mixed]),
+                periodByRoute[RenderRoute.AsioLane]);
+
             if ((diag.BufferSampleCount > 0 || diag.RenderReadCount > 0) || sender.IsRunning)
             {
                 // Second-highest of the window, not the peak: one OS hiccup must not inflate the
@@ -8392,17 +9340,44 @@ public sealed partial class MainForm : Form
                 // backend reported anything else. Both capture backends now read the device's engine
                 // period at open, and ASIO reads its driver's buffer size. Falls back to the old
                 // estimate when a device won't say, so unknown never masquerades as measured.
+                // THE FAR END'S capture first, because that is whose microphone this journey starts
+                // at. A receive-only machine cannot measure that stage, and substituting the local
+                // estimate for it is a guess about somebody else's hardware: Ed's 2026-08-24 laptop
+                // called it 10 ms while the sending desktop had measured 0.7. Senders now state it in
+                // the format packet, so we use what they said, fall back to our own device's figure
+                // (right when we are the sender in the pair), and only then to the estimate.
+                var announcedCaptureMs = receiver.AnnouncedCaptureLatencyMs;
                 var reportedCaptureMs = sender.ReportedInputLatencyMs;
-                var captureBufferMs = reportedCaptureMs > 0 ? reportedCaptureMs : CaptureBufferEstimateMs(captureGapMs);
+                var captureBufferMs = PickCaptureLatencyMs(
+                    announcedCaptureMs, reportedCaptureMs, CaptureBufferEstimateMs(captureGapMs));
                 var senderAccumulatorMs = SenderAccumulatorEstimateMs();
                 var wireOneWayMs = LowestPeerRttMs() / 2.0;
                 // Which lane is the user actually listening on? ASIO runs its own backend at its own
                 // (much smaller) period and is NOT penalised by WASAPI's shared-mode buffering — so
                 // read that lane's measured period, not a single global that the slower lane wins.
-                var listeningRoute = receiver.HasSessionsForRoute(RenderRoute.AsioLane) ? RenderRoute.AsioLane
-                    : receiver.HasSessionsForRoute(RenderRoute.WasapiLane) ? RenderRoute.WasapiLane
-                    : RenderRoute.Mixed;
-                var lanePeriodMs = receiver.MaxRenderCallbackGapMsFor(listeningRoute);
+                // With nothing being received, fall back to the lane this CONFIGURATION actually uses
+                // rather than to Mixed. Mixed is deliberately answered with the WASAPI figure, which on
+                // an ASIO-only rig is zero — so the render term fell back to a 10 ms estimate even
+                // though the driver had reported its real playback latency at open. Ed's 2026-08-24
+                // desktop log shows exactly that: "driver reports 171 samples of playback latency =
+                // 3.6 ms" a minute before every probe line reads render=10.0[est]. The lesson is the
+                // one already written into AudioConfiguration — ask the configuration, not the mode.
+                var listeningRoute = PickListeningRoute(
+                    receiver.HasSessionsForRoute(RenderRoute.AsioLane),
+                    receiver.HasSessionsForRoute(RenderRoute.WasapiLane),
+                    ActiveAudioConfiguration());
+                // READ EACH LANE'S PERIOD EXACTLY ONCE. MaxRenderCallbackGapMsFor RESETS the value as
+                // it reads it (Interlocked.Exchange to 0), so the SECOND reader in the same tick gets
+                // zero — and this probe used to be the first reader. It consumed whichever lane the
+                // listener was on, and the per-lane readout below then re-read the same lane, saw
+                // nothing, and fell back to the whole-machine total. That total INCLUDES the live
+                // jitter-buffer depth, and the readout adds the buffer SETTING on top: the buffer got
+                // counted twice. Ed's 2026-08-24 laptop log is the proof — recv-queue 21 ms inside a
+                // 37 ms total, against a buffer set to 34, and the box read about 70 ms one way when
+                // the honest figure was about 50. Read both lanes up front and hand the values down.
+                var wasapiPeriodMs = periodByRoute[RenderRoute.WasapiLane];
+                var asioPeriodMs = periodByRoute[RenderRoute.AsioLane];
+                var lanePeriodMs = listeningRoute == RenderRoute.AsioLane ? asioPeriodMs : wasapiPeriodMs;
                 if (lanePeriodMs <= 0) lanePeriodMs = diag.MaxRenderCallbackGapMs;
                 // Same again for the output. The old figure was a measured callback GAP doubled and
                 // then clamped up to a 10 ms floor, which pinned a fast card at 10 whatever the truth
@@ -8427,8 +9402,8 @@ public sealed partial class MainForm : Form
                 // the queue depth and the output period are not — those are the two terms that make a
                 // WASAPI journey and an ASIO journey genuinely different lengths.
                 var sharedMs = captureBufferMs + senderAccumulatorMs + wireOneWayMs;
-                achievedLatencyWasapiMs = LaneLatencyMs(RenderRoute.WasapiLane, sharedMs, totalMs);
-                achievedLatencyAsioMs = LaneLatencyMs(RenderRoute.AsioLane, sharedMs, totalMs);
+                achievedLatencyWasapiMs = LaneLatencyMs(RenderRoute.WasapiLane, sharedMs, wasapiPeriodMs, lanePeriodMs);
+                achievedLatencyAsioMs = LaneLatencyMs(RenderRoute.AsioLane, sharedMs, asioPeriodMs, lanePeriodMs);
                 UpdateMeasuredLatencyReadout();
                 // Each term is tagged with WHERE IT CAME FROM. A total made of four constants and one
                 // measurement reads exactly like a total made of five measurements, which is how this
@@ -8436,7 +9411,10 @@ public sealed partial class MainForm : Form
                 // numbers. "dev" = the device or driver said so, "est" = we worked it out, "meas" =
                 // we timed it ourselves. If a term reads est when you expected dev, that device
                 // declined to answer and the line above it at open time will say so. 2026-08-24.
-                var capSrc = reportedCaptureMs > 0 ? "dev" : "est";
+                // "peer" is the strongest of the three: the SENDER measured its own capture and told
+                // us on the wire, so it is a real figure about the machine the journey actually
+                // started on rather than a guess made here about somebody else's hardware.
+                var capSrc = announcedCaptureMs > 0 ? "peer" : reportedCaptureMs > 0 ? "dev" : "est";
                 var renSrc = reportedRenderMs > 0 ? "dev" : "est";
                 logFile.Event($"latency-probe estimated one-way ≈ {totalMs:0.0}ms " +
                     $"(capture={captureBufferMs:0.0}[{capSrc}], send-accum={senderAccumulatorMs:0.0}[est], wire={wireOneWayMs:0.0}[meas], " +
@@ -8454,16 +9432,15 @@ public sealed partial class MainForm : Form
             if (openCount > lastObservedSessionsOpenedCount)
             {
                 lastObservedSessionsOpenedCount = openCount;
-                recentMaxGaps.Clear();
-                recentRenderCbGaps.Clear();
-                recentCaptureCbGaps.Clear();
-                recentMinBuffers.Clear();
-                // New conditions: every lane re-earns its evidence and forgets its learned floor.
-                mixedTuneMemory.Reset();
-                wasapiTuneMemory.Reset();
-                asioTuneMemory.Reset();
-                lastSourceChangeUtc = DateTime.UtcNow;
+                OnNewStreamSessions();
             }
+
+            // A NEW SESSION IS NOT THE ONLY THING THAT INVALIDATES A FLOOR. An output going away and
+            // coming back does too, and that is not a new session — the peer never stopped sending, it
+            // is the speaker that left. Ed's laptop held a 25 ms WASAPI floor for seven and a half
+            // hours on a lane with no device at all. See LaneTuneMemory.NoteLaneAudible.
+            foreach (var route in new[] { RenderRoute.WasapiLane, RenderRoute.AsioLane })
+                NoteLaneAudibility(route, receiver.LaneIsConsuming(route));
 
             // Push this second's max-gap reading into the rolling window the continuous
             // auto-tune samples from. Capped at RecentMaxGapWindowSeconds entries so older
@@ -8490,14 +9467,29 @@ public sealed partial class MainForm : Form
             }
             else measuredEmitIntervalMs = 0;
 
+            // Readings taken while the tuner is on hold describe a transition, not the listening conditions —
+            // see TuneEvidenceHold. A wake holds every lane, so even the network window is skipped. An output
+            // being re-opened holds only the lanes it carries, but the SHARED render and buffer windows are
+            // skipped too, because the tuner falls back to those whenever a lane's own window is empty.
+            var evidenceNow = DateTime.UtcNow;
+            var anyLaneHeld = tuneHold.AnyHeld(evidenceNow);
+            var everyLaneHeld = !TuneLaneAllowed(RenderRoute.WasapiLane, evidenceNow)
+                && !TuneLaneAllowed(RenderRoute.AsioLane, evidenceNow)
+                && !TuneLaneAllowed(RenderRoute.Mixed, evidenceNow);
             if (diag.PacketCount > 0)
             {
-                recentMaxGaps.Enqueue(diag.MaxArrivalGapMs);
-                while (recentMaxGaps.Count > RecentMaxGapWindowSeconds) recentMaxGaps.Dequeue();
+                if (!everyLaneHeld)
+                {
+                    recentMaxGaps.Enqueue(diag.MaxArrivalGapMs);
+                    while (recentMaxGaps.Count > RecentMaxGapWindowSeconds) recentMaxGaps.Dequeue();
+                }
                 // Mirror window for actual render-callback period. Same windowing so they age
                 // out together; auto-tune uses the max of this for an honest formula.
-                recentRenderCbGaps.Enqueue(diag.MaxRenderCallbackGapMs);
-                while (recentRenderCbGaps.Count > RecentMaxGapWindowSeconds) recentRenderCbGaps.Dequeue();
+                if (!anyLaneHeld)
+                {
+                    recentRenderCbGaps.Enqueue(diag.MaxRenderCallbackGapMs);
+                    while (recentRenderCbGaps.Count > RecentMaxGapWindowSeconds) recentRenderCbGaps.Dequeue();
+                }
 
                 // ...and the SAME readings per lane, because the render period and the buffer depth
                 // belong to an output device, not to the machine. Sharing them let one lane be sized
@@ -8509,7 +9501,12 @@ public sealed partial class MainForm : Form
                     (RenderRoute.Mixed, mixedTuneMemory),
                 })
                 {
-                    var laneGap = receiver.MaxRenderCallbackGapMsFor(laneRoute);
+                    // The value read ONCE at the top of this tick, not a fresh read — the accessor
+                    // resets as it reads, so re-reading it here returns zero and silently empties
+                    // this lane's window. See periodByRoute.
+                    // A lane on hold keeps its windows empty until the transition is over.
+                    if (!TuneLaneAllowed(laneRoute, evidenceNow)) continue;
+                    var laneGap = periodByRoute.TryGetValue(laneRoute, out var p) ? p : 0;
                     if (laneGap > 0)
                     {
                         laneMemory.RenderCbGaps.Enqueue(laneGap);
@@ -8524,8 +9521,11 @@ public sealed partial class MainForm : Form
                 }
                 // Third mirror window: how shallow the buffer got this second. Feeds the auto-tune's
                 // unused-margin evidence (see recentMinBuffers).
-                recentMinBuffers.Enqueue(diag.BufferMinMs);
-                while (recentMinBuffers.Count > RecentMaxGapWindowSeconds) recentMinBuffers.Dequeue();
+                if (!anyLaneHeld)
+                {
+                    recentMinBuffers.Enqueue(diag.BufferMinMs);
+                    while (recentMinBuffers.Count > RecentMaxGapWindowSeconds) recentMinBuffers.Dequeue();
+                }
             }
         }
         else
@@ -9024,6 +10024,9 @@ public sealed partial class MainForm : Form
     internal RemSound.Receiver.AudioReceiver ReceiverForTest => receiver;
     internal RemSound.Sender.AudioSender SenderForTest => sender;
     internal RemSoundSettingsStore SettingsForTest => settings;
+    /// <summary>The window's own log, so the control suite can prove a control REPORTS what it did
+    /// and not merely that it did it. See <see cref="RemSoundLog.EventTapForTest"/>.</summary>
+    internal RemSoundLog LogForTest => logFile;
     /// <summary>Find a control by its private FIELD name, so a spec can name the exact control the
     /// developer sees in the source rather than guessing at a caption.</summary>
     internal bool SendEnabledForTest => IsSendEnabled;
@@ -9307,6 +10310,12 @@ public sealed partial class MainForm : Form
         if (!EnsureStreamingPassword(box)) return;
         HandleCapabilityChange();
         MarkProfileDirty();
+        // THE two switches that decide whether anything happens at all — and until 2026-08-24
+        // neither left a trace. "I can't hear them" and "they can't hear me" are the two commonest
+        // reports there are, and the first thing worth knowing is whether the switch was even on.
+        LogUiChange(box == sendMyAudioCheckbox ? "send my audio"
+            : box == receiveAudioCheckbox ? "play incoming audio"
+            : box.Name, box.Checked ? "on" : "off");
         // Audible feedback for the toggle, whether the user clicked the checkbox or pressed the
         // mute hotkey (the hotkey flips .Checked, which routes through here too). Skipped while a
         // profile is being applied programmatically — loading a profile that has send/receive on
@@ -9367,7 +10376,7 @@ public sealed partial class MainForm : Form
             AppendLogEntry($"security: {status} with {addr}");
             var msg = status == PeerSecurityStatus.PasswordMismatch
                 ? $"You and {addr} have different passwords, so no audio will pass between you.\n\nMake sure you've both set the same password (File → Change this profile's password)."
-                : $"{addr} is running an older version of RemSound that can't connect securely. They need to update before audio can flow between you.";
+                : PeerSecurityNotice.NoFingerprintMessage(addr.ToString());
             // Show it front-and-centre, and FREEZE the 1 Hz status tick while it's up. This dialog is
             // raised FROM that tick; left running, the tick keeps firing into the modal loop and
             // re-runs the peer-list rebuild (SyncAllPeerLists) UNDER the dialog, which knocks it out
@@ -9484,11 +10493,32 @@ public sealed partial class MainForm : Form
     {
         try
         {
-            var address = await ResolvePeerAddressAsync(entry);
-            if (address is null)
+            // A peer discovery can already hear is selected as THAT peer, at the address they are
+            // actually on, and DNS is not asked. At launch discovery has heard nobody yet, so this is
+            // the profile-switch-mid-session case; the DNS path is the launch case, and
+            // RefreshKnownPeers joins its guess to the discovered peer a second later (the same-name
+            // merge there, which is also where a guess that never answers is replaced).
+            var (host, _) = TrySplitHostPort(entry);
+            var heard = new List<PeerAnnouncement>();
+            if (!IPAddress.TryParse(host, out _))
             {
-                AppendLogEntry($"profile reconnect: could not resolve \"{entry}\"; skipping");
-                return;
+                heard.AddRange(discovery.Peers.Where(p => string.Equals(p.Name, host, StringComparison.OrdinalIgnoreCase)));
+            }
+            PeerAnnouncement peer;
+            if (heard.Count == 1)
+            {
+                peer = heard[0];
+            }
+            else
+            {
+                var address = await ResolvePeerAddressAsync(entry);
+                if (address is null)
+                {
+                    AppendLogEntry($"profile reconnect: could not resolve \"{entry}\"; skipping");
+                    return;
+                }
+                peer = CreateManualPeer(entry, address);
+                manualPeers[peer.InstanceId] = peer;
             }
             var rememberedEntries = settings.LoadRememberedPeers()
                 .Select(static value => value.Trim())
@@ -9496,12 +10526,11 @@ public sealed partial class MainForm : Form
             rememberedEntries.Add(entry.Trim());
             settings.SaveRememberedPeers(rememberedEntries);
 
-            var peer = CreateManualPeer(entry, address);
-            manualPeers[peer.InstanceId] = peer;
             rememberedPeerInstanceIds[entry.Trim()] = peer.InstanceId;
             SelectPeer(peer, fromProfileRestore: true);
             PushDiscoveryUnicastHints();
-            logFile.Event($"profile reconnect: \"{entry}\" → {address}:{peer.AudioPort}");
+            logFile.Event($"profile reconnect: \"{entry}\" → {peer.Address}:{peer.AudioPort}"
+                + (heard.Count == 1 ? " (discovered, DNS not asked)" : ""));
             RefreshKnownPeers();
             // CRITICAL: SelectPeer alone only updates the receiver's allow-list and the
             // selectedPeerEndpoints dictionary; it does NOT engage the audio sender's outbound
@@ -10235,11 +11264,11 @@ public sealed partial class MainForm : Form
         {
             var effectiveSamples = EffectiveOpusFrameSamples(item.Codec, item.OpusFrameSamples, rate);
             sender.ConfigureCodec(item.Codec, effectiveSamples);
-            logFile.Event($"send rate changed to {rate} → Opus frame {effectiveSamples / 48.0:0.##}ms");
+            LogUiChange("send rate", $"{rate} (Opus frame {effectiveSamples / 48.0:0.##}ms)");
         }
         else
         {
-            logFile.Event($"send rate changed to {rate} (PCM)");
+            LogUiChange("send rate", $"{rate} (PCM)");
         }
     }
 
@@ -10349,6 +11378,10 @@ public sealed partial class MainForm : Form
     /// </summary>
     private void ContinuousTuneTick()
     {
+        // A WAKE FIRST. On 2026-09-10 THIS timer won the race on waking and raised the WASAPI buffer from 35
+        // to 65 ms on evidence from before the sleep, three seconds before Windows reported the resume. It has
+        // to be able to notice on its own. See DetectWakeFromTickGap.
+        DetectWakeFromTickGap();
         if (!receiver.IsRunning) return;
         var frameMs = receiver.ActiveStreamFrameMs;
         if (frameMs is null) return;
@@ -10370,13 +11403,15 @@ public sealed partial class MainForm : Form
             // this gate a route with no audio would still react to the OTHER route's
             // gap signal and silently inflate its target before any of its own audio has
             // arrived.
-            if (continuousTuneEnabled && receiver.HasSessionsForRoute(RenderRoute.WasapiLane))
+            if (continuousTuneEnabled && receiver.HasSessionsForRoute(RenderRoute.WasapiLane)
+                && TuneLaneAllowed(RenderRoute.WasapiLane, DateTime.UtcNow))
             {
                 TickRoute(RenderRoute.WasapiLane, maxLatencyBox, "WASAPI",
                     ref lastObservedUnderrunCount, ref lastObservedDeviceGulpCount, ref suppressUserSliderMoveTracking,
                     lastUserSliderMoveUtc, intervalSec, frameMs.Value);
             }
-            if (settings.LoadContinuousAutoTuneAsioEnabled() && receiver.HasSessionsForRoute(RenderRoute.AsioLane))
+            if (settings.LoadContinuousAutoTuneAsioEnabled() && receiver.HasSessionsForRoute(RenderRoute.AsioLane)
+                && TuneLaneAllowed(RenderRoute.AsioLane, DateTime.UtcNow))
             {
                 TickRoute(RenderRoute.AsioLane, maxLatencyAsioBox, "ASIO",
                     ref lastObservedUnderrunCountAsio, ref lastObservedDeviceGulpCountAsio, ref suppressUserAsioSliderMoveTracking,
@@ -10385,7 +11420,7 @@ public sealed partial class MainForm : Form
         }
         else
         {
-            if (continuousTuneEnabled)
+            if (continuousTuneEnabled && TuneLaneAllowed(RenderRoute.Mixed, DateTime.UtcNow))
             {
                 TickRoute(RenderRoute.Mixed, maxLatencyBox, "",
                     ref lastObservedUnderrunCount, ref lastObservedDeviceGulpCount, ref suppressUserSliderMoveTracking,
@@ -10535,7 +11570,10 @@ public sealed partial class MainForm : Form
             memory.CleanTicks = 0; // this lane's buffer ran short — its evidence for shedding is void
             // ...and record WHERE it ran short: that value is too thin for THIS lane, so its creep
             // must never probe back down to it. A floor learned by experiment beats a guessed constant.
-            memory.Creep.NoteShortfallAt((int)slider.Value);
+            // Capped at what the measurement justifies (capped = the recommendation, computed above).
+            // Without that cap the floor was learned from the slider's own value, so every raise
+            // justified the next one. See CreepState.NoteShortfallAt. 2026-09-06.
+            memory.Creep.NoteShortfallAt((int)slider.Value, capped);
 
             // UNDERRUNS MUST RAISE, NOT FREEZE.
             //
@@ -10588,6 +11626,10 @@ public sealed partial class MainForm : Form
             return;
         }
         memory.CleanTicks++;
+        // A quiet stretch also RELAXES the learned floor, one step at a time. Without this a floor
+        // learned in a noisy first twenty seconds bound the rest of the session, however clean it
+        // became. See CreepState.NoteCleanRun. 2026-09-06.
+        memory.Creep.NoteCleanRun(memory.CleanTicks);
 
 
         // Low-water evidence: the shallowest the buffer got across the same lookback window. Cushion
@@ -10917,6 +11959,7 @@ public sealed partial class MainForm : Form
         // away and say so; leaving the socket open into a half-dismantled app would have them asking
         // for audio from a receiver that no longer exists.
         try { pluginHost?.Dispose(); pluginHost = null; receiver.SetPluginPeerClaims(null); } catch { /* teardown is best-effort */ }
+        try { pluginTrackSource.Dispose(); } catch { /* teardown is best-effort */ }
 
         // Stop any active recording before the engines tear down. The recorder will flush
         // its queue and close the file cleanly. Done here (rather than in Dispose) because

@@ -28,7 +28,12 @@ public sealed record AudioFormatInfo(
     int AverageBytesPerSecond,
     int Codec = (int)AudioTransportCodec.Pcm,
     int FrameSamplesPerChannel = 480,
-    RenderRoute Lane = RenderRoute.Mixed)
+    RenderRoute Lane = RenderRoute.Mixed,
+    /// <summary>The SENDER's own capture latency in milliseconds, carried on the wire so the far end
+    /// can report the real journey instead of guessing at the half of it that happens here. Zero means
+    /// the sender did not state it (an older build, or a device that will not say), and the receiver
+    /// falls back to its own estimate. See RemPacket.FormatPayloadWithCaptureSize. 2026-08-24.</summary>
+    double CaptureLatencyMs = 0)
 {
     /// <summary>Human-friendly frame duration in milliseconds, derived from
     /// <see cref="FrameSamplesPerChannel"/> and <see cref="SampleRate"/>. May be a fraction

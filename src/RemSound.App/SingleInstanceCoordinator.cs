@@ -205,16 +205,52 @@ internal sealed class SingleInstanceCoordinator : IDisposable
         return clear;
     }
 
+    /// <summary>
+    /// May the single-instance guard kill this process?
+    ///
+    /// <para>Only a copy in OUR OWN Windows session. The mutex above is created without a
+    /// <c>Global\</c> prefix, so it lives in the per-session namespace — nothing outside this session
+    /// can possibly be holding it, and killing something out there could never resolve the
+    /// conflict.</para>
+    ///
+    /// <para>The reason this matters is the SERVICE. It runs the same RemSound.exe, so its process is
+    /// also called "RemSound", and it sits in session 0. Enumerating by name alone picked it up, and
+    /// "force close the other copy" then tried to terminate it: access denied unelevated, which routed
+    /// it into the elevated taskkill and put a UAC prompt in front of somebody who had asked to close
+    /// an app. Accepting it kills the lock-screen service — which the SCM then restarts, so the "is the
+    /// field clear now?" check could also come back false and refuse to start at all. The service
+    /// deliberately never takes the interactive lock, so it was never the cause of the dialog in the
+    /// first place. Confirmed against a live install, 2026-08-24.</para>
+    ///
+    /// <para>A session id we cannot read means DON'T kill: never terminate a process on a guess.</para>
+    /// </summary>
+    internal static bool IsKillableInstance(int pid, int selfPid, int? sessionId, int ownSessionId)
+    {
+        if (pid == selfPid) return false;
+        if (sessionId is null) return false;
+        return sessionId.Value == ownSessionId;
+    }
+
     private static List<Process> OtherInstances(int selfPid)
     {
         Process[] all;
         try { all = Process.GetProcessesByName("RemSound"); }
         catch { return []; }
 
+        int ownSession;
+        using (var self = Process.GetCurrentProcess())
+        {
+            try { ownSession = self.SessionId; }
+            catch { foreach (var p in all) p.Dispose(); return []; }   // can't tell ours from theirs: kill nothing
+        }
+
         var others = new List<Process>(all.Length);
         foreach (var p in all)
         {
-            if (p.Id == selfPid) { p.Dispose(); continue; }
+            int? session;
+            try { session = p.SessionId; }
+            catch { session = null; }
+            if (!IsKillableInstance(p.Id, selfPid, session, ownSession)) { p.Dispose(); continue; }
             others.Add(p);
         }
         return others;

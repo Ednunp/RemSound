@@ -88,6 +88,12 @@ public sealed class RemSoundService : ServiceBase
         try { cts.Cancel(); } catch { }
         try { worker?.Join(5000); } catch { }
         try { host?.Dispose(); } catch { }
+        // Close the log LAST, once everything above has had its say. Without this the service's log
+        // never got its "log stopped" line, so a file that ends mid-sentence read the same whether the
+        // service shut down cleanly or was killed — and telling those two apart is most of what the
+        // log is for. (AutoFlush is on, so nothing was ever lost; only the ending.) 2026-08-24.
+        try { log?.Dispose(); } catch { }
+        log = null;
     }
 
     protected override void OnShutdown() => OnStop();

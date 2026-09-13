@@ -31,26 +31,40 @@ internal static class CueSounds
         var dir = AppConfig.SoundsDirectory;
         if (string.IsNullOrEmpty(baseName) || !Directory.Exists(dir)) return Array.Empty<string>();
 
+        try { return SelectVariants(baseName, Directory.EnumerateFiles(dir, "*.wav").Select(Path.GetFileName)!); }
+        catch { return Array.Empty<string>(); }
+    }
+
+    /// <summary>The pure selection rule behind <see cref="Variants"/>, over a supplied list of
+    /// filenames rather than a directory.
+    ///
+    /// <para>Split out 2026-08-24 so the rule can actually be TESTED. The shipped sounds folder
+    /// contains only numbered files ("connect 1.wav", "connect 2.wav") and never a bare
+    /// "connect.wav", so the dedupe below — the only interesting thing this method does — was never
+    /// once exercised by the gate: deleting it left every test green. It exists for a legacy
+    /// install that still has the unnumbered file, and getting it wrong gives a screen-reader user
+    /// two rows both announced "Sound 1" with no way to tell them apart.</para></summary>
+    internal static IReadOnlyList<string> SelectVariants(string baseName, IEnumerable<string> fileNames)
+    {
+        if (string.IsNullOrEmpty(baseName)) return Array.Empty<string>();
+
         var matches = new List<(int Order, string Name)>();
-        try
+        foreach (var name in fileNames)
         {
-            foreach (var full in Directory.EnumerateFiles(dir, "*.wav"))
+            if (string.IsNullOrEmpty(name)) continue;
+            var stem = Path.GetFileNameWithoutExtension(name);
+            if (stem.Equals(baseName, StringComparison.OrdinalIgnoreCase))
             {
-                var name = Path.GetFileName(full);
-                var stem = Path.GetFileNameWithoutExtension(name);
-                if (stem.Equals(baseName, StringComparison.OrdinalIgnoreCase))
-                {
-                    matches.Add((0, name)); // the bare, unnumbered name sorts first
-                }
-                else if (stem.Length > baseName.Length + 1
-                         && stem.StartsWith(baseName + " ", StringComparison.OrdinalIgnoreCase)
-                         && int.TryParse(stem[(baseName.Length + 1)..], out var n))
-                {
-                    matches.Add((n, name));
-                }
+                matches.Add((0, name)); // the bare, unnumbered name sorts first
+            }
+            else if (stem.Length > baseName.Length + 1
+                     && stem.StartsWith(baseName + " ", StringComparison.OrdinalIgnoreCase)
+                     && int.TryParse(stem[(baseName.Length + 1)..], out var n))
+            {
+                matches.Add((n, name));
             }
         }
-        catch { return Array.Empty<string>(); }
+
         var ordered = matches.OrderBy(m => m.Order).ToList();
         // If numbered variants exist, drop the bare unnumbered file: it labels as "Sound 1" (below), the
         // same as "<cue> 1.wav", so the two would show as indistinguishable "Sound 1" rows a screen-reader

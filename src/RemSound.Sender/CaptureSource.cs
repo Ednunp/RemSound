@@ -59,11 +59,23 @@ internal sealed class CaptureSource : IDisposable
     public int BufferedMilliseconds =>
         (int)(buffer.BufferedDuration.TotalMilliseconds);
 
+    /// <summary>Set by the mixing engine: true only while more than one source is live. A lone source
+    /// has nothing to stay aligned WITH, so its drift corrector stays idle at ratio 1.0 and the
+    /// commonest setup of all behaves exactly as it always has.</summary>
+    internal Func<bool>? CorrectionWanted { get; set; }
+
+    /// <summary>This source's drift corrector, so the mixer can report what it is applying.</summary>
+    internal CaptureDriftCorrector? DriftCorrector { get; private set; }
+
+    /// <summary>Rate ratio currently applied to hold this source on the mix clock. 1.0 = untouched.
+    /// Surfaced on the diag line so per-source drift is visible instead of only audible.</summary>
+    public double AppliedDriftRatio => DriftCorrector?.AppliedRatio ?? 1.0;
+
     public CaptureSource(MMDevice device, CaptureKind kind, string displayName, Action<string>? onDiagnostic = null)
         : this(
             kind == CaptureKind.Loopback
-                ? new LowLatencyWasapiLoopbackCapture(device, audioBufferMilliseconds: CaptureBufferMs)
-                : new WasapiCapture(device, useEventSync: true, audioBufferMillisecondsLength: CaptureBufferMs),
+                ? new LowLatencyWasapiLoopbackCapture(device, CaptureBufferMs, onDiagnostic)
+                : (IWaveIn)new WasapiCapture(device, useEventSync: true, audioBufferMillisecondsLength: CaptureBufferMs),
             kind, device.ID, displayName, onDiagnostic)
     {
     }
@@ -101,7 +113,21 @@ internal sealed class CaptureSource : IDisposable
         {
             sp = new StereoMixDownSampleProvider(sp);
         }
-        Provider = sp;
+        // LAST in the chain, on the pull side: hold this device on the mixer's clock so several
+        // sources summed into one stream stay aligned with each other. Without it the only thing that
+        // ever corrected a drifting source was the ring hitting 250 ms and discarding, or emptying and
+        // padding silence — a jump or a hole, and only after a quarter-second of error. Idle (ratio
+        // pinned at 1.0) while this is the only live source. See CaptureDriftCorrector. 2026-09-07.
+        var drift = new CaptureDriftCorrector(
+            sp,
+            () => BufferedMilliseconds,
+            () => BytesCaptured,
+            () => CorrectionWanted?.Invoke() ?? false,
+            displayName,
+            CaptureDriftCorrector.DefaultMeasurementWindowSec,
+            onDiagnostic);
+        DriftCorrector = drift;
+        Provider = drift;
 
         capture.DataAvailable += OnDataAvailable;
         capture.RecordingStopped += OnRecordingStopped;

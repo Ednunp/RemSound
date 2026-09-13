@@ -28,7 +28,20 @@ $expectedMM = ($expectedVersion -split '\.')[0..1] -join '.'   # major.minor, e.
 
 # ---- 1. BUILD: publish to a throwaway folder (the app is never run here yet, so the bundled
 #         sounds\ folder stays intact for the package checks below) ----
-$publishDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rs-runtests-" + [guid]::NewGuid().ToString('N'))
+# A STABLE folder, deliberately not a fresh GUID per run. Windows Firewall keys its allow rules
+# on the program path, so a new random path meant a brand-new "allow RemSound to communicate on
+# these networks?" prompt on EVERY gate run — the app binds UDP 47821 (discovery) and 47830 (audio)
+# during --selftest, which is enough to trigger it. One machine here had accumulated 22 rules, 18
+# of them pointing at temp folders this script had already deleted. A stable path prompts once,
+# ever. Set REMSOUND_TESTS_DIR to override (parallel runs, CI, or a path already allow-listed).
+$publishDir = if ([string]::IsNullOrWhiteSpace($env:REMSOUND_TESTS_DIR)) {
+    Join-Path ([System.IO.Path]::GetTempPath()) 'rs-runtests'
+} else {
+    $env:REMSOUND_TESTS_DIR
+}
+# Stable means it can hold last run's leftovers, and a stale file would let a package check pass
+# on something this build never produced. Start empty every time.
+Remove-Item -LiteralPath $publishDir -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host "Building (publish to $publishDir) ..." -ForegroundColor Cyan
 & dotnet publish $proj -c Release -o $publishDir --nologo | Out-Null
 if ($LASTEXITCODE -ne 0) {

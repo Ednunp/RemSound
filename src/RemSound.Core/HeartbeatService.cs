@@ -168,15 +168,22 @@ public sealed class HeartbeatService : IDisposable
         var entries = GetAllPeerHealth();
         if (entries.Count == 0) return "no peers";
         return string.Join(", ", entries.Select(FormatPeer));
-
-        static string FormatPeer(PeerHealth p) => p.State switch
-        {
-            PeerHealthState.Healthy when p.RttMs is { } rtt => $"{p.AudioEndpoint.Address}: {rtt}ms",
-            PeerHealthState.Stale when p.AgeOfLastPong is { } age => $"{p.AudioEndpoint.Address}: stale {age.TotalSeconds:0.0}s",
-            PeerHealthState.Unreachable when p.AgeOfLastPong is { } age => $"{p.AudioEndpoint.Address}: unreachable {age.TotalSeconds:0.0}s",
-            _ => $"{p.AudioEndpoint.Address}: pending",
-        };
     }
+
+    /// <summary>How one peer's health reads in that summary.
+    ///
+    /// <para>Lifted out of <see cref="GetHealthSummary"/> as a nested local function in 2026-08-24 so
+    /// the gate can drive it. This string goes into the main status label, which a screen reader reads
+    /// aloud, and into the diagnostics report — so a healthy peer formatted as "pending" tells Ed his
+    /// link is broken when it is fine, and he has no way to see otherwise. Nothing tested it; the
+    /// health STATES were pinned but the words the user actually hears were not.</para></summary>
+    internal static string FormatPeer(PeerHealth p) => p.State switch
+    {
+        PeerHealthState.Healthy when p.RttMs is { } rtt => $"{p.AudioEndpoint.Address}: {rtt}ms",
+        PeerHealthState.Stale when p.AgeOfLastPong is { } age => $"{p.AudioEndpoint.Address}: stale {age.TotalSeconds:0.0}s",
+        PeerHealthState.Unreachable when p.AgeOfLastPong is { } age => $"{p.AudioEndpoint.Address}: unreachable {age.TotalSeconds:0.0}s",
+        _ => $"{p.AudioEndpoint.Address}: pending",
+    };
 
     private static string KeyFor(IPEndPoint ep) => $"{ep.Address}:{ep.Port}";
 

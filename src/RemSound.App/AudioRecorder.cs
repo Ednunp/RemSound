@@ -714,6 +714,27 @@ internal sealed class AudioRecorder : IDisposable
     /// For 32-bit IEEE float we use the slightly-longer 18-byte fmt chunk variant with
     /// format code 3 and a trailing cbSize=0 field, so the data chunk starts at offset 46.
     /// </summary>
+    /// <summary>The largest data chunk a WAV can describe, and the reason a long recording has to be
+    /// STOPPED rather than allowed to run past it.
+    ///
+    /// <para>The RIFF size and data-chunk-size fields are both unsigned 32-bit. Past 4 GB they wrap,
+    /// and <c>(uint)dataBytesWritten</c> truncated silently — the file kept growing while its header
+    /// described a different, wrong length, so a player would read part of it and stop. At 48 kHz
+    /// stereo that is about 3 hours of 32-bit float, 4 hours of 24-bit or 6 hours of 16-bit: well
+    /// inside a long rehearsal or an overnight, and exactly the kind of failure you discover when you
+    /// open the file. Nothing guarded it (found 2026-08-24).</para>
+    ///
+    /// <para>Stopping is the right answer here rather than carrying on. Everything up to the limit is
+    /// a valid, complete, playable WAV — Dispose patches the header — and the user is TOLD through the
+    /// same route as any other writer death, so they can start a fresh file. Carrying on would trade a
+    /// clean three-hour recording for a corrupt four-hour one. (The real fix for takes this long is
+    /// RF64, or recording in FLAC, which has no such limit.)</para></summary>
+    private const long WavMaxDataBytes = uint.MaxValue - 1024;
+
+    /// <summary>Gate seam: shrink the WAV size cap so the limit can be reached in a test rather than
+    /// in three hours. Zero means use the real one.</summary>
+    internal static long WavDataCapForTest;
+
     private sealed class WavFormatWriter : IFormatWriter
     {
         private const int HeaderRefreshSeconds = 5;
@@ -775,6 +796,18 @@ internal sealed class AudioRecorder : IDisposable
         public void Write(ReadOnlySpan<float> samples)
         {
             if (samples.IsEmpty) return;
+
+            // Stop at the 4 GB the format can describe, and SAY so. See WavMaxDataBytes.
+            var cap = WavDataCapForTest > 0 ? WavDataCapForTest : WavMaxDataBytes;
+            if (dataBytesWritten + (long)samples.Length * 4 > cap)
+            {
+                var hours = dataBytesWritten / 384000.0 / 3600.0;
+                throw new IOException(
+                    $"this WAV has reached the {cap / 1024 / 1024 / 1024.0:0.0} GB a WAV file can describe "
+                    + $"(about {hours:0.0} hours). Everything recorded so far is saved and playable — start a new "
+                    + "recording to carry on, or use FLAC, which has no such limit.");
+            }
+
             int bytesAppended;
             switch (bitsPerSample)
             {

@@ -202,7 +202,7 @@ internal static class CommandLine
                     + Environment.NewLine + "Test window: no audio is carried here."
                 : "RemSound is not answering." + Environment.NewLine
                     + "Start RemSound, or switch the link on in its DAW plugin menu.";
-            panel.JobChanged += (sending, peer) => { /* no audio in the test window - see the status text */ };
+            panel.JobChanged += (send, receive, chosen, all, sendLevel, receiveLevel) => { /* no audio in the test window - see the status text */ };
         });
         return 0;
     }

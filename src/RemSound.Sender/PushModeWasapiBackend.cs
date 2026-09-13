@@ -57,7 +57,7 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
     private readonly Action<string>? onDiagnostic;
     private readonly object gate = new();
 
-    private WasapiCapture? capture;
+    private IWaveIn? capture;
     private MMDevice? captureDevice; // the device backing capture/keepAlive; WE own it and must dispose it (NAudio's WasapiCapture never does)
     private SilentRenderKeepAlive? keepAlive;
     private CaptureSourceSpec? activeSpec;
@@ -152,8 +152,8 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
                 captureDevice = device; // hold it for disposal in StopInternal — see field comment
 
                 capture = spec.Kind == CaptureKind.Loopback
-                    ? new LowLatencyWasapiLoopbackCapture(device, audioBufferMilliseconds: CaptureBufferMs)
-                    : new WasapiCapture(device, useEventSync: true, audioBufferMillisecondsLength: CaptureBufferMs);
+                    ? new LowLatencyWasapiLoopbackCapture(device, CaptureBufferMs, msg => onDiagnostic?.Invoke($"push-wasapi: {msg}"))
+                    : (IWaveIn)new WasapiCapture(device, useEventSync: true, audioBufferMillisecondsLength: CaptureBufferMs);
 
                 var fmt = capture.WaveFormat;
                 sourceChannels = fmt.Channels;

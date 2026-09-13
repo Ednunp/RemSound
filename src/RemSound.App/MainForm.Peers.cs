@@ -115,7 +115,63 @@ public sealed partial class MainForm
                 // The "manual peer" that lost out should be removed from manualPeers too,
                 // otherwise the next discovery refresh re-creates the duplicate.
                 manualPeers.Remove(from);
+                RedirectRememberedEntries(from, to);
             }
+        }
+
+        // --- Same NAME, different address: the remembered peer the DNS got wrong -----------------
+        //
+        // A profile reconnects its peers 140 ms after launch, before discovery has heard anybody, so
+        // a name is resolved by DNS and pinned wherever DNS says. For a phone that is a stale lease as
+        // often as not (the same iPhone: .28, .36, .44, .48, 129.11, 129.35 across a month of logs). A
+        // second later discovery hears the real one, under its OWN instance id, at the address it is
+        // actually on - and the dedupe above only joins the two when DNS happened to be right. On the
+        // other days the app heartbeated a dead address all session while the phone sat one row down
+        // in Discovered, and the follow rule below could not help: a manual record has no candidate
+        // to follow. 2026-09-04 (Anthony Reyers' iPhone pinned at .36, really on .48), and 2026-09-01
+        // 00:10 before it.
+        //
+        // So a manual peer whose entry is a NAME joins the one discovered peer of that name. The pin
+        // moves to the discovered address only if the typed one has never answered a heartbeat: a
+        // typed address that works is the user's choice and stays put. Two discovered peers of one
+        // name is ambiguous, and nothing is merged.
+        var nowUtc = DateTime.UtcNow;
+        var pinsMoved = false;
+        foreach (var manual in manualPeers.Values.ToList())
+        {
+            var (manualHost, _) = TrySplitHostPort(manual.Name);
+            if (string.IsNullOrWhiteSpace(manualHost) || IPAddress.TryParse(manualHost, out _)) continue;
+            var namesakes = byEndpoint.Values
+                .Where(p => !manualPeers.ContainsKey(p.InstanceId)
+                         && string.Equals(p.Name, manualHost, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (namesakes.Count != 1) continue;
+            var found = namesakes[0];
+
+            var manualKey = $"{manual.Address}:{manual.AudioPort}";
+            if (byEndpoint.TryGetValue(manualKey, out var holder) && holder.InstanceId == manual.InstanceId)
+            {
+                byEndpoint.Remove(manualKey);
+            }
+            manualPeers.Remove(manual.InstanceId);
+            RedirectRememberedEntries(manual.InstanceId, found.InstanceId);
+
+            if (!selectedPeerEndpoints.Remove(manual.InstanceId, out var typedEndpoint)) continue;
+            selectedPeerLabels.Remove(manual.InstanceId);
+            if (selectedPeerEndpoints.ContainsKey(found.InstanceId))
+            {
+                // Both were ticked; the discovered one already carries the selection.
+                logFile.Event($"peer {found.Name}: dropped the typed duplicate at {typedEndpoint}, already selected as discovered");
+                continue;
+            }
+            var typedAnswers = HeartbeatStateOf(typedEndpoint) is PeerHealthState.Healthy or PeerHealthState.Stale;
+            var endpoint = typedAnswers ? typedEndpoint : new IPEndPoint(found.Address, found.AudioPort);
+            selectedPeerEndpoints[found.InstanceId] = endpoint;
+            selectedPeerLabels[found.InstanceId] = ResolvePeerDisplayName(found);
+            if (!typedAnswers) pinsMoved = true;
+            logFile.Event(typedAnswers
+                ? $"peer {found.Name}: typed entry joined the discovered peer; keeping {typedEndpoint}, it answers"
+                : $"peer {found.Name}: typed entry resolved to {typedEndpoint}, which never answered; discovery hears them at {endpoint}, using that");
         }
 
         knownPeers.Clear();
@@ -130,10 +186,9 @@ public sealed partial class MainForm
         // thrashed fast enough, tore the receiver's audio session down and back up quickly enough to
         // crash the app (#16, same singer). So: never move off an address that's still answering
         // heartbeats; only follow once the current one has been unreachable for a sustained spell,
-        // only TO an address that is itself answering, and never more than once per cooldown. Net
+        // only TO an address there is proof of life for, and never more than once per cooldown. Net
         // effect — a peer you reach on a working address stays put; a genuine move (the old address
         // really went away) is still followed a few seconds later.
-        var nowUtc = DateTime.UtcNow;
         foreach (var (id, oldEndpoint) in selectedPeerEndpoints.ToList())
         {
             if (!knownPeers.TryGetValue(id, out var peer)) continue;
@@ -155,13 +210,20 @@ public sealed partial class MainForm
                 continue;
             }
             if (nowUtc - downSince < EndpointMoveUnreachableGrace) continue;   // not down long enough yet
-            if (!IsEndpointHeartbeatHealthy(newEndpoint)) continue;           // don't chase a dead address
+            // Don't chase a dead address - but ask a question that CAN be answered. The heartbeat only
+            // ever pings the pinned address, so "is the candidate Healthy" was never true, and this
+            // rule had not fired once in any log since it was written (2026-05-31). An announcement
+            // from that address inside discovery's window is a packet that reached us from it, which
+            // is the proof there is; a pong from it, should we happen to be tracking it, counts too.
+            if (!IsEndpointHeartbeatHealthy(newEndpoint)
+                && !discovery.GetKnownAddresses(id).Any(a => a.Equals(newEndpoint.Address))) continue;
             if (lastEndpointMoveUtc.TryGetValue(id, out var lastMove)
                 && nowUtc - lastMove < EndpointMoveCooldown) continue;        // anti-thrash cooldown
 
             selectedPeerEndpoints[id] = newEndpoint;
             lastEndpointMoveUtc[id] = nowUtc;
             endpointUnreachableSinceUtc.Remove(id);
+            pinsMoved = true;
             logFile.Event($"peer {peer.Name} endpoint moved {oldEndpoint} -> {newEndpoint} (old endpoint unreachable {(int)(nowUtc - downSince).TotalSeconds}s)");
         }
 
@@ -170,6 +232,13 @@ public sealed partial class MainForm
         // to the receiver's allow-list so we don't keep accepting from a stale endpoint we no
         // longer recognise as a selected peer.
         PushAllowedReceiveSenders();
+
+        // A pin that moved has to reach the heartbeat and the sender NOW. Both take their targets
+        // from ApplyAudioRuntime, which until here ran only after a click: a pin moved by the rules
+        // above would have gone on being heartbeated at the OLD address, so the new one could never
+        // read Healthy and the peer would have sat "pending" for ever. Idempotent when nothing has
+        // changed, and it is what every selection handler already calls after a change.
+        if (pinsMoved) ApplyAudioRuntime();
     }
 
     private void SelectPeer(PeerAnnouncement peer) => SelectPeer(peer, fromProfileRestore: false);
@@ -223,6 +292,25 @@ public sealed partial class MainForm
                 if (seen.Add(addr)) allowed.Add(new IPEndPoint(addr, 0));
         }
         receiver.SetAllowedSenders(allowed);
+
+        // Same walk, kept as GROUPS rather than flattened: which addresses belong to one person. The
+        // accept-list above says "audio from any of these paths is welcome"; this says "and these two
+        // paths are the SAME person". A plugin instance claims the one address it was shown, so
+        // without this a peer sending from their other interface reached a session the instance never
+        // looked at — silence on the track while the app played them fine — and the speaker mix did
+        // not know to stay out of the way either. Same peer identity the accept-list already uses
+        // (InstanceId), so nothing new is trusted here.
+        var groups = new List<IPAddress[]>();
+        foreach (var (id, ep) in selectedPeerEndpoints)
+        {
+            var addresses = new List<IPAddress> { ep.Address };
+            foreach (var addr in discovery.GetKnownAddresses(id))
+            {
+                if (!addresses.Any(a => a.Equals(addr))) addresses.Add(addr);
+            }
+            if (addresses.Count > 1) groups.Add(addresses.ToArray());
+        }
+        receiver.SetPeerAddressGroups(groups);
     }
 
     /// <summary>True if the heartbeat currently considers <paramref name="endpoint"/> healthy —
@@ -240,6 +328,30 @@ public sealed partial class MainForm
             }
         }
         return false;
+    }
+
+    /// <summary>The heartbeat's current state for exactly this endpoint; Unknown when it is not being
+    /// tracked at all, which is what a candidate address always is.</summary>
+    private PeerHealthState HeartbeatStateOf(IPEndPoint endpoint)
+    {
+        if (heartbeatService is null) return PeerHealthState.Unknown;
+        foreach (var h in heartbeatService.GetAllPeerHealth())
+        {
+            if (h.AudioEndpoint.Equals(endpoint)) return h.State;
+        }
+        return PeerHealthState.Unknown;
+    }
+
+    /// <summary>When a selection is handed from one instance id to another (a typed entry joining the
+    /// discovered peer it turned out to be), the remembered entries naming the old id follow it.
+    /// Otherwise the entry reappears in the Remembered list while that peer is connected, and ticking
+    /// it later re-resolves the name by DNS instead of selecting the peer discovery already hears.</summary>
+    private void RedirectRememberedEntries(Guid from, Guid to)
+    {
+        foreach (var entry in rememberedPeerInstanceIds.Where(kv => kv.Value == from).Select(kv => kv.Key).ToList())
+        {
+            rememberedPeerInstanceIds[entry] = to;
+        }
     }
 
     /// <summary>

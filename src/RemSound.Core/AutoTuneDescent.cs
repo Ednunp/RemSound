@@ -79,14 +79,68 @@ public static class AutoTuneDescent
         /// <summary>Ticks since the last creep probe, so each step is spaced by a validating wait.</summary>
         public int TicksSinceProbe { get; set; }
 
-        /// <summary>The buffer ran short at <paramref name="atMs"/> — record it as too thin for this
-        /// machine so the creep never returns there. Called on a tick the tuner SKIPS for short-reads,
-        /// which is precisely the evidence that the last probe went too far.</summary>
-        public void NoteShortfallAt(int atMs, Policy? policy = null)
+        /// <summary>
+        /// The buffer ran short at <paramref name="atMs"/> — record it as too thin for this machine
+        /// so the creep never returns there.
+        /// </summary>
+        /// <param name="justifiedMs">What the MEASUREMENTS say this lane needs right now — the
+        /// tuner's own recommendation. The learned floor is capped at this, and that cap is the
+        /// entire point of the parameter.</param>
+        /// <remarks>
+        /// <para><b>Why the cap exists.</b> This used to learn the floor from <paramref name="atMs"/>
+        /// alone — the tuner's OWN current position. An underrun at 79 ms taught it "79 is too thin",
+        /// which justified raising to 84, which taught it 84, which justified 89. Every raise
+        /// manufactured the evidence for the next one: a control loop taking its own output as its
+        /// input, and such a loop can only travel one way.</para>
+        ///
+        /// <para>Ed's laptop, 2026-08-28: 79 → 84 → 89 → 94 → 104 in eighteen seconds while the
+        /// measurement sat at <b>37 ms the whole time</b> and never supported a single step of it. The
+        /// floor climbed 82 → 102 alongside, and since it only reset on a new stream, nothing he typed
+        /// into the box afterwards could get underneath it. "No matter how much I put in manually, it
+        /// never seemed to recover."</para>
+        ///
+        /// <para>Running short far ABOVE what the measurements ask for is not evidence that the buffer
+        /// is too thin. It is evidence that something else is wrong, and more buffer will not fix it.
+        /// So the floor may still be taught by experience — but never further than the evidence
+        /// reaches. 2026-09-06.</para>
+        /// </remarks>
+        public void NoteShortfallAt(int atMs, int justifiedMs, Policy? policy = null)
         {
             var p = policy ?? Default;
-            var floor = atMs + p.CreepStepMs;
+            // Never learn a floor above what the measurements justify. One step of headroom above the
+            // SMALLER of the two, so a genuine shortfall at or below the measured need still teaches.
+            var floor = Math.Min(atMs, Math.Max(justifiedMs, 0)) + p.CreepStepMs;
             if (floor > DiscoveredFloorMs) DiscoveredFloorMs = floor;
+        }
+
+        /// <summary>
+        /// A clean stretch — nothing has run short for a while, so let the learned floor come DOWN.
+        /// </summary>
+        /// <remarks>
+        /// <para>Without this the floor is permanent for the life of a stream: learned in the noisy
+        /// first seconds after a connect, or during a spell when the machine was busy, and then
+        /// binding for the rest of the session however quiet things become afterwards. That is what
+        /// made a bad first twenty seconds cost Ed the following twenty minutes.</para>
+        ///
+        /// <para>One step at a time, and only after a validating quiet spell — the same shape as the
+        /// creep itself, so one lucky tick can never unlearn a real limit. This does NOT speed up the
+        /// descent: it lifts a ceiling that was stopping the descent being attempted at all. The trim
+        /// glide and the per-tick descent limit are untouched. 2026-09-06.</para>
+        /// </remarks>
+        public void NoteCleanRun(int cleanTicks, Policy? policy = null)
+        {
+            if (DiscoveredFloorMs <= 0) return;
+            var p = policy ?? Default;
+            if (cleanTicks <= 0 || cleanTicks % Math.Max(1, p.CreepIntervalTicks) != 0) return;
+            DiscoveredFloorMs = Math.Max(0, DiscoveredFloorMs - p.CreepStepMs);
+        }
+
+        /// <summary>Put back a floor learned earlier. After a wake the audio is restarted, but the network and the devices
+        /// the floor was learned on are the same ones, so it still describes them.</summary>
+        public void RestoreFloor(int floorMs)
+        {
+            DiscoveredFloorMs = Math.Max(0, floorMs);
+            TicksSinceProbe = 0;
         }
 
         /// <summary>Conditions changed (a new stream): the discovered floor described the old ones.</summary>

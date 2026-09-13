@@ -50,6 +50,7 @@ internal static partial class SelfTest
 
         var restoreMuted = CuePlayer.GloballyMuted;
         var restoreChecks = CheckSoundService.Suppressed;
+        var restoreSink = UiChangeLog.Sink;
         CuePlayer.GloballyMuted = true;
         CheckSoundService.Suppressed = true;
         try
@@ -58,6 +59,18 @@ internal static partial class SelfTest
             var dialogs = 0;
             var controlsAudited = 0;
             var effectsProven = 0;
+            // Which dialog controls actually change stored configuration, and which of those SAY so.
+            // Ed, 2026-08-24: "let's do the dialogues next let's complete it." The main window's rule
+            // is per-control because its controls are enumerated in a spec table; a dialog sweep has
+            // no such table, so the rule here is derived from behaviour instead — if driving it moved
+            // stored configuration, it changed something a user did on purpose, and that must leave a
+            // trace. New dialog controls are covered the moment they are added, with nothing to keep
+            // up to date.
+            var changedConfig = new List<string>();
+            var loggedIt = new List<string>();
+            var dialogLogCapture = new List<string>();
+
+            UiChangeLog.Sink = (what, value) => { lock (dialogLogCapture) dialogLogCapture.Add($"{what} → {value}"); };
 
             foreach (var (name, make) in DialogFactories())
             {
@@ -100,22 +113,59 @@ internal static partial class SelfTest
                         // rest persist on OK and are counted separately rather than silently skipped.
                         if (!c.Enabled) continue;
                         var before = SnapshotConfig();
+                        // (5) THE LOG. Captured around the drive, so a control that changes stored
+                        // configuration can be required to SAY so — see below.
+                        dialogLogCapture.Clear();
                         try { DriveDialogControl(c); }
                         catch (Exception ex) { problems.Add($"{name} / '{DialogControlName(c)}': driving it threw {ex.GetType().Name}: {ex.Message}"); continue; }
-                        if (SnapshotConfig() != before) effectsProven++;
+                        if (SnapshotConfig() == before) continue;
+                        effectsProven++;
+                        changedConfig.Add($"{name} / '{DialogControlName(c)}'");
+                        if (dialogLogCapture.Count > 0) loggedIt.Add($"{name} / '{DialogControlName(c)}'");
                     }
                 }
                 finally { try { dlg.Dispose(); } catch { } }
             }
 
-            if (problems.Count > 0) throw new CheckFailed(string.Join("; ", problems));
+            // Assert the POSITIVE facts, not only the absence of problems. Reporting "no problems"
+            // after auditing nothing is the exact failure this suite exists to catch, and until
+            // 2026-08-24 its passing path executed no assertion at all: had DialogFactories() come
+            // back empty, or every dialog stopped exposing controls, it would still have returned a
+            // confident summary.
+            var declared = DialogFactories().Count();
+            Check(dialogs == declared,
+                $"every declared dialog must have been built and audited ({dialogs} of {declared}) — a dialog that "
+                + "quietly drops out of this sweep is a dialog nothing checks");
+            Check(controlsAudited > 0,
+                "the sweep found no interactive control in any dialog — it has stopped walking them, and 'no problems' "
+                + "over nothing is not a pass");
+            Check(effectsProven > 0,
+                $"not one of the {controlsAudited} controls changed any persisted state when driven — EFFECT is the whole "
+                + "point of this suite over the old existence-only audit, and it proved nothing this run");
+            // (5) AND THE LOG. Any dialog control that CHANGED stored configuration changed something
+            // the user did on purpose, and that must leave a trace. Derived from behaviour rather
+            // than from a spec table, so a dialog control added tomorrow is covered the moment it
+            // persists anything — there is nothing to keep up to date and nothing to forget.
+            var silent = changedConfig.Except(loggedIt).ToList();
+            Check(silent.Count == 0,
+                $"{silent.Count} dialog control(s) changed stored configuration and recorded NOTHING: "
+                + $"{string.Join(", ", silent)}. A setting a user changed on purpose, with no trace, is a setting "
+                + "nobody can account for afterwards — and the night a log matters is never the night there is time "
+                + "to add one");
+            Check(loggedIt.Count > 0,
+                "not one dialog control was proven to log what it changed — the log half of this suite proved nothing");
+
+            Check(problems.Count == 0, string.Join("; ", problems));
+
             return $"{dialogs} dialogs, {controlsAudited} interactive controls audited (accessibility + theme + driven); "
-                 + $"{effectsProven} persisted a change on the spot, {controlsAudited - effectsProven} persist on OK or are plumbing";
+                 + $"{effectsProven} persisted a change on the spot, {controlsAudited - effectsProven} persist on OK or are plumbing; "
+                 + $"all {loggedIt.Count} that persisted a change also LOGGED it";
         }
         finally
         {
             CuePlayer.GloballyMuted = restoreMuted;
             CheckSoundService.Suppressed = restoreChecks;
+            UiChangeLog.Sink = restoreSink;
         }
     }
 

@@ -1558,7 +1558,7 @@ RemSound reacts the moment a device is plugged in or unplugged, so an unplugged 
 
 ### No sound after the computer wakes from sleep
 
-RemSound notices when the computer has just woken up, waits a moment for any USB sound devices to come back to life, and rebuilds its audio engine from scratch — you'll briefly see a small “Reconnecting to audio driver” window during the rebuild, then sound should resume on its own. If sound still doesn't come back, click on the ASIO driver picker on the Audio inputs and outputs tab and re-pick the same driver (or pick _(none)_ and then re-pick your driver). That triggers the same full rebuild manually. As a last resort, quit and reopen RemSound.
+RemSound notices when the computer has just woken up, waits a moment for any USB sound devices to come back to life, then stops all its audio and starts it again from scratch — you'll briefly see a small “Reconnecting to audio driver” window while it does. It then puts back the buffer sizes the automatic tuning had settled on before the sleep, so the delay should be what it was when you left. Sound should resume on its own. If sound still doesn't come back, click on the ASIO driver picker on the Audio inputs and outputs tab and re-pick the same driver (or pick _(none)_ and then re-pick your driver). That triggers the same full rebuild manually. As a last resort, quit and reopen RemSound.
 
 ### A sound card you were listening through was unplugged
 

@@ -113,6 +113,40 @@ internal sealed class SenderLane
     private long audioFramesSent;
     public long TakeAudioFramesSent() => Interlocked.Exchange(ref audioFramesSent, 0);
 
+    // Largest gap between two audio frames LEAVING this lane, in Stopwatch ticks. Reset on read.
+    //
+    // This is the number the far end's jitter buffer actually feels, and nothing else here measures
+    // it. A lane's per-second packet rate can look perfect while its packets leave in clumps, and a
+    // clump plus a gap is exactly what an underrun on somebody else's machine is made of. The two
+    // capture lanes are clocked by an audio callback and should sit at the frame period; the PLUGIN
+    // lane is fed from the bridge's network receive thread, which is not an audio thread and is also
+    // answering a receiving instance's requests, so it is the one this exists for. Comparing the two
+    // in the same log line is the whole point — one is the control.
+    //
+    // Producer thread only, like the peak and the probe beside it.
+    private long lastEmitTicks;
+    private long maxEmitGapTicks;
+
+    private void NoteEmitted()
+    {
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        // Skip the first emit after a (re)start: the gap since "never" is not a gap.
+        if (lastEmitTicks != 0)
+        {
+            var gap = now - lastEmitTicks;
+            if (gap > maxEmitGapTicks) maxEmitGapTicks = gap;
+        }
+        lastEmitTicks = now;
+    }
+
+    /// <summary>Largest gap between two audio frames leaving this lane since the last call, in
+    /// milliseconds. Resets on read.</summary>
+    public int TakeMaxEmitGapMs()
+    {
+        var ticks = Interlocked.Exchange(ref maxEmitGapTicks, 0);
+        return (int)(ticks * 1000 / System.Diagnostics.Stopwatch.Frequency);
+    }
+
     // Which render route this lane announces in its format packets. The receiver reads the
     // Lane byte on the wire and tags the matching SessionPlayout, which makes PlayoutEngine
     // route the lane's audio to the corresponding per-route IWaveProvider surface (lane
@@ -150,6 +184,7 @@ internal sealed class SenderLane
         streamId = NewStreamId();
         lastFormatPacketUtc = DateTime.MinValue;
         frameAccumulatorWritten = 0;
+        lastEmitTicks = 0;
     }
 
     /// <summary>Reset per-lane counters and pick a new streamId. Called from
@@ -162,6 +197,7 @@ internal sealed class SenderLane
         formatSequence = 0;
         frameAccumulatorWritten = 0;
         lastFormatPacketUtc = DateTime.MinValue;
+        lastEmitTicks = 0;
     }
 
     /// <summary>
@@ -332,6 +368,7 @@ internal sealed class SenderLane
         var totalParts = (byte)((ctLen + maxPart - 1) / maxPart);
         pcmFrameId++;
         Interlocked.Increment(ref audioFramesSent);
+        NoteEmitted();
         for (byte part = 0; part < totalParts; part++)
         {
             var offset = part * maxPart;
@@ -365,6 +402,7 @@ internal sealed class SenderLane
         if (cryptoGcm is null) return; // no password yet → never send audio in the clear
         var ctLen = RemSoundCrypto.EncryptInto(cryptoGcm, cryptoNonces!, opusPlainScratch.AsSpan(0, encLen), cipherScratch);
         Interlocked.Increment(ref audioFramesSent);
+        NoteEmitted();
         SendAudio(cipherScratch.AsSpan(0, ctLen));
     }
 
@@ -385,9 +423,15 @@ internal sealed class SenderLane
         // Mixed and the receiver routes the session to its legacy mix bus; in BothIndependent
         // senders this is WasapiLane or AsioLane and the receiver routes to the matching
         // per-route IWaveProvider surface.
+        // OUR OWN capture latency travels with the format, so the receiving end can report the real
+        // journey instead of substituting its own 10 ms guess for a stage that happens HERE. One
+        // figure, not one per lane: this machine mixes every ticked capture source into a single
+        // outgoing stream, so there is one capture stage. The render LANE is a receiver-side idea,
+        // and the sender's worst-source figure is what its mix actually waits for. 2026-08-24.
+        var captureLatencyMs = owner.ReportedInputLatencyMs;
         var format = codec == AudioTransportCodec.Opus
-            ? new AudioFormatInfo(48000, 2, 16, 1, 4, 192_000, (int)AudioTransportCodec.Opus, opusFrameSamples, route)
-            : new AudioFormatInfo(48000, 2, 24, 1, 6, 288_000, (int)AudioTransportCodec.Pcm, owner.PcmFrameSamplesPerChannel, route);
+            ? new AudioFormatInfo(48000, 2, 16, 1, 4, 192_000, (int)AudioTransportCodec.Opus, opusFrameSamples, route, captureLatencyMs)
+            : new AudioFormatInfo(48000, 2, 24, 1, 6, 288_000, (int)AudioTransportCodec.Pcm, owner.PcmFrameSamplesPerChannel, route, captureLatencyMs);
 
         // Allocate the extended (36-byte) format payload — see RemPacket.FormatPayloadExtendedSize
         // for the backward-compat contract. Old receivers parse the first 32 bytes and ignore
@@ -395,11 +439,13 @@ internal sealed class SenderLane
         // belongs to. The Lane value carried here comes from the AudioFormatInfo constructed
         // above, which currently always sets Mixed for the default lane; Stage 4 will set
         // WasapiLane / AsioLane on the second lane in BothIndependent mode.
-        Span<byte> packet = stackalloc byte[RemPacket.HeaderSize + RemPacket.FormatPayloadWithFingerprintSize];
+        Span<byte> packet = stackalloc byte[RemPacket.HeaderSize + RemPacket.FormatPayloadWithCaptureSize];
         RemPacket.WriteHeader(packet, RemPacketType.Format, streamId, ++formatSequence);
         // Append our password fingerprint so the peer can tell whether its profile password
-        // matches ours without anyone sending the password. WriteFormatPayload returns 36 (no
-        // fingerprint set) or 44 (fingerprint written); we send exactly that many payload bytes.
+        // matches ours without anyone sending the password, and our capture latency after it.
+        // WriteFormatPayload returns 36 (no fingerprint), 44 (fingerprint) or 46 (fingerprint +
+        // capture); we send exactly that many payload bytes, and every reader takes a MINIMUM
+        // length, so a peer that has never heard of the last field is unaffected.
         var payloadLen = RemPacket.WriteFormatPayload(packet[RemPacket.HeaderSize..], format, owner.AudioFingerprint);
         owner.SendToAll(packet[..(RemPacket.HeaderSize + payloadLen)]);
     }

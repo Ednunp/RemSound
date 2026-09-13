@@ -66,12 +66,23 @@ public sealed class PluginBridgeLink : IDisposable
         if (!destination.Address.Equals(Loopback)) return false;
         if (payload.Length > PluginBridgeProtocol.MaxAudioBytes) return false;
 
-        Span<byte> packet = stackalloc byte[PluginBridgeProtocol.HeaderSize + PluginBridgeProtocol.MaxAudioBytes];
+        // Sized to what is actually being sent, NOT to the maximum.
+        //
+        // This used to reserve HeaderSize + MaxAudioBytes — 32,784 bytes — on every call. C# zeroes a
+        // stackalloc, so each call memset 32 KB regardless of payload, and this runs on the DAW's
+        // audio thread once per block: a receiving instance was clearing 32 KB to send a 20-byte
+        // request. At a 128-frame block that is around 12 MB/s of pointless writes on the one thread
+        // in the process that must never be made to work for nothing, and it is exactly the shape
+        // that produces a "RemSound makes my DAW crackle" report with nothing in the log to show for
+        // it. Found 2026-08-24 reading the file against its own promise two classes over: "nothing
+        // allocates on the audio thread".
+        var total = PluginBridgeProtocol.HeaderSize + payload.Length;
+        Span<byte> packet = stackalloc byte[total];
         PluginBridgeProtocol.WriteHeader(packet, type, instanceHash, peer, payload.Length);
         payload.CopyTo(packet[PluginBridgeProtocol.HeaderSize..]);
         try
         {
-            socket.SendTo(packet[..(PluginBridgeProtocol.HeaderSize + payload.Length)], SocketFlags.None, destination);
+            socket.SendTo(packet, SocketFlags.None, destination);
             return true;
         }
         catch (SocketException) { return false; }

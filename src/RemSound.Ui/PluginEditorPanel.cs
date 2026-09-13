@@ -18,8 +18,17 @@ namespace RemSound.App;
 ///
 /// <para>Deliberately SMALL. Password, peers and audio settings stay in the main app (Ed's call:
 /// "read the profile from the standalone app... it's far easier"), so the plugin only has to answer
-/// which job this instance is doing. One person per track: an instance either sends this DAW track,
-/// or receives one chosen peer onto it.</para>
+/// what this instance does and how loud each direction is.</para>
+///
+/// <para><b>Two switches, not a mode.</b> Send and receive are independent tick boxes, so one
+/// instance can do both at once and a track needs one plugin rather than two. Both start OFF: an
+/// instance that broadcast a track the moment it was inserted would be a nasty surprise, and for a
+/// screen-reader user an invisible one.</para>
+///
+/// <para><b>A checked list, not a chooser.</b> One track can carry several people — "listen to 3
+/// people talking while they are listening to your production session" — and making that mean three
+/// plugin instances would be the tool getting in the way. The list is therefore checkable, with an
+/// "all peers" tick above it for the case where the answer is simply everybody.</para>
 ///
 /// <para><b>Talks to the world only through callbacks.</b> This assembly holds the house accessible
 /// controls and nothing else — no Core, no audio engine — so the panel takes its peer list, its job
@@ -28,21 +37,75 @@ namespace RemSound.App;
 /// </summary>
 internal sealed class PluginEditorPanel : TableLayoutPanel
 {
-    private readonly ListBox jobList = new()
+    private readonly AccessibleCheckBox sendBox = new()
     {
-        Width = 320,
-        Height = 40,
-        IntegralHeight = false,
-        AccessibleName = "What this plugin does (Alt+W)",
+        Text = "Se&nd this track to my peers (Alt+N)",
+        AutoSize = true,
+        AccessibleName = "Send this track to my peers",
     };
 
-    private readonly ListBox peerList = new()
+    private readonly AccessibleCheckBox receiveBox = new()
+    {
+        Text = "&Receive peers onto this track (Alt+R)",
+        AutoSize = true,
+        AccessibleName = "Receive peers onto this track",
+    };
+
+    private readonly AccessibleCheckBox allPeersBox = new()
+    {
+        Text = "Receive all peers, including whoever &joins later (Alt+J)",
+        AutoSize = true,
+        AccessibleName = "Receive all peers, including whoever joins later",
+    };
+
+    // A CHECKED list, not a plain one. A track can carry several people — three of them talking while
+    // you work is the case that asked for this — and a single-selection list would mean one plugin
+    // instance per person. NVDA reads a CheckedListBox item as its name plus checked or unchecked, and
+    // space toggles it, so the control says everything it needs to without any custom drawing.
+    private readonly CheckedListBox peerList = new()
     {
         Width = 320,
-        Height = 80,
+        Height = 96,
         IntegralHeight = false,
-        AccessibleName = "Peer to receive from (Alt+P)",
+        CheckOnClick = true,
+        AccessibleName = "Peers to receive (Alt+P)",
     };
+
+    // Spin boxes rather than sliders, on purpose. NVDA reads a NumericUpDown's value on every arrow
+    // press and the number it reads is the number the engine uses; a TrackBar announces a position on
+    // an arbitrary scale and cannot be typed into. In DECIBELS: 0 is unity, which is the number a DAW
+    // user recognises, and the bottom of the range is a real off rather than very quiet.
+    private readonly NumericUpDown sendLevel = new()
+    {
+        Width = 90,
+        DecimalPlaces = 1,
+        Increment = 1m,
+        Minimum = MinLevelDb,
+        Maximum = MaxLevelDb,
+        Value = 0m,
+        AccessibleName = "Send level in decibels, 0 is unity (Alt+L)",
+    };
+
+    private readonly NumericUpDown receiveLevel = new()
+    {
+        Width = 90,
+        DecimalPlaces = 1,
+        Increment = 1m,
+        Minimum = MinLevelDb,
+        Maximum = MaxLevelDb,
+        Value = 0m,
+        AccessibleName = "Receive level in decibels, 0 is unity (Alt+V)",
+    };
+
+    /// <summary>The range of both level controls, in dB. Mirrors the plugin's own limits; kept here as
+    /// plain numbers because this assembly deliberately has no reference to the engine.</summary>
+    private const decimal MinLevelDb = -60m;
+    private const decimal MaxLevelDb = 12m;
+
+    /// <summary>Who this instance is receiving, as addresses. The panel's own memory rather than a
+    /// read of the control, because somebody who disconnects leaves the list and must NOT be forgotten
+    /// — they come back to the same track when they return.</summary>
+    private readonly HashSet<string> checkedAddresses = new(StringComparer.Ordinal);
 
     private readonly AccessibleCheckBox activeBox = new()
     {
@@ -65,6 +128,19 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
     private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 1000 };
     private string lastStatus = "";
 
+    /// <summary>Non-zero while the panel is writing its OWN controls — seeding them from the engine,
+    /// or rebuilding the peer list. Assigning SelectedIndex fires SelectedIndexChanged exactly as a
+    /// keystroke does, and WinForms gives no way to tell the two apart, so the difference has to be
+    /// recorded here. Without it every programmatic write is indistinguishable from a user decision
+    /// and gets announced back to the engine as one.</summary>
+    private int suppressAnnounce;
+
+    /// <summary>Where the keyboard was in the list, by ADDRESS. A rebuild puts the user back on the
+    /// same person rather than on the same position: somebody joining or leaving shifts every position
+    /// after them, and landing on whoever inherited the number is exactly the confusion this whole
+    /// design is trying to avoid.</summary>
+    private string? cursorAddress;
+
     private sealed record PeerEntry(string Address, string Name)
     {
         public override string ToString() => Name;
@@ -75,38 +151,49 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Func<IReadOnlyList<(string Address, string Name)>>? PeerSource { get; set; }
 
-    /// <summary>Raised when the user changes what this instance does: sending, or receiving the peer
-    /// at the given address (null when sending).</summary>
+    /// <summary>Raised when the user changes anything about what this instance does: either direction,
+    /// who is being received (empty unless receiving), whether to take all peers, or either level in
+    /// dB.</summary>
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
-    public Action<bool, string?>? JobChanged { get; set; }
+    public Action<bool, bool, IReadOnlyList<string>, bool, float, float>? JobChanged { get; set; }
 
     /// <summary>The plain-English status line. Read rather than pushed, so the panel never has to be
     /// told about something changing behind it.</summary>
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Func<string>? StatusSource { get; set; }
 
-    /// <summary>Is this instance sending its track, rather than receiving a peer?</summary>
-    public bool IsSending => jobList.SelectedIndex == 0;
+    /// <summary>What the instance is ALREADY doing, read once as the panel comes up.
+    ///
+    /// <para>A panel is built fresh every time the DAW opens the window, and it used to be born on its
+    /// own defaults and then announce those defaults back at the engine as though the user had chosen
+    /// them. Opening the window therefore threw away whatever the instance was doing: the peer was
+    /// released and the job flipped, about 20 ms before the window was even shown (Anthony Reyers,
+    /// 2026-08-28, five times out of five in one session). The panel must open showing the truth, not
+    /// asserting a default.</para></summary>
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Func<(bool Send, bool Receive, IReadOnlyList<string> Peers, bool AllPeers, bool Active, float SendLevelDb, float ReceiveLevelDb)>? InitialStateSource { get; set; }
 
-    /// <summary>The address of the chosen peer, or null when sending or when none is chosen.</summary>
-    public string? ChosenPeerAddress => peerList.SelectedItem is PeerEntry entry ? entry.Address : null;
+    /// <summary>Is this instance sending its track?</summary>
+    public bool SendChecked => sendBox.Checked;
+
+    /// <summary>Is this instance receiving a peer onto its track?</summary>
+    public bool ReceiveChecked => receiveBox.Checked;
+
+    /// <summary>The addresses this instance is receiving, including anybody who is currently
+    /// disconnected.</summary>
+    public IReadOnlyList<string> ChosenPeerAddresses => [.. checkedAddresses];
+
+    /// <summary>Take everybody, and follow the session as people come and go.</summary>
+    public bool AllPeersChecked => allPeersBox.Checked;
 
     public PluginEditorPanel()
     {
         ColumnCount = 2;
-        RowCount = 4;
+        RowCount = 8;
         AutoSize = true;
         Padding = new Padding(12);
         ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-
-        // One person per track (Ed, 2026-08-15): an instance either sends this track, or receives
-        // ONE peer onto it. Splitting a single machine's devices into separate streams was
-        // deliberately dropped — independent jitter buffers would let a guitar and a vocal from the
-        // same performance drift apart at the far end, which is worse than latency.
-        jobList.Items.Add("Send this track to my peers");
-        jobList.Items.Add("Receive one peer onto this track");
-        jobList.SelectedIndex = 0;
 
         peerList.Items.Add(NoPeers);
         peerList.SelectedIndex = 0;
@@ -115,27 +202,69 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
         // Placeholder until the first real status arrives. It used to read "Latency: not receiving",
         // naming a quantity this panel never reports — nothing else here mentions latency and the
         // live wording (RemSoundPlugin.DescribeStatus) doesn't either. 2026-08-23.
-        statusReadout.Text = "Not connected." + Environment.NewLine + "Not receiving.";
+        statusReadout.Text = "Not connected." + Environment.NewLine + "Doing nothing yet.";
 
-        FormLayoutRows.AddRow(this, 0, "&What this plugin does (Alt+W)", jobList, c => c.Focus());
-        FormLayoutRows.AddRow(this, 1, "&Peer to receive from (Alt+P)", peerList, c => c.Focus());
-        Controls.Add(activeBox, 0, 2);
+        Controls.Add(sendBox, 0, 0);
+        SetColumnSpan(sendBox, 2);
+        Controls.Add(receiveBox, 0, 1);
+        SetColumnSpan(receiveBox, 2);
+        Controls.Add(allPeersBox, 0, 2);
+        SetColumnSpan(allPeersBox, 2);
+        FormLayoutRows.AddRow(this, 3, "&Peers to receive (Alt+P)", peerList, c => c.Focus());
+        FormLayoutRows.AddRow(this, 4, "Send &level in dB (Alt+L)", sendLevel, c => c.Focus());
+        FormLayoutRows.AddRow(this, 5, "Receive le&vel in dB (Alt+V)", receiveLevel, c => c.Focus());
+        Controls.Add(activeBox, 0, 6);
         SetColumnSpan(activeBox, 2);
-        FormLayoutRows.AddRow(this, 3, "&Status (Alt+S)", statusReadout, c => c.Focus());
+        FormLayoutRows.AddRow(this, 7, "&Status (Alt+S)", statusReadout, c => c.Focus());
 
-        jobList.TabIndex = 0;
-        peerList.TabIndex = 1;
-        activeBox.TabIndex = 2;
-        statusReadout.TabIndex = 3;
+        sendBox.TabIndex = 0;
+        receiveBox.TabIndex = 1;
+        allPeersBox.TabIndex = 2;
+        peerList.TabIndex = 3;
+        sendLevel.TabIndex = 4;
+        receiveLevel.TabIndex = 5;
+        activeBox.TabIndex = 6;
+        statusReadout.TabIndex = 7;
 
-        // Receiving is the only job that needs a peer chosen; sending goes to everyone, exactly as
-        // the app does today. Kept as enable/disable rather than hide, so the tab order never shifts
-        // under a screen-reader user mid-session.
-        jobList.SelectedIndexChanged += (_, _) => { UpdatePeerListEnabled(); AnnounceJob(); };
-        peerList.SelectedIndexChanged += (_, _) => AnnounceJob();
-        // Unticking Active is the user's own bypass: it hands the peer back to RemSound's speakers
-        // rather than leaving them nowhere. Same effect as the DAW bypassing the plugin, reachable
-        // from inside the window for anyone whose host makes bypass hard to find by keyboard.
+        // Only receiving needs a peer chosen; sending goes to everyone, exactly as the app does today.
+        // Kept as enable/disable rather than hide, so the tab order never shifts under a screen-reader
+        // user mid-session.
+        sendBox.CheckedChanged += (_, _) => AnnounceJob();
+        receiveBox.CheckedChanged += (_, _) => { UpdatePeerListEnabled(); AnnounceJob(); };
+        allPeersBox.CheckedChanged += (_, _) => { UpdatePeerListEnabled(); AnnounceJob(); };
+        // ItemCheck, not ItemCheckChanged: WinForms raises it BEFORE the item's state has moved, so the
+        // new value comes from the event and the announcement is deferred to the message loop, by which
+        // time the control agrees with us. Moving the SELECTION announces nothing — it is only the
+        // cursor, and a list where arrowing past somebody put them on your track would be a trap.
+        peerList.ItemCheck += (_, e) =>
+        {
+            if (suppressAnnounce > 0) return;
+            if (e.Index < 0 || e.Index >= peerList.Items.Count) return;
+            if (peerList.Items[e.Index] is not PeerEntry entry) return;
+            if (e.NewValue == CheckState.Checked) checkedAddresses.Add(entry.Address);
+            else checkedAddresses.Remove(entry.Address);
+            // Deferred so the control agrees with us by the time it is read, and guarded because a
+            // host can close the window between the tick and the invoke - an exception on the way out
+            // of a plugin window is a crashed DAW, not a logged warning.
+            try
+            {
+                if (IsHandleCreated && !IsDisposed) BeginInvoke(new Action(AnnounceJob));
+                else AnnounceJob();
+            }
+            catch (ObjectDisposedException) { /* the window went away underneath the tick */ }
+            catch (InvalidOperationException) { /* ...or its handle did */ }
+        };
+        peerList.SelectedIndexChanged += (_, _) =>
+        {
+            if (suppressAnnounce > 0) return;
+            cursorAddress = peerList.SelectedItem is PeerEntry entry ? entry.Address : null;
+        };
+        sendLevel.ValueChanged += (_, _) => AnnounceJob();
+        receiveLevel.ValueChanged += (_, _) => AnnounceJob();
+        // Unticking Active is the user's own bypass: it hands the peer back to RemSound's speakers and
+        // stops the track going out, without forgetting which directions were on. Same effect as the
+        // DAW bypassing the plugin, reachable from inside the window for anyone whose host makes
+        // bypass hard to find by keyboard.
         activeBox.CheckedChanged += (_, _) => AnnounceJob();
 
         refreshTimer.Tick += (_, _) => Refresh(fromTimer: true);
@@ -152,12 +281,39 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
     internal bool PeerListEnabledForTest => peerList.Enabled;
     internal string StatusTextForTest => statusReadout.Text;
     internal void SelectPeerForTest(int index) => peerList.SelectedIndex = index;
-    internal void SelectJobForTest(int index) => jobList.SelectedIndex = index;
+    internal void SetPeerCheckedForTest(int index, bool on) => peerList.SetItemChecked(index, on);
+    internal bool PeerCheckedForTest(int index) => peerList.GetItemChecked(index);
+    internal IReadOnlyList<string> CheckedPeersForTest => ChosenPeerAddresses;
+    internal void SetAllPeersForTest(bool on) => allPeersBox.Checked = on;
+    internal void SetSendForTest(bool on) => sendBox.Checked = on;
+    internal void SetReceiveForTest(bool on) => receiveBox.Checked = on;
+    internal void SetSendLevelForTest(float db) => sendLevel.Value = ClampLevel(db);
+    internal void SetReceiveLevelForTest(float db) => receiveLevel.Value = ClampLevel(db);
+    internal decimal SendLevelForTest => sendLevel.Value;
+    internal decimal ReceiveLevelForTest => receiveLevel.Value;
+    internal decimal LevelMinimumForTest => sendLevel.Minimum;
+    internal decimal LevelMaximumForTest => sendLevel.Maximum;
     internal void SetActiveForTest(bool active) => activeBox.Checked = active;
+    internal IReadOnlyList<Control> TabOrderForTest =>
+        Controls.Cast<Control>().Where(c => c.TabStop).OrderBy(c => c.TabIndex).ToList();
+
+    /// <summary>How many times the peer list has actually been cleared and repopulated.
+    ///
+    /// <para>Here because the screen-reader rule cannot be checked by its OUTCOME. The gate asserted
+    /// that an unchanged refresh left the selected index where it was — but the rebuild restores the
+    /// selection by address afterwards, so the index lands back in the right place whether or not the
+    /// list was rebuilt, and forcing a rebuild every tick left the step green (2026-08-24). The harm
+    /// is the rebuild itself: NVDA re-announces the list every time it is repopulated, once a second,
+    /// which makes the control unusable and looks perfectly fine to anyone testing by eye.</para></summary>
+    internal int PeerListRebuildsForTest { get; private set; }
 
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
+        // Seed BEFORE the first refresh. The refresh rebuilds the peer list, and that rebuild is what
+        // used to announce the panel's defaults; seeding first means the rebuild has the user's real
+        // job and peer to preserve rather than a default to assert.
+        ApplyInitialState();
         Refresh(fromTimer: false);
         refreshTimer.Start();
     }
@@ -169,45 +325,102 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
     }
 
     /// <summary>Tell the engine what this instance is doing now. The peer is reported ONLY while this
-    /// instance is actually receiving one — switching to sending, or unticking Active, must hand that
+    /// instance is actually receiving one — unticking Receive, or unticking Active, must hand that
     /// person back to RemSound's speakers rather than leaving them claimed by a plugin that is no
     /// longer playing them. Getting this wrong leaves someone mute with nothing on screen to explain
     /// it, which is the worst failure this feature has.</summary>
     private void AnnounceJob()
     {
-        var sending = IsSending || !activeBox.Checked;
-        JobChanged?.Invoke(sending, sending ? null : ChosenPeerAddress);
+        if (suppressAnnounce > 0) return;
+        var active = activeBox.Checked;
+        var send = active && sendBox.Checked;
+        var receive = active && receiveBox.Checked;
+        JobChanged?.Invoke(send, receive, receive ? ChosenPeerAddresses : [], receive && allPeersBox.Checked,
+                           (float)sendLevel.Value, (float)receiveLevel.Value);
     }
 
-    private void UpdatePeerListEnabled() => peerList.Enabled = jobList.SelectedIndex == 1;
+    /// <summary>Show what the instance is already doing, before anything is announced. Runs under the
+    /// suppression flag: these writes are the panel catching up with the engine, and reporting them
+    /// back as user choices is the whole bug this exists to stop.</summary>
+    private void ApplyInitialState()
+    {
+        if (InitialStateSource?.Invoke() is not { } state) return;
+        suppressAnnounce++;
+        try
+        {
+            sendBox.Checked = state.Send;
+            receiveBox.Checked = state.Receive;
+            allPeersBox.Checked = state.AllPeers;
+            activeBox.Checked = state.Active;
+            sendLevel.Value = ClampLevel(state.SendLevelDb);
+            receiveLevel.Value = ClampLevel(state.ReceiveLevelDb);
+            checkedAddresses.Clear();
+            foreach (var address in state.Peers) checkedAddresses.Add(address);
+            UpdatePeerListEnabled();
+        }
+        finally { suppressAnnounce--; }
+    }
+
+    /// <summary>A NumericUpDown throws if it is handed a value outside its own range, and a level
+    /// arriving from a saved project is outside our control. Clamped rather than trusted: an exception
+    /// here would take the window down as it opens.</summary>
+    private static decimal ClampLevel(float value) => Math.Clamp((decimal)value, MinLevelDb, MaxLevelDb);
+
+    /// <summary>The list is for choosing individuals, so it is off when there is nobody to choose
+    /// between — either the instance is not receiving, or it is taking everybody. Disabled rather than
+    /// hidden, so the tab order never shifts under a screen-reader user mid-session.</summary>
+    private void UpdatePeerListEnabled() => peerList.Enabled = receiveBox.Checked && !allPeersBox.Checked;
 
     /// <summary>Pull the peer list and the status text. Named and internal rather than an inline
     /// timer lambda so the gate can drive the REAL refresh instead of waiting a second for a tick.</summary>
     internal void Refresh(bool fromTimer)
     {
         var peers = PeerSource?.Invoke() ?? [];
-        var chosen = ChosenPeerAddress;
 
         // Only rebuild when the list has actually CHANGED. Rebuilding under a screen-reader user
         // every second would re-announce the list and move their place in it — the list would be
         // unusable, and the cause would be invisible to anyone testing by eye.
         if (PeerListDiffers(peers))
         {
-            peerList.BeginUpdate();
-            peerList.Items.Clear();
-            if (peers.Count == 0) peerList.Items.Add(NoPeers);
-            else foreach (var (address, name) in peers) peerList.Items.Add(new PeerEntry(address, name));
-            // Keep the user on the same person if they are still there.
-            var restored = false;
-            for (var i = 0; i < peerList.Items.Count && chosen is not null; i++)
+            PeerListRebuildsForTest++;
+            // Every write below raises an event exactly as a keystroke does. Suppressed, because none
+            // of them is the user changing anything: they are the list being rebuilt underneath
+            // choices that have not moved.
+            suppressAnnounce++;
+            try
             {
-                if (peerList.Items[i] is not PeerEntry entry || entry.Address != chosen) continue;
-                peerList.SelectedIndex = i;
-                restored = true;
-                break;
+                peerList.BeginUpdate();
+                peerList.Items.Clear();
+                if (peers.Count == 0) peerList.Items.Add(NoPeers);
+                else foreach (var (address, name) in peers) peerList.Items.Add(new PeerEntry(address, name));
+
+                // The ticks come from OUR memory, not from the control that was just cleared, so
+                // somebody who dropped off and came back is still on the track they were put on.
+                for (var i = 0; i < peerList.Items.Count; i++)
+                {
+                    if (peerList.Items[i] is not PeerEntry entry) continue;
+                    peerList.SetItemChecked(i, checkedAddresses.Contains(entry.Address));
+                }
+
+                // Keep the keyboard on the same person if they are still there, rather than on the
+                // same position, which is now somebody else.
+                var restored = false;
+                for (var i = 0; i < peerList.Items.Count && cursorAddress is not null; i++)
+                {
+                    if (peerList.Items[i] is not PeerEntry entry || entry.Address != cursorAddress) continue;
+                    peerList.SelectedIndex = i;
+                    restored = true;
+                    break;
+                }
+                if (!restored && peerList.Items.Count > 0) peerList.SelectedIndex = 0;
+                cursorAddress = peerList.SelectedItem is PeerEntry cursor ? cursor.Address : null;
+                peerList.EndUpdate();
             }
-            if (!restored && peerList.Items.Count > 0) peerList.SelectedIndex = 0;
-            peerList.EndUpdate();
+            finally { suppressAnnounce--; }
+
+            // NOTHING is announced. A rebuild only ever changes who is on SCREEN; who is on the track
+            // is held by address and is unaffected by somebody joining or leaving, which is the whole
+            // reason it is held that way. The engine notices a peer coming or going on its own.
         }
 
         // Only ever write the control when the TEXT has actually changed. Rewriting it resets keyboard

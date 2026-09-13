@@ -71,7 +71,7 @@ internal static partial class SelfTest
         // ---- Engine and services ---------------------------------------------------------------------
         new("RemSound.Core/PeerDiscoveryService.cs", "Discovery tests (announce, expiry, named peers)"),
         new("RemSound.Receiver/MultiOutputPlayout.cs", "Playout and lifecycle-churn tests"),
-        new("RemSound.Sender/AsioCaptureBackend.cs", "Lifecycle churn (ASIO leg skipped without REMSOUND_TEST_ASIO)"),
+        new("RemSound.Core/SharedAsioDevice.cs", "Lifecycle churn (ASIO leg skipped without REMSOUND_TEST_ASIO), and the real-driver duplex step when REMSOUND_ASIO_TEST_DRIVER names one"),
         new("RemSound.Sender/AudioSessionStartWatcher.cs", "Instant capture-on-first-sound tests"),
         new("RemSound.Sender/CaptureSource.cs", "Capture and mixing tests"),
         new("RemSound.Sender/PushModeWasapiBackend.cs", "Push-mode tests + lifecycle churn"),

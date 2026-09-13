@@ -70,7 +70,12 @@ internal sealed class HostCaptureBackend : ICaptureBackend
 
     /// <summary>Hand the host's block for this track to RemSound's sender. Called on the DAW's audio
     /// thread — allocation-free by construction, see the class summary.</summary>
-    public void SubmitHostBlock(ReadOnlySpan<double> left, ReadOnlySpan<double> right)
+    /// <param name="gain">Send trim, 1 = unity. Applied HERE, in the same pass that interleaves and
+    /// narrows to float, so it costs one multiply per sample and no extra pass over the block. It is
+    /// applied to the copy going out and never to the host's own buffers, so the track keeps playing
+    /// at its own level whatever the trim is set to — a send level that also turned the track down
+    /// would be a surprise nobody asked for.</param>
+    public void SubmitHostBlock(ReadOnlySpan<double> left, ReadOnlySpan<double> right, float gain = 1f)
     {
         if (!running) return;
         var frames = Math.Min(left.Length, right.Length);
@@ -79,8 +84,8 @@ internal sealed class HostCaptureBackend : ICaptureBackend
         // Interleave and narrow to float — the mix bus RemSound speaks everywhere else.
         for (var i = 0; i < frames; i++)
         {
-            interleavedIn[i * Channels] = (float)left[i];
-            interleavedIn[i * Channels + 1] = (float)right[i];
+            interleavedIn[i * Channels] = (float)left[i] * gain;
+            interleavedIn[i * Channels + 1] = (float)right[i] * gain;
         }
 
         callbacks++;

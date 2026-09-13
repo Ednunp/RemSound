@@ -37,9 +37,28 @@ internal static partial class SelfTest
     private sealed class CheckFailed : Exception { public CheckFailed(string m) : base(m) { } }
     private sealed class StepSkipped : Exception { public StepSkipped(string m) : base(m) { } }
 
+    /// <summary>How many assertions have been executed, ever, in this process. Snapshotted around
+    /// each <see cref="RunStep"/> so a step that finishes having asserted NOTHING can be failed
+    /// rather than counted as proof. A step that returns a cheerful summary having checked nothing
+    /// is indistinguishable, from outside, from one that verified everything — this is what makes
+    /// them distinguishable. 2026-08-24.</summary>
+    private static int assertionsRun;
+
     private static void Check(bool condition, string failMessage)
     {
+        assertionsRun++;
         if (!condition) throw new CheckFailed(failMessage);
+    }
+
+    /// <summary>Assert that something a test needs is actually present, and hand it back non-null.
+    ///
+    /// <para>Exists because <c>x ?? throw new CheckFailed(…)</c> reads as an assertion but was
+    /// invisible to the assertion counter, so a step whose only checks were of that shape looked
+    /// like a step that checked nothing. Routing them through here makes them count.</para></summary>
+    private static T Require<T>(T? value, string failMessage) where T : class
+    {
+        assertionsRun++;
+        return value ?? throw new CheckFailed(failMessage);
     }
 
     private static string Skip(string why) => throw new StepSkipped(why);
@@ -65,6 +84,11 @@ internal static partial class SelfTest
         var results = new List<Result>();
         RunStep(results, "Audio round-trip (PCM)", () => AudioRoundTrip(opus: false, seconds));
         RunStep(results, "Audio round-trip (Opus)", () => AudioRoundTrip(opus: true, seconds));
+        // MUST run before anything service-shaped: it asks whether the MAIN WINDOW pulls in
+        // System.ServiceProcess, and once any other step has loaded that assembly the question can no
+        // longer be answered in this process. It used to sit after the whole service suite, where it
+        // silently checked nothing on every run.
+        RunStep(results, "Main window builds without loading the service assembly (Win7-safe)", MainWindowServiceAssemblyFree);
         RunStep(results, "Encryption round-trip", Encryption);
         RunStep(results, "Packet framing and rejection", PacketFraming);
         RunStep(results, "Server wire-format compatibility", ServerWireCompat);
@@ -125,7 +149,6 @@ internal static partial class SelfTest
         RunStep(results, "Main window profile round-trip (controls load + save)", MainWindowProfileRoundTrip);
         RunStep(results, "Auto-save non-read-only profiles (options + guard + silent timer)", AutoSaveNonReadOnlyProfiles);
         RunStep(results, "Service verb gate (normal launch stays load-safe)", ServiceVerbGate);
-        RunStep(results, "Main window builds without loading the service assembly (Win7-safe)", MainWindowServiceAssemblyFree);
         RunStep(results, "Main window builds where process-loopback is unsupported (Win7 launch, issue #22)", Win7SendModeConstruction);
         RunStep(results, "Menu shortcuts don't clash with controls", MenuShortcutsDontClashWithControls);
         RunStep(results, "Service log discovery (newest activity log)", ServiceLogDiscovery);
@@ -152,6 +175,19 @@ internal static partial class SelfTest
         RunStep(results, "App-plugin link: framing, loopback-only, and its measured latency cost", PluginBridgeLinkTest);
         RunStep(results, "Plugin end to end (peer reaches the DAW track and leaves the speakers)", PluginBridgeEndToEnd);
         RunStep(results, "Plugin survives the peer's session being pruned and reopened", PluginSurvivesSessionChurn);
+        RunStep(results, "Several plugin instances at once (same peer, and different peers)", SeveralPluginInstancesAtOnce);
+        RunStep(results, "A claimed peer who changes network path", AClaimedPeerWhoChangesPath);
+        RunStep(results, "Three concurrent streams from one sender", ThreeConcurrentStreamsFromOneSender);
+        RunStep(results, "Plugin lane never collides with a live capture lane", PluginLaneNeverCollides);
+        RunStep(results, "An idle plugin lane is completely silent", IdlePluginLaneIsSilent);
+        RunStep(results, "Format changes reach the plugin lane (and repeats do not)", PluginLaneFollowsFormatChanges);
+        RunStep(results, "Plugin send end to end (a DAW track reaches every peer)", PluginSendEndToEnd);
+        RunStep(results, "Plugin sends with no capture device ticked", PluginSendsWithNoCaptureDevice);
+        RunStep(results, "Plugin lane obeys mute, recording and mandatory encryption", PluginLaneObeysTheHouseRules);
+        RunStep(results, "Plugin instances in one DAW sum exactly", PluginInstancesSumExactly);
+        RunStep(results, "Plugin lane ownership (last one out releases it, a crash times out)", PluginLaneOwnershipAndTimeout);
+        RunStep(results, "Two DAWs at once (summed, and hand-over when one goes)", TwoDawsAtOnce);
+        RunStep(results, "Plugin drift corrector (both directions, and idle when matched)", PluginDriftCorrector);
         RunStep(results, "Plugin window (peer list, job, bypass - screen-reader safe)", PluginWindowWiring);
         RunStep(results, "Plugin rate conversion (a 44.1k DAW must not transpose anyone)", PluginRateConversion);
         RunStep(results, "The plugin actually ships in this build (and installs from it)", PluginPayloadPresent);
@@ -159,9 +195,21 @@ internal static partial class SelfTest
         RunStep(results, "Plugin host contract (the properties without which no DAW loads it)", PluginHostContract);
         RunStep(results, "Plugin send passthrough and saved state", PluginSendPassthroughAndState);
         RunStep(results, "Plugin parameters (the screen-reader route that needs no window)", PluginParameters);
+        RunStep(results, "Plugin: one instance sending AND receiving (the input goes out, never the output)", PluginBothDirectionsAtOnce);
+        RunStep(results, "Plugin: several peers on one track (the app mixes the set)", PluginSeveralPeersOnOneTrack);
+        RunStep(results, "Plugin: two tracks on one peer stay sample-aligned", PluginTwoTracksOnOnePeerStayAligned);
+        RunStep(results, "Plugin: a slow start leaves no lasting lag between two tracks", PluginSlowStartLeavesNoLastingLag);
+        RunStep(results, "Connected list holds still for a peer on two networks", ConnectedListHoldsStillForAMultiHomedPeer);
+        RunStep(results, "A remembered peer the DNS got wrong still follows discovery", RememberedPeerFollowsDiscovery);
+        RunStep(results, "One stream from a peer’s two addresses is one session", OneStreamFromTwoAddressesIsOneSession);
+        RunStep(results, "ASIO: one driver instance carries both directions (real hardware, when named)", AsioOneDriverBothDirections);
+        RunStep(results, "Plugin: levels in decibels, and a nudge that costs no audio", PluginLevelsInDecibels);
+        RunStep(results, "Plugin: who is on the track survives the peer list changing", PluginPeerSetSurvivesTheListChanging);
+        RunStep(results, "Plugin: a project from the one-job build still opens doing what it did", PluginLegacyProjectConverts);
         RunStep(results, "Plugin logging (silent when off, honest when on)", PluginLogging);
         RunStep(results, "Plugin logging reaches the app's own log file (the wiring, not just the events)", PluginLoggingInTheApp);
         RunStep(results, "Every wired event is claimed (no handler escapes the suites)", EveryWiredEventIsClaimed);
+        RunStep(results, "GATE GUARD: no reflection lookup in this suite can miss silently", GateHasNoSilentReflection);
         RunStep(results, "Every audio-axis test covers all THREE configurations (or says why not)", AudioConfigurationCoverage);
         foreach (var cfg in SuiteConfigs)
             RunStep(results, $"Control suite - {cfg.Name} (UI + accessibility + theme + effect)", () => RunControlSuite(cfg));
@@ -187,6 +235,44 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT: the latency estimate uses the DEVICE'S figures, not constants", AuditLatencyUsesDeviceReportedFigures);
         RunStep(results, "AUDIT: output latency is reported PER LANE (both run at once)", AuditOutputLatencyIsReportedPerLane);
         RunStep(results, "AUDIT: jitter-buffer wording, in all THREE audio configurations", AuditJitterBufferWordingInEveryMode);
+        RunStep(results, "AUDIT: the render log names the CONFIGURATION, not just the mode", AuditRenderLogNamesTheConfiguration);
+        RunStep(results, "AUDIT: the sender's capture figure on the wire (both compatibility directions)", AuditCaptureLatencyOnTheWire);
+        RunStep(results, "AUDIT: a dialog's change reaches the log, stamped with the configuration", AuditDialogLoggingIsStamped);
+        RunStep(results, "AUDIT: logging OFF means nothing is written (including mid-session)", AuditLoggingIsGated);
+        RunStep(results, "AUDIT: the render period is read ONCE per tick and shared (auto-tune starvation)", AuditRenderPeriodIsReadOncePerTick);
+        RunStep(results, "AUDIT: render time is attributed to the lane that spent it", AuditRenderWorkIsAttributedPerLane);
+        RunStep(results, "AUDIT: the readout says NOT RECEIVING once the last stream goes", AuditReadoutSaysNotReceivingWhenStreamsGo);
+        RunStep(results, "AUDIT: an output Windows invalidated re-opens itself (no untick/retick)", AuditFaultedOutputReopensItself);
+        RunStep(results, "AUDIT: the faulted-output heal actually runs in the per-second tick", AuditFaultedOutputHealRunsInTheTick);
+        RunStep(results, "AUDIT: the tuner's learned floor is not self-justifying (and relaxes)", AuditTunerFloorIsNotSelfJustifying);
+        RunStep(results, "AUDIT: buffer depth is the deepest LANE, not primaries plus mirrors", AuditBufferDepthIsNotDoubleCounted);
+        RunStep(results, "AUDIT: the plugin pan/EQ switch actually changes the audio (measured)", AuditPluginShapingSwitchActuallySwitches);
+        RunStep(results, "AUDIT: two capture sources in one stream stay aligned (drift corrected)", AuditCaptureSourcesStayAligned);
+        RunStep(results, "AUDIT: the one shared drift loop keeps its four hard-won safety rules", AuditSharedDriftLoopRules);
+        RunStep(results, "AUDIT: switching an output lane off leaves no ring written-but-never-read", AuditUntickedLaneIsNotFedForever);
+        RunStep(results, "AUDIT: a missing password fingerprint names both causes, the likelier first", AuditMissingFingerprintNamesBothCauses);
+        RunStep(results, "AUDIT: the long-run report says what could creep, in every configuration", AuditLongRunReportSaysWhatCreeps);
+        RunStep(results, "AUDIT: the long-run report is actually WRITTEN when the old line goes silent", AuditLongRunReportIsActuallyWritten);
+        RunStep(results, "SOAK: nothing creeps over twelve simulated hours", AuditNothingCreepsOverHours);
+        RunStep(results, "SOAK: a wake returns the buffer to where it was", AuditResumeReturnsToWhereItWas);
+        RunStep(results, "AUDIT: capture survives a sound card whose event never fires", AuditCaptureSurvivesADeadDeviceEvent);
+        RunStep(results, "AUDIT: an output that comes back re-earns its learned floor", AuditReturningOutputForgetsItsOldFloor);
+        RunStep(results, "AUDIT: a wake holds every lane and discards the readings across the gap, keeping what the tuner learned", AuditWakeHoldsTheTunerAndKeepsWhatItLearned);
+        RunStep(results, "AUDIT: a wake puts back the tune the tuner had settled on, not its last moment", AuditWakePutsBackTheSettledTuneNotTheLastMoment);
+        RunStep(results, "AUDIT: waking stops all the audio, starts it again and puts back the tune from before the sleep (all three configurations)", AuditWakeRestartsTheAudioWithTheTuneFromBeforeSleep);
+        RunStep(results, "AUDIT: re-opening an output is not network jitter (both output kinds)", AuditOutputReopenIsNotJitter);
+        RunStep(results, "AUDIT: a settling WASAPI endpoint is not taken as a clock", AuditSettlingEndpointIsNotTakenAsAClock);
+        RunStep(results, "AUDIT: after a wake the report bursts and splits network gaps from render gaps", AuditPostWakeBurstSplitsNetworkFromRender);
+        RunStep(results, "AUDIT: the log identifies exactly which build wrote it", AuditLogIdentifiesTheBuild);
+        // 2026-08-24 audit of the plugin bridge, the recorder and the service.
+        RunStep(results, "AUDIT REC1: a peer heard on BOTH lanes keeps all of both blocks in its track", AuditPeerTrackKeepsBothLanes);
+        RunStep(results, "AUDIT REC2: a WAV stops at the 4 GB its header can describe, and says so", AuditWavStopsAtTheFormatLimit);
+        RunStep(results, "Recording captures a peer in ALL THREE audio configurations", RecordingCapturesInEveryConfiguration);
+        RunStep(results, "A lane's hardware figure never contains the jitter buffer", LaneHardwareNeverCountsTheBuffer);
+        RunStep(results, "AUDIT INST1: the uninstaller refuses to delete a drive root or a system folder", AuditUninstallerRefusesDangerousFolders);
+        RunStep(results, "AUDIT TICK1: the always-on per-second work runs with logging OFF", AuditTickWorkIsNotBehindTheLogSwitch);
+        RunStep(results, "AUDIT SI1: force-close never reaches for the Windows service", AuditForceCloseSparesTheService);
+        RunStep(results, "AUDIT DISC1: a malformed discovery broadcast is dropped, not fatal", AuditDiscoveryRejectsMalformedAnnouncements);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");
@@ -213,7 +299,28 @@ internal static partial class SelfTest
     {
         var sw = Stopwatch.StartNew();
         var r = new Result { Name = name };
-        try { r.Message = body() ?? ""; r.Status = "PASS"; }
+        // GUARD B: a step that asserts nothing cannot pass. Snapshot the assertion counter, and if a
+        // step runs to completion having executed no Check/Require at all, fail it. Such a step is
+        // reporting safety it never established, which is the exact disease this gate exists to
+        // cure. A SKIP is exempt — it declares up front that it did not run. 2026-08-24.
+        var assertionsBefore = assertionsRun;
+        try
+        {
+            r.Message = body() ?? "";
+            var ran = assertionsRun - assertionsBefore;
+            if (ran == 0)
+            {
+                r.Status = "FAIL";
+                r.Message = "this step completed without executing a single assertion — it proves nothing. "
+                          + "Give it a Check/Require, or delete it.";
+            }
+            else
+            {
+                r.Status = "PASS";
+                if (r.Message.Length > 0) r.Message += $" [{ran} assertions]";
+                else r.Message = $"{ran} assertions";
+            }
+        }
         catch (StepSkipped sk) { r.Status = "SKIP"; r.Message = sk.Message; }
         catch (CheckFailed cf) { r.Status = "FAIL"; r.Message = cf.Message; }
         catch (Exception ex)
@@ -353,7 +460,21 @@ internal static partial class SelfTest
             "streamId must be a little-endian uint16 at offset 6 (the relay's pairing key)");
         Check(BinaryPrimitives.ReadUInt32LittleEndian(h.Slice(8, 4)) == 0xAABBCCDD,
             "sequence must be a little-endian uint32 at offset 8");
-        return "12-byte 'RMND' header; relay-visible fields unchanged";
+
+        // Stream id 0 never reaches the wire. The relay PAIRS peers on this field (see the comment
+        // above), so a zero would give every such stream the same pairing key and let the relay pair
+        // the wrong two people. WriteHeader normalises it to 1; nothing tested that, and removing the
+        // normalisation left the whole gate green (2026-08-24). Our own TryReadHeader normalises on
+        // read too, which is why no in-process test could see it — the relay does not read through
+        // our parser.
+        Span<byte> zero = stackalloc byte[RemPacket.HeaderSize];
+        RemPacket.WriteHeader(zero, RemPacketType.Audio, streamId: 0, sequence: 1);
+        Check(BinaryPrimitives.ReadUInt16LittleEndian(zero.Slice(6, 2)) == 1,
+            "a stream id of 0 must be written to the wire as 1 — the relay pairs on this field, and a shared zero would "
+            + "let it pair the wrong two peers. Reading it back through our own parser cannot show this: that normalises "
+            + "on read as well, so the check has to look at the BYTES");
+
+        return "12-byte 'RMND' header; relay-visible fields unchanged; stream id 0 never reaches the wire";
     }
 
     /// <summary>Per-peer volume/pan/EQ DSP: nothing-to-do builds a null chain, the master-off state
@@ -414,6 +535,28 @@ internal static partial class SelfTest
         var supported = RemSound.Sender.ProcessLoopbackCapture.IsSupported;
         Check(supported == OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041),
             "support gate disagrees with the OS build check");
+
+        // NAME → PIDs, against a process that is certainly running: this one. Everything in
+        // "send specific applications" hangs off this lookup — CaptureSpecBuilder turns each ticked
+        // name into a capture spec through it — and making it return nothing left the whole gate
+        // green (2026-08-24). A user ticks VLC, nothing streams, and no error appears anywhere.
+        using var self = Process.GetCurrentProcess();
+        var ownName = self.ProcessName;                     // no ".exe" — the stable identity
+        var ownPids = RemSound.Sender.AudioAppEnumerator.PidsForProcessName(ownName);
+        Check(ownPids.Contains(self.Id),
+            $"looking up a RUNNING process by name must find it — asked for \"{ownName}\" and got "
+            + $"[{string.Join(", ", ownPids)}], which does not include this process ({self.Id}). Every ticked "
+            + "application is resolved to a capture through this lookup");
+        Check(RemSound.Sender.AudioAppEnumerator.PidsForProcessName("zzremsound-no-such-process").Count == 0,
+            "and a name nothing is running under must come back empty rather than matching something");
+
+        // ...and the spec builder must turn that name into a real process-loopback capture. This is
+        // the step between "ticked in the list" and "audio actually captured".
+        var ownSpecs = CaptureSpecBuilder.BuildApplicationSpecs([ownName]);
+        Check(ownSpecs.Count > 0 && ownSpecs.All(s => s.Kind == CaptureKind.ProcessLoopback),
+            $"a ticked application must become at least one process-loopback capture spec (got {ownSpecs.Count})");
+        Check(ownSpecs.Any(s => ProcessLoopbackId.TryParse(s.DeviceId, out var got) && got == self.Id),
+            "and the spec must carry the process id the lookup found, or the capture opens against nobody");
 
         // Push-mode routing rule: a single whole-device loopback source IS push-eligible under tight
         // latency, but a single per-app process-loopback source must NEVER be — the push backend opens an
@@ -836,9 +979,22 @@ internal static partial class SelfTest
         Check(args.Contains("depend= Audiosrv"), "must depend on the audio service so it starts after audio is up");
 
         // Auto-restart-on-crash failure actions.
+        //
+        // The whole value of these args is the LADDER — restart after 5s, then 10s, then every 60s,
+        // with the failure counter reset daily. Until 2026-08-24 this checked only that the string
+        // contained "actions= restart/", which a single-restart ladder satisfies just as well:
+        // collapsing three actions to one left this step green. A service that restarts once and
+        // then stays dead is the worst case for this component specifically — it is the send-only
+        // service, running where nobody is sitting, and it would simply stop streaming in silence.
         var fail = ServiceControl.BuildFailureArgs();
-        Check(fail.StartsWith($"failure {ServiceControl.ServiceName} ") && fail.Contains("actions= restart/"),
-            $"failure args must configure auto-restart (got: {fail})");
+        Check(fail.StartsWith($"failure {ServiceControl.ServiceName} "), $"failure args must name the service (got: {fail})");
+        Check(fail.Contains("reset= 86400"),
+            $"the failure counter must reset daily, or a service that crashes once a month eventually exhausts its "
+            + $"restart actions and never comes back (got: {fail})");
+        Check(fail.Contains("actions= restart/5000/restart/10000/restart/60000"),
+            $"all THREE restart actions must be present, in order — 5s, then 10s, then every 60s. Windows uses the "
+            + $"LAST action for every subsequent failure, so a shorter ladder means the service gives up and stays "
+            + $"dead on a machine nobody is watching (got: {fail})");
 
         // Self-update version comparison — the service restarts itself ONLY on a strictly-newer on-disk
         // version; any other case must be false so it can never loop.
@@ -1163,7 +1319,25 @@ internal static partial class SelfTest
         Check(CueSounds.VariantLabel("connect.wav", "connect.wav") == "Sound 1", "the bare legacy name must label as Sound 1");
         Check(CueSounds.VariantLabel("connect.wav", "connect 11.wav") == "Sound 11", "double-digit variants must label correctly");
 
-        // Resolution against the real shipped sounds folder.
+        // The SELECTION RULE, over a supplied list — the shipped folder contains only numbered files,
+        // so the interesting half of this rule (dropping a bare legacy "connect.wav" when numbered
+        // variants exist) had no input that could exercise it and deleting the rule left this test
+        // green. Found 2026-08-24 by breaking the product and watching nothing happen. Feed it the
+        // legacy case explicitly.
+        var legacyMix = CueSounds.SelectVariants("connect",
+            ["connect 2.wav", "unrelated.wav", "connect.wav", "connect 1.wav", "connect 10.wav", "connectors 1.wav"]);
+        Check(legacyMix.SequenceEqual(new[] { "connect 1.wav", "connect 2.wav", "connect 10.wav" }),
+            "with numbered variants present the bare legacy file must be DROPPED and the rest ordered numerically "
+            + "(10 after 2, not after 1) — two rows both announced 'Sound 1' are indistinguishable to a screen reader. "
+            + $"Got: {string.Join(", ", legacyMix)}");
+        Check(CueSounds.SelectVariants("connect", ["connect.wav"]).SequenceEqual(new[] { "connect.wav" }),
+            "a bare legacy file with NO numbered variants must still be offered — dropping it would leave the cue silent");
+        Check(CueSounds.SelectVariants("connect", ["CONNECT 1.WAV"]).Count == 1,
+            "matching must be case-insensitive (a stray capital still resolves)");
+        Check(CueSounds.SelectVariants("connect", ["connectors 1.wav", "connect-1.wav", "connect x.wav"]).Count == 0,
+            "a different cue whose name merely starts the same must not be collected");
+
+        // And the same rule against the real shipped sounds folder.
         var variants = CueSounds.Variants("connect.wav");
         if (variants.Count == 0) return Skip("no connect cue variants on disk (sounds not seeded in this environment)");
         var hasNumbered = variants.Any(v => !v.Equals("connect.wav", StringComparison.OrdinalIgnoreCase));
@@ -1422,6 +1596,21 @@ internal static partial class SelfTest
         var now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
         PeerHealthState At(double secondsSincePong) =>
             HeartbeatService.SnapshotHealthForTest(ep, now.AddSeconds(-secondsSincePong), now.AddSeconds(-60), 5, now).State;
+        // The three numbers only mean anything TOGETHER. A ping every second against a 2-second
+        // healthy window leaves one whole missed reply of slack; stretch the interval past the
+        // window and every peer alive flaps Healthy → Stale → Healthy forever, because the next
+        // ping simply has not been sent yet. Each constant was pinned on its own; the relationship
+        // between them was not, and raising the interval to 30 seconds left the gate green
+        // (2026-08-24).
+        Check(HeartbeatService.PingInterval == TimeSpan.FromSeconds(1),
+            $"peers are pinged once a second (got {HeartbeatService.PingInterval.TotalSeconds}s)");
+        Check(HeartbeatService.PingInterval * 2 <= HeartbeatService.HealthyWindow,
+            $"the ping interval ({HeartbeatService.PingInterval.TotalSeconds}s) must leave room for a missed reply inside "
+            + $"the healthy window ({HeartbeatService.HealthyWindow.TotalSeconds}s) — any wider and a perfectly healthy "
+            + "peer reads Stale simply because the next ping has not gone out yet");
+        Check(HeartbeatService.HealthyWindow < HeartbeatService.UnreachableWindow,
+            "healthy must be a shorter window than unreachable, or a peer can never be merely stale");
+
         Check(At(1) == PeerHealthState.Healthy, "a pong 1s ago must read Healthy (window 2s)");
         Check(At(3) == PeerHealthState.Stale, "a pong 3s ago must read Stale (2s–5s)");
         Check(At(6) == PeerHealthState.Unreachable, "a pong 6s ago must read Unreachable (>5s)");
@@ -1429,7 +1618,24 @@ internal static partial class SelfTest
             "never-answered but only just pinged must read Unknown (pending), not dead");
         Check(HeartbeatService.SnapshotHealthForTest(ep, null, now.AddSeconds(-10), null, now).State == PeerHealthState.Unreachable,
             "never-answered after sustained pinging must read Unreachable");
-        return "payload round-trips; pong echoes tick to source; health windows exact (2s/5s, pending honoured)";
+
+        // The WORDS, not just the states. This string goes into the main status label — which is read
+        // aloud — and into the diagnostics report. A healthy peer formatted as "pending" tells Ed his
+        // link is broken when it is fine, and nothing on screen would contradict it. Only the states
+        // were pinned until 2026-08-24; the formatting could say anything.
+        string Summary(double secondsSincePong, int? rtt) =>
+            HeartbeatService.FormatPeer(HeartbeatService.SnapshotHealthForTest(ep, now.AddSeconds(-secondsSincePong), now.AddSeconds(-60), rtt, now));
+        Check(Summary(1, 24) == "10.5.5.5: 24ms",
+            $"a healthy peer must read as its address and its round-trip time — got \"{Summary(1, 24)}\"");
+        Check(Summary(3, 24) == "10.5.5.5: stale 3.0s",
+            $"a stale peer must SAY stale, with how long it has been quiet — got \"{Summary(3, 24)}\"");
+        Check(Summary(6, 24) == "10.5.5.5: unreachable 6.0s",
+            $"an unreachable peer must SAY unreachable, with how long — got \"{Summary(6, 24)}\"");
+        Check(HeartbeatService.FormatPeer(HeartbeatService.SnapshotHealthForTest(ep, null, now.AddSeconds(-1), null, now)) == "10.5.5.5: pending",
+            "a peer that has not answered yet must read pending, not a number it does not have");
+
+        return "payload round-trips; pong echoes tick to source; health windows exact (2s/5s, pending honoured); "
+             + "and the summary the status line reads aloud names the state and the figure for each";
     }
 
     /// <summary>The SPSC ring buffer is the heart of every audio path (capture mix + playout), and until
@@ -1477,10 +1683,30 @@ internal static partial class SelfTest
 
         // DropOldest (consumer side) and TrimFromProducer (producer side) both discard the OLDEST bytes.
         ring.Write(src);
+        // COUNT as well as content. Only the content was checked until 2026-08-24, so deleting the
+        // counter from DropOldest left this test green — and DropOldest is the click-trim and
+        // drain-on-slider-move path, whose drops roll up through SessionPlayout.DropCount into
+        // AggregateDrops and the diagnostics log. An uncounted drop there means audio is thrown
+        // away and the log reports none: Ed hears a dropout, the log says the buffer is fine, and
+        // the log wins the argument it should have lost.
+        var dropsBeforeDropOldest = ring.DropCount;
         ring.DropOldest(5);
+        Check(ring.DropCount == dropsBeforeDropOldest + 5,
+            $"DropOldest must COUNT what it discarded (expected {dropsBeforeDropOldest + 5}, got {ring.DropCount})");
         var after = new byte[95];
         ring.Read(after);
         Check(after[0] == 5 && after[94] == 99, "DropOldest must discard from the head (oldest)");
+
+        // Asked for more than it holds, it drops what it has and counts exactly that — over-counting
+        // would inflate the diagnostics just as badly as under-counting hides them.
+        ring.Write(src);
+        var dropsBeforeOverAsk = ring.DropCount;
+        ring.DropOldest(1000);
+        Check(ring.BufferedBytes == 0, "DropOldest asked for more than is buffered must empty the ring");
+        Check(ring.DropCount == dropsBeforeOverAsk + 100,
+            $"it must count only the {100} bytes actually there, not the {1000} asked for (got {ring.DropCount - dropsBeforeOverAsk})");
+        ring.DropOldest(10);
+        Check(ring.DropCount == dropsBeforeOverAsk + 100, "dropping from an empty ring must count nothing");
         ring.Write(src);
         var trimmed = ring.TrimFromProducer(30);
         Check(trimmed == 70 && ring.BufferedBytes == 30, "TrimFromProducer must report and keep exact counts");
@@ -1559,20 +1785,95 @@ internal static partial class SelfTest
         return "RFC 6598 boundaries exact; private/IPv6 excluded";
     }
 
-    /// <summary>QoS attach runs on every sender start; it must never throw on a healthy bound socket —
-    /// whether prioritisation is actually granted varies by machine and either answer is fine.</summary>
+    /// <summary>
+    /// QoS attach runs on every sender start. Whether prioritisation is actually GRANTED varies by
+    /// machine — qwave.dll can be absent, the QoS service disabled — so the grant itself cannot be
+    /// asserted. Everything around it can, and that is where the damage would be.
+    ///
+    /// <para>This used to be a pure smoke test: call TryAttach, accept true or false, return. Both
+    /// answers passed, so it could not fail for any reason short of a throw, and it executed no
+    /// assertion at all (found 2026-08-24 by the assertion-counter guard). What it now pins is the
+    /// promise the class actually makes: <em>the socket keeps working either way</em>.</para>
+    ///
+    /// <list type="bullet">
+    ///   <item>The socket still carries datagrams AFTER attach — the failure path claims to leave it
+    ///         untouched, so prove it does.</item>
+    ///   <item>And after Dispose — detaching a flow must not take our socket down with it.</item>
+    ///   <item>Attach always SAYS what it did. A silent attach means a user's log can never answer
+    ///         "is QoS on for me?", which is the only reason the diagnostic callback exists.</item>
+    ///   <item>Dispose really resets it: a second attach re-runs rather than short-circuiting on
+    ///         stale state. Drop the reset in Dispose and the second call returns a cheerful true
+    ///         with no flow behind it — unprioritised audio, reported as prioritised.</item>
+    /// </list>
+    /// </summary>
     private static string? NetworkPrioritySmoke()
     {
-        using var s = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork,
+        using var sender = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork,
             System.Net.Sockets.SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp);
-        s.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        using var listener = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork,
+            System.Net.Sockets.SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp);
+        sender.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        listener.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        listener.ReceiveTimeout = 2000;
+        var to = (IPEndPoint)listener.LocalEndPoint!;
+
+        // Does a datagram still get through? This is the whole promise of the failure path.
+        bool Carries(byte marker)
+        {
+            var payload = new byte[] { 0x52, 0x53, 0x51, 0x6F, 0x53, marker };
+            sender.SendTo(payload, to);
+            var buf = new byte[64];
+            System.Net.EndPoint from = new IPEndPoint(IPAddress.Any, 0);
+            try
+            {
+                var n = listener.ReceiveFrom(buf, ref from);
+                return n == payload.Length && buf.AsSpan(0, n).SequenceEqual(payload);
+            }
+            catch (System.Net.Sockets.SocketException) { return false; }
+        }
+
+        Check(Carries(0), "the test's own socket pair must carry a datagram before QoS is involved, or nothing below means anything");
+
         var np = new NetworkPriority();
         try
         {
-            var attached = np.TryAttach(s, _ => { });
-            return $"no throw; attach reported {attached} (either is acceptable — qWave availability varies)";
+            var first = new List<string>();
+            var attached = np.TryAttach(sender, first.Add);
+            Check(first.Count > 0,
+                "attach must report what it did through its diagnostic callback — a silent attach leaves a user's log "
+                + "unable to answer 'is QoS on for me?', which is the only reason that callback exists");
+            Check(first.TrueForAll(m => m.Contains("qwave", StringComparison.OrdinalIgnoreCase)),
+                $"every QoS diagnostic must name qwave so it is findable in a log: {string.Join(" | ", first)}");
+            Check(Carries(1),
+                $"the socket must still carry audio after a QoS attach reported {attached} — the failure path promises "
+                + "the socket is left untouched, and the success path must not disturb it either");
+
+            // Attaching twice must not double up: the second call short-circuits on the already-attached
+            // socket, so it says nothing new.
+            var second = new List<string>();
+            np.TryAttach(sender, second.Add);
+            if (attached) Check(second.Count == 0, "a repeat attach on an already-attached socket must be a silent no-op, not a second flow");
+
+            np.Dispose();
+            Check(Carries(2), "Dispose detaches the QoS flow — it must not take the socket down with it");
+
+            // Dispose must really reset. If it left attachedSocket set, this call returns true
+            // immediately and says nothing, and the audio would run unprioritised while the code
+            // believed otherwise.
+            var third = new List<string>();
+            np.TryAttach(sender, third.Add);
+            Check(third.Count > 0,
+                "after Dispose, attaching again must genuinely re-run (and so report) — a Dispose that fails to clear "
+                + "its state makes the next attach a silent no-op that claims success with no flow behind it");
+
+            np.Dispose();
+            np.Dispose();   // idempotent: shutdown runs this on a path that may already have run
+            Check(Carries(3), "a double Dispose must still leave the socket working");
+
+            return $"attach reported {attached} (qWave availability varies, so the grant itself is not asserted); "
+                 + "the socket carries audio before, during and after; attach always reports; Dispose resets and is idempotent";
         }
-        finally { (np as IDisposable)?.Dispose(); }
+        finally { np.Dispose(); }
     }
 
     /// <summary>The no-UAC restart used after a service-profile save (TryRestartNoAdmin) must FAIL SAFE:
@@ -1676,7 +1977,55 @@ internal static partial class SelfTest
             if (!InteractivePresence.IsInteractiveAppRunning(name)) released = true; else Thread.Sleep(25);
         }
         Check(released, "no app should be seen after the hold is released");
-        return "held → present; released → absent";
+
+        // ---- The half this test was missing until 2026-08-24 ------------------------------------
+        // Everything above runs against a GUID token, which proves the MECHANISM and nothing about
+        // the PRODUCTION token. Breaking the real IsInteractiveAppRunning() left this step green.
+        // The app holds one name and the service watches another; if those two ever drift apart the
+        // service simply never yields — it keeps streaming while Ed's app is open, with no error
+        // anywhere to say so.
+        //
+        // The production token is deliberately NOT acquired here: a real app may be holding it, and
+        // taking it would suspend a live service mid-stream. Instead read the name the production
+        // path uses and prove the no-argument entry point answers for exactly that name.
+        var mutexNameField = Require(
+            typeof(InteractivePresence).GetField("MutexName",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static),
+            "InteractivePresence.MutexName not found — the app/service name agreement cannot be checked");
+        var production = Require(mutexNameField.GetValue(null) as string, "the production token name must be a string");
+
+        Check(production.StartsWith(@"Global\", StringComparison.Ordinal),
+            $"the token must live in the Global namespace or the service (session 0) can never see the app's hold — got \"{production}\"");
+
+        // The comparison has to be made in the state where it DISCRIMINATES. Comparing the two entry
+        // points while nothing holds the token compares false against false, which a drifted name
+        // passes just as happily — the two-zeroes trap, caught here on the first attempt at this
+        // check. So the agreement is asserted while the token is genuinely HELD.
+        string agreement;
+        if (InteractivePresence.IsInteractiveAppRunning(production))
+        {
+            // A real RemSound is running on this machine and holding it. That is the live handshake,
+            // and it is a stronger witness than anything this test could stage.
+            Check(InteractivePresence.IsInteractiveAppRunning(),
+                "a real RemSound is holding the production token, but the no-argument IsInteractiveAppRunning — the one "
+                + "the SERVICE calls — cannot see it. The names have drifted, so the service will never yield and will "
+                + "keep streaming over the running app");
+            agreement = $"a live app is holding {production} and the service's own entry point sees it";
+        }
+        else
+        {
+            using var appHold = InteractivePresence.AcquireHold();       // the APP's entry point
+            Check(appHold is not null, "AcquireHold() must take the production token when nothing else holds it");
+            Check(InteractivePresence.IsInteractiveAppRunning(),          // the SERVICE's entry point
+                "a hold taken through AcquireHold() (what the APP calls) must be visible to IsInteractiveAppRunning() "
+                + "(what the SERVICE calls). If those two names drift the service never yields and keeps streaming over "
+                + "a running app — with nothing anywhere to say so");
+            Check(InteractivePresence.IsInteractiveAppRunning(production),
+                "and it must be the production name that is held, not some other one");
+            agreement = $"AcquireHold() and IsInteractiveAppRunning() both reach {production}";
+        }
+
+        return $"held → present; released → absent; {agreement}";
     }
 
     /// <summary>End-to-end proof of the send-only service host, headless (no window, no message pump):
@@ -1794,6 +2143,20 @@ internal static partial class SelfTest
         Check(fresh.ThemeMode == "system", "ThemeMode must default to 'system'");
         Check(fresh.ShowDiscoveredPeers && fresh.ShowRememberedPeers, "the peer lists must default to shown");
 
+        // A BLANK PROFILE's audio defaults — what somebody gets on their very first launch, before
+        // they have touched a control. Only AppConfig's defaults were pinned; the profile's were not,
+        // and moving the smoothness default left the gate green (2026-08-24). These are audible: a
+        // different smoothness trims the buffer differently on every stream a new user ever starts,
+        // and they would have no idea a default had moved under them.
+        var blank = new Profile();
+        Check(blank.MaxLatencyMs == 80, $"a new profile's WASAPI jitter buffer starts at 80 ms (got {blank.MaxLatencyMs})");
+        Check(blank.MaxLatencyMsAsio == 10, $"and its ASIO jitter buffer at 10 ms (got {blank.MaxLatencyMsAsio})");
+        Check(blank.Smoothness == 3, $"and buffer smoothness at 3 (got {blank.Smoothness})");
+        Check(blank.ContinuousAutoTuneIntervalSec == 5, $"and the auto-tune interval at 5 seconds (got {blank.ContinuousAutoTuneIntervalSec})");
+        Check(!blank.ContinuousAutoTuneEnabled && !blank.ContinuousAutoTuneAsioEnabled,
+            "auto-tune starts OFF on both lanes — a behaviour-changing option defaults to off, and it must not begin "
+            + "moving somebody's buffer before they have asked it to");
+
         var cfg = new AppConfig
         {
             ThemeMode = "dark",
@@ -1851,7 +2214,85 @@ internal static partial class SelfTest
               && loaded.StartWithProfileTitle == original.StartWithProfileTitle
               && loaded.ProfilesDirectory == original.ProfilesDirectory,
             "settings must survive a save/reload unchanged");
-        return null;
+
+        // --- CLAMP SYMMETRY: what is stored must be what takes effect --------------------------
+        //
+        // Four settings are range-clamped on the way in AND filtered on the way out. The two limits
+        // are written separately, so they can drift — and when they do, nothing complains: the save
+        // stores a value the load quietly refuses, and the app runs on the DEFAULT while the profile
+        // on disk says something else. That is the dead-slider bug wearing a different hat, and the
+        // existing tests could not see it because they only ever asserted that the loaded value was
+        // in range, which the fallback to the default satisfies. Found 2026-08-24 by widening a save
+        // clamp and watching the gate stay green.
+        //
+        // The check that discriminates is stored == effective, for values off both ends.
+        var clampScratch = Path.Combine(Path.GetTempPath(), "remsound-clamp-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using (AppConfig.UseThrowawayUserDataDirectory(clampScratch))
+            {
+                var store = new RemSoundSettingsStore("RemSound");
+                // Stored is read through CopyTo, which is the path that writes the profile to disk —
+                // so "stored" here means literally what a user's profile file would contain. Reading
+                // the effective value back through Load() and comparing the two is the only form that
+                // discriminates: comparing an effective value against a RANGE passes happily when the
+                // load filter has silently fallen back to the default.
+                (string Name, Action<int> Save, Func<int> Effective, Func<Profile, int> Stored)[] clamped =
+                [
+                    ("jitter buffer (WASAPI)", v => store.SaveMaxLatencyMs(v), () => store.LoadMaxLatencyMs(50), p => p.MaxLatencyMs),
+                    ("jitter buffer (ASIO)", v => store.SaveMaxLatencyMsAsio(v), () => store.LoadMaxLatencyMsAsio(50), p => p.MaxLatencyMsAsio),
+                    ("auto-tune interval", v => store.SaveContinuousAutoTuneIntervalSec(v), () => store.LoadContinuousAutoTuneIntervalSec(10), p => p.ContinuousAutoTuneIntervalSec),
+                    ("buffer smoothness", v => store.SaveSmoothness(v), () => store.LoadSmoothness(5), p => p.Smoothness),
+                ];
+
+                foreach (var (name, save, effectiveOf, storedOf) in clamped)
+                {
+                    foreach (var nonsense in new[] { -9999, 0, 99999 })
+                    {
+                        save(nonsense);
+                        var written = new Profile();
+                        store.CopyTo(written);
+                        var stored = storedOf(written);
+                        var effective = effectiveOf();
+                        Check(stored == effective,
+                            $"{name}: saving {nonsense} put {stored} in the profile but the app runs on {effective}. "
+                            + "The save clamp and the load filter disagree, so a user's profile on disk says one thing "
+                            + "while the app does another — and nothing anywhere reports it");
+                    }
+                }
+
+                // The other direction: a profile that ALREADY holds an out-of-range value. The save
+                // clamp never sees it — the value arrives from a file. Ed's profiles sync between
+                // machines over Dropbox and have been written by several builds, so "a profile
+                // containing a number this build does not offer" is a real state, not a hypothetical.
+                // Loosening the load filter left the gate green until this was added (2026-08-24),
+                // because every earlier case reached the store through Save.
+                foreach (var (name, _, effectiveOf, _) in clamped)
+                {
+                    var (min, max) = name.StartsWith("jitter", StringComparison.Ordinal) ? (5, 500)
+                                   : name.StartsWith("auto-tune", StringComparison.Ordinal) ? (RemSoundSettingsStore.MinAutoTuneIntervalSec, 60)
+                                   : (1, 10);
+                    foreach (var rogue in new[] { -1, 0, 99999 })
+                    {
+                        store.ApplyProfile(new Profile
+                        {
+                            MaxLatencyMs = rogue,
+                            MaxLatencyMsAsio = rogue,
+                            ContinuousAutoTuneIntervalSec = rogue,
+                            Smoothness = rogue,
+                        });
+                        var effective = effectiveOf();
+                        Check(effective >= min && effective <= max,
+                            $"{name}: a profile holding {rogue} must be brought into [{min}, {max}] on load — this build "
+                            + $"cannot show or honour {rogue}, so accepting it means the control reads one thing and the "
+                            + $"engine runs on another (got {effective})");
+                    }
+                }
+            }
+        }
+        finally { try { if (Directory.Exists(clampScratch)) Directory.Delete(clampScratch, recursive: true); } catch { } }
+
+        return "config round-trips; all four clamped settings agree between save and load at both ends of their range";
     }
 
     /// <summary>A profile saved through <see cref="ProfileStore"/> reloads with its fields intact.
@@ -1891,6 +2332,20 @@ internal static partial class SelfTest
                   && back.SelectedSendApplications.Contains("vlc")
                   && back.SelectedSendApplications.Contains("firefox"),
                 "per-application send settings must survive a save/reload");
+
+            // A profile whose JSON carries no title. Loading it must fall back to the FILENAME, or
+            // the picker shows a blank row a screen-reader user cannot identify or select. Ed's
+            // profiles sync over Dropbox and have been renamed by hand before, so this is a real
+            // state — and deleting the fallback left the gate green (2026-08-24).
+            var untitledPath = Path.Combine(temp, "renamed by hand.json");
+            File.WriteAllText(untitledPath, "{\"Title\":\"\",\"Volume\":42}");
+            var recovered = store.Load("renamed by hand");
+            Check(recovered is not null, "a profile file with no title in its JSON must still load");
+            Check(recovered!.Title == "renamed by hand",
+                $"a profile with a blank title in its JSON must take its title from the FILENAME — otherwise it appears "
+                + $"in the picker as an empty row that cannot be identified or chosen (got \"{recovered.Title}\")");
+            Check(recovered.Volume == 42, "and the rest of the file must still be read");
+
             return null;
         }
         finally
@@ -1971,8 +2426,64 @@ internal static partial class SelfTest
     /// built headlessly (its constructor opens audio devices, registers hotkeys and binds sockets),
     /// so it's out of scope here. A dialog that won't construct in this context is skipped, not
     /// failed.</summary>
+    /// <summary>A checkbox that reports itself focused, so the gate can drive the focus half of the
+    /// WinEvent recipe. A headless form has never been shown, so nothing on it ever reports Focused —
+    /// which is why that half went untested.</summary>
+    private sealed class FocusedCheckBoxForTest : AccessibleCheckBox
+    {
+        internal override bool HasKeyboardFocus => true;
+    }
+
     private static string? AccessibilityAudit()
     {
+        // ---- THE LOAD-BEARING NVDA FIX ---------------------------------------------------------
+        // A plain WinForms CheckBox on .NET 10 is SILENT when it is toggled with the spacebar while
+        // it already has focus. The cure is two MSAA events: STATECHANGE, and — when the box is
+        // focused — a re-fire of FOCUS, which is what makes NVDA re-announce the control with its
+        // new state. That second call is the single most load-bearing accessibility line in this
+        // workspace, and nothing watched it: deleting it left the entire gate green while every
+        // checkbox in the app went silent for Ed (2026-08-24).
+        //
+        // The events are observed through a shim rather than a real WinEvent hook: an out-of-context
+        // hook needs a message pump the gate does not have, and showing a window to get one would
+        // steal focus from whoever is at the machine.
+        var raised = new List<uint>();
+        AccessibleCheckBox.RaisedWinEventsForTest = raised;
+        try
+        {
+            using var host = new Form();
+            var focused = new FocusedCheckBoxForTest { Text = "Focused probe" };
+            var unfocused = new AccessibleCheckBox { Text = "Unfocused probe" };
+            host.Controls.Add(focused);
+            host.Controls.Add(unfocused);
+            _ = host.Handle;
+            _ = focused.Handle;
+            _ = unfocused.Handle;
+
+            raised.Clear();
+            focused.Checked = !focused.Checked;
+            Check(raised.Contains(AccessibleCheckBox.StateChangeEventForTest),
+                "toggling a checkbox must fire EVENT_OBJECT_STATECHANGE");
+            Check(raised.Contains(AccessibleCheckBox.FocusEventForTest),
+                "toggling a FOCUSED checkbox must ALSO re-fire EVENT_OBJECT_FOCUS. That re-fire is the whole reason this "
+                + "control exists: without it NVDA stays silent on a spacebar toggle, so every checkbox in the app "
+                + "becomes unusable — and nothing on screen looks any different");
+            Check(raised.IndexOf(AccessibleCheckBox.StateChangeEventForTest) < raised.IndexOf(AccessibleCheckBox.FocusEventForTest),
+                "the state change must be raised BEFORE the focus re-fire, or the re-announcement carries the old state");
+
+            // The other half of the rule: a checkbox that is NOT focused must raise the state change
+            // and nothing else. Bulk programmatic ticking on profile load goes through here, and a
+            // focus re-fire per control would yank a screen reader around the window.
+            raised.Clear();
+            unfocused.Checked = !unfocused.Checked;
+            Check(raised.Contains(AccessibleCheckBox.StateChangeEventForTest),
+                "an unfocused toggle must still report the state change");
+            Check(!raised.Contains(AccessibleCheckBox.FocusEventForTest),
+                "an UNFOCUSED checkbox must not re-fire focus — a profile load ticks dozens of boxes, and a focus event "
+                + "for each would drag a screen reader around the window");
+        }
+        finally { AccessibleCheckBox.RaisedWinEventsForTest = null; }
+
         var factories = DialogFactories();
 
         var audited = new List<string>();
@@ -2141,6 +2652,39 @@ internal static partial class SelfTest
             Check(!Program.IsServiceInvocation(args),
                 $"a normal launch ({(args.Length == 0 ? "no args" : string.Join(' ', args))}) must not be treated as a service invocation");
 
+        // The verb STRINGS themselves, absolutely. The loop below iterates the constants, so renaming
+        // one renamed both sides of every assertion and the step stayed green (2026-08-24) — and these
+        // are not internal names. BuildCreateArgs writes RunVerb into the service's registered binPath,
+        // which lives in the Windows service database on the user's machine and survives every app
+        // update. Rename it and an already-installed service still launches with the OLD verb, which
+        // the new build no longer recognises: the process starts as a normal app launch, as SYSTEM, in
+        // session 0, and simply stops streaming with nobody there to notice.
+        (string Verb, string Name)[] registered =
+        [
+            ("--run-service", nameof(ServiceControl.RunVerb)),
+            ("--install-service", nameof(ServiceControl.InstallVerb)),
+            ("--uninstall-service", nameof(ServiceControl.UninstallVerb)),
+            ("--start-service", nameof(ServiceControl.StartVerb)),
+            ("--stop-service", nameof(ServiceControl.StopVerb)),
+        ];
+        foreach (var (expected, name) in registered)
+        {
+            var actual = name switch
+            {
+                nameof(ServiceControl.RunVerb) => ServiceControl.RunVerb,
+                nameof(ServiceControl.InstallVerb) => ServiceControl.InstallVerb,
+                nameof(ServiceControl.UninstallVerb) => ServiceControl.UninstallVerb,
+                nameof(ServiceControl.StartVerb) => ServiceControl.StartVerb,
+                _ => ServiceControl.StopVerb,
+            };
+            Check(actual == expected,
+                $"{name} is \"{actual}\", was \"{expected}\". A service already registered on somebody's machine still "
+                + "launches with the old verb — it survives app updates — so renaming this stops that service working "
+                + "with no error anywhere. Ask Ed before changing it");
+        }
+        Check(ServiceControl.BuildCreateArgs(@"C:\x\RemSound.exe").Contains("--run-service"),
+            "the registered binPath must carry the run verb — that string is what Windows stores and replays on every boot");
+
         // Every service verb must be recognised, case-insensitively (so it DOES route to the dispatch).
         foreach (var verb in new[]
                  {
@@ -2163,7 +2707,15 @@ internal static partial class SelfTest
         if (!loadedBefore)
             Check(!IsAssemblyLoaded(svcAsm), "deciding a normal launch must not load the Windows-service assembly");
 
-        return "normal launches stay load-safe; all six service verbs recognised (case-insensitive)";
+        // Say so when that half could not run. It is order-dependent, and an order-dependent check
+        // that quietly passes is exactly the shape that had MainWindowServiceAssemblyFree checking
+        // nothing for months (2026-08-24).
+        var loadSafety = loadedBefore
+            ? "load-safety NOT re-checked this run (an earlier step had already loaded System.ServiceProcess)"
+            : "deciding a normal launch loads no service assembly";
+
+        return $"normal launches stay load-safe; the five registered verb strings are pinned; all six recognised "
+             + $"case-insensitively; {loadSafety}";
     }
 
     /// <summary>The Service menu's "View service log" opens the newest diagnostic log — the log that says
@@ -2226,8 +2778,15 @@ internal static partial class SelfTest
         catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
         using (form) { }
 
+        // Order-dependent, and it used to hide that: any earlier step that touched the service code
+        // loaded System.ServiceProcess into this process, and this step then returned a cheerful
+        // sentence having checked nothing. It ran in that state on every gate run for months, because
+        // it sat AFTER the whole service suite (found 2026-08-24 by the assertion-counter guard).
+        // It now runs before anything service-shaped, and if it is ever polluted again it SKIPs —
+        // loudly, and named in the skip summary — rather than passing.
         if (loadedBefore)
-            return "service assembly already loaded by an earlier step; main-window load-safety not re-checked this run";
+            return Skip("System.ServiceProcess was already loaded by an earlier step, so this run cannot tell whether the "
+                      + "main window loads it — move this step before every service step again");
         Check(!IsAssemblyLoaded(svcAsm),
             "constructing the main window must NOT load System.ServiceProcess (Service menu is version-gated, not probed) — this is what keeps the app launching on Windows 7");
         return "the main window builds without loading the Windows-service assembly (Win7 launch-safe)";
@@ -2392,7 +2951,13 @@ internal static partial class SelfTest
 
         var guard = new ControlReceiveGuard();
         var sealedOk = ControlSealing.Seal(key, RemoteControlKind.SystemMuteToggle, 0, nowSecs);
-        Check(sealedOk.Length == ControlSealing.SealedPayloadBytes, "sealed payload must be the documented wire size");
+        // An ABSOLUTE size. Comparing what Seal produced against SealedPayloadBytes compares the
+        // constant with itself — Seal derives its length from it — so it could not notice the layout
+        // moving. The cross-port contract pins 38 as well; this keeps the sealed-control test able to
+        // stand on its own. (Same shape as the EQ clamp and the plugin claim timeout, 2026-08-24.)
+        Check(sealedOk.Length == 38,
+            $"a sealed control command is 38 bytes on the wire — kind, delta and a timestamp under AES-GCM. The receiver "
+            + $"tells sealed from legacy 2-byte plaintext by that exact length (got {sealedOk.Length})");
         Check(guard.TryAccept(key, sealedOk, now, out var kind, out _, out _) && kind == RemoteControlKind.SystemMuteToggle,
             "a genuine sealed command must authenticate and round-trip its kind");
         Check(!guard.TryAccept(key, sealedOk, now, out _, out _, out var whyReplay) && whyReplay.StartsWith("replay"),
@@ -2623,6 +3188,14 @@ internal static partial class SelfTest
         // Deferred-retry arithmetic: at 14:30 the 01:00 window opens in 10.5 hours; at 00:30 in 30 min.
         Check(UpdateWindow.UntilNextStart(At(14, 30), t0100) == TimeSpan.FromMinutes(630), "14:30 → 01:00 is 10.5 h away");
         Check(UpdateWindow.UntilNextStart(At(0, 30), t0100) == TimeSpan.FromMinutes(30), "00:30 → 01:00 is 30 min away");
+        // The boundary: asked AT the start minute, the answer is a whole day, not zero. Untested
+        // until 2026-08-24, when changing `mins <= 0` to `mins < 0` left this step green. Zero would
+        // arm the deferred-retry timer with no delay at all — a retry loop instead of a wait.
+        Check(UpdateWindow.UntilNextStart(At(1, 0), t0100) == TimeSpan.FromHours(24),
+            "asked exactly at the start minute, the next opening is a full day away — never zero, which would arm the "
+            + "deferred-retry timer with no delay and spin");
+        Check(UpdateWindow.UntilNextStart(At(1, 1), t0100) == TimeSpan.FromMinutes(24 * 60 - 1),
+            "one minute past the start, the next opening is a day less a minute away");
 
         Check(UpdateWindow.FormatMinutes(0) == "00:00" && UpdateWindow.FormatMinutes(1425) == "23:45",
             "slot text runs 00:00 through 23:45");
@@ -3041,7 +3614,7 @@ internal static partial class SelfTest
 
         // A creep step that costs a shortfall must set a floor for THIS machine, and stick.
         var learned = new AutoTuneDescent.CreepState();
-        learned.NoteShortfallAt(35);
+        learned.NoteShortfallAt(35, 35);
         Check(learned.DiscoveredFloorMs > 35, "a shortfall must raise the learned floor above where it happened");
         var held = AutoTuneDescent.NextTarget(60, 20, lowWaterMs: 40, sampleCount: 15, consecutiveCleanTicks: 30, policy: null, creep: learned);
         Check(held >= learned.DiscoveredFloorMs,
@@ -3188,7 +3761,7 @@ internal static partial class SelfTest
         var creep = new AutoTuneDescent.CreepState();
         Check(creep.DiscoveredFloorMs == 0, "nothing is known before anything has run short");
 
-        creep.NoteShortfallAt(20);
+        creep.NoteShortfallAt(20, 20);
         Check(creep.DiscoveredFloorMs > 20,
             $"running short AT 20 ms must teach a floor ABOVE 20 - 20 is proven too thin, so it can never be the answer "
           + $"(learned {creep.DiscoveredFloorMs})");
@@ -3196,10 +3769,10 @@ internal static partial class SelfTest
 
         // Running short deeper raises it further; running short shallower must NOT lower it, or one
         // good second at a thin setting would undo everything learned the hard way.
-        creep.NoteShortfallAt(30);
+        creep.NoteShortfallAt(30, 30);
         Check(creep.DiscoveredFloorMs > floorAfter20, "running short deeper must raise the floor further");
         var floorAfter30 = creep.DiscoveredFloorMs;
-        creep.NoteShortfallAt(10);
+        creep.NoteShortfallAt(10, 10);
         Check(creep.DiscoveredFloorMs == floorAfter30,
             "a shortfall at a SHALLOWER setting must not lower a floor already learned deeper");
 
@@ -3273,10 +3846,82 @@ internal static partial class SelfTest
              + "and a raise too small to be worth hearing is rounded up rather than repeated every tick";
     }
 
+    /// <summary>
+    /// THE HARDWARE FIGURE MUST NEVER CONTAIN THE JITTER BUFFER — in any configuration.
+    ///
+    /// <para>Ed, 2026-08-24, reading his own logs: "the total latency for asio looks very very high
+    /// ... the hardware etc that looks high to then give me a 1way of 70 odd." He was right. The
+    /// per-lane period accessor RESETS as it reads, the per-second probe read it first, so the
+    /// readout's own read returned zero and fell through to the whole end-to-end total — which
+    /// contains the LIVE buffer depth. The readout then added the buffer SETTING on top. His laptop:
+    /// buffer set to 34, live depth 21 inside a 37 ms total, box reading ~70 when the truth was ~50.</para>
+    ///
+    /// <para>All three configurations were affected, because the probe consumes whichever lane is
+    /// being listened to: ASIO-only and WASAPI-only each had their single lane inflated, and in
+    /// both-lanes ONE line was wrong while the other looked perfectly reasonable — the hardest of the
+    /// three to spot, because the two lines then disagree for no visible reason.</para>
+    /// </summary>
+    private static string? LaneHardwareNeverCountsTheBuffer()
+    {
+        // Ed's real laptop figures, 2026-08-24 20:25.
+        const double sharedMs = 10.0 + 2.5 + 0.0;   // capture[est] + send-accum[est] + wire[meas]
+        const double outputQueueMs = 0.0;
+        const double reportedAsioMs = 3.6;          // what his ASIO driver states at open
+        const int liveBufferDepthMs = 21;           // recv-queue — the live jitter buffer
+        const int setBufferMs = 34;                 // what the control was set to
+        const double oldWrongTotal = 37.1;          // the whole-machine estimate the old code fell back to
+
+        foreach (var configuration in AudioConfigurations.All)
+        {
+            var where = configuration.Describe();
+
+            // THE REGRESSION: this lane's period reads ZERO because the probe consumed it earlier in
+            // the same tick. The device still stated its latency, so the answer must come from that —
+            // and must never become the end-to-end total.
+            var consumed = MainForm.LaneHardwareMs(
+                laneHasSessions: true, reportedOutputMs: reportedAsioMs,
+                lanePeriodMs: 0, fallbackPeriodMs: 0,
+                sharedMs: sharedMs, outputQueueMs: outputQueueMs);
+            Check(Math.Abs(consumed - (sharedMs + reportedAsioMs)) < 0.0001,
+                $"in {where} a lane whose measured period was already consumed must still answer from the figure the "
+                + $"DEVICE stated ({reportedAsioMs} ms), giving {sharedMs + reportedAsioMs} ms — got {consumed:0.0}. "
+                + $"Falling back to the machine total here is what put {oldWrongTotal} ms of 'hardware' in Ed's box");
+            Check(consumed < liveBufferDepthMs,
+                $"in {where} the hardware figure came out at {consumed:0.0} ms, more than the live jitter-buffer depth "
+                + $"({liveBufferDepthMs} ms) on its own — the buffer has leaked into a figure the readout then ADDS the "
+                + "buffer setting to, so the buffer is counted twice");
+
+            // And the number the user actually reads: set plus measured, nothing counted twice.
+            var text = MainForm.FormatMeasuredLatency(configuration, setBufferMs, consumed, setBufferMs, consumed);
+            Check(text.Contains($"approximately {setBufferMs + consumed:0} ms"),
+                $"in {where} the box must read {setBufferMs + consumed:0} ms one way (a {setBufferMs} ms buffer plus "
+                + $"{consumed:0} ms of hardware) — got: {text}");
+            Check(!text.Contains($"approximately {setBufferMs + oldWrongTotal:0} ms"),
+                $"in {where} the box is still reading {setBufferMs + oldWrongTotal:0} ms — the jitter buffer is counted "
+                + "twice, once as the live depth inside the hardware figure and again as the setting added to it");
+
+            // A lane carrying nothing must stay silent rather than borrow the machine's total.
+            Check(MainForm.LaneHardwareMs(false, reportedAsioMs, 12, 10, sharedMs, outputQueueMs) == 0,
+                $"in {where} a lane with no streams on it must report nothing at all");
+            // Nothing stated and nothing timed: report nothing, never a plausible-looking number.
+            Check(MainForm.LaneHardwareMs(true, 0, 0, 0, sharedMs, outputQueueMs) == 0,
+                $"in {where} a lane with no stated latency and no timed period must report nothing rather than invent one");
+            // A lane's own period wins over the machine-wide one once it has been timed.
+            var timed = MainForm.LaneHardwareMs(true, 0, 4, 40, sharedMs, outputQueueMs);
+            var fellBack = MainForm.LaneHardwareMs(true, 0, 0, 40, sharedMs, outputQueueMs);
+            Check(timed < fellBack,
+                $"in {where} a lane that HAS been timed (4 ms) must use its own period, not the machine-wide 40 ms "
+                + $"(got {timed:0.0} vs {fellBack:0.0}) — one slow lane must never inflate the other");
+        }
+
+        return "a lane's hardware figure comes from what the device STATED even when the period was already consumed, "
+             + "never contains the jitter buffer, and stays silent when nothing is known — all three configurations";
+    }
+
     private static string? MeasuredLatencyReadout()
     {
         // TWO LANES: both reported, each with its own pair of numbers, and never merged.
-        var both = MainForm.FormatMeasuredLatency(true, 26, 45.2, 10, 12.4);
+        var both = MainForm.FormatMeasuredLatency(AudioConfiguration.Both, 26, 19.2, 10, 2.4);
         Check(both.Contains("WASAPI") && both.Contains("ASIO"), $"both lanes must be named (got: {both})");
         Check(both.Contains("jitter buffer 26 ms") && both.Contains("Total latency approximately 45 ms"), $"the WASAPI figures must be present (got: {both})");
         Check(both.Contains("jitter buffer 10 ms") && both.Contains("Total latency approximately 12 ms"), $"the ASIO figures must be present (got: {both})");
@@ -3295,7 +3940,7 @@ internal static partial class SelfTest
         // exactly the case that keeps getting collapsed into the two-lane branch.
         foreach (var configuration in AudioConfigurations.All)
         {
-            var text = MainForm.FormatMeasuredLatency(configuration.HasTwoLanes(), 30, 44.6, 10, 12.4);
+            var text = MainForm.FormatMeasuredLatency(configuration, 30, 14.6, 10, 2.4);
             if (configuration.HasTwoLanes())
             {
                 Check(text.Contains("WASAPI") && text.Contains("ASIO"),
@@ -3307,12 +3952,39 @@ internal static partial class SelfTest
                     $"in {configuration.Describe()} there is ONE jitter buffer, so no lane may be named (got: {text})");
             }
         }
-        Check(MainForm.FormatMeasuredLatency(AudioConfiguration.WasapiOnly.HasTwoLanes(), 30, 44.6, 10, 12.4)
-              == MainForm.FormatMeasuredLatency(AudioConfiguration.AsioOnly.HasTwoLanes(), 30, 44.6, 10, 12.4),
-            "WASAPI-only and ASIO-only must read identically — a single lane is a single lane whichever kind it is");
+        // THE SAME SHAPE IS NOT THE SAME NUMBERS — and getting that wrong hid a live bug.
+        //
+        // This check used to assert the two single-lane configurations produced IDENTICAL text, on
+        // the reasoning that "a single lane is a single lane whichever kind it is". The shape claim is
+        // right; the equality claim was not, and it silently required the readout to show ASIO-only
+        // users the WASAPI lane's figures. Those figures are hard ZERO on an ASIO-only rig, because
+        // LaneLatencyMs returns 0 for a lane with no sessions — so the box read "not receiving" while
+        // the ASIO driver was playing audio. The test passed the whole time, and it passed BECAUSE it
+        // fed the same numbers to both lanes, so the wrong-slot read was invisible.
+        //
+        // So: different numbers per lane, and each single-lane configuration must show ITS OWN.
+        // 2026-08-24, found by auditing the EXISTING tests against all three configurations.
+        var wasapiOnly = MainForm.FormatMeasuredLatency(AudioConfiguration.WasapiOnly, 30, 14.6, 10, 2.4);
+        var asioOnly = MainForm.FormatMeasuredLatency(AudioConfiguration.AsioOnly, 30, 14.6, 10, 2.4);
+        Check(wasapiOnly.Contains("jitter buffer 30 ms") && wasapiOnly.Contains("add 15 ms"),
+            $"WASAPI-only must report the WASAPI lane's own figures (got: {wasapiOnly})");
+        Check(asioOnly.Contains("jitter buffer 10 ms") && asioOnly.Contains("add 2 ms"),
+            $"ASIO-only must report the ASIO lane's own figures, not the WASAPI slots — those are zero on an "
+            + $"ASIO-only rig, which is how the box came to say the sound card added nothing (got: {asioOnly})");
+        Check(wasapiOnly != asioOnly,
+            "the two single-lane configurations read the SAME SHAPE but not the same numbers — identical text here "
+            + "means one of them is being shown the other lane's figures");
+        // The exact field shape behind Ed's report: ASIO carrying audio, WASAPI slots empty.
+        var asioLive = MainForm.FormatMeasuredLatency(AudioConfiguration.AsioOnly, 10, 5.5, 10, 5.5);
+        var asioLiveWasapiEmpty = MainForm.FormatMeasuredLatency(AudioConfiguration.AsioOnly, 0, 0, 10, 5.5);
+        Check(asioLive == asioLiveWasapiEmpty,
+            $"on an ASIO-only rig the WASAPI slots are zero and must not change a thing — reading them is what made "
+            + $"the box say \"not receiving\" with audio playing (got: \"{asioLiveWasapiEmpty}\" vs \"{asioLive}\")");
+        Check(!asioLiveWasapiEmpty.Contains("not receiving"),
+            $"ASIO-only with 5.5 ms of measured hardware must never read as not receiving (got: {asioLiveWasapiEmpty})");
 
         // ONE LANE: no point naming a lane the user hasn't got.
-        var single = MainForm.FormatMeasuredLatency(false, 30, 44.6, 0, 0);
+        var single = MainForm.FormatMeasuredLatency(AudioConfiguration.WasapiOnly, 30, 14.6, 0, 0);
         Check(!single.Contains("WASAPI") && !single.Contains("ASIO"), $"a single-slider setup shouldn't name lanes (got: {single})");
         Check(single.Contains("jitter buffer 30 ms") && single.Contains("Total latency approximately 45 ms"), $"it must still report the figures (got: {single})");
         // The middle figure is the whole point: it explains the gap instead of leaving it a mystery.
@@ -3328,18 +4000,154 @@ internal static partial class SelfTest
         Check(!single.Contains(Environment.NewLine), "one lane, one line");
 
         // NOT RECEIVING: say so rather than speak a zero, which a screen reader would read as fact.
-        var idle = MainForm.FormatMeasuredLatency(false, 30, 0, 0, 0);
+        var idle = MainForm.FormatMeasuredLatency(AudioConfiguration.WasapiOnly, 30, 0, 0, 0);
         Check(idle.Contains("not receiving") && !idle.Contains("Total latency approximately 0"),
             $"with no audio it must say so, not claim 0 ms (got: {idle})");
-        var oneIdle = MainForm.FormatMeasuredLatency(true, 26, 45.2, 10, 0);
+        var oneIdle = MainForm.FormatMeasuredLatency(AudioConfiguration.Both, 26, 19.2, 10, 0);
         Check(oneIdle.Contains("Total latency approximately 45 ms") && oneIdle.Contains("not receiving"),
             $"one lane can be live while the other is idle, and both must be reported honestly (got: {oneIdle})");
 
         // Rounded for speech — NVDA must not read decimals.
-        var rounded = MainForm.FormatMeasuredLatency(false, 26, 41.678, 0, 0);
+        var rounded = MainForm.FormatMeasuredLatency(AudioConfiguration.WasapiOnly, 26, 15.678, 0, 0);
         Check(rounded.Contains("Total latency approximately 42 ms") && rounded.Contains("add 16 ms"),
             $"every figure must round for speech rather than read to three decimals (got: {rounded})");
-        return "two lanes reported apart with their own set/achieved pairs; single-lane setups stay unlabelled; idle says so instead of claiming zero";
+
+        // ---- EVERY TERM MUST ARRIVE --------------------------------------------------------------
+        //
+        // Ed, 2026-08-24: "seems like you need to add more tests that when we're pulling from a thing
+        // like that to measure, or for any readout it should actually be pulling correctly."
+        //
+        // He is right, and this is the gap. Everything else here checks the NEGATIVE — that no figure
+        // is invented with nothing open — and the arithmetic in isolation. Nothing checked that a
+        // number a device genuinely reported reaches the box he reads. His ASIO driver reported 3.6 ms
+        // of playback latency, the log printed it at open, and the readout still said the sound card
+        // added nothing. A term that quietly stopped contributing looks identical from outside.
+        //
+        // So: move each term ON ITS OWN and require the sum to move by exactly that much. A dropped
+        // term fails here whichever one it is.
+        var terms = new[] { "shared (capture + packing + wire)", "output queue", "output device period" };
+        for (var i = 0; i < terms.Length; i++)
+        {
+            var moved = new double[3];
+            moved[i] = 7.5;
+            var before = MainForm.ComposeLaneLatencyMs(0, 0, 0);
+            var after = MainForm.ComposeLaneLatencyMs(moved[0], moved[1], moved[2]);
+            Check(Math.Abs((after - before) - 7.5) < 0.0001,
+                $"the '{terms[i]}' term must reach the total. Adding 7.5 ms of it moved the answer by {after - before:0.###} ms, "
+                + "so that stage of the journey is being dropped — and a dropped stage reads exactly like a fast machine");
+        }
+        Check(Math.Abs(MainForm.ComposeLaneLatencyMs(1.9, 0.0, 3.6) - 5.5) < 0.0001,
+            "the terms must sum — Ed's desktop ASIO figures were 1.9 shared, 0 queued and the driver's own 3.6");
+        // ---- AND IT MUST ASK THE RIGHT LANE -------------------------------------------------------
+        //
+        // The estimate reads its output figures from ONE lane. With audio arriving that is the live
+        // lane; with nothing arriving it used to ask the neutral "Mixed" route — which is deliberately
+        // answered with the WASAPI figure, and is therefore ZERO on an ASIO-only rig. So the output
+        // period silently fell back to a 10 ms estimate while Ed's driver had reported its real
+        // 3.6 ms at open — which is why his log read render=10.0[est] a minute after
+        // "driver reports 171 samples of playback latency = 3.6 ms".
+        Check(MainForm.PickListeningRoute(true, false, AudioConfiguration.Both) == RenderRoute.AsioLane,
+            "a live ASIO session must be read from the ASIO lane");
+        Check(MainForm.PickListeningRoute(false, true, AudioConfiguration.Both) == RenderRoute.WasapiLane,
+            "a live WASAPI session must be read from the WASAPI lane");
+        Check(MainForm.PickListeningRoute(false, false, AudioConfiguration.AsioOnly) == RenderRoute.AsioLane,
+            "with nothing arriving on an ASIO-ONLY setup the figures must come from the ASIO lane. Asking the neutral "
+            + "route answers with the WASAPI figure, which is zero here — so a driver that HAD reported its latency was "
+            + "ignored and an estimate used instead");
+        Check(MainForm.PickListeningRoute(false, false, AudioConfiguration.WasapiOnly) == RenderRoute.WasapiLane,
+            "and on a WASAPI-only setup, from the WASAPI lane");
+        foreach (var configuration in AudioConfigurations.All)
+        {
+            Check(MainForm.PickListeningRoute(false, false, configuration) != RenderRoute.Mixed,
+                $"in {configuration.Describe()} the estimate must never read from the Mixed route — it is answered with "
+                + "the WASAPI figure, so on an ASIO-only setup it silently returns nothing at all");
+        }
+
+        // The jitter buffer must NOT be inside the hardware sum: the readout ADDS the setting to it,
+        // so counting a buffer term here as well would report the buffer twice.
+        Check(Math.Abs(MainForm.ComposeLaneLatencyMs(10, 0, 0) - 10) < 0.0001,
+            "the hardware sum carries no buffer term of its own — the readout supplies the buffer");
+
+        // ---- THE BUFFER IS NOT ITS SETTING -------------------------------------------------------
+        //
+        // "Sound card and hardware add" was computed as the total MINUS THE SET jitter buffer, which
+        // mixes a measurement with a setting. The target is a cap, not a fill level: on ASIO the live
+        // depth routinely sits below it, so the subtraction went negative and the clamp turned it into
+        // a flat ZERO — the box telling a user that the sound card and the network between two
+        // machines added nothing at all.
+        //
+        // These are Ed's real numbers from 2026-08-24, ASIO lane on the desktop: 0.7 ms of capture
+        // (the device's own figure), 1.2 send accumulation, 0.0 wire, 0.0 output queue and the ASIO
+        // driver's reported 3.6 ms of playback latency — 5.5 ms of genuine hardware — against a jitter
+        // buffer SET to 10 with a live depth of 0.
+        // Ed's call on the arithmetic (2026-08-24): "we should add the jitter buffer that we set, plus
+        // the remaining measurements or it becomes nonsensical. so if we set it to 10, it should say
+        // 10." So the three numbers now ADD UP — nothing is derived by subtracting another, which is
+        // what allowed one figure to be squeezed to zero by another.
+        var edsCase = MainForm.FormatMeasuredLatency(AudioConfiguration.WasapiOnly, 10, 5.5, 0, 0);
+        Check(!edsCase.Contains("add 0 ms"),
+            $"with 5.5 ms of measured hardware the box must NOT claim the hardware adds nothing (got: {edsCase})");
+        Check(edsCase.Contains("jitter buffer 10 ms"), $"the buffer must read as what it is SET to (got: {edsCase})");
+        Check(edsCase.Contains("add 6 ms"), $"the hardware must read as what was MEASURED — 5.5 rounds to 6 (got: {edsCase})");
+        Check(edsCase.Contains("Total latency approximately 16 ms"),
+            $"and the total must be the two ADDED, not one derived from the other (got: {edsCase})");
+
+        // IN ALL THREE CONFIGURATIONS, not just whichever shape the test happened to build.
+        //
+        // Ed asked the question directly (2026-08-24): "and you did part 1 for all 3 configs? asio,
+        // wasapi and mixed?" The honest answer was no — the naming was checked in all three, but the
+        // ARITHMETIC was only driven for the one-lane and two-lane shapes. WASAPI-only and ASIO-only
+        // reach the same code path today, and that is exactly the assumption that has to be asserted
+        // rather than relied on: ASIO-only is the configuration that keeps getting collapsed into
+        // another branch, and it is the one this bug was found in.
+        foreach (var configuration in AudioConfigurations.All)
+        {
+            // DIFFERENT figures per lane, deliberately. This loop used to pass the SAME pair into both
+            // slots, so it could not tell whether ASIO-only was reading the ASIO lane or the WASAPI
+            // one — and it was reading the wrong one. Feeding one pair to both lanes is the exact
+            // shape that makes a per-lane bug invisible while the test looks thorough. 2026-08-24.
+            const int wasapiSet = 20;
+            const double wasapiHardware = 6.4;
+            const int asioSet = 12;
+            const double asioHardware = 3.6;   // the figure Ed's ASIO driver really reports at open
+            var line = MainForm.FormatMeasuredLatency(configuration, wasapiSet, wasapiHardware, asioSet, asioHardware);
+
+            // Which pair must THIS configuration show? Two lanes shows both (checked below); a single
+            // lane must show its OWN, and an ASIO-only rig's WASAPI slots are zero.
+            var singleLaneIsAsio = configuration.UsesAsio() && !configuration.UsesWasapi();
+            var setMs = singleLaneIsAsio ? asioSet : wasapiSet;
+            var hardwareMs = singleLaneIsAsio ? asioHardware : wasapiHardware;
+            Check(line.Contains($"jitter buffer {setMs} ms"),
+                $"in {configuration.Describe()} the buffer must read as what THIS configuration's lane is SET to (got: {line})");
+            Check(line.Contains($"add {hardwareMs:0} ms"),
+                $"in {configuration.Describe()} the hardware must read as what was MEASURED on this configuration's own "
+                + $"lane — never squeezed to zero by the setting, and never taken from a lane that is not carrying "
+                + $"audio (got: {line})");
+            Check(line.Contains($"approximately {setMs + hardwareMs:0} ms"),
+                $"in {configuration.Describe()} the total must be the setting plus the measurement (got: {line})");
+            if (configuration.HasTwoLanes())
+            {
+                // Both lanes, each with its own three numbers that add up on their own.
+                var twoLane = MainForm.FormatMeasuredLatency(AudioConfiguration.Both, 30, 5.0, 12, 4.0);
+                Check(twoLane.Contains("jitter buffer 30 ms") && twoLane.Contains("approximately 35 ms"),
+                    $"in {configuration.Describe()} the WASAPI line must add up on its own (got: {twoLane})");
+                Check(twoLane.Contains("jitter buffer 12 ms") && twoLane.Contains("approximately 16 ms"),
+                    $"in {configuration.Describe()} the ASIO line must add up on its own (got: {twoLane})");
+            }
+        }
+
+        // The rule over a spread, including a tiny buffer with big hardware and the reverse.
+        foreach (var (set, hardware) in new[] { (10, 5.5), (35, 16.2), (80, 2.0), (5, 40.0) })
+        {
+            var line = MainForm.FormatMeasuredLatency(AudioConfiguration.WasapiOnly, set, hardware, 0, 0);
+            Check(line.Contains($"jitter buffer {set} ms") && line.Contains($"add {hardware:0} ms")
+                  && line.Contains($"approximately {set + hardware:0} ms"),
+                $"set {set} plus measured {hardware} must read as {set + hardware:0} (got: {line})");
+        }
+
+        return "two lanes reported apart; single-lane setups stay unlabelled; idle says so instead of claiming zero; "
+             + "the three numbers ADD UP (the buffer you set, plus the measured hardware, is the total); and every "
+             + "term of the hardware sum is proved to reach it";
     }
 
     /// <summary>The status line must tell the user BOTH numbers: what they asked the latency control
@@ -3462,7 +4270,7 @@ internal static partial class SelfTest
         // INDEPENDENT MEMORY: a shortfall on one lane must not touch the other's floor.
         var wasapiMem = new AutoTuneDescent.CreepState();
         var asioMem = new AutoTuneDescent.CreepState();
-        asioMem.NoteShortfallAt(60);                       // the ASIO lane got into trouble at 60ms
+        asioMem.NoteShortfallAt(60, 60);                       // the ASIO lane got into trouble at 60ms
         Check(asioMem.DiscoveredFloorMs > 60, "the lane that ran short must learn a floor");
         Check(wasapiMem.DiscoveredFloorMs == 0,
             $"the OTHER lane must learn nothing from it (it picked up a floor of {wasapiMem.DiscoveredFloorMs}ms)");
@@ -3484,7 +4292,7 @@ internal static partial class SelfTest
         asioMem.Reset();
         Check(asioMem.DiscoveredFloorMs == 0, "a reset lane forgets its floor");
         var kept = new AutoTuneDescent.CreepState();
-        kept.NoteShortfallAt(50);
+        kept.NoteShortfallAt(50, 50);
         asioMem.Reset();
         Check(kept.DiscoveredFloorMs > 50, "...without wiping another lane's memory");
 
@@ -3526,40 +4334,54 @@ internal static partial class SelfTest
                 $"in {configuration.Describe()} the lane a stream landed on must have a real target to read");
         }
 
-        // --- Single-slider mode (WasapiOnly and every other classic mode) ---
-        var engine = new RemSound.Receiver.PlayoutEngine(new RemSound.Receiver.ReceiverDiagnostics());
-        engine.SetIndependentLaneLatency(false);
-        engine.SetLaneActive(RenderRoute.WasapiLane, true);   // one WASAPI output ticked...
-        engine.SetLaneActive(RenderRoute.AsioLane, false);    // ...no ASIO, exactly as CompositeRenderBackend reports
-        engine.SetMaxLatencyMs(RenderRoute.Mixed, 30);        // MainForm's call in classic modes
-        var session = engine.GetOrCreateSession(endpoint, 1, capacityBytes: 1024 * 1024);
-        Check(session.Route == RenderRoute.WasapiLane,
-            $"a stream must land on the active output lane (got {session.Route}) — the mismatch the slider used to ignore");
+        // --- Single-slider mode: run for EVERY single-lane configuration, not just WASAPI ---
+        // WasapiOnly and AsioOnly both present ONE slider (independent lane latency is only switched on
+        // when two lanes are ticked). These claims look lane-agnostic, and "it's lane-agnostic" is
+        // precisely the reasoning that kept missing ASIO-only. The hidden-write claim is sharper here
+        // than it looks: on an ASIO-only rig the user's own stream sits ON the ASIO lane, so a
+        // hidden-slider write that leaked through would overwrite the visible slider for exactly the
+        // people who cannot see it happen.
+        foreach (var configuration in AudioConfigurations.All)
+        {
+            var lane = configuration.SingleRoute();
+            if (lane is null) continue;   // both-lanes has TWO sliders; its own deep block is below
+            var where = configuration.Describe();
 
-        engine.SetMaxLatencyMs(RenderRoute.Mixed, 330);       // the user drags the slider up
-        Check(engine.TargetLatencyMsFor(session.Route) == 330,
-            $"the target the render path reads for this stream must BE the slider's value (got {engine.TargetLatencyMsFor(session.Route)}ms for a 330ms slider)");
-        Check(engine.MaxLatencyMsFor(session.Route) == 330, "the max must follow the slider too");
+            var engine = new RemSound.Receiver.PlayoutEngine(new RemSound.Receiver.ReceiverDiagnostics());
+            engine.SetIndependentLaneLatency(false);
+            engine.SetLaneActive(RenderRoute.WasapiLane, configuration.UsesWasapi());
+            engine.SetLaneActive(RenderRoute.AsioLane, configuration.UsesAsio());
+            engine.SetMaxLatencyMs(RenderRoute.Mixed, 30);        // MainForm's call in single-slider modes
+            var session = engine.GetOrCreateSession(endpoint, 1, capacityBytes: 1024 * 1024);
+            Check(session.Route == lane.Value,
+                $"in {where} a stream must land on the active output lane (got {session.Route}) — the mismatch the slider used to ignore");
 
-        // A LOWER must reach the session (disarm + drain). Arm it first, then lower and prove the
-        // very next read returns nothing — that IS the disarm, and it's what refills to the new depth.
-        var block = new byte[48000 * 8 / 2]; // 500ms stereo float — must exceed the 330ms target, or it never arms
-        session.Write(block);
-        session.NoteFramesQueued(engine.TargetLatencyMsFor(session.Route));
-        var scratch = new float[960 * 2];
-        Check(session.ReadFloats(scratch, 960, 330, 330) > 0, "the session must be armed and producing before the lower");
-        engine.SetMaxLatencyMs(RenderRoute.Mixed, 30);
-        Check(session.ReadFloats(scratch, 960, 30, 30) == 0,
-            "lowering the slider must disarm+drain this stream — matching on the slider's route is what made 'lower' inert");
+            engine.SetMaxLatencyMs(RenderRoute.Mixed, 330);       // the user drags the slider up
+            Check(engine.TargetLatencyMsFor(session.Route) == 330,
+                $"in {where} the target the render path reads for this stream must BE the slider's value (got {engine.TargetLatencyMsFor(session.Route)}ms for a 330ms slider)");
+            Check(engine.MaxLatencyMsFor(session.Route) == 330, $"in {where} the max must follow the slider too");
 
-        // The hidden ASIO slider must not touch the visible one. It only exists in BothIndependent,
-        // but the app pushes its persisted value at startup in EVERY mode (and its auto-tune can
-        // tick) — now that all routes resolve to the shared value, an unguarded write would overwrite
-        // the user's real slider with a hidden control's number.
-        engine.SetMaxLatencyMs(RenderRoute.Mixed, 120);
-        engine.SetMaxLatencyMs(RenderRoute.AsioLane, 8);
-        Check(engine.TargetLatencyMsFor(session.Route) == 120,
-            $"an ASIO-lane write must be ignored in single-slider mode (got {engine.TargetLatencyMsFor(session.Route)}ms, expected the visible slider's 120ms)");
+            // A LOWER must reach the session (disarm + drain). Arm it first, then lower and prove the
+            // very next read returns nothing — that IS the disarm, and it's what refills to the new depth.
+            var block = new byte[48000 * 8 / 2]; // 500ms stereo float — must exceed the 330ms target, or it never arms
+            session.Write(block);
+            session.NoteFramesQueued(engine.TargetLatencyMsFor(session.Route));
+            var scratch = new float[960 * 2];
+            Check(session.ReadFloats(scratch, 960, 330, 330) > 0,
+                $"in {where} the session must be armed and producing before the lower");
+            engine.SetMaxLatencyMs(RenderRoute.Mixed, 30);
+            Check(session.ReadFloats(scratch, 960, 30, 30) == 0,
+                $"in {where} lowering the slider must disarm+drain this stream — matching on the slider's route is what made 'lower' inert");
+
+            // The hidden ASIO slider must not touch the visible one. It only exists in BothIndependent,
+            // but the app pushes its persisted value at startup in EVERY configuration (and its auto-tune
+            // can tick) — now that all routes resolve to the shared value, an unguarded write would
+            // overwrite the user's real slider with a hidden control's number.
+            engine.SetMaxLatencyMs(RenderRoute.Mixed, 120);
+            engine.SetMaxLatencyMs(RenderRoute.AsioLane, 8);
+            Check(engine.TargetLatencyMsFor(session.Route) == 120,
+                $"in {where} an ASIO-lane write must be ignored in single-slider mode (got {engine.TargetLatencyMsFor(session.Route)}ms, expected the visible slider's 120ms)");
+        }
 
         // --- Two-slider mode (BothIndependent): lanes stay genuinely separate ---
         var indep = new RemSound.Receiver.PlayoutEngine(new RemSound.Receiver.ReceiverDiagnostics());
@@ -3751,20 +4573,62 @@ internal static partial class SelfTest
     /// WASAPI, so this proves lifecycle safety, not delivery of a real session event.)</summary>
     private static string? SessionStartWatcher()
     {
+        // This used to construct, Rehook twice, Dispose twice and return a cheerful summary having
+        // asserted NOTHING (found 2026-08-24 by the assertion-counter guard). "Did not throw" is not
+        // the claim that matters here — an unhooked watcher never throws either, it just silently
+        // stops catching apps at their first sound.
         RemSound.Sender.AudioSessionStartWatcher w;
         try { w = new RemSound.Sender.AudioSessionStartWatcher(_ => { }, _ => { }); }
         catch (Exception ex) { return Skip($"session watcher could not construct (no audio endpoint?): {ex.GetType().Name}: {ex.Message}"); }
+
+        var managerField = Require(
+            typeof(RemSound.Sender.AudioSessionStartWatcher).GetField("manager",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic),
+            "AudioSessionStartWatcher.manager not found — without reaching it this test can only prove nothing was thrown");
+        bool Hooked() => managerField.GetValue(w) is not null;
+
         try
         {
-            w.Rehook(); // re-point at the current default device — must never throw
-            w.Rehook();
-            return "constructed, re-hooked twice, and disposed idempotently without throwing";
-        }
-        finally
-        {
+            if (!Hooked())
+                return Skip("no default render endpoint on this machine, so the watcher legitimately hooked nothing");
+
+            // A silent hook failure is the whole failure mode: the app keeps running, and per-app
+            // send just never catches anything at its start again.
+            Check(Hooked(), "constructing the watcher must leave it hooked to the default render device");
+
+            // Rehook runs on every default-device change, so it must re-establish the hook rather
+            // than merely not throw, and it must not drip WASAPI handles while doing it.
+            SettleForLeakCheck();
+            var handlesBefore = SafeHandleCount();
+            const int rehooks = 60;
+            for (var i = 0; i < rehooks; i++)
+            {
+                w.Rehook();
+                Check(Hooked(), $"Rehook must leave the watcher hooked (pass {i + 1}) — an unhooked watcher never fires and never complains");
+            }
+            SettleForLeakCheck();
+            var growth = SafeHandleCount() - handlesBefore;
+            // The bar is per-rehook, not a flat number: a real leak here is a DRIP that scales with
+            // how often the default device changes over a long session, so the check has to scale
+            // with the number of rehooks or a bigger sample would keep passing.
+            Check(growth < rehooks / 2,
+                $"{rehooks} rehooks grew the process by {growth} handles ({growth / (double)rehooks:0.00} per rehook) — Rehook "
+                + "must dispose the previous session manager AND its device, or every default-device change leaks WASAPI "
+                + "COM state for the life of the session");
+
+            // Disposed means disposed: a stray Rehook after teardown would re-arm COM callbacks into
+            // an object nothing owns any more.
             w.Dispose();
-            w.Dispose(); // idempotent
+            Check(!Hooked(), "Dispose must unhook");
+            w.Rehook();
+            Check(!Hooked(), "Rehook after Dispose must do nothing — a disposed watcher must not re-arm COM callbacks into itself");
+            w.Dispose();
+            Check(!Hooked(), "a second Dispose must be a harmless no-op");
+
+            return $"hooked on construction; {rehooks} rehooks each re-establish the hook and cost {growth} handles; "
+                 + "Dispose unhooks, defeats a later Rehook, and is idempotent";
         }
+        finally { w.Dispose(); }
     }
 
     /// <summary>Pins the two-list semantics Ed specified 2026-07-16 (no send-all option): a TICKED app
@@ -3859,6 +4723,25 @@ internal static partial class SelfTest
             var name = !string.IsNullOrWhiteSpace(c.AccessibleName) ? c.AccessibleName : c.Text;
             if (string.IsNullOrWhiteSpace(name))
                 violations.Add($"{formName}: a {c.GetType().Name} has no accessible name or text");
+        }
+
+        // NON-self-labelling controls must carry an AccessibleName of their own, and nothing checked
+        // that until 2026-08-24 — blanking the master volume slider's name left the whole gate green.
+        //
+        // These are exactly the types that CANNOT fall back on anything: a TrackBar, ListBox,
+        // ComboBox, NumericUpDown, CheckedListBox or TextBox has no Text a reader can use, and the
+        // framework does not reliably derive a name from a neighbouring label — which is the whole
+        // reason the working agreement says to set AccessibleName explicitly on them. Without one,
+        // NVDA announces the role and the value and nothing about what the control IS: "slider, 40".
+        foreach (var c in all.Where(c => c is TrackBar or ListBox or ComboBox or NumericUpDown or CheckedListBox or TextBox))
+        {
+            if (c is TextBox { ReadOnly: true, TabStop: false }) continue;   // a read-only readout nobody can reach
+            // The edit box WinForms builds inside a NumericUpDown is a child nobody names: the
+            // NumericUpDown itself carries the name and is what a screen reader announces.
+            if (c.Parent is UpDownBase) continue;
+            if (string.IsNullOrWhiteSpace(c.AccessibleName))
+                violations.Add($"{formName}: a {c.GetType().Name} has no AccessibleName — it has no Text to fall back on, "
+                             + "so a screen reader announces its role and value and nothing about what it governs");
         }
 
         // Tab-order sanity: the GetNextControl walk must TERMINATE — a cycle would trap a keyboard /

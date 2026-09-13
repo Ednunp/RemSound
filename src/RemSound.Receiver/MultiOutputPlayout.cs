@@ -79,6 +79,36 @@ internal sealed class MultiOutputPlayout : IRenderBackend
     public bool IsRunning => produceTask is { IsCompleted: false };
 
     /// <summary>
+    /// Is any output sitting dead, waiting to be re-opened?
+    ///
+    /// <para>An output that WASAPI invalidates mid-stream is flagged <c>Faulted</c> and re-opened by
+    /// the next <c>SetOutputDevices</c>. That works when the device was UNPLUGGED, because the
+    /// hot-plug notifier fires one. It does NOT work when the endpoint is invalidated while the
+    /// device stays present — changing anything in its Windows sound-control-panel properties, a
+    /// format change, a driver reset, a resume from hibernate. Nothing is added or removed, so no
+    /// notification arrives, so nothing calls SetOutputDevices, and the dead output stays dead.</para>
+    ///
+    /// <para>Ed hit exactly that on 2026-08-26: he changed a level on his Roger On in the Windows
+    /// sound panel, closed it, and had no sound until he unticked the device and ticked it again —
+    /// which is just a manual SetOutputDevices, the very call the recovery was waiting for. The
+    /// per-second tick now watches this and re-applies on its own.</para>
+    /// </summary>
+    public bool HasFaultedOutput
+    {
+        get
+        {
+            lock (gate)
+            {
+                foreach (var entry in outputs.Values)
+                {
+                    if (entry.Faulted) return true;
+                }
+                return false;
+            }
+        }
+    }
+
+    /// <summary>
     /// Friendly names of currently-active output devices, comma-joined. "(none)" when no
     /// device is enabled. Used by the snapshot log column.
     /// </summary>
@@ -125,6 +155,18 @@ internal sealed class MultiOutputPlayout : IRenderBackend
     /// <inheritdoc cref="ReportedOutputLatencyMsFor"/>
     public double OutputQueueMsFor(RenderRoute route) =>
         route == RenderRoute.AsioLane ? 0 : WorstQueueMs;
+
+    /// <summary>One reading per live WASAPI output, for the long-run report. Reads the same lock-free
+    /// snapshot the render thread uses, so it never blocks audio. See <see cref="WasapiOutputStage"/>
+    /// for why this stage in particular is worth watching over hours.</summary>
+    public IReadOnlyList<WasapiOutputStage> OutputStages()
+    {
+        var snap = outputSnapshot;
+        if (snap.Length == 0) return Array.Empty<WasapiOutputStage>();
+        var readings = new WasapiOutputStage[snap.Length];
+        for (var i = 0; i < snap.Length; i++) readings[i] = snap[i].Snapshot();
+        return readings;
+    }
 
     /// <summary>The WORST reported latency among this backend's live outputs, because a listener
     /// hears the slowest one. Private: the only way OUT of this class is per lane, so nobody can ask
@@ -402,11 +444,13 @@ internal sealed class MultiOutputPlayout : IRenderBackend
     /// </summary>
     private sealed class DriftResamplingProvider : IWaveProvider
     {
-        // Mirror SessionPlayout's proven constants for the clock-ratio feed-forward.
-        private const double DriftMeasurementWindowSec = 10.0;
-        private const double DriftRatioSmoothingNew = 0.30;
-        private const double DriftRatioMin = 0.95;
-        private const double DriftRatioMax = 1.05;
+        // The clock-ratio loop itself now lives in Core as DriftRatioTracker: the ten-second window,
+        // the discarded first window, the ±5 % sanity band, the 70/30 smoothing and the bounded depth
+        // term. It was lifted out of THIS class on 2026-09-07 because two other places had grown their
+        // own copy of the same arithmetic — the plugin sender's second-DAW lane and the new
+        // capture-source corrector — and the newest copy had been written without the parts this one
+        // had learned the hard way. Everything below is what is genuinely local to a WASAPI card.
+        //
         // Feedback: steer the buffer toward a cushion. Pure rate-matching holds the buffer wherever
         // the start-up transient left it (~50 ms and climbing in the field). SessionPlayout was
         // originally thought to get away without this (it ARMS at target and has a click-trim net),
@@ -421,12 +465,9 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         // NOT a load-reactive loop, so it never climbs on a CPU/network spike and drops when calm.
         // The pull is the WINDOW AVERAGE (one coalesced double-pull can't move it), and a hysteresis
         // band means only a genuine change in the card's pull size ever shifts the target.
-        private const double TargetGulpMultiple = 1.2;  // cushion ≈ this × the card's pull size
-        private const int MinTargetDepthMs = 8;         // floor for a tiny-pull device
-        private const int MaxTargetDepthMs = 50;        // cap so a pathological pull can't run away
-        private const int TargetHysteresisMs = 2;       // only move the target on a real ≥2 ms shift
-        private const double DepthCorrectionSec = 15.0; // correct a depth error over ~this long
-        private const double MaxDepthBias = 0.003;      // cap the depth nudge at 0.3 % rate
+        // The cushion-sizing numbers (margin, floor, cap, hysteresis) are AdaptiveCushionTarget's.
+        // The correction over time (DepthCorrectionSec) and its 0.3 % cap (MaxDepthBias) are the
+        // tracker's, shared with every other caller — see DriftRatioTracker.
 
         private readonly BufferedWaveProvider buffer;
         private readonly string name;
@@ -452,19 +493,26 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         // ratio the resampler needs to hold the buffer level.
         private long producerFedBytes;     // Interlocked (producer writes, render reads)
         private long deviceDrainedBytes;    // render thread only
-        private long windowStartTicks;
-        private long windowStartFed;
-        private long windowStartDrained;
-        private double smoothedRatio = 1.0;
-        private bool tracking;
-        private bool firstWindowDone;
+        // The acquisition gate is on HERE and nowhere else: this stage's endpoint is the thing that
+        // re-opens, and a freshly opened WASAPI endpoint swings for about thirty seconds before it reads
+        // its real clock. See DriftRatioTracker.acquireAgreementPpm for the readings that proved it.
+        private readonly DriftRatioTracker tracker = new(MixSampleRate, acquireAgreementPpm: DriftRatioTracker.DeviceAcquisitionAgreementPpm);
         // Adaptive-but-stable target. pullSumBytes/pullCount accumulate the card's pull sizes over a
         // window; targetMs is set from their average (× the margin) and then HELD — the hysteresis
         // band keeps it from flitting. Defaults to 12 ms until the first window measures the card.
         private long pullSumBytes;
         private long pullCount;
-        private int targetMs = 12;
+        private int targetMs = AdaptiveCushionTarget.DefaultMs;
         private double lastGulpMs;
+        private double lastClockPpm;
+        private double lastCorrPpm;
+
+        /// <summary>A reading of this stage for the long-run report. These numbers used to exist only
+        /// inside a ten-second log line, and only while a receiver was running — so on a send-only
+        /// machine, or between lines, they were unavailable. This is the WASAPI-only stage, and the
+        /// one Ed's overnight slowdown must live in, so it has to be readable on demand.</summary>
+        public WasapiOutputStage Snapshot() =>
+            new(name, BufferedMs, targetMs, lastGulpMs, lastClockPpm, lastCorrPpm);
 
         // Scratch — grown lazily, persists across calls so the hot path doesn't allocate.
         private byte[] inputBytes = new byte[16384];
@@ -552,80 +600,45 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         /// Render thread only.</summary>
         private void UpdateRatioIfDue()
         {
-            var now = Stopwatch.GetTimestamp();
-            if (windowStartTicks == 0)
-            {
-                windowStartTicks = now;
-                windowStartFed = Interlocked.Read(ref producerFedBytes);
-                windowStartDrained = deviceDrainedBytes;
-                return;
-            }
-
-            var elapsedSec = (now - windowStartTicks) / (double)Stopwatch.Frequency;
-            if (elapsedSec < DriftMeasurementWindowSec) return;
-
-            var fedNow = Interlocked.Read(ref producerFedBytes);
-            var fedDelta = fedNow - windowStartFed;
-            var drainedDelta = deviceDrainedBytes - windowStartDrained;
-
-            // Re-anchor immediately so every early return below still advances the window cleanly.
-            windowStartTicks = now;
-            windowStartFed = fedNow;
-            windowStartDrained = deviceDrainedBytes;
+            // The tracker owns the window and re-anchors it here, so every early return below still
+            // advances the window cleanly.
+            if (!tracker.WindowClosed(Interlocked.Read(ref producerFedBytes), deviceDrainedBytes)) return;
 
             // Size the target to THIS card from its average pull, then hold it. Done on every path
             // (including the discarded warm-up window) so the next window's average starts clean.
+            // This is exactly why the tracker's update is split in two: the target does not exist until
+            // the window has closed, and the depth term must use it in the SAME window, not the next.
             var avgPullBytes = pullCount > 0 ? pullSumBytes / pullCount : 0;
             pullSumBytes = 0;
             pullCount = 0;
             if (avgPullBytes > 0)
             {
                 lastGulpMs = avgPullBytes / (double)MixBytesPerFrame * 1000.0 / MixSampleRate;
-                var candidateMs = (int)Math.Round(
-                    Math.Clamp(lastGulpMs * TargetGulpMultiple, MinTargetDepthMs, MaxTargetDepthMs));
-                // Hysteresis: only move on a genuine ≥2 ms change in the card's pull, so tiny
-                // averaging wobble never nudges the latency — it settles once and stays put.
-                if (Math.Abs(candidateMs - targetMs) >= TargetHysteresisMs) targetMs = candidateMs;
+                // The rule itself lives in AdaptiveCushionTarget, as a seam rather than three lines
+                // here — it is the only thing in the whole receive path that decides how much latency
+                // this stage deliberately holds, and inline it could only be tested by running a real
+                // card for hours. Extracted, a soak can prove it settles and then stops moving.
+                targetMs = AdaptiveCushionTarget.Next(targetMs, lastGulpMs);
             }
 
-            // Discard the FIRST completed window. WASAPI primes its endpoint buffer at start-up,
-            // which inflates the device-drain count for that window and reads as a large bogus
-            // ppm (−1199 ppm observed) that shoves the buffer off target. Start measuring from
-            // the next window, by which point start-up is done.
-            if (!firstWindowDone) { firstWindowDone = true; return; }
+            // Feed-forward against the true crystal ratio (system feed ÷ device drain), plus the
+            // feedback nudge toward the adaptive target: depth above target biases the rate UP so the
+            // resampler pulls more per output and drains the buffer faster, below target biases it
+            // down. The tracker discards the FIRST completed window — WASAPI primes its endpoint
+            // buffer at start-up, which inflates the device-drain count and reads as a large bogus ppm
+            // (−1199 ppm observed) that would shove the buffer off target — and it discards, rather
+            // than clamps, any reading outside the sanity band. Nothing is applied on a guess.
+            if (!tracker.ApplyMeasurement(buffer.BufferedBytes / MixBytesPerFrame, targetMs * MixSampleRate / 1000)) return;
 
-            if (fedDelta <= 0 || drainedDelta <= 0) return;
-
-            // Feed-forward: the true crystal ratio (system feed ÷ device drain). Independent of
-            // the resampler rate we apply, so it's a clean measurement of the clock difference.
-            // Cancels steady-state drift so the feedback term doesn't have to fight a constant.
-            var measured = (double)fedDelta / drainedDelta;
-            if (measured >= DriftRatioMin && measured <= DriftRatioMax)
-            {
-                smoothedRatio = tracking
-                    ? (1.0 - DriftRatioSmoothingNew) * smoothedRatio + DriftRatioSmoothingNew * measured
-                    : measured;
-                tracking = true;
-            }
-            if (!tracking) return; // nothing valid measured yet — don't touch the rate.
-
-            // Feedback: nudge the buffer toward the adaptive target (targetMs). depthError > 0 = too deep → bias
-            // the rate UP so the resampler pulls more per output and drains the buffer faster;
-            // < 0 = too shallow → bias down. Clamped + spread over DepthCorrectionSec so it's a
-            // gentle, inaudible pitch trim, not a per-sample discontinuity.
-            var depthFrames = buffer.BufferedBytes / MixBytesPerFrame;
-            var targetFrames = targetMs * MixSampleRate / 1000;
-            var depthError = depthFrames - targetFrames;
-            var depthCorrection = Math.Clamp(
-                depthError / (DepthCorrectionSec * MixSampleRate),
-                -MaxDepthBias, MaxDepthBias);
-
-            var appliedRatio = smoothedRatio + depthCorrection;
+            var appliedRatio = tracker.AppliedRatio;
             resampler.SetRates(MixSampleRate * appliedRatio, MixSampleRate);
 
             var depthMs = buffer.BufferedBytes / MixBytesPerFrame * 1000 / MixSampleRate;
+            var smoothedRatio = tracker.ClockRatio;
             var clockPpm = (smoothedRatio - 1.0) * 1_000_000.0;
-            var corrPpm = depthCorrection * 1_000_000.0;
+            var corrPpm = tracker.DepthCorrection * 1_000_000.0;
+            lastClockPpm = clockPpm;
+            lastCorrPpm = corrPpm;
             onDiagnostic?.Invoke(
                 $"\"{name}\": clock={smoothedRatio:F6} ({clockPpm:+0;-0}ppm) depthMs={depthMs} " +
                 $"target={targetMs} gulpMs={lastGulpMs:F0} corr={corrPpm:+0;-0}ppm applied={appliedRatio:F6}");

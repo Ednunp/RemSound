@@ -582,8 +582,84 @@ internal static class AppInstaller
     /// retrying a few times in case a copy is slow to release its files, then deletes itself. The two
     /// flags decide independently whether the "user settings and logs" folder (profiles + config +
     /// logs) and the "recordings" folder go too; whichever aren't removed are kept in place.</summary>
+    /// <summary>
+    /// Is this folder one we are willing to point <c>rd /s /q</c> at?
+    ///
+    /// <para>The remover deletes whatever folder the install marker sits next to, and the marker is
+    /// just a file — copy an installed RemSound somewhere else and it travels with it. Copy one to a
+    /// drive root and "Uninstall RemSound" would generate <c>rd /s /q "D:\"</c>, which walks the whole
+    /// drive. Nothing checked; found 2026-08-24 reading the uninstall path.</para>
+    ///
+    /// <para>Unlikely, and catastrophic, and free to prevent — which is the whole argument for a
+    /// guard. It refuses a drive root and the handful of folders nobody could ever legitimately have
+    /// installed INTO, and lets every real install through untouched.</para>
+    /// </summary>
+    internal static bool IsSafeToRemove(string? folder)
+    {
+        if (string.IsNullOrWhiteSpace(folder)) return false;
+
+        // DRIVE-RELATIVE PATHS, refused before anything resolves them. "C:" and "C:sub" name a drive
+        // WITHOUT a separator, and Windows resolves those against that drive's own current directory —
+        // so Path.GetFullPath("C:") returns wherever this process happens to be on C:, which is a real
+        // nested folder and sails straight through the drive-root check below. The guard would then
+        // approve deleting it.
+        //
+        // Found 2026-09-06 by the gate itself: AUDIT INST1 passes from a working directory on D: and
+        // FAILS from one on C:, because that is the only difference. A test that passes because of
+        // where it was run from is barely a test, and a safety guard that depends on the current
+        // directory is not a guard. An install folder is always fully qualified, so the shape is
+        // simply refused.
+        var trimmed = folder.Trim();
+        if (trimmed.Length >= 2 && trimmed[1] == ':'
+            && (trimmed.Length == 2 || (trimmed[2] != Path.DirectorySeparatorChar && trimmed[2] != Path.AltDirectorySeparatorChar)))
+        {
+            return false;
+        }
+
+        string full;
+        try { full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder)); }
+        catch { return false; }
+        if (full.Length == 0) return false;
+
+        // A drive root, or a UNC share root — never.
+        var root = Path.GetPathRoot(full);
+        if (string.IsNullOrEmpty(root)) return false;
+        if (string.Equals(Path.TrimEndingDirectorySeparator(root), full, StringComparison.OrdinalIgnoreCase)) return false;
+
+        // Folders that hold OTHER things. An install lives in its own folder inside one of these,
+        // never as one of them.
+        foreach (var special in new[]
+                 {
+                     Environment.SpecialFolder.Windows, Environment.SpecialFolder.System,
+                     Environment.SpecialFolder.ProgramFiles, Environment.SpecialFolder.ProgramFilesX86,
+                     Environment.SpecialFolder.CommonApplicationData, Environment.SpecialFolder.UserProfile,
+                     Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolder.ApplicationData,
+                     Environment.SpecialFolder.DesktopDirectory, Environment.SpecialFolder.MyDocuments,
+                     Environment.SpecialFolder.MyMusic, Environment.SpecialFolder.Personal,
+                 })
+        {
+            string path;
+            try { path = Environment.GetFolderPath(special); } catch { continue; }
+            if (string.IsNullOrEmpty(path)) continue;
+            if (string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)), full, StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+        return true;
+    }
+
     private static void StartDeleteAfterExit(string installFolder, bool removeProfilesConfigLogs, bool removeRecordings)
     {
+        // Refuse before writing a script that deletes a tree. Both callers already turn a throw here
+        // into "RemSound couldn't start the uninstaller: <reason>", which is the right outcome: the
+        // user is told plainly and nothing is removed.
+        if (!IsSafeToRemove(installFolder))
+        {
+            throw new InvalidOperationException(
+                $"\"{installFolder}\" is not a folder RemSound is willing to delete — it looks like a drive root or a "
+                + "system folder rather than an install of its own. Nothing has been removed. If this really is a "
+                + "RemSound install, move it into its own folder first and uninstall from there.");
+        }
+
         var pid = Environment.ProcessId;
 
         // Folders to KEEP: everything else (all program files, and any data folder not being removed)

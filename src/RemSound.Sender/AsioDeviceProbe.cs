@@ -1,5 +1,6 @@
 using Microsoft.Win32;
 using NAudio.Wave;
+using RemSound.Core;
 
 namespace RemSound.Sender;
 
@@ -67,6 +68,11 @@ public static class AsioDeviceProbe
     /// </summary>
     public static AsioDriverProbeResult ProbeDriverInfo(string driverName)
     {
+        // A driver RemSound already holds answers from that instance. Opening a second one to ask its
+        // channel names fails on a driver that allows one per process, and would have emptied the
+        // channel lists for exactly the driver in use.
+        if (SharedAsioDevice.TryDescribe(driverName, out var heldIn, out var heldOut, out var heldInNames, out var heldOutNames))
+            return new AsioDriverProbeResult(heldIn, heldOut, heldInNames, heldOutNames);
         try
         {
             using var asio = new AsioOut(driverName);

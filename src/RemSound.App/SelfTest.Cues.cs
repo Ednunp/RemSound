@@ -108,10 +108,28 @@ internal static partial class SelfTest
         var restore = CuePlayer.GloballyMuted;
         try
         {
-            CuePlayer.GloballyMuted = true;
+            // COUNT the plays that get past the gate. The old assertion was that GloballyMuted was
+            // still set after a muted Play — which Play never changes either way, so it held whether
+            // or not the mute worked. Deleting the mute gate outright left this step green
+            // (2026-08-24). Two different values, never two zeroes: muted must not play, unmuted must.
             var player = new CuePlayer(wav);
-            player.Play(); // must be a no-op: no device opened, no sound, no throw
+
+            CuePlayer.GloballyMuted = true;
+            var mutedBefore = CuePlayer.PlaysStartedForTest;
+            player.Play();
+            player.Play();
+            Check(CuePlayer.PlaysStartedForTest == mutedBefore,
+                $"a muted cue must not open a device or make a sound — {CuePlayer.PlaysStartedForTest - mutedBefore} of two "
+                + "Plays got past the mute. This is the gate chiming at whoever happens to be at the screen");
             Check(CuePlayer.GloballyMuted, "GloballyMuted must stay set — Play must not clear it as a side effect");
+
+            // And the other direction, or the check above would pass just as well on a cue system
+            // that never makes a sound at all.
+            CuePlayer.GloballyMuted = false;
+            var unmutedBefore = CuePlayer.PlaysStartedForTest;
+            player.Play();
+            Check(CuePlayer.PlaysStartedForTest == unmutedBefore + 1,
+                "an UNMUTED cue must actually reach playback — otherwise the mute check above is comparing two zeroes");
         }
         finally { CuePlayer.GloballyMuted = restore; }
 

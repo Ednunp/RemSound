@@ -25,6 +25,30 @@ public enum PluginBridgeMessage : byte
     /// "address TAB name". Also the plugin's proof that RemSound is running — no reply means the app
     /// is closed, or the user has switched the plugin off in Preferences, and the plugin says so.</summary>
     PeerList = 7,
+    /// <summary>Plugin → app, every audio block: the same three jobs as <see cref="ClaimPeer"/> —
+    /// claim, heartbeat and request — but for SEVERAL peers at once. Payload is a little-endian int32
+    /// frame count, then a byte count, then that many 4-byte IPv4 addresses.
+    ///
+    /// <para><b>Why the app sums rather than the plugin.</b> One track can carry several people (a
+    /// conversation you want to hear over your own session), and the naive way to do it — one request
+    /// and one reply per peer — multiplies the loopback traffic and the bridge thread's work by the
+    /// number of people on the track. The app already has each peer decoded and shaped, so it reads
+    /// them all and returns ONE mixed block, and the plugin's audio path is unchanged: one ring, one
+    /// resampler. The cost is that a per-peer trim is not available in the plugin; RemSound's own
+    /// per-peer volume, pan and EQ apply to what the plugin gets (they run inside the session read
+    /// this path calls), so that control already exists where the user already knows it.</para></summary>
+    ClaimPeers = 8,
+    /// <summary>App → plugin: a block of the claimed peers' audio, like <see cref="PeerAudio"/>, but
+    /// stamped with WHICH DAW BLOCK it is for. Payload is a little-endian int64 round number, then the
+    /// int32 ask number the plugin sent with its request, then the interleaved float samples.
+    ///
+    /// <para>The app numbers the blocks of each DAW: every instance in one host process asking once is
+    /// one round, and an instance asking again is the next. So two tracks that ask in the same DAW
+    /// block get the same round number, and the plugin can play "the round this block's ask will get,
+    /// minus a fixed lead" instead of "the oldest reply in a queue" — which is what put two tracks on
+    /// the same peer a few blocks apart, by however many replies had piled up in each queue at start.
+    /// Sent only to a plugin whose request carried an ask number; an older plugin gets PeerAudio.</para></summary>
+    PeerAudioRound = 9,
 }
 
 /// <summary>
@@ -121,7 +145,7 @@ public static class PluginBridgeProtocol
         if (packet[4] != Version) return false;
 
         var raw = packet[5];
-        if (raw is < (byte)PluginBridgeMessage.Hello or > (byte)PluginBridgeMessage.PeerList) return false;
+        if (raw is < (byte)PluginBridgeMessage.Hello or > (byte)PluginBridgeMessage.PeerAudioRound) return false;
         type = (PluginBridgeMessage)raw;
 
         payloadLength = BinaryPrimitives.ReadUInt16LittleEndian(packet[6..]);
@@ -137,4 +161,98 @@ public static class PluginBridgeProtocol
     /// <summary>A stable 32-bit id for a plugin instance, so the header stays small. A Guid would
     /// cost 16 bytes per message on the hot path for no benefit locally.</summary>
     public static int InstanceHash(Guid instanceId) => instanceId.GetHashCode();
+
+    // ---- The claim set ---------------------------------------------------------------------------
+
+    /// <summary>How many peers one plugin instance may put on one track. Not a musical judgement: it
+    /// bounds the request datagram and the per-block work on the bridge thread, and it is far past
+    /// anything a session would do. A set longer than this is truncated rather than refused, because
+    /// dropping the whole request would silence the track.</summary>
+    public const int MaxClaimedPeers = 32;
+
+    /// <summary>Bytes a claim-set payload needs for <paramref name="peerCount"/> peers.</summary>
+    public static int ClaimSetSize(int peerCount) => sizeof(int) + 1 + peerCount * 4;
+
+    /// <summary>The same with the trailing ask number (see <see cref="PluginBridgeMessage.PeerAudioRound"/>).</summary>
+    public static int ClaimSetSizeWithAsk(int peerCount) => ClaimSetSize(peerCount) + sizeof(int);
+
+    /// <summary>Header of a <see cref="PluginBridgeMessage.PeerAudioRound"/> payload: the round, then the ask number.</summary>
+    public const int AudioRoundHeaderSize = sizeof(long) + sizeof(int);
+
+    /// <summary>Write the round and ask number in front of a block's samples.</summary>
+    public static void WriteAudioRoundHeader(Span<byte> destination, long round, int askNumber)
+    {
+        BinaryPrimitives.WriteInt64LittleEndian(destination, round);
+        BinaryPrimitives.WriteInt32LittleEndian(destination[sizeof(long)..], askNumber);
+    }
+
+    /// <summary>Read them back; the samples follow.</summary>
+    public static bool TryReadAudioRoundHeader(ReadOnlySpan<byte> payload, out long round, out int askNumber)
+    {
+        round = 0;
+        askNumber = -1;
+        if (payload.Length < AudioRoundHeaderSize) return false;
+        round = BinaryPrimitives.ReadInt64LittleEndian(payload);
+        askNumber = BinaryPrimitives.ReadInt32LittleEndian(payload[sizeof(long)..]);
+        return true;
+    }
+
+    /// <summary>Write "I want these people, and I just consumed this many frames". IPv4 only, which is
+    /// what this link has always carried — the header's own peer field is four bytes.</summary>
+    /// <returns>Bytes written.</returns>
+    public static int WriteClaimSet(Span<byte> destination, int frames, ReadOnlySpan<IPAddress> peers)
+    {
+        var count = Math.Min(peers.Length, MaxClaimedPeers);
+        if (destination.Length < ClaimSetSize(count)) throw new ArgumentException("Claim set does not fit", nameof(destination));
+        BinaryPrimitives.WriteInt32LittleEndian(destination, frames);
+        var written = 0;
+        Span<byte> scratch = stackalloc byte[16];
+        for (var i = 0; i < count; i++)
+        {
+            if (!peers[i].TryWriteBytes(scratch, out var length) || length != 4) continue;   // IPv6: not on this link
+            scratch[..4].CopyTo(destination[(sizeof(int) + 1 + written * 4)..]);
+            written++;
+        }
+        destination[sizeof(int)] = (byte)written;
+        return ClaimSetSize(written);
+    }
+
+    /// <summary>The same request with the plugin's ask number after the addresses, so the reply can
+    /// say which ask it answers (see <see cref="PluginBridgeMessage.PeerAudioRound"/>). An app that
+    /// predates the number reads the set exactly as before and ignores the tail.</summary>
+    public static int WriteClaimSet(Span<byte> destination, int frames, ReadOnlySpan<IPAddress> peers, int askNumber)
+    {
+        var length = WriteClaimSet(destination, frames, peers);
+        if (destination.Length < length + sizeof(int)) throw new ArgumentException("Claim set does not fit", nameof(destination));
+        BinaryPrimitives.WriteInt32LittleEndian(destination[length..], askNumber);
+        return length + sizeof(int);
+    }
+
+    /// <summary>Read a claim set back. The addresses are handed over as RAW BYTES rather than
+    /// <see cref="IPAddress"/> objects on purpose: this runs once per audio block per instance, the
+    /// set is identical on all but a handful of those blocks, and the caller can compare the bytes
+    /// against what it already holds and allocate nothing at all in the normal case.</summary>
+    public static bool TryReadClaimSet(ReadOnlySpan<byte> payload, out int frames, out ReadOnlySpan<byte> addresses)
+    {
+        frames = 0;
+        addresses = default;
+        if (payload.Length < sizeof(int) + 1) return false;
+        frames = BinaryPrimitives.ReadInt32LittleEndian(payload);
+        int count = payload[sizeof(int)];
+        if (count > MaxClaimedPeers) return false;
+        if (payload.Length < ClaimSetSize(count)) return false;
+        addresses = payload.Slice(sizeof(int) + 1, count * 4);
+        return true;
+    }
+
+    /// <summary>Read a claim set and, if the plugin sent one, its ask number; -1 when it did not (an
+    /// older plugin), in which case the reply must be a plain <see cref="PluginBridgeMessage.PeerAudio"/>.</summary>
+    public static bool TryReadClaimSet(ReadOnlySpan<byte> payload, out int frames, out ReadOnlySpan<byte> addresses, out int askNumber)
+    {
+        askNumber = -1;
+        if (!TryReadClaimSet(payload, out frames, out addresses)) return false;
+        var tail = ClaimSetSize(addresses.Length / 4);
+        if (payload.Length >= tail + sizeof(int)) askNumber = BinaryPrimitives.ReadInt32LittleEndian(payload[tail..]);
+        return true;
+    }
 }

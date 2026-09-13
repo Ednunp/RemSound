@@ -69,14 +69,24 @@ internal sealed class PeerRenderBridge
     }
 
     /// <summary>Fill one DAW block from the claimed peer. Audio thread; allocation-free.</summary>
-    /// <returns>Frames actually filled — short while the buffer is still building, which the caller
-    /// leaves as silence rather than repeating stale audio.</returns>
-    public int FillHostBlock(Span<double> left, Span<double> right)
+    /// <param name="mixInto">Sum the peer on top of whatever the caller has already put in the block,
+    /// rather than replacing it. That is the normal case for an FX insert: the track's own audio has
+    /// to survive the plugin, or putting RemSound on a track that is also playing something silences
+    /// it (Anthony Reyers, 2026-08-28). Replacing is kept available for a bus that carries nothing but
+    /// the peer, where clearing first saves a pointless add.</param>
+    /// <param name="gain">Receive trim, 1 = unity. Applied as the peer is written or summed, so it
+    /// touches only their audio and never the track's own.</param>
+    /// <returns>Frames actually filled from the peer — short while the buffer is still building, which
+    /// the caller leaves alone rather than repeating stale audio.</returns>
+    public int FillHostBlock(Span<double> left, Span<double> right, float gain = 1f, bool mixInto = false)
     {
         var hostFrames = Math.Min(left.Length, right.Length);
         if (hostFrames <= 0) return 0;
-        left[..hostFrames].Clear();
-        right[..hostFrames].Clear();
+        if (!mixInto)
+        {
+            left[..hostFrames].Clear();
+            right[..hostFrames].Clear();
+        }
 
         // Fast path: the host is already at our rate, so there is no rounding to absorb.
         if (Math.Abs(hostSampleRate - PluginBridgeProtocol.WireSampleRate) < 0.5)
@@ -84,10 +94,21 @@ internal sealed class PeerRenderBridge
             if (wireIn.Length < hostFrames * Channels) return 0;
             var direct = client.ReadPeerBlock(wireIn.AsSpan(0, hostFrames * Channels), hostFrames);
             if (direct <= 0) return 0;
-            for (var i = 0; i < direct; i++)
+            if (mixInto)
             {
-                left[i] = wireIn[i * Channels];
-                right[i] = wireIn[i * Channels + 1];
+                for (var i = 0; i < direct; i++)
+                {
+                    left[i] += wireIn[i * Channels] * gain;
+                    right[i] += wireIn[i * Channels + 1] * gain;
+                }
+            }
+            else
+            {
+                for (var i = 0; i < direct; i++)
+                {
+                    left[i] = wireIn[i * Channels] * gain;
+                    right[i] = wireIn[i * Channels + 1] * gain;
+                }
             }
             return direct;
         }
@@ -123,10 +144,21 @@ internal sealed class PeerRenderBridge
         // Emit whatever the carry can cover — a full block in steady state, less only when the app
         // is genuinely starving us, which is left as silence rather than repeated audio.
         var emit = Math.Min(hostFrames, carryFrames);
-        for (var i = 0; i < emit; i++)
+        if (mixInto)
         {
-            left[i] = carry[i * Channels];
-            right[i] = carry[i * Channels + 1];
+            for (var i = 0; i < emit; i++)
+            {
+                left[i] += carry[i * Channels] * gain;
+                right[i] += carry[i * Channels + 1] * gain;
+            }
+        }
+        else
+        {
+            for (var i = 0; i < emit; i++)
+            {
+                left[i] = carry[i * Channels] * gain;
+                right[i] = carry[i * Channels + 1] * gain;
+            }
         }
         // Shift the surplus down for next time.
         var remaining = carryFrames - emit;
