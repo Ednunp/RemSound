@@ -142,17 +142,8 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
         }
     }
 
-    /// <summary>Max raw-capture step across both inner backends since the last call. Has to
-    /// drain BOTH probes (so neither sits accumulating forever after we read one) and return
-    /// the larger value.</summary>
-    public float TakeMaxRawCaptureStep()
-    {
-        var w = wasapi?.TakeMaxRawCaptureStep() ?? 0f;
-        var a = asio?.TakeMaxRawCaptureStep() ?? 0f;
-        return w > a ? w : a;
-    }
-
-    /// <summary>Cross-buffer (boundary) max across both inner backends. Drains BOTH.</summary>
+    /// <summary>Cross-buffer (boundary) max across both inner backends. Has to drain BOTH probes
+    /// (so neither sits accumulating forever after we read one) and return the larger value.</summary>
     public float TakeMaxRawCaptureStepCrossBuffer()
     {
         var w = wasapi?.TakeMaxRawCaptureStepCrossBuffer() ?? 0f;

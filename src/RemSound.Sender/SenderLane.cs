@@ -90,7 +90,6 @@ internal sealed class SenderLane
     // to tell a real capture glitch from instrumentation aliasing. Per-lane separation fixes
     // that without changing what the probe measures.
     private readonly AudioStepProbe preEncodeStepProbe = new();
-    public float TakeMaxPreEncodeStep() => preEncodeStepProbe.TakeMax();
     public float TakeMaxPreEncodeStepCrossBuffer() => preEncodeStepProbe.TakeMaxCrossBuffer();
     public float TakeMaxPreEncodeStepWithinBuffer() => preEncodeStepProbe.TakeMaxWithinBuffer();
 

@@ -109,7 +109,6 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
     /// where Ed has been hunting jitter.</summary>
     public int TakeMaxCallbackGapMs() => 0;
 
-    public float TakeMaxRawCaptureStep() => rawCaptureStepProbe.TakeMax();
     public float TakeMaxRawCaptureStepCrossBuffer() => rawCaptureStepProbe.TakeMaxCrossBuffer();
     public float TakeMaxRawCaptureStepWithinBuffer() => rawCaptureStepProbe.TakeMaxWithinBuffer();
     public long TakeCumulativeCaptureTicks() => Interlocked.Exchange(ref cumulativeCaptureTicks, 0);

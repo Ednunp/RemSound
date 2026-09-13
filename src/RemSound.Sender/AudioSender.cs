@@ -175,24 +175,6 @@ public sealed class AudioSender : IDisposable
     public double TakeCaptureWorkMs() =>
         engine.TakeCumulativeCaptureTicks() * 1000.0 / Stopwatch.Frequency;
 
-    // Pre-encode discontinuity probe — per-lane (each <see cref="SenderLane"/> owns its own).
-    // The aggregate accessor returns the max across both lanes since the last read; per-lane
-    // accessors expose them individually so BothIndependent mode can tell which lane is
-    // producing the artefact. Splitting the probe per-lane (2026-05-15) eliminates the
-    // cross-stream synthetic-step artefact that appeared when both lanes shared one probe and
-    // their interleaved callbacks fooled the cross-buffer step computation into recording a
-    // "step" between two unrelated audio streams.
-    public float TakeMaxSenderPreEncodeStep()
-    {
-        var a = defaultLane.TakeMaxPreEncodeStep();
-        var b = asioLane.TakeMaxPreEncodeStep();
-        var c = pluginLane.TakeMaxPreEncodeStep();
-        return Math.Max(a, Math.Max(b, c));
-    }
-    public float TakeMaxPreEncodeStepWasapiLane() => defaultLane.TakeMaxPreEncodeStep();
-    public float TakeMaxPreEncodeStepAsioLane() => asioLane.TakeMaxPreEncodeStep();
-    public float TakeMaxPreEncodeStepPluginLane() => pluginLane.TakeMaxPreEncodeStep();
-
     /// <summary>Loudest absolute pre-encode sample across both lanes since the last call (resets on
     /// read). ~0 means we're sending silence; surfaced on the diag line as capPeak.</summary>
     public float TakeMaxSenderPreEncodePeak()
@@ -217,10 +199,13 @@ public sealed class AudioSender : IDisposable
     public long TakeSenderAudioFramesSent() =>
         defaultLane.TakeAudioFramesSent() + asioLane.TakeAudioFramesSent() + pluginLane.TakeAudioFramesSent();
 
-    // Cross-buffer (boundary) and within-buffer (content) split — see AudioStepProbe for the
-    // diagnostic distinction. Used by the per-second diag logger to emit two extra columns so
-    // an offline log inspection can tell a real audio transient apart from a buffer-boundary
-    // glitch. 2026-05-21 addition.
+    // Pre-encode discontinuity probe, read per lane — each <see cref="SenderLane"/> owns its own, so
+    // the log can tell which lane is producing an artefact. Splitting the probe per lane (2026-05-15)
+    // eliminated the cross-stream synthetic-step artefact that appeared when the lanes shared one
+    // probe and their interleaved callbacks fooled the cross-buffer step computation into recording
+    // a "step" between two unrelated audio streams. Cross-buffer (boundary) and within-buffer
+    // (content) are read separately — see AudioStepProbe for the diagnostic distinction — so an
+    // offline log inspection can tell a real audio transient apart from a buffer-boundary glitch.
     public float TakeMaxPreEncodeStepWasapiLaneCrossBuffer() => defaultLane.TakeMaxPreEncodeStepCrossBuffer();
     public float TakeMaxPreEncodeStepWasapiLaneWithinBuffer() => defaultLane.TakeMaxPreEncodeStepWithinBuffer();
     public float TakeMaxPreEncodeStepAsioLaneCrossBuffer() => asioLane.TakeMaxPreEncodeStepCrossBuffer();
@@ -241,12 +226,11 @@ public sealed class AudioSender : IDisposable
     public int TakeMaxEmitGapMsAsioLane() => asioLane.TakeMaxEmitGapMs();
     public int TakeMaxEmitGapMsPluginLane() => pluginLane.TakeMaxEmitGapMs();
 
-    // Raw capture-side step probe — now lives inside each <see cref="ICaptureBackend"/>
+    // Raw capture-side step probe — lives inside each <see cref="ICaptureBackend"/>
     // implementation so the ASIO path and the WASAPI path each measure their own buffers
-    // independently. The aggregate just asks the backend for the max since last read; in
+    // independently. These just ask the backend for the max since last read; in
     // BothIndependent mode the composite backend forwards to both inners and returns the
     // larger value.
-    public float TakeMaxSenderRawCaptureStep() => engine.TakeMaxRawCaptureStep();
     public float TakeMaxSenderRawCaptureStepCrossBuffer() => engine.TakeMaxRawCaptureStepCrossBuffer();
     public float TakeMaxSenderRawCaptureStepWithinBuffer() => engine.TakeMaxRawCaptureStepWithinBuffer();
 

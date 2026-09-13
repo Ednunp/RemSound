@@ -80,20 +80,13 @@ internal interface ICaptureBackend : IDisposable
     /// support per-callback timing (e.g. trivial test backends) may return 0.</summary>
     int TakeMaxCallbackGapMs();
 
-    /// <summary>Worst single-sample step magnitude observed in the raw capture buffer since
-    /// the last call; resets on read. Each backend owns its own probe instance so the
-    /// cross-buffer step measurement doesn't get fooled by another backend's interleaved
-    /// callbacks (which is what produced spurious 0.4-0.5 readings in BothIndependent mode
-    /// before 2026-05-15). Backends that can't sensibly expose raw samples return 0.
-    /// Returns the max-of-(cross-buffer, within-buffer); for the split values use
-    /// <see cref="TakeMaxRawCaptureStepCrossBuffer"/> + <see cref="TakeMaxRawCaptureStepWithinBuffer"/>
-    /// and do NOT also call this in the same drain window.</summary>
-    float TakeMaxRawCaptureStep();
-
     /// <summary>Worst CROSS-BUFFER (boundary) raw-capture step since the last call. Non-zero =
     /// the first sample of some delivered capture buffer didn't continue smoothly from the
     /// last sample of the previous one. The clicks-at-buffer-boundary signal we're hunting.
-    /// Resets on read. Backends that can't sensibly expose raw samples return 0.</summary>
+    /// Resets on read. Each backend owns its own probe instance so the cross-buffer step
+    /// measurement doesn't get fooled by another backend's interleaved callbacks (which is what
+    /// produced spurious 0.4-0.5 readings in BothIndependent mode before 2026-05-15). Backends
+    /// that can't sensibly expose raw samples return 0.</summary>
     float TakeMaxRawCaptureStepCrossBuffer();
 
     /// <summary>Worst WITHIN-BUFFER raw-capture step since the last call. Non-zero = a sharp

@@ -137,7 +137,6 @@ internal sealed class HostCaptureBackend : ICaptureBackend
     /// we don't measure would be a constant dressed as a measurement, which is exactly the mistake
     /// the latency estimate made (2026-08-15).</summary>
     public int TakeMaxCallbackGapMs() => 0;
-    public float TakeMaxRawCaptureStep() => 0;
     public float TakeMaxRawCaptureStepCrossBuffer() => 0;
     public float TakeMaxRawCaptureStepWithinBuffer() => 0;
     public long TakeCumulativeCaptureTicks() => 0;

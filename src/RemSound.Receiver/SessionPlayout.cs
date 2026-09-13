@@ -274,8 +274,6 @@ internal sealed class SessionPlayout : IDisposable
     // came out of the resampler (after rate compensation).
     private readonly AudioStepProbe postRingReadStepProbe = new();
     private readonly AudioStepProbe postResamplerStepProbe = new();
-    public float TakeMaxPostRingReadStep() => postRingReadStepProbe.TakeMax();
-    public float TakeMaxPostResamplerStep() => postResamplerStepProbe.TakeMax();
     public float TakeMaxPostRingReadStepCrossBuffer() => postRingReadStepProbe.TakeMaxCrossBuffer();
     public float TakeMaxPostRingReadStepWithinBuffer() => postRingReadStepProbe.TakeMaxWithinBuffer();
     public float TakeMaxPostResamplerStepCrossBuffer() => postResamplerStepProbe.TakeMaxCrossBuffer();

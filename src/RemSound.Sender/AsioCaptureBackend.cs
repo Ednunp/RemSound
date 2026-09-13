@@ -163,7 +163,6 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     /// invoke the thing the driver invokes. Test seam only; nothing in the app reads this.</summary>
     internal Action<ReadOnlyMemory<float>> CallbackForTest => onMixedSamples;
 
-    public float TakeMaxRawCaptureStep() => rawCaptureStepProbe.TakeMax();
     public float TakeMaxRawCaptureStepCrossBuffer() => rawCaptureStepProbe.TakeMaxCrossBuffer();
     public float TakeMaxRawCaptureStepWithinBuffer() => rawCaptureStepProbe.TakeMaxWithinBuffer();
     public long TakeCumulativeCaptureTicks() => Interlocked.Exchange(ref cumulativeCaptureTicks, 0);

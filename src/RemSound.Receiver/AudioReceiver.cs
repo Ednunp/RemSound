@@ -571,27 +571,10 @@ public sealed class AudioReceiver : IDisposable
         }
     }
 
-    /// <summary>Take the worst post-decode single-sample step magnitude across all active
-    /// stream sessions since the last call, resetting each session's probe. Used by the
-    /// diag log to pinpoint where in the pipeline audio discontinuities are being
-    /// introduced. Returns max-of-(cross, within); for the split values use the XB/WB
-    /// methods below and do NOT also call this in the same drain window.</summary>
-    public float TakeMaxPostDecodeStep()
-    {
-        lock (sessionsLock)
-        {
-            var max = 0f;
-            foreach (var s in sessions.Values)
-            {
-                var v = s.TakeMaxPostDecodeStep();
-                if (v > max) max = v;
-            }
-            return max;
-        }
-    }
-
-    /// <summary>Cross-buffer (packet-boundary) max post-decode step across all sessions.
-    /// Drains each session's cross-buffer counter. 2026-05-21 addition for the click hunt.</summary>
+    /// <summary>Cross-buffer (packet-boundary) max post-decode single-sample step across all active
+    /// stream sessions since the last call, draining each session's cross-buffer counter. Used by
+    /// the diag log to pinpoint where in the pipeline audio discontinuities are being introduced.
+    /// 2026-05-21 addition for the click hunt.</summary>
     public float TakeMaxPostDecodeStepCrossBuffer()
     {
         lock (sessionsLock)
@@ -735,13 +718,12 @@ public sealed class AudioReceiver : IDisposable
     public double FilteredDriftErrorFrames => playoutEngine.PrimaryFilteredDriftErrorFrames;
     // DriftAccumulator removed 2026-05-23. Phase-4 fixed-ratio resampler never sets an
     // integrator value; always returned 0. Removed alongside the driftAcc= diag column.
-    /// <summary>Take the worst single-sample step out of the ring buffer (after decode +
-    /// SessionPlayout.Write, before resampler) since the last call.</summary>
-    public float TakeMaxPostRingReadStep() => playoutEngine.TakeMaxPostRingReadStep();
+    /// <summary>The worst single-sample step out of the ring buffer (after decode +
+    /// SessionPlayout.Write, before resampler) since the last call, split cross/within buffer.</summary>
     public float TakeMaxPostRingReadStepCrossBuffer() => playoutEngine.TakeMaxPostRingReadStepCrossBuffer();
     public float TakeMaxPostRingReadStepWithinBuffer() => playoutEngine.TakeMaxPostRingReadStepWithinBuffer();
-    /// <summary>Take the worst single-sample step out of the resampler since the last call.</summary>
-    public float TakeMaxPostResamplerStep() => playoutEngine.TakeMaxPostResamplerStep();
+    /// <summary>The worst single-sample step out of the resampler since the last call, split
+    /// cross/within buffer.</summary>
     public float TakeMaxPostResamplerStepCrossBuffer() => playoutEngine.TakeMaxPostResamplerStepCrossBuffer();
     public float TakeMaxPostResamplerStepWithinBuffer() => playoutEngine.TakeMaxPostResamplerStepWithinBuffer();
     /// <summary>RingbufferOverflowDropBytes = AggregateDrops minus the deliberate trim+drain

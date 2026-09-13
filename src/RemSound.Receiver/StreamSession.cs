@@ -53,7 +53,6 @@ internal sealed class StreamSession : IDisposable
     // session playout, so the post-ring-read probe in SessionPlayout sees the exact same
     // samples a moment later (after riding through the ring buffer).
     private readonly AudioStepProbe postDecodeStepProbe = new();
-    public float TakeMaxPostDecodeStep() => postDecodeStepProbe.TakeMax();
     public float TakeMaxPostDecodeStepCrossBuffer() => postDecodeStepProbe.TakeMaxCrossBuffer();
     public float TakeMaxPostDecodeStepWithinBuffer() => postDecodeStepProbe.TakeMaxWithinBuffer();
 
