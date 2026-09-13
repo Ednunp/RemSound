@@ -230,6 +230,8 @@ internal static partial class SelfTest
         RunStep(results, "No copy of RemSound carries the signing key's folder", AuditNoCopyCarriesTheSigningKeyFolder);
         RunStep(results, "The release script hands RemSound the signing key", AuditReleaseScriptHandsOverTheSigningKey);
         RunStep(results, "Updater refuses an unsigned or badly-signed release (enforcement flow)", UpdaterRefusesUnsignedRelease);
+        RunStep(results, "The relay updater installs only a release signed by the release key", AuditRelayUpdaterInstallsOnlySignedReleases);
+        RunStep(results, "Server releases are signed the way the relay checks", AuditServerReleasesAreSignedTheWayTheRelayChecks);
         RunStep(results, "CROSS-PORT CONTRACT (the values other RemSounds depend on)", CrossPortContract);
         RunStep(results, "Password derivation (any password derives a key; cached; 100k for cross-port compat)", PasswordDerivation);
         RunStep(results, "Relay address-proof echo (AddrCheck round-trip)", RelayAddrCheckEcho);

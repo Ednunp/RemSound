@@ -20,7 +20,7 @@ namespace RemSound.App;
 /// Two kinds of option:
 ///   * "do-and-exit" commands (--help, --version, --devices, --list-profiles, --list-named-peers,
 ///     --selftest, --perftest, --diagnostics, --log, --close, and the developer and publishing verbs
-///     --plugin-window and --sign-update) print to the calling terminal (and/or a
+///     --plugin-window, --sign-update and --sign-server-release) print to the calling terminal (and/or a
 ///     file) and terminate the process; --plugin-window shows a window instead of printing.
 ///   * "launch options" (--profile, --connect, --minimized) modify a normal GUI start.
 /// <c>--config-dir</c> (<see cref="TryGetConfigDir"/>) applies to both. Program handles --silent,
@@ -106,6 +106,10 @@ internal static class CommandLine
                     // Publish-pipeline verb (build-release.ps1): sign a release zip with the private
                     // key so the updater's signature enforcement accepts it. Not a user command.
                     return WithConsole(() => SignUpdate(ValueAfter(args, raw)));
+                case "--sign-server-release":
+                    // Publish verb for a relay (server) release: sign the tarball so the relay's auto-updater
+                    // installs it. Not a user command.
+                    return WithConsole(() => SignServerRelease(ValueAfter(args, raw)));
             }
         }
 
@@ -180,6 +184,53 @@ internal static class CommandLine
 
     /// <summary>Gate seam: the signing verb itself, driven in-process.</summary>
     internal static int SignUpdateForTest(string? zipPath) => SignUpdate(zipPath);
+
+    /// <summary>--sign-server-release &lt;tarball&gt;: write &lt;tarball&gt;.sig for a relay (server) release. Same release key
+    /// as --sign-update, but the signature is DER-encoded, because the relay's auto-updater
+    /// (server/remsound-relay-update.sh) checks it with openssl, which reads only DER. The app's own update signature keeps
+    /// its original format, so no installed copy is affected. Self-checks against the embedded public key before reporting
+    /// success. Exit codes as --sign-update.</summary>
+    private static int SignServerRelease(string? tarballPath)
+    {
+        if (string.IsNullOrWhiteSpace(tarballPath) || !File.Exists(tarballPath))
+        {
+            Console.WriteLine($"sign-server-release: file not found: [{tarballPath}]");
+            return 2;
+        }
+        var keyPath = SigningKeyPath;
+        if (string.IsNullOrWhiteSpace(keyPath))
+        {
+            Console.WriteLine("sign-server-release: no signing key given - set REMSOUND_SIGNING_KEY to the private key file");
+            return 3;
+        }
+        if (!File.Exists(keyPath))
+        {
+            Console.WriteLine($"sign-server-release: signing key not found at [{keyPath}] (from REMSOUND_SIGNING_KEY)");
+            return 3;
+        }
+        try
+        {
+            var bytes = File.ReadAllBytes(tarballPath);
+            var signature = UpdateSignature.SignDerWithKey(bytes, File.ReadAllText(keyPath));
+            if (!UpdateSignature.VerifyDer(bytes, signature))
+            {
+                Console.WriteLine("sign-server-release: FAILED self-check - the private key does not match the public key embedded in this build.");
+                return 4;
+            }
+            var sigPath = tarballPath + UpdateSignature.SignatureAssetSuffix;
+            File.WriteAllText(sigPath, signature);
+            Console.WriteLine($"sign-server-release: OK - wrote {sigPath} (verified against the embedded public key)");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"sign-server-release: FAILED - {ex.GetType().Name}: {ex.Message}");
+            return 5;
+        }
+    }
+
+    /// <summary>Gate seam: the server-release signing verb, driven in-process.</summary>
+    internal static int SignServerReleaseForTest(string? tarballPath) => SignServerRelease(tarballPath);
 
     /// <summary>Show the plugin editor panel standalone (see PluginEditorPanel.ShowStandalone).
     /// A UI verb, so it must NOT attach a console — that would flash a window at a blind user.</summary>

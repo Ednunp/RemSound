@@ -203,9 +203,16 @@ payload.
 
 The relay is small and doesn't change often, but when it does we'd rather
 not chase every operator to re-SCP. The updater polls GitHub Releases for
-tags starting with `server-`, finds the highest version, downloads it, swaps
-the files, restarts the service, and falls back to the prior version if
-startup fails. Logs everything to `/var/log/remsound-relay-update.log`.
+tags starting with `server-`, finds the highest version, downloads it with its
+signature, swaps the files, restarts the service, and falls back to the prior
+version if startup fails. Logs everything to `/var/log/remsound-relay-update.log`.
+
+It installs nothing that is not signed by the RemSound release key, whose
+public half is built into the updater (the same key the Windows app checks
+its own updates with). A release with no `.sig`, a signature that does not
+check out, or a tarball changed after signing is refused before the running
+relay is touched, and the refusal is logged. The check uses `openssl`, which
+`install.sh` requires.
 
 It only triggers on `server-*` tags, so RemSound app releases (tags like
 `vX.Y`, without the `server-` prefix) don't affect the relay. It also skips
@@ -225,10 +232,22 @@ drafts and pre-releases.
        --transform "s,^<srcdir>,remsound-$TAG," <srcdir>
    ```
 
-3. Publish it, marked NOT latest:
+3. Sign it, on the machine that holds the release private key. Every relay's
+   updater refuses a release without a valid signature:
+
+   ```powershell
+   $env:REMSOUND_SIGNING_KEY = '<path to the release private key>'
+   & RemSound.exe --sign-server-release "remsound-$TAG.tar.gz"
+   ```
+
+   That writes `remsound-<tag>.tar.gz.sig` beside the tarball, after checking
+   it against the public key built into RemSound. (It is not the same format as
+   the app's own `--sign-update`: the relay checks with openssl.)
+
+4. Publish both files, marked NOT latest:
 
    ```bash
-   gh release create "$TAG" "/tmp/remsound-$TAG.tar.gz" \
+   gh release create "$TAG" "/tmp/remsound-$TAG.tar.gz" "/tmp/remsound-$TAG.tar.gz.sig" \
        --repo Ednunp/RemSound --latest=false \
        --title "Server $TAG" --notes "..."
    ```

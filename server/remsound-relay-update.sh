@@ -8,7 +8,10 @@
 #   1. Read the installed tag from /etc/remsound-relay/version.
 #   2. Query the GitHub Releases API for tags starting with "server-".
 #   3. If the latest is newer than the installed tag:
-#      a. Download the matching tarball asset.
+#      a. Download the matching tarball asset and its "<tarball>.sig" signature.
+#         Refuse to go any further unless the signature is valid for the
+#         RemSound release key built into this script (2026-09-13: this used
+#         to install whatever appeared, as root, unchecked).
 #      b. Snapshot current installed files to /etc/remsound-relay/backup/.
 #      c. Stop the relay service.
 #      d. Replace the relay files with the new tarball contents.
@@ -42,6 +45,15 @@ LOG_FILE="/var/log/remsound-relay-update.log"
 
 SERVICE_NAME="remsound-relay.service"
 HEALTH_WAIT_SECONDS=3
+
+# The RemSound release-signing PUBLIC key: the same key the Windows app checks its own updates with
+# (RemSound.Core.UpdateSignature.PublicKeyPem; the app's self-test pins that the two copies match). A
+# server release is installed only if its "<tarball>.sig" asset is a valid signature by this key, as
+# RemSound.exe --sign-server-release writes it. Only the holder of the private key can publish one.
+RELEASE_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAENrzZmey3cvNxNyd6t55QQThTb3Zj
+xR34nJr7egPq4f1Ff1IL5qA46nstniKZ3Zl6k+vcLWRr1oXzzdHvbIidcw==
+-----END PUBLIC KEY-----'
 
 # Script-global mktemp working directory. Set by main(); cleaned up by the
 # EXIT trap below. Kept at script scope (not function-local) so the trap can
@@ -130,10 +142,28 @@ sys.exit(0 if left > right else 1)
 PY
 }
 
+# Returns 0 only if file $2 holds a valid signature over file $1 by the public key in file $3: base64 of
+# a DER-encoded ECDSA P-256 / SHA-256 signature, as RemSound.exe --sign-server-release writes it.
+# Anything else - no signature, garbage, another key, a changed file - returns non-zero. Logs nothing,
+# so the app's self-test can drive it on its own.
+verify_release_signature() {
+    local file="$1" signature="$2" pubkey="$3"
+    [[ -s "$file" && -s "$signature" && -s "$pubkey" ]] || return 1
+    local der ok=1
+    der="$(mktemp)" || return 1
+    if tr -d ' \r\n' < "$signature" | base64 -d > "$der" 2>/dev/null \
+        && openssl dgst -sha256 -verify "$pubkey" -signature "$der" "$file" >/dev/null 2>&1; then
+        ok=0
+    fi
+    rm -f "$der"
+    return "$ok"
+}
+
 # -------- GitHub releases query ---------------------------------------------
 
 # Fetch the releases list and pick the latest server-tag release.
-# Outputs three lines: tag, asset_url, asset_name. Exits non-zero on no match.
+# Outputs four lines: tag, asset_url, asset_name, signature_url (empty when the
+# release has no "<asset_name>.sig"). Exits non-zero on no match.
 get_latest_release() {
     local json
     if ! json="$(curl --fail --silent --show-error --max-time 30 \
@@ -197,17 +227,23 @@ for r in releases:
     name = asset.get("name") or ""
     if not url:
         continue
-    candidates.append((parse_version(tag), tag, url, name))
+    sig_url = ""
+    for s in r.get("assets") or []:
+        if ((s or {}).get("name") or "") == name + ".sig":
+            sig_url = (s or {}).get("browser_download_url") or ""
+            break
+    candidates.append((parse_version(tag), tag, url, name, sig_url))
 
 if not candidates:
     sys.stderr.write("no eligible server-* releases found\n")
     sys.exit(4)
 
 candidates.sort(reverse=True)
-_, tag, url, name = candidates[0]
+_, tag, url, name, sig_url = candidates[0]
 print(tag)
 print(url)
 print(name)
+print(sig_url)
 PY
 }
 
@@ -276,7 +312,7 @@ main() {
 
     log "update check starting (repo=$REPO prefix=$TAG_PREFIX)"
 
-    local current latest_tag asset_url asset_name
+    local current latest_tag asset_url asset_name sig_url
     current="$(read_current_version)"
     log "currently installed: $current"
 
@@ -288,6 +324,7 @@ main() {
     latest_tag="$(printf '%s\n' "$release_info" | sed -n '1p')"
     asset_url="$(printf '%s\n' "$release_info" | sed -n '2p')"
     asset_name="$(printf '%s\n' "$release_info" | sed -n '3p')"
+    sig_url="$(printf '%s\n' "$release_info" | sed -n '4p')"
     log "latest available: $latest_tag asset=$asset_name"
 
     if ! tag_newer_than "$latest_tag" "$current"; then
@@ -296,6 +333,16 @@ main() {
     fi
 
     log "newer release found: $latest_tag -> upgrading from $current"
+
+    # Refuse anything that cannot prove where it came from, before touching the running relay.
+    if [[ -z "$sig_url" ]]; then
+        log "ERROR: $latest_tag has no signature ($asset_name.sig) - refusing to install an unsigned release"
+        return 1
+    fi
+    if ! command -v openssl >/dev/null 2>&1; then
+        log "ERROR: openssl is needed to check the release signature - refusing to update (sudo apt-get install -y openssl)"
+        return 1
+    fi
 
     # Working area in /tmp. Use the script-global $WORK_DIR (not a function
     # local) so the EXIT trap can still see the variable after main returns.
@@ -309,6 +356,19 @@ main() {
         log "ERROR: download failed"
         return 1
     fi
+
+    log "downloading $sig_url"
+    if ! curl --fail --silent --show-error --max-time 30 \
+            --location -o "$tarball.sig" "$sig_url"; then
+        log "ERROR: signature download failed - refusing to install"
+        return 1
+    fi
+    printf '%s\n' "$RELEASE_PUBLIC_KEY" > "$WORK_DIR/release-public-key.pem"
+    if ! verify_release_signature "$tarball" "$tarball.sig" "$WORK_DIR/release-public-key.pem"; then
+        log "ERROR: $asset_name is not signed by the RemSound release key - refusing to install"
+        return 1
+    fi
+    log "signature checked: $asset_name is signed by the RemSound release key"
 
     log "extracting $asset_name"
     if ! tar -xzf "$tarball" -C "$WORK_DIR"; then
@@ -360,4 +420,8 @@ main() {
     return 1
 }
 
-main "$@"
+# Run only when executed (the systemd service does). Sourcing the script - as the app's self-test does,
+# to drive verify_release_signature on its own - defines the functions and runs nothing.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

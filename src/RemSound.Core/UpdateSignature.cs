@@ -58,4 +58,34 @@ xR34nJr7egPq4f1Ff1IL5qA46nstniKZ3Zl6k+vcLWRr1oXzzdHvbIidcw==
         ec.ImportFromPem(privateKeyPem);
         return Convert.ToBase64String(ec.SignData(data, HashAlgorithmName.SHA256));
     }
+
+    /// <summary>Relay (server) release signatures: the same key and hash, DER-encoded (RFC 3279), because the relay's
+    /// auto-updater checks them with <c>openssl dgst -verify</c>, which reads only DER. The app's own update signatures stay
+    /// in the fixed-length format every 5.6+ updater already reads. Used via --sign-server-release. Returns base64.</summary>
+    public static string SignDerWithKey(byte[] data, string privateKeyPem)
+    {
+        using var ec = ECDsa.Create();
+        ec.ImportFromPem(privateKeyPem);
+        return Convert.ToBase64String(ec.SignData(data, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence));
+    }
+
+    /// <summary>True when a DER signature (see <see cref="SignDerWithKey"/>) verifies against the embedded release key.</summary>
+    public static bool VerifyDer(byte[] data, string signatureBase64) =>
+        VerifyDerWithKey(data, signatureBase64, PublicKeyPem);
+
+    /// <summary>DER verification against an explicit public key. Never throws.</summary>
+    public static bool VerifyDerWithKey(byte[] data, string signatureBase64, string publicKeyPem)
+    {
+        try
+        {
+            var signature = Convert.FromBase64String(signatureBase64.Trim());
+            using var ec = ECDsa.Create();
+            ec.ImportFromPem(publicKeyPem);
+            return ec.VerifyData(data, signature, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
+        }
+        catch
+        {
+            return false;
+        }
+    }
 }

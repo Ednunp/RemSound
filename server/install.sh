@@ -7,7 +7,8 @@
 #   sudo ./install.sh
 #
 # What it does:
-#   1. Sanity checks: systemd present, python3 present, curl present.
+#   1. Sanity checks: systemd present, python3 present, curl present, openssl present
+#      (the auto-updater checks each release's signature with it).
 #   2. Copies remsound-relay.py to /usr/local/sbin/.
 #   3. Copies remsound-relay.service to /etc/systemd/system/.
 #   4. Copies the auto-updater script + service + timer.
@@ -52,6 +53,11 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 if ! command -v curl >/dev/null 2>&1; then
   echo "curl not found. Install it first: sudo apt-get install -y curl" >&2
+  exit 1
+fi
+if ! command -v openssl >/dev/null 2>&1; then
+  echo "openssl not found. Install it first: sudo apt-get install -y openssl" >&2
+  echo "(The auto-updater uses it to check that each release is signed by the RemSound release key.)" >&2
   exit 1
 fi
 
