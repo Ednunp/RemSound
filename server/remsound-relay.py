@@ -22,7 +22,8 @@ The two protocols share state only via the listening socket and the stats
 counters. They never interact otherwise: a v1 client and a v2 client cannot
 hear each other in this release (deliberate — see the design doc).
 
-Owner: Pi thread. Spec: D:\\Dropbox\\proj\\pi\\remsound server update.md.
+Operator guide: server/README.md. The original design (historical, not current):
+server/remsound server update.md.
 """
 
 from __future__ import annotations
@@ -616,6 +617,17 @@ class Relay:
             s.forwarded, s.dropped_unpaired, s.dropped_lobby_full,
             s.rejected_bad_header, s.pair_changes, s.lobby_changes,
             len(self.v2_clients), v1_summary, v2_summary,
+        )
+        # The address-proof counters get their own line, so the event=stats line above stays exactly as
+        # anything already reading it expects. They are the evidence for when --require-addr-check can
+        # be switched on: while would_block_unverified keeps climbing in watch-only mode, clients that
+        # cannot echo their cookie are still in use, and enforcement would cut them off.
+        self.log.info(
+            "event=addr_check_stats addr_check=%s addr_checks_verified=%d blocked_unverified=%d "
+            "would_block_unverified=%d rejected_ip_cap=%d",
+            "ENFORCED" if self.require_addr_check else "watch-only",
+            s.addr_checks_verified, s.blocked_unverified,
+            s.would_block_unverified, s.rejected_ip_cap,
         )
         self.stats = RelayStats()
         for p in self.v1_peers:
