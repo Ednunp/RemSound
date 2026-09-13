@@ -90,7 +90,6 @@ public sealed class PluginTrackSource : IDisposable
 
     private long blocksSubmitted;
     private long blocksSummed;
-    private long blocksIgnoredOversize;
 
     /// <summary>Blocks handed to the plugin lane. The number that separates "the plugin is sending
     /// and the app is taking it" from "the app subscribed but nothing arrived".</summary>
@@ -99,10 +98,6 @@ public sealed class PluginTrackSource : IDisposable
     /// <summary>Blocks where a second DAW's audio was summed in. Zero in the ordinary single-host
     /// session, which is also the assertion that the fast path is the one being taken.</summary>
     public long BlocksSummed => Interlocked.Read(ref blocksSummed);
-
-    /// <summary>Blocks discarded for being larger than the bridge's own maximum. Should never move;
-    /// if it does, something is writing to our port that is not a plugin.</summary>
-    public long BlocksIgnoredOversize => Interlocked.Read(ref blocksIgnoredOversize);
 
     /// <summary>How many DAWs are delivering track audio right now.</summary>
     public int HostCount { get { lock (gate) return hosts.Count; } }
@@ -128,11 +123,8 @@ public sealed class PluginTrackSource : IDisposable
         if (span.Length < Channels) return;
         // Whole frames only: a truncated tail would swap the channels for everything after it.
         var frames = span.Length / Channels;
-        if (frames > MaxFramesPerBlock)
-        {
-            Interlocked.Increment(ref blocksIgnoredOversize);
-            return;
-        }
+        // Larger than the bridge's own maximum, which no plugin sends: drop it.
+        if (frames > MaxFramesPerBlock) return;
 
         bool isDriver;
         bool needArm;
@@ -334,21 +326,6 @@ public sealed class PluginTrackSource : IDisposable
             if (armed) { armed = false; disarm = true; }
         }
         if (disarm) sender.SetPluginSendActive(false);
-    }
-
-    /// <summary>Diagnostic snapshot of a non-driving host's ring, for the gate and the log.</summary>
-    public bool TryDescribeHost(Guid hostId, out int bufferedFrames, out double appliedRatio)
-    {
-        lock (gate)
-        {
-            bufferedFrames = 0;
-            appliedRatio = 1.0;
-            if (!hosts.TryGetValue(hostId, out var host)) return false;
-            if (host.Lane is null) return true;   // the driver: no ring, ratio is 1 by definition
-            bufferedFrames = host.Lane.BufferedFrames;
-            appliedRatio = host.Lane.AppliedRatio;
-            return true;
-        }
     }
 
     /// <summary>Which host is currently driving, for the gate.</summary>

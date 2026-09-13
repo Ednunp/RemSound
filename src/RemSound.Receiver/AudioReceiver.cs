@@ -52,7 +52,6 @@ public sealed class AudioReceiver : IDisposable
     /// idlest sessions down to this cap. 2026-05-15.</summary>
     public const int MaxLiveSessions = 32;
 
-    private readonly Stopwatch uptime = new();
     private readonly ReceiverDiagnostics diagnostics = new();
     private readonly PlayoutEngine playoutEngine;
     private IRenderBackend multiOutput;
@@ -69,19 +68,6 @@ public sealed class AudioReceiver : IDisposable
     // only when the count actually changes, so unbounded growth is visible in the log
     // without spamming it or needing a Task Manager screenshot to notice.
     private int lastLoggedSessionCount = -1;
-
-    /// <summary>When false (the default), a Format packet arriving with a NEW streamId from
-    /// a peer that already has a session under a DIFFERENT streamId triggers immediate
-    /// disposal of the old session — preserves the pre-refactor "one peer = one active
-    /// session" behaviour. The sender legitimately rotates streamId on codec changes /
-    /// engine restarts; without this, the old SessionPlayout sits empty for 4 seconds
-    /// until <see cref="PruneIdleSessions"/> fires, racking up phantom underrun counts
-    /// from the render thread polling its empty buffer (~100 per second).
-    ///
-    /// Set true in the native-independent audio mode (Stage 4) where two streamIds from
-    /// the same peer are expected to coexist (WASAPI lane + ASIO lane). In that mode the
-    /// auto-dispose-old-on-new-streamId is wrong — both lanes are continuously active.</summary>
-    public bool AllowMultipleStreamsPerPeer { get; set; }
 
     // True when audio playback is enabled — i.e. multiOutput is started and Format/Audio
     // packets should be processed into sessions. False means the listener stays bound
@@ -736,7 +722,6 @@ public sealed class AudioReceiver : IDisposable
 
     public long PacketsReceived => Interlocked.Read(ref packetsReceived);
     public long BytesReceived => Interlocked.Read(ref bytesReceived);
-    public TimeSpan Uptime => uptime.Elapsed;
 
     /// <summary>Total times we used Opus inband FEC to recover a single-packet gap, across all active sessions.</summary>
     public long OpusFecRecoveries
@@ -871,7 +856,6 @@ public sealed class AudioReceiver : IDisposable
         playoutEngine.ResetAll();
 
         listener.Start(udpPort);
-        uptime.Restart();
     }
 
     /// <summary>
@@ -915,7 +899,6 @@ public sealed class AudioReceiver : IDisposable
         listener.Stop();
         playbackEnabled = false;
         multiOutput.Stop();
-        uptime.Stop();
         lock (sessionsLock)
         {
             DisposeAllSessionsLocked();
@@ -1239,10 +1222,9 @@ public sealed class AudioReceiver : IDisposable
         StreamSession? newSession = null;
         bool isNewSession = false;
         bool isFormatChange = false;
-        // Older sessions from the same peer that are being replaced because we're in
-        // single-stream mode (AllowMultipleStreamsPerPeer=false) and the sender rotated
-        // its streamId (codec change / engine restart). Disposed AFTER releasing the
-        // sessionsLock so their tear-down doesn't extend the critical section.
+        // Older sessions from the same peer, on the same lane, that are being replaced because
+        // the sender rotated its streamId (codec change / engine restart). Disposed AFTER releasing
+        // the sessionsLock so their tear-down doesn't extend the critical section.
         List<StreamSession>? supersededByStreamIdChange = null;
 
         var key = (remote, streamId);
@@ -1324,28 +1306,22 @@ public sealed class AudioReceiver : IDisposable
             // Format-resend packets must NOT supersede the other lane's session. Without the
             // lane match, the two lanes' 250 ms format announces took turns killing each
             // other 8× per second, neither lane could stay alive long enough to arm, and
-            // BothIndependent appeared to "produce no audio" on the receiver. AllowMultiple-
-            // StreamsPerPeer is preserved as an override knob (default false) for unusual
-            // setups; even with it true, lane-mismatched sessions would still coexist, so the
-            // flag now only governs same-lane-different-streamId behaviour.
-            if (!AllowMultipleStreamsPerPeer)
+            // BothIndependent appeared to "produce no audio" on the receiver.
+            foreach (var (otherKey, otherSession) in sessions)
             {
-                foreach (var (otherKey, otherSession) in sessions)
+                if (otherKey.Endpoint.Equals(remote)
+                    && otherKey.StreamId != streamId
+                    && otherSession.Format.Lane == format.Lane)
                 {
-                    if (otherKey.Endpoint.Equals(remote)
-                        && otherKey.StreamId != streamId
-                        && otherSession.Format.Lane == format.Lane)
-                    {
-                        supersededByStreamIdChange ??= [];
-                        supersededByStreamIdChange.Add(otherSession);
-                    }
+                    supersededByStreamIdChange ??= [];
+                    supersededByStreamIdChange.Add(otherSession);
                 }
-                if (supersededByStreamIdChange is not null)
+            }
+            if (supersededByStreamIdChange is not null)
+            {
+                foreach (var s in supersededByStreamIdChange)
                 {
-                    foreach (var s in supersededByStreamIdChange)
-                    {
-                        sessions.Remove((s.Endpoint, s.StreamId));
-                    }
+                    sessions.Remove((s.Endpoint, s.StreamId));
                 }
             }
         }

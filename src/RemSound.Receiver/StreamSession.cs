@@ -117,11 +117,7 @@ internal sealed class StreamSession : IDisposable
     {
         // Already had it on the peer's other path. Handled, not failed: counting it as a drop would
         // make a healthy merged session look like a lossy one. See AlreadyDelivered.
-        if (AlreadyDelivered(sequence))
-        {
-            Interlocked.Increment(ref duplicatePathPackets);
-            return true;
-        }
+        if (AlreadyDelivered(sequence)) return true;
         diagnostics.RecordPacketArrived();
         TrackWireSequence(sequence);
         return Codec switch
@@ -203,16 +199,12 @@ internal sealed class StreamSession : IDisposable
     private bool multiPath;
     private uint replayHighest;
     private ulong replayMask;
-    private long duplicatePathPackets;
 
     /// <summary>This stream has now arrived from a second address belonging to the same peer.</summary>
     public void NoteAlternatePath() => multiPath = true;
 
     /// <summary>Has this stream been seen on more than one of its peer's paths?</summary>
     public bool IsMultiPath => multiPath;
-
-    /// <summary>Packets dropped because the other path had already delivered them.</summary>
-    public long DuplicatePathPackets => Interlocked.Read(ref duplicatePathPackets);
 
     /// <summary>Have we already delivered this wire sequence? Only ever true for a merged session.
     /// A sequence too far back to judge is let through: being wrong in that direction costs one

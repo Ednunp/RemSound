@@ -38,12 +38,7 @@ internal sealed class LaneActivity
     public const double DefaultStallSeconds = 3.0;
 
     private readonly long[] lastReadTicks = new long[8];
-    private readonly long stallTicks;
-
-    /// <param name="stallSeconds">Overridable ONLY so the gate can measure this in milliseconds
-    /// instead of seconds. Every shipped caller takes the default, and the test pins that.</param>
-    public LaneActivity(double stallSeconds = DefaultStallSeconds)
-        => stallTicks = (long)(stallSeconds * Stopwatch.Frequency);
+    private readonly long stallTicks = (long)(DefaultStallSeconds * Stopwatch.Frequency);
 
     /// <summary>This lane was just read. Called at the top of every per-route render read; a couple of
     /// nanoseconds on the audio thread and no lock.</summary>

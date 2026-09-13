@@ -44,7 +44,6 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     private readonly AudioStepProbe rawCaptureStepProbe = new();
     private readonly Action<string>? onDiagnostic;
     private readonly string driverName;
-    public string DriverName => driverName;
     private readonly object gate = new();
 
     // The driver, SHARED with the receiver's playback side: one instance per driver name for the whole
@@ -147,14 +146,6 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
             activeChannelPairIndices = [];
         }
         onDiagnostic?.Invoke("asio capture: parked — callback detached and zero active pairs; driver stays open");
-    }
-
-    /// <summary>True when the lane is parked: the driver is open but no channel pair is active, so
-    /// no audio is being delivered. Exposed so the gate can assert the park actually happened rather
-    /// than trusting that a method was called.</summary>
-    public bool IsParked
-    {
-        get { lock (gate) return device is not null && activeChannelPairIndices.Count == 0; }
     }
 
     /// <summary>The callback the driver's thread would invoke, so the gate can drive it directly and

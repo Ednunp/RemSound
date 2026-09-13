@@ -107,8 +107,6 @@ internal sealed class LowLatencyWasapiLoopbackCapture : IWaveIn
             "Loopback capture format is fixed to the device mix format and cannot be assigned.");
     }
 
-    public CaptureState CaptureState => captureState;
-
     public void StartRecording()
     {
         if (captureState != CaptureState.Stopped)

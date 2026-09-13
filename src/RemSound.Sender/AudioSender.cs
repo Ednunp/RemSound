@@ -97,7 +97,6 @@ public sealed class AudioSender : IDisposable
     // streamId/sequence counters are all per-lane; the UDP socket, codec config, mute flag,
     // engine and stats stay here. See <see cref="SenderLane"/> for the per-stream hot path.
 
-    private readonly Stopwatch uptime = new();
     private volatile AudioTransportCodec codec = AudioTransportCodec.Pcm;
     // Opus frame size in samples-per-channel at 48 kHz. Default 480 = 10 ms. Renamed from
     // opusFrameMs 2026-05-23 (v3.0 wire-format refactor) so the 2.5 ms RESTRICTED_LOWDELAY
@@ -255,7 +254,6 @@ public sealed class AudioSender : IDisposable
     // from a LAN peer because LAN peers send to the receiver's well-known port directly.
     private CancellationTokenSource? inboundCts;
     private Thread? inboundThread;
-    private long inboundPackets;
 
     /// <summary>
     /// Optional callback invoked for each UDP datagram that arrives at this sender's socket.
@@ -585,7 +583,6 @@ public sealed class AudioSender : IDisposable
     public bool IsMuted { get => muted; set => muted = value; }
     public long PacketsSent => Interlocked.Read(ref packetsSent);
     public long BytesSent => Interlocked.Read(ref bytesSent);
-    public TimeSpan Uptime => uptime.Elapsed;
 
     /// <summary>
     /// Friendly summary of currently-active sources for diagnostic columns. Returns
@@ -654,7 +651,6 @@ public sealed class AudioSender : IDisposable
         asioLane.ResetForStart();
         Interlocked.Exchange(ref packetsSent, 0);
         Interlocked.Exchange(ref bytesSent, 0);
-        uptime.Restart();
         // Unpark the ASIO lane if a previous Stop parked it (see Stop below). This re-points the
         // persistent instance's callback at the lane the CURRENT mode wants; the composite's Start,
         // a line below, restores its channel pairs via UpdateSources. Idempotent and cheap when the
@@ -678,7 +674,6 @@ public sealed class AudioSender : IDisposable
         // the bridge thread after the user switched sending off. The app re-arms it on its next tick
         // if a plugin is genuinely still delivering blocks (see PluginTrackSource).
         pluginSendActive = false;
-        uptime.Stop();
     }
 
     // === plugin lane (the DAW track) ===
@@ -701,7 +696,6 @@ public sealed class AudioSender : IDisposable
     internal RenderRoute DefaultLaneRouteForTest => defaultLane.Route;
     internal RenderRoute AsioLaneRouteForTest => asioLane.Route;
     internal ushort DefaultLaneStreamIdForTest => defaultLane.StreamId;
-    internal ushort AsioLaneStreamIdForTest => asioLane.StreamId;
 
     /// <summary>
     /// Arm or disarm the plugin lane. Called by <see cref="PluginTrackSource"/> when the first DAW
@@ -721,9 +715,6 @@ public sealed class AudioSender : IDisposable
             if (active)
             {
                 pluginLane.ResetForStart();
-                // Uptime is otherwise only started by the capture engine, and a plugin-only send has
-                // no capture engine. Without this the diagnostic line divides by a stopped clock.
-                if (!uptime.IsRunning) uptime.Restart();
                 diagnostic?.Invoke($"sender: plugin lane armed on route {pluginLane.Route}, stream {pluginLane.StreamId}");
             }
             else
@@ -834,7 +825,6 @@ public sealed class AudioSender : IDisposable
 
             if (received <= 0) continue;
             if (anyEndpoint is not IPEndPoint remote) continue;
-            Interlocked.Increment(ref inboundPackets);
 
             try
             {
@@ -862,10 +852,6 @@ public sealed class AudioSender : IDisposable
         catch (SocketException) { return false; }
         catch (ObjectDisposedException) { return false; }
     }
-
-    /// <summary>Cumulative inbound packets received on this sender's socket. Mostly zero
-    /// outside relay mode.</summary>
-    public long InboundPackets => Interlocked.Read(ref inboundPackets);
 
     /// <summary>
     /// Shutdown. The ORDER here is the whole content of this method, so it is spelled out.

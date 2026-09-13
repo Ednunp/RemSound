@@ -448,16 +448,6 @@ internal sealed class PlayoutEngine : IWaveProvider
         return bytes / count / MixBytesPerFrame * 1000 / MixSampleRate;
     }
 
-    public bool IsArmed
-    {
-        get
-        {
-            var snap = sessionsSnapshot;
-            foreach (var s in snap) if (s.IsArmed) return true;
-            return false;
-        }
-    }
-
     public float Volume
     {
         get => volume;

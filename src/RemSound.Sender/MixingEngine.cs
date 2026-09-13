@@ -52,7 +52,6 @@ internal sealed class MixingEngine : ICaptureBackend
     private Task? mixTask;
 
     private long clippedSampleCount;
-    private long mixTickCount;
 
     public MixingEngine(Action<ReadOnlyMemory<float>> onMixedSamples, Action<string>? onDiagnostic = null)
     {
@@ -91,7 +90,6 @@ internal sealed class MixingEngine : ICaptureBackend
     }
 
     public long ClippedSampleCount => Interlocked.Read(ref clippedSampleCount);
-    public long MixTickCount => Interlocked.Read(ref mixTickCount);
 
     public long TotalCaptureCallbacks
     {
@@ -249,7 +247,6 @@ internal sealed class MixingEngine : ICaptureBackend
             }
 
             Interlocked.Exchange(ref clippedSampleCount, 0);
-            Interlocked.Exchange(ref mixTickCount, 0);
             cts = new CancellationTokenSource();
             mixTask = Task.Run(() => MixLoop(cts.Token));
             onDiagnostic?.Invoke($"mixer started with {active.Count} source(s): [{string.Join(", ", active.Select(a => $"\"{a.Source.Name}\" ({a.Source.Kind})"))}]");
@@ -517,7 +514,6 @@ internal sealed class MixingEngine : ICaptureBackend
                 // sources sum past unity. Shared rule (SampleClamp); one batched counter add.
                 var clipped = SampleClamp.ClampBuffer(mixScratch.AsSpan(0, read));
                 if (clipped > 0) Interlocked.Add(ref clippedSampleCount, clipped);
-                Interlocked.Increment(ref mixTickCount);
 
                 onMixedSamples(new ReadOnlyMemory<float>(mixScratch, 0, read));
                 if (diag) Interlocked.Add(ref cumulativeMixLoopTicks, Stopwatch.GetTimestamp() - workStart);

@@ -356,7 +356,6 @@ internal sealed class SessionPlayout : IDisposable
     public int BufferedMs => playout.BufferedBytes / MixBytesPerFrame * 1000 / MixSampleRate;
     public long UnderrunCount => playout.UnderrunCount;
     public long DropCount => playout.DropCount;
-    public bool IsArmed => playbackArmed;
 
     /// <summary>Per-cause drop accessors (cumulative bytes / counts since session start).
     /// Splits the previously-opaque DropCount so the diag log can distinguish click-trim
