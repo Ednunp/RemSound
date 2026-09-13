@@ -14,8 +14,8 @@ namespace RemSound.App;
 ///   - Manageable via Task Manager → Startup, which is where Windows users now expect to
 ///     find login-launched apps.
 ///
-/// All methods catch all exceptions and return success bools — flipping the toggle in the
-/// Startup behaviour dialog should never throw, even on policy-locked machines.
+/// All methods catch all exceptions and return success bools — flipping the start-with-Windows
+/// box in Preferences (or in the installer) should never throw, even on policy-locked machines.
 /// </summary>
 internal static class StartupAutoStart
 {

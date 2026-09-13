@@ -8,23 +8,23 @@ namespace RemSound.App;
 /// Subscribes to Windows' system power-state changes and fires a single callback on
 /// <see cref="PowerModes.Resume"/> — i.e. when the system has just come back from sleep
 /// (S3) or hibernate (S4). Both states raise the same Resume event, so the one hook covers
-/// both. Used by <see cref="MainForm"/> to re-initialise the audio backend after wake:
-/// after a sleep cycle the USB audio device (ASIO / WASAPI) can come back in a degraded
-/// state where the pipeline appears to run but no sound actually comes out of the
-/// interface, and a clean close-and-reopen of the audio backend clears it.
+/// both. Used by <see cref="MainForm"/> to restart the audio after a wake: it stops every
+/// stream, puts back the auto-tune from before the sleep, closes and reopens the audio
+/// backend on both sides and starts again whatever was running. The reopen also clears a
+/// USB audio device (ASIO / WASAPI) that came back from sleep running but silent.
 ///
 /// Threading: PowerModeChanged is raised on a system-message thread, NOT the UI thread.
 /// The handler returns from that thread quickly (no work done inline) and schedules the
-/// real reset on a background task — which then marshals onto the UI thread via the
+/// restart on a background task — which then marshals onto the UI thread via the
 /// caller's callback. The caller's callback is responsible for any UI-thread marshaling.
 ///
 /// USB settle delay: Windows raises Resume early, sometimes before USB devices have
 /// finished re-enumerating. The handler waits <see cref="SettleDelay"/> before firing the
-/// callback so the audio backend re-init has a fully-ready USB stack to talk to.
+/// callback so the audio restart has a fully-ready USB stack to talk to.
 ///
 /// Debounce: Windows can in rare cases fire Resume twice in quick succession after a
 /// short sleep. The handler ignores Resume events within <see cref="DebounceWindow"/> of
-/// the previous one so the audio backend isn't torn down and rebuilt twice for one wake.
+/// the previous one so the audio isn't restarted twice for one wake.
 /// </summary>
 internal sealed class PowerResumeHandler : IDisposable
 {

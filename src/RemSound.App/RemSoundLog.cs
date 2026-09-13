@@ -1,14 +1,16 @@
 namespace RemSound.App;
 
 /// <summary>
-/// Lightweight tab-separated log file written next to the executable in <c>logs\</c>.
+/// Lightweight tab-separated log file written to <see cref="RemSound.Core.AppConfig.LogsDirectory"/>
+/// (<c>user settings and logs\logs\</c> beside the exe, unless <c>--config-dir</c> moves it).
 /// Two row kinds:
 ///   SNAP  — periodic snapshot of runtime counters (one per second)
 ///   EVT   — one-off events (connect, disconnect, codec change, errors)
-/// Format:
+/// Format (the file opens with a header row naming these columns, starting with Kind):
 ///   SNAP\t{Timestamp}\t{Machine}\t{Connected}\t{SendRunning}\t{ReceiveRunning}\t{Codec}\t
 ///         {MaxLatencyMs}\t{TargetLatencyMs}\t{BufferMs}\t{SenderPackets}\t{SenderKB}\t
-///         {SenderDevice}\t{ReceiverPackets}\t{ReceiverKB}\t{Underruns}\t{Drops}\t{ReceiveDevice}
+///         {SenderDevice}\t{ReceiverPackets}\t{ReceiverKB}\t{Underruns}\t{Drops}\t{ReceiveDevice}\t
+///         {Heartbeat}\t{OpusFecRecoveries}\t{OpusUnrecoveredGaps}\t{MaxLatencyMsAsio}\t{TargetLatencyMsAsio}
 ///   EVT\t{Timestamp}\t{Message}
 ///
 /// The log file is created lazily on the first write that arrives while <see cref="Enabled"/>

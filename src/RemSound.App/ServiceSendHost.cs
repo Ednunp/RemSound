@@ -13,9 +13,9 @@ namespace RemSound.App;
 /// resuming when the app closes or crashes (see <see cref="InteractivePresence"/>).
 ///
 /// <para>Send-only and WASAPI-only by design: ASIO can't run in a service, and receive is impossible on
-/// Windows 11 with no user logged in, so neither is attempted. v1 sends directly to the profile's
-/// configured peer addresses (LAN / port-forwarded / reachable hosts); NAT hole-punching and relay
-/// discovery are the interactive app's job, not the service's.</para>
+/// Windows 11 with no user logged in, so neither is attempted. It sends to the profile's configured
+/// peer addresses, and <see cref="ServiceNetworkPresence"/> gives it the same discovery, heartbeat,
+/// NAT pinhole and relay pairing the interactive app has.</para>
 ///
 /// <para>Structured so the mechanism is unit-testable without a real service: <see cref="ApplyProfile"/>,
 /// <see cref="Suspend"/> and <see cref="Resume"/> are driven directly by the self-tests, and
@@ -65,9 +65,6 @@ public sealed class ServiceSendHost : IDisposable
         sender.Diagnostic = msg => log?.Invoke($"sender: {msg}");
     }
 
-    // Capture-health watch (issue #23): the lock-screen bug is "capture open but ZERO buffers ever arrive".
-    // Log the first callback when audio genuinely flows, and an explicit zero-callbacks line after 10s so
-    // the log names the fault instead of just going quiet.
     // ---- Capture-health watch + boot self-heal (issue #23) --------------------------------------
     // Boot fingerprint (Jonathan's logs + Ed): at the boot lock screen the machine's OWN speakers play
     // the Windows tune and NVDA, the loopback capture opens fine in session 0 and callbacks flow — yet
@@ -82,7 +79,9 @@ public sealed class ServiceSendHost : IDisposable
     // opened = the capture is provably DEAF → re-open it immediately (a fresh attach lands on the live
     // graph) — fast enough that the boot tune itself comes through. A quiet machine reads quiet on
     // BOTH sides, so nothing ever fires on healthy captures; the first real audio the capture hears
-    // ends the ladder for the stint. Frozen callbacks (2s+) also re-open, deafness aside.
+    // ends the ladder for the stint. Frozen callbacks (2s+) also re-open, deafness aside. The watch also
+    // logs the first callback once audio flows, and a zero-callbacks line after 10s, so the log names the
+    // lock-screen "capture open but no buffers" fault instead of going quiet.
     private long captureWatchStartTick;
     private bool loggedFirstCallback;
     private bool loggedZeroCallbacks;

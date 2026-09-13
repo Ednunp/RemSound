@@ -31,8 +31,8 @@ internal static class ServiceUpdate
         return Version.TryParse(onDiskFileVersion, out var onDisk) && onDisk > running;
     }
 
-    /// <summary>True when a strictly-newer RemSound.exe sits next to the running service binary (i.e. an
-    /// update landed). Reads the on-disk exe's file version; never throws.</summary>
+    /// <summary>True when the recorded app-source folder holds a strictly-newer RemSound.exe than the running
+    /// service (i.e. an update landed there). Reads that exe's file version; never throws.</summary>
     public static bool UpdateLanded() => IsNewer(RunningVersion(), OnDiskVersion());
 
     /// <summary>

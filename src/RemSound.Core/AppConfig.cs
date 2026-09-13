@@ -418,7 +418,8 @@ public sealed class AppConfig
 
     /// <summary>The single per-user folder next to the exe — <c>&lt;exe&gt;\user settings and logs\</c> —
     /// that holds EVERYTHING this machine's user owns: the global config file, the <c>profiles\</c>
-    /// subfolder, <c>logs\</c>, and <c>sounds\</c>. 2026-06-10: consolidated here from the loose files
+    /// subfolder and <c>logs\</c> (it also held a <c>sounds\</c> folder until v3.9.1; cues now ship in
+    /// <see cref="SoundsDirectory"/>). 2026-06-10: consolidated here from the loose files
     /// / the earlier <c>config\</c> folder so the install root stays tidy and the auto-updater can
     /// exclude one folder to leave ALL user state (including custom cue WAVs) untouched.</summary>
     public const string UserDataFolderName = "user settings and logs";

@@ -197,7 +197,8 @@ public static class ServiceControl
     /// install folder or a dev working copy — so it can't lock those files or block the app's auto-updater.
     /// Also grants the installing user start/stop rights, so the service can be stopped with
     /// a plain <c>sc stop</c> (no admin, no app). Returns 0 on success. Idempotent-ish: already-installed
-    /// reports success.</summary>
+    /// reports success after following a newly named source folder and re-applying the folder lockdown;
+    /// it does not copy the program again (the self-update does that).</summary>
     public static int DoInstall()
     {
         // If the non-elevated app introduced the real interactive user, record THAT identity before any
@@ -420,11 +421,12 @@ public static class ServiceControl
     }
 
     /// <summary>Copies the program files from <paramref name="sourceDir"/> to <paramref name="destDir"/>,
-    /// recursively, but NEVER the user-state folders (logs, profiles, config, recordings) — the service
-    /// keeps its own state in ProgramData. Overwrites so a re-install refreshes the binaries.</summary>
+    /// recursively, but NEVER the user-state folders ("user settings and logs", recordings, and the top-level
+    /// logs, profiles and config folders of older layouts) — the service keeps its own state in ProgramData.
+    /// Overwrites, so a self-update (<see cref="DoSelfUpdate"/>) refreshes the binaries in place.</summary>
     internal static void CopyProgramTo(string sourceDir, string destDir)
     {
-        // Guard against copying a folder onto itself (re-install from the service bin folder).
+        // Guard against copying a folder onto itself (installing or updating from the service bin folder itself).
         if (string.Equals(Path.GetFullPath(sourceDir).TrimEnd('\\'),
                           Path.GetFullPath(destDir).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
             return;
@@ -608,12 +610,12 @@ public static class ServiceControl
         catch { return false; }
     }
 
-    /// <summary>Starts the service. Must be run elevated. Returns 0 on success.</summary>
     // Distinct failure codes for start/stop, so the dialog can say something useful instead of the
     // notorious bare "(code 1)". The full exception always goes to the service events log too.
     public const int StartStopTimedOut = 6;   // service didn't reach the target state in 15 s
     public const int StartStopScmRefused = 7; // the service manager refused (missing, disabled, ...)
 
+    /// <summary>Starts the service. Must be run elevated. Returns 0 on success or if already running or starting.</summary>
     public static int DoStart() => StartStop(start: true);
 
     /// <summary>Stops the service. Must be run elevated. Returns 0 on success or if already stopped.</summary>
