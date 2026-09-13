@@ -72,10 +72,12 @@ foreach ($loc in $runLocations) {
         # /E copies the program + binaries; NO /MIR so we never DELETE the user's data. The /XD
         # excludes make the copy incapable of OVERWRITING it either: if publish\ ever accumulated a
         # user-data folder (a stray run from there), it must never land on Ed's real Dropbox profiles/
-        # config/logs. The binary sync only ever carries program files, never user state, both ways.
+        # config/logs. /XF *.log also keeps loose log files, such as the updater's updater.log next to
+        # the exe, out of the copy. The binary sync only ever carries program files, never user state,
+        # both ways.
         Invoke-Robocopy @($publish, $loc, '/E',
             '/XD', 'user settings and logs', 'recordings', 'logs', 'profiles', 'config',
-            '/XF', 'global config.json', 'remsound.config.json')
+            '/XF', 'global config.json', 'remsound.config.json', '*.log')
     }
     # THE point of this script: the whole source 'default sounds' folder, force-copied over THIS
     # location's copy, every time. /IS = copy even files robocopy thinks are identical; /IT = copy
@@ -84,13 +86,6 @@ foreach ($loc in $runLocations) {
     Write-Host "Force-syncing 'default sounds' -> $locSounds (source wins, every time) ..." -ForegroundColor Cyan
     New-Item -ItemType Directory -Path $locSounds -Force | Out-Null
     Invoke-Robocopy @($srcSounds, $locSounds, '*.wav', '/IS', '/IT')
-
-    # One-time tidy: drop the orphaned pre-2026-06-13 program 'sounds\' folder and the defunct old
-    # per-user sounds folder if they're lingering from before the move (the running app also deletes
-    # the per-user one on launch). Idempotent - a no-op once gone.
-    foreach ($orphan in @((Join-Path $loc 'sounds'), (Join-Path $loc 'user settings and logs\sounds'))) {
-        if (Test-Path -LiteralPath $orphan) { Remove-Item -LiteralPath $orphan -Recurse -Force -ErrorAction SilentlyContinue }
-    }
 }
 
 $count = @(Get-ChildItem $srcSounds -Filter *.wav).Count
