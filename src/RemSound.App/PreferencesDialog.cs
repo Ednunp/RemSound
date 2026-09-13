@@ -4,20 +4,26 @@ using RemSound.Core;
 namespace RemSound.App;
 
 /// <summary>
-/// Preferences dialog. A four-tab dialog (2026-06-13 overhaul) using the same accessible
+/// Preferences dialog. A six-tab dialog using the same accessible
 /// <see cref="QuietTabControl"/> as the main window:
-///   * General — Browse for RemSound profiles folder, Accept remote volume commands, UPnP
-///     automatic router port-forwarding, and Enable logs / Write logs now.
+///   * General — Browse for RemSound profiles folder, the auto-save list, Accept remote volume
+///     commands, UPnP automatic router port-forwarding (+ its status), and the two "clear
+///     remembered list" buttons.
+///   * Appearance — colour theme, show the volume/pan/EQ tab, main-window tab order, and the
+///     discovered / remembered peer list toggles.
 ///   * Audio cues — the cue list (a plain list of cue names; arrowing previews each cue's
 ///     current sound), a "Choose sound" list whose "(none)" entry turns a cue off, the Play /
 ///     Browse actions, and the keyboard-clicks toggle.
 ///   * Startup behaviour — Start minimised, Start with Windows, Start with a specific profile
 ///     (+ the profile list). Moved here from the standalone Options-menu dialog.
-///   * Update settings — startup-check toggle, frequency, manual check, silent-install, and
-///     show-what's-new.
+///   * Update settings — startup-check toggle, frequency, manual check, silent-install, the
+///     install time range, and show-what's-new.
+///   * Logging — Enable logs, Write logs now, the logs-folder size warning, deleting old logs,
+///     and Delete all logs.
 ///
 /// All settings save through <see cref="RemSoundSettingsStore"/> or <see cref="AppConfig"/>
-/// on every change (no OK-to-commit). Esc or Close dismisses.
+/// (Start with Windows: the Windows auto-start entry) on every change (no OK-to-commit).
+/// Esc or Close dismisses.
 ///
 /// Reachable via the Options → Preferences menu item or Ctrl+P from the main window.
 /// </summary>
@@ -70,13 +76,13 @@ internal sealed class PreferencesDialog : Form
     internal static IReadOnlyList<int> AutoSaveMinuteOptionsForTest => AutoSaveMinuteOptions;
 
     // Audio cue UI (2026-05-28 revised after Ed's feedback that one-control-per-cue blew
-    // out the tab order). Back to a single CheckedListBox — up/down arrows move between
-    // cues, Space toggles enable, exactly as it always was. Two buttons sit BELOW the list:
-    // a Play button to preview, and a Browse button to pick a custom WAV. Both act on
-    // whichever cue is currently selected in the list. Their labels update live as the
-    // selection changes ("Play disconnect sound", "Browse for disconnect sound...") so
-    // sighted and NVDA users alike know which cue they're about to act on. Tab order in
-    // the cue section is just: list → Play → Browse (three tab stops, not eighteen).
+    // out the tab order). A single list of cues — up/down arrows move between cues. Below it
+    // sit the "Choose sound" list, then a Play button to preview and a Browse button to pick a
+    // custom WAV. All act on whichever cue is currently selected in the list. The button labels
+    // update live as the selection changes ("Play disconnect sound", "Browse for disconnect
+    // sound...") so sighted and NVDA users alike know which cue they're about to act on. Tab
+    // order in the cue section: cue list → Choose sound → Play → Browse → keyboard clicks
+    // (five tab stops, not one per cue).
     private readonly Label cueListLabel = new()
     {
         Text = "Audio cue sou&nds (Alt+N):",
@@ -107,10 +113,11 @@ internal sealed class PreferencesDialog : Form
         Padding = new Padding(6, 2, 6, 2),
     };
 
-    // "Choose default sound" — a second listbox under the cue checklist. The cue WAVs ship as
-    // numbered variants ("connect 1.wav", "connect 2.wav", ...); this lists the variants for the
-    // cue currently selected in cueList. Arrowing it previews each variant AND makes it the chosen
-    // default for that cue (machine-wide, AppConfig.DefaultCueSounds). The count isn't hard-coded —
+    // "Choose sound" — a second listbox under the cue list. The cue WAVs ship as numbered
+    // variants ("connect 1.wav", "connect 2.wav", ...); after "(none)" and any file of your own,
+    // this lists the variants for the cue currently selected in cueList. Arrowing onto a variant
+    // previews it AND makes it the chosen default for that cue (machine-wide,
+    // AppConfig.DefaultCueSounds). The count isn't hard-coded —
     // whatever "<base> <n>.wav" files exist are offered, so adding more sounds later needs no code.
     // "Choose sound" on screen AND to NVDA. The label used to say "Choose sound" while both names said
     // "Choose default sound", so a screen reader heard a different control from the one on screen.
@@ -147,11 +154,13 @@ internal sealed class PreferencesDialog : Form
 
     /// <summary>Describes one cue row in the list. <see cref="DisplayName"/> is the listbox
     /// text; <see cref="CueId"/> is the well-known key from <see cref="MainForm.CueId"/>;
-    /// <see cref="DefaultFileName"/> is the bundled WAV in <c>sounds\</c>. The Load/Save
+    /// <see cref="DefaultFileName"/> is the base name of the built-in WAVs in <c>default sounds\</c>
+    /// (shipped as numbered variants, "connect 1.wav" and so on). The Load/Save
     /// delegates close over the right backing store so the handlers don't need to know whether
     /// a row is per-profile (<see cref="RemSoundSettingsStore"/>) or machine-wide
-    /// (<see cref="AppConfig"/> — the Startup cue, which fires before any profile loads).
-    /// <see cref="IsProfileSetting"/> tells the handlers whether toggling the row should flag
+    /// (<see cref="AppConfig"/> — the Startup cue and the nine send/receive, hide/show, checkbox
+    /// and tab-switch cues).
+    /// <see cref="IsProfileSetting"/> tells the handlers whether changing the row should flag
     /// a pending profile save; machine-wide rows persist immediately and never do.</summary>
     private sealed record CueRowDescriptor(
         string DisplayName,
@@ -164,7 +173,8 @@ internal sealed class PreferencesDialog : Form
         Action<string?> SaveCustomPath);
 
     // Built per-dialog (not static) so the per-profile rows can close over the live `settings`
-    // store while the Startup row closes over machine-wide AppConfig. Order = listbox order.
+    // store while the machine-wide rows (Startup and the MachineRow cues) close over AppConfig.
+    // Order = listbox order.
     private readonly CueRowDescriptor[] cueRows;
 
     private static CueRowDescriptor[] BuildCueRows(RemSoundSettingsStore settings)
@@ -177,7 +187,7 @@ internal sealed class PreferencesDialog : Form
 
         // Machine-wide cue (enable flag + custom path in AppConfig, not the profile). Persists
         // immediately and never flags a profile save (IsProfileSetting=false). Same shape as the
-        // Startup row below, factored out for the send/receive/hide/show cues.
+        // Startup row below, factored out for the other nine machine-wide cues.
         CueRowDescriptor MachineRow(string name, string id, string file,
             Func<AppConfig, bool> loadEnabled, Action<AppConfig, bool> saveEnabled) =>
             new(name, id, file, false,
@@ -302,10 +312,10 @@ internal sealed class PreferencesDialog : Form
         AutoSize = true,
     };
 
-    // Update settings — startup-check checkbox, frequency dropdown, manual check button,
-    // silent-install checkbox. Sits above the logging row so users meet it during setup; the
-    // canonical order in the dialog is "things related to the program staying current" before
-    // "things related to diagnosing how it's running".
+    // Update settings tab — startup-check checkbox, frequency dropdown, manual check button,
+    // silent-install checkbox, install time range and show-what's-new. Its tab comes before the
+    // Logging tab: "things related to the program staying current" before "things related to
+    // diagnosing how it's running".
     private readonly AccessibleCheckBox checkForUpdatesOnStartupBox = new()
     {
         Text = "Check for updates on &startup",
@@ -367,7 +377,8 @@ internal sealed class PreferencesDialog : Form
     };
 
     // After an update installs and RemSound restarts, opening the About box once lets the user
-    // see what changed. Off by default (opt-in). 'h' mnemonic — 'w' is taken by "Write logs now".
+    // see what changed. On by default (AppConfig.ShowWhatsNewAfterUpdate). 'h' mnemonic — 's' is
+    // taken on this tab by "Check for updates on startup".
     private readonly AccessibleCheckBox showWhatsNewAfterUpdateBox = new()
     {
         Text = "S&how what's new after each update",
@@ -560,13 +571,14 @@ internal sealed class PreferencesDialog : Form
         DialogResult = DialogResult.OK,
     };
 
-    // The four-tab strip. Held as a field (not a constructor local) so OnShown can land focus
-    // on it when the dialog opens — see the OnShown override for why that's needed for NVDA.
+    // The six-tab strip. Held as a field (not a constructor local) so OnShown can pick the first tab
+    // and focus a control on it, and Ctrl+1..N can switch tabs — see OnShown for why NVDA needs that.
     private readonly QuietTabControl tabs = new() { Dock = DockStyle.Fill, TabIndex = 0, TabStop = true };
 
-    /// <summary>True if the user toggled Mute cues or Accept remote during this dialog
-    /// session. The owner uses this to know whether to MarkProfileDirty after the dialog
-    /// closes (since both settings live on Profile and need to flag a save-pending state).</summary>
+    /// <summary>True if the user changed a per-profile setting during this dialog session:
+    /// Accept remote volume commands, or a per-profile cue (on/off or its sound file). The owner
+    /// uses this to know whether to MarkProfileDirty after the dialog closes (those settings live
+    /// on the Profile and need to flag a save-pending state).</summary>
     public bool ChangedAnyProfileSetting { get; private set; }
 
     private readonly Func<(RouterMappingStatus Status, IPEndPoint? External, string LastError)> getUpnpSnapshot;
@@ -639,9 +651,8 @@ internal sealed class PreferencesDialog : Form
                 "Profiles folder updated", MessageBoxButtons.OK, MessageBoxIcon.Information);
         };
 
-        // Populate the cue listbox — order matches the cueRows array, and the index of a
-        // selected row maps 1:1 to a CueRowDescriptor. Each row's ticked state is loaded via
-        // the descriptor (per-profile cues from the settings store; the Startup cue from AppConfig).
+        // Populate the cue listbox with the display names — order matches the cueRows array, and
+        // the index of a selected row maps 1:1 to a CueRowDescriptor.
         cueList.Items.Clear();
         foreach (var c in cueRows)
         {
@@ -711,8 +722,8 @@ internal sealed class PreferencesDialog : Form
 
         cueListLabel.Click += (_, _) => cueList.Focus();
 
-        // "Choose default sound" listbox — populated for the selected cue, arrowing it previews +
-        // chooses the default variant. Initial fill for the cue selected at construction.
+        // "Choose sound" listbox — populated for the selected cue; arrowing it previews + chooses
+        // (see OnDefaultSoundChosen). Initial fill for the cue selected at construction.
         defaultSoundLabel.Click += (_, _) => defaultSoundList.Focus();
         defaultSoundList.SelectedIndexChanged += (_, _) => OnDefaultSoundChosen();
         RefreshDefaultSoundList();
@@ -1069,10 +1080,10 @@ internal sealed class PreferencesDialog : Form
         updateWindowRangeRow.Controls.Add(updateWindowEndLabel);
         updateWindowRangeRow.Controls.Add(updateWindowEndBox);
 
-        // Group the cue label + list + the two action buttons into a single panel that
-        // occupies one row in the outer layout. The action buttons sit side-by-side under
-        // the list so they read as "buttons that act on the list above" without taking up
-        // a second row of vertical space.
+        // Group the cue list, the Choose sound list, the two action buttons and the keyboard-clicks
+        // checkbox into a single panel, the Audio cues tab's only row. The action buttons sit
+        // side-by-side under the lists so they read as "buttons that act on the selected cue"
+        // without taking up a second row of vertical space.
         var cueGroup = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -1093,7 +1104,7 @@ internal sealed class PreferencesDialog : Form
         };
         cueActions.Controls.Add(playSelectedCueButton);
         cueActions.Controls.Add(browseSelectedCueButton);
-        // Tab order within the cue group: cue checklist -> default-sound list -> Play/Browse ->
+        // Tab order within the cue group: cue list -> Choose sound list -> Play/Browse ->
         // keyboard-clicks checkbox. Labels are skipped (not tab stops).
         defaultSoundList.TabIndex = 2;
         keyboardClicksBox.TabIndex = 5;
@@ -1142,7 +1153,7 @@ internal sealed class PreferencesDialog : Form
         // Six tabs (General, Appearance, Audio cues, Startup behaviour, Update settings, Logging),
         // accessible (QuietTabControl) like the main window. Ctrl+Tab / arrows on the
         // strip switch tabs; the active page's controls are the next tab stops. The control itself
-        // is a field (declared above) so OnShown can focus it when the dialog opens. Logging is its
+        // is a field (declared above) so OnShown and Ctrl+1..N can reach it. Logging is its
         // own tab (2026-06-19); the two logging controls moved off the General tab to lead it.
         // Auto-save label + list stacked into one panel, so they read as a unit and sit as a single
         // row of the General tab directly after the "Browse for profiles folder" button, as Ed asked.
@@ -1221,22 +1232,6 @@ internal sealed class PreferencesDialog : Form
         };
     }
 
-    /// <summary>When the dialog opens, land focus on the first real, NAMED leaf control inside the
-    /// active tab page so NVDA announces the dialog and that control. Never the tab strip: the tab
-    /// control is a <see cref="QuietTabControl"/> whose own accessible object is deliberately
-    /// role-less and nameless (so NVDA reads the tab item, not a redundant "tab control"), and
-    /// focusing THAT on open gave NVDA nothing to announce — which is exactly why Preferences opened
-    /// silent until you moved. Focusing a named leaf (the first General-tab control) gives NVDA
-    /// something to speak, and because ShowDialog exposes the form as a dialog (UIA IsDialog, .NET 7+)
-    /// it then reads the whole dialog.
-    ///
-    /// Three load-bearing details, confirmed against the dotnet/winforms + NVDA issue trackers and
-    /// matching the pattern Andre's Sensor Readout uses (it focuses a real list/textbox in Shown):
-    ///   * Deferred via BeginInvoke so it runs after the dialog's accessibility tree is live.
-    ///   * ActiveControl=null FIRST, so leaf.Focus() is a genuine focus CHANGE and actually raises the
-    ///     focus event (without the transition WinForms can treat focus as unchanged and stay silent).
-    ///   * NotifyFocus re-fires the MSAA focus event as belt-and-braces.
-    /// Ctrl+Tab still switches tabs from inside the page.</summary>
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
         // Ctrl+1..N switch to that tab by its current position — matches the main window.
@@ -1258,6 +1253,23 @@ internal sealed class PreferencesDialog : Form
         return base.ProcessCmdKey(ref msg, keyData);
     }
 
+    /// <summary>When the dialog opens, select the first tab and land focus on the first real, NAMED
+    /// leaf control inside it so NVDA announces the dialog and that control. Never the tab strip: the tab
+    /// control is a <see cref="QuietTabControl"/> whose own accessible object is deliberately
+    /// role-less and nameless (so NVDA reads the tab item, not a redundant "tab control"), and
+    /// focusing THAT on open gave NVDA nothing to announce — which is exactly why Preferences opened
+    /// silent until you moved. Focusing a named leaf (the first General-tab control) gives NVDA
+    /// something to speak, and because ShowDialog exposes the form as a dialog (UIA IsDialog, .NET 7+)
+    /// it then reads the whole dialog.
+    ///
+    /// Three load-bearing details, confirmed against the dotnet/winforms + NVDA issue trackers and
+    /// matching the pattern Andre's Sensor Readout uses (it focuses a real list/textbox in Shown):
+    ///   * Deferred via BeginInvoke so it runs after the dialog's accessibility tree is live.
+    ///   * ActiveControl=null FIRST, so leaf.Focus() is a genuine focus CHANGE and actually raises the
+    ///     focus event (without the transition WinForms can treat focus as unchanged and stay silent).
+    ///   * NotifyFocus re-fires the MSAA focus event as belt-and-braces.
+    /// The last two happen inside <see cref="WinEventNotifier.AnnounceByFocusingLeaf"/>.
+    /// Ctrl+Tab still switches tabs from inside the page.</summary>
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
@@ -1377,9 +1389,8 @@ internal sealed class PreferencesDialog : Form
     /// <summary>Refresh the Play and Browse action buttons so their visible text and
     /// AccessibleName reflect the currently-selected cue. Called on every selection change
     /// in the cue listbox AND immediately after a Browse pick (the "(custom)" tag flips
-    /// based on whether a custom path is set). When the selection is empty — e.g. the
-    /// listbox briefly clears during a profile reload — both buttons get a generic label
-    /// and are disabled so a stray click can't act on a stale index.</summary>
+    /// based on whether a custom path is set). When nothing is selected, both buttons get a
+    /// generic label and are disabled so a stray click can't act on a stale index.</summary>
     private void RefreshCueActionButtons()
     {
         var idx = cueList.SelectedIndex;
@@ -1414,9 +1425,10 @@ internal sealed class PreferencesDialog : Form
         }
     }
 
-    /// <summary>Repopulate the "Choose default sound" listbox for the currently-selected cue with
-    /// its numbered variants, and select whichever variant is the active default. Disabled (with a
-    /// note) when the cue has no built-in sounds on disk.</summary>
+    /// <summary>Repopulate the "Choose sound" listbox for the currently-selected cue: "(none)", then a
+    /// row for your own file if the cue has one (or had one while this dialog has been open), then its
+    /// numbered built-in variants. Selects what the cue plays now — "(none)" when the cue is off. With
+    /// no cue selected the list is left empty and disabled.</summary>
     private void RefreshDefaultSoundList()
     {
         suppressDefaultSoundPreview = true;
@@ -1591,13 +1603,13 @@ internal sealed class PreferencesDialog : Form
     }
 
     /// <summary>Resolves the WAV file currently configured for a cue: the user's custom
-    /// override if set and on disk, otherwise the bundled default in <c>sounds\</c>.
-    /// Returns null when neither resolves to an existing file (typical for save.wav /
-    /// profile.wav before the project owner supplies them) so the caller can stay silent.
+    /// override if set and on disk, otherwise the chosen built-in variant in <c>default sounds\</c>.
+    /// Returns null when neither resolves to an existing file so the caller can stay silent.
     /// Mirrors the resolution order in MainForm.TryLoadCueSound — the Play button must
-    /// preview exactly what the cue would play if it fired now. Reads through the settings
-    /// cache so we see whatever the user has changed in this dialog session, including
-    /// custom paths not yet persisted to the profile JSON.</summary>
+    /// preview exactly what the cue would play if it fired now. Reads through the row's own
+    /// store (the settings cache for a profile cue, AppConfig for a machine-wide one) so we see
+    /// whatever the user has changed in this dialog session, including custom paths not yet
+    /// persisted to the profile JSON.</summary>
     private static string? ResolveCueFilePath(CueRowDescriptor cue)
     {
         var customPath = cue.LoadCustomPath();
@@ -1605,14 +1617,14 @@ internal sealed class PreferencesDialog : Form
         {
             return customPath;
         }
-        // Otherwise the chosen default variant in sounds\ ("connect 1.wav" / "connect 2.wav" / ...),
+        // Otherwise the chosen default variant in default sounds\ ("connect 1.wav" / "connect 2.wav" / ...),
         // resolved the same way MainForm.TryLoadCueSound resolves it.
         var defaultPath = CueSounds.ResolveDefaultPath(cue.CueId, cue.DefaultFileName, AppConfig.Load());
         return defaultPath is not null && File.Exists(defaultPath) ? defaultPath : null;
     }
 
     /// <summary>Preview a cue's currently-configured WAV through the system default audio
-    /// output. Plays asynchronously (SoundPlayer.Play loads + plays on a thread-pool thread),
+    /// output. Plays asynchronously (CuePlayer.Play loads + plays on a thread-pool thread),
     /// so the dialog stays responsive even if the file is briefly slow to load. When no file
     /// resolves — e.g. a cue without a default WAV and no custom path — show a small popup
     /// so the user knows why nothing happened, rather than silently doing nothing and
@@ -1643,13 +1655,13 @@ internal sealed class PreferencesDialog : Form
     }
 
     /// <summary>Open a WAV file picker for the given cue. The picker defaults to the user's
-    /// previously-set custom path if one exists, falling back to the bundled sounds\ folder
-    /// next to RemSound.exe — so picking a file from inside that folder is treated as
+    /// previously-set custom path if one exists, falling back to the built-in default sounds\
+    /// folder next to RemSound.exe. Picking a file from inside that folder is treated as
     /// "use the default" and the override is cleared rather than re-pointed at the same
     /// file (which would leave the user stuck with a stale copy if a future RemSound update
-    /// replaces the default WAV). Writes through the settings cache, since custom cue paths
-    /// are per-profile — clearing here also flips ChangedAnyProfileSetting so the save-prompt
-    /// fires on the way out.</summary>
+    /// replaces the default WAV). Writes through the row's own store (the profile for a profile
+    /// cue, AppConfig for a machine-wide one); for a profile cue it also flips
+    /// ChangedAnyProfileSetting so the save-prompt fires on the way out.</summary>
     private void OnBrowseClicked(Button btn, CueRowDescriptor cue)
     {
         var soundsFolder = AppConfig.SoundsDirectory;
@@ -1671,7 +1683,7 @@ internal sealed class PreferencesDialog : Form
         var pickedFullPath = Path.GetFullPath(picker.FileName);
         var soundsFolderFullPath = Path.GetFullPath(soundsFolder);
 
-        // If the user picked a file inside the bundled sounds\ folder, treat it as a "use
+        // If the user picked a file inside the built-in default sounds\ folder, treat it as a "use
         // default" — clear the override rather than store the path. Avoids freezing the
         // user on a specific shipped-default file across updates.
         if (pickedFullPath.StartsWith(soundsFolderFullPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
@@ -1684,7 +1696,8 @@ internal sealed class PreferencesDialog : Form
             cue.SaveCustomPath(pickedFullPath);
             UiChangeLog.Record($"cue sound: {cue.CueId}", $"your own file {Path.GetFileName(pickedFullPath)}");
         }
-        // The Startup cue is machine-wide, not part of the profile — don't arm the save prompt.
+        // Machine-wide cues (Startup and the other AppConfig rows) aren't part of the profile — don't
+        // arm the save prompt for them.
         if (cue.IsProfileSetting) ChangedAnyProfileSetting = true;
         // Refresh the visible action-button labels so the "(custom)" tag appears or
         // disappears right away. Belt-and-braces: the caller also refreshes, but doing it

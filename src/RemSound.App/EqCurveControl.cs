@@ -5,8 +5,9 @@ namespace RemSound.App;
 
 /// <summary>A purely-decorative frequency-response graph for the selected peer's EQ. Draws the dialled
 /// EQ shape (all three modes feed the same curve) so a sighted onlooker sees the classic EQ picture.
-/// It is NOT focusable and carries no accessible content — NVDA skips it entirely; every actual control
-/// stays the sliders / list / buttons around it. RemSound has no sighted primary users, so this is a
+/// It is not a tab stop and has an empty accessible name, so it gives a screen reader nothing to read.
+/// Unlike <see cref="StatusDot"/> it does not override its accessible object, so it keeps the default
+/// one every Panel has. Every actual control stays the sliders / list / buttons around it. RemSound has no sighted primary users, so this is a
 /// low-cost nicety, not part of the interaction.</summary>
 internal sealed class EqCurveControl : Panel
 {
@@ -22,7 +23,7 @@ internal sealed class EqCurveControl : Panel
         TabStop = false;                       // never in the keyboard tab order
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
                | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
-        // No accessible name/role — leave it invisible to screen readers.
+        // Empty accessible name; the role stays the Panel default (no custom accessible object).
         AccessibleName = "";
     }
 
