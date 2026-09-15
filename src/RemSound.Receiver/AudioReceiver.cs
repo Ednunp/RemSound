@@ -506,7 +506,8 @@ public sealed class AudioReceiver : IDisposable
     public int TargetLatencyMs => playoutEngine.TargetLatencyMs;
 
     /// <summary>
-    /// Frame duration of the active streams (PCM frames are 5 ms, or 2.5 ms in Tight; Opus frames
+    /// Frame duration of the active streams (PCM frames are 236 samples, just under 5 ms, from a current
+    /// sender, 240 from an older one, or 120 in Tight; Opus frames
     /// are whatever the sender chose). null when no stream is active. With multiple streams this
     /// picks the largest frame duration as the
     /// codec floor — most conservative for the auto-tune. Returns ms (rounded up to the next

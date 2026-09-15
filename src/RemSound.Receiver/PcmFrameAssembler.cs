@@ -10,10 +10,11 @@ namespace RemSound.Receiver;
 
 /// <summary>
 /// Assembles multi-part PCM transport frames back into a single contiguous payload.
-/// PCM frames at 48 kHz × 24-bit × 2 ch × 10 ms = 2880 bytes, split into 2 UDP parts.
+/// A frame from a current Windows sender fits one part (236 samples, 1,444 bytes encrypted), which
+/// completes at once; a 5 ms frame from an older sender (240 samples, 1,468 bytes) arrives as two.
 ///
 /// On a healthy LAN, parts arrive in order. If a part is missed we drop the whole frame
-/// rather than wait — at 10 ms cadence, waiting more than ~5 ms is worse than a single dropped frame.
+/// rather than wait — at a ~5 ms cadence, waiting for a late part is worse than a single dropped frame.
 /// </summary>
 internal sealed class PcmFrameAssembler
 {

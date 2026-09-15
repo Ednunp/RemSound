@@ -25,13 +25,21 @@ namespace RemSound.Sender;
 /// </summary>
 public sealed class AudioSender : IDisposable
 {
-    // PCM frame size is configurable via SendRate. Standard = 5 ms (240 samples = 1440 bytes,
-    // single UDP packet under MaxAudioPayloadBytes=1454). Tight = 2.5 ms (120 samples = 720
-    // bytes, also single packet). Tight mode adds nothing structurally — same packet shape,
-    // just half-size — so the receive-side multipart assembler stays a no-op.
+    // PCM frame size is set by SendRate. Standard is the largest frame that still goes out as ONE packet once
+    // it is encrypted, on a path with a 1492-byte MTU (PPPoE broadband; a 1500-byte path has room to spare):
+    // 1492 - 20 IP - 8 UDP - 12 RemPacket header - 6 PCM sub-header - 28 AES-GCM = 1418 bytes, which is 236
+    // samples of 24-bit stereo (4.92 ms). It was 240 (5 ms): encrypted, that came to 1468 bytes, over the
+    // 1454-byte chunk, so every frame went as two packets and losing either lost the frame. Every receiver
+    // works a frame's length out from the packet, so the size can change (checked 2026-09-15 against the
+    // Windows receive path back to 5.0 and the Android and iPhone apps). Tight = 2.5 ms (120 samples) fits
+    // either way.
     private const int MixChannels = 2;
     private const int OpusBitrateLan = 192_000;
-    private const int PcmStandardSamplesPerChannel = 240;  // 5 ms
+    private const int PcmBytesPerSample = 3;
+    private const int PcmPathMtuBytes = 1492;
+    internal const int PcmStandardSamplesPerChannel =
+        (PcmPathMtuBytes - 20 - 8 - RemPacket.HeaderSize - RemPcmFrame.SubHeaderSize - RemSoundCrypto.EncryptionOverheadBytes)
+        / (PcmBytesPerSample * MixChannels);   // 236
     private const int PcmTightSamplesPerChannel = 120;     // 2.5 ms
 
     // Mutable PCM frame parameters — updated by SetSendRate. Keep them volatile because the
@@ -509,7 +517,7 @@ public sealed class AudioSender : IDisposable
 
     /// <summary>Tight-latency mode toggle. Affects two things:
     ///   * PCM on every lane: each delivered sample buffer is emitted directly as its own
-    ///     packet (split at 5 ms) instead of being accumulated to the PCM frame size — saves
+    ///     packet (split at the Standard frame size) instead of being accumulated to the PCM frame size — saves
     ///     ~frame_size_ms/2 of average send-side latency. SenderLane.ProcessPcm reads
     ///     <see cref="IsTightLatencyEnabled"/> directly.
     ///   * A single WASAPI source: rebuilds the capture backend so its WASAPI lane runs

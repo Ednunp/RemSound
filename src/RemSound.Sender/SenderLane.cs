@@ -40,7 +40,7 @@ internal sealed class SenderLane
     private readonly int opusBitrate;
 
     // Hot-path scratch. Sized to the largest possible single frame (Opus 20 ms = 1920 stereo
-    // samples). PCM 5 ms uses only the first 480, Opus 10 ms only the first 960. Reusing one
+    // samples). A Standard PCM frame uses only the first 472, Opus 10 ms only the first 960. Reusing one
     // buffer means no realloc on codec change. outboundScratch is per-lane so two lanes don't
     // step on each other's packet construction.
     private readonly float[] frameAccumulator = new float[MaxFrameStereoSamples];
@@ -288,12 +288,13 @@ internal sealed class SenderLane
     {
         // Tight-latency mode: emit each delivered sample buffer as its own packet instead of
         // accumulating to the PCM frame size. Saves up to (frame_size_ms / 2) of average
-        // accumulator delay. Variable packet size per call. Cap at 240 stereo-frames (5 ms =
-        // 1440 bytes) to stay under MaxAudioPayloadBytes=1454; in normal ASIO buffer sizes
-        // (64/128) this cap is never hit.
+        // accumulator delay. Variable packet size per call. Capped at the Standard frame size, the
+        // largest that still goes out as one encrypted packet (AudioSender.PcmStandardSamplesPerChannel),
+        // so a 480-frame WASAPI push buffer or a 512-frame ASIO buffer is cut into pieces that each fit.
+        // Normal ASIO buffer sizes (64/128) never reach the cap.
         if (owner.IsTightLatencyEnabled)
         {
-            const int MaxStereoSamplesPerPacket = 240 * MixChannels;
+            const int MaxStereoSamplesPerPacket = AudioSender.PcmStandardSamplesPerChannel * MixChannels;
             var pos = 0;
             while (pos < samples.Length)
             {
