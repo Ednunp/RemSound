@@ -40,6 +40,11 @@ internal sealed class SessionPlayout : IDisposable
     // Updated from the network thread; read from the audio thread. Volatile is enough
     // because we only ever monotonically increase it within a session lifetime.
     private volatile int largestWriteMs;
+    // A standard uncompressed frame from a current sender is 236 samples, 4.92 ms, so that it fits one packet; it was 240,
+    // exactly 5 ms. Rounding 4.92 down to 4 would leave 2 to 4 ms less room before a trim, so a buffer would be trimmed
+    // down sooner than before. A write this few frames short of a whole millisecond counts as that millisecond. No other
+    // size in use moves: 2.5, 10 and 20 ms frames, and 32- to 2,048-frame buffers, all come out as they always did.
+    private const int WriteMsShortfallFrames = 4;
 
     // === Drop-cause split ===
     // Codex pointed out that the legacy `DropCount` on the ring buffer rolled up every reason
@@ -412,6 +417,10 @@ internal sealed class SessionPlayout : IDisposable
     /// whether a lane is still taking audio. Null in tests that build a session directly.</summary>
     internal Func<RenderRoute, bool>? LaneIsConsuming { get; set; }
 
+    /// <summary>The clock the trim glide and the drift loop read: the Stopwatch, always, in the app. A self-test hands in
+    /// a simulated clock so it can drive minutes of this loop in a moment.</summary>
+    internal Func<long> NowTicks { get; init; } = Stopwatch.GetTimestamp;
+
     public void Write(ReadOnlySpan<byte> source)
     {
         var mir = mirrors;
@@ -461,7 +470,7 @@ internal sealed class SessionPlayout : IDisposable
     /// re-fans-out) and by <see cref="Write"/> for the primary before it forwards to its mirrors.</summary>
     private void WriteLocal(ReadOnlySpan<byte> source)
     {
-        var ms = source.Length * 1000 / MixBytesPerSecond;
+        var ms = (source.Length / MixBytesPerFrame + WriteMsShortfallFrames) * 1000 / MixSampleRate;
         if (ms > largestWriteMs) largestWriteMs = ms;
         playout.Write(source);
         // Track bytes written for the drift-resampler measurement window. Producer thread
@@ -676,7 +685,7 @@ internal sealed class SessionPlayout : IDisposable
             // buffer - so a lowered target (the auto-tune walking latency down) lets the buffer
             // slide down under the threshold rather than being shaved into a click on each step.
             const double TrimGlideDownMsPerSec = 1.5;
-            var nowTrimTicks = Stopwatch.GetTimestamp();
+            var nowTrimTicks = NowTicks();
             if (trimGlideTargetMs <= 0 || targetLatencyMs >= trimGlideTargetMs)
             {
                 trimGlideTargetMs = targetLatencyMs;
@@ -715,7 +724,7 @@ internal sealed class SessionPlayout : IDisposable
         // The buffer-level error LP filter no longer drives any correction — that job is
         // now the resampler's. It's kept purely as a diag display so the log shows where
         // the buffer is sitting.
-        var nowTicks = Stopwatch.GetTimestamp();
+        var nowTicks = NowTicks();
         var driftTargetBytes = MillisecondsToBytes(targetLatencyMs);
         if (prevDriftSampleTicks != 0)
         {

@@ -1,4 +1,6 @@
+using System.Net;
 using RemSound.Core;
+using RemSound.Receiver;
 using RemSound.Sender;
 
 namespace RemSound.App;
@@ -49,6 +51,48 @@ internal static partial class SelfTest
             $"a large buffer must be cut into the largest pieces that fit one encrypted packet ({OnePacketPcmCiphertextBytes} bytes; the largest was {largest})");
         return $"480- and 512-frame buffers went as {packets} pieces, each one packet, the largest {largest} bytes";
     });
+
+    /// <summary>
+    /// A RECEIVER GIVES A ONE-PACKET FRAME THE TRIM ROOM OF A 5 MS FRAME.
+    ///
+    /// <para>A receiver leaves room over target before it trims a buffer, sized from the largest frame it has been sent. A
+    /// 236-sample frame is 4.92 ms; rounded down to 4 it would leave 2 ms less room on an ASIO output and 4 ms less on a
+    /// WASAPI one, and trim latency down sooner than before. Each lane must still ride out a buffer 1 ms inside a 5 ms
+    /// frame's room, and still trim one 1 ms past it.</para>
+    /// </summary>
+    private static string? ReceiverGivesAOnePacketFrameTheTrimRoomOfA5MsFrame()
+    {
+        var lanesChecked = new List<string>();
+        foreach (var configuration in AudioConfigurations.All)
+        {
+            // Room over target for a 5 ms frame: smoothness 3 (a WASAPI output's default) leaves 5×4+4 plus 8; smoothness 1
+            // (an ASIO output at its tightest) leaves 5×2+4.
+            var lanes = new List<(string Name, int TargetMs, int Smoothness, int RoomMs)>();
+            if (configuration.UsesWasapi()) lanes.Add(("WASAPI output", 40, 3, 32));
+            if (configuration.UsesAsio()) lanes.Add(("ASIO output", 12, 1, 14));
+            foreach (var (name, targetMs, smoothness, roomMs) in lanes)
+            {
+                foreach (var (overMs, shouldTrim) in new[] { (roomMs - 1, false), (roomMs + 1, true) })
+                {
+                    var session = new SessionPlayout(new IPEndPoint(IPAddress.Loopback, 47830), 1, 1 << 20);
+                    // One standard frame from the sender, then 1 ms top-ups (which never count as the largest frame).
+                    var frames = (targetMs + overMs) * 48;
+                    session.Write(new byte[AudioSender.PcmStandardSamplesPerChannel * 2 * sizeof(float)]);
+                    frames -= AudioSender.PcmStandardSamplesPerChannel;
+                    for (; frames >= 48; frames -= 48) session.Write(new byte[48 * 2 * sizeof(float)]);
+                    if (frames > 0) session.Write(new byte[frames * 2 * sizeof(float)]);
+                    session.NoteFramesQueued(targetMs);
+                    session.ReadFloats(new float[2], 1, targetMs, 1000, smoothness, applyShaping: false, emitRecordTap: false);
+                    Check((session.TrimFireCount > 0) == shouldTrim,
+                        $"in {configuration.Describe()}, the {name} must give a {AudioSender.PcmStandardSamplesPerChannel}-sample frame the same trim room "
+                        + $"as a 5 ms frame, {roomMs} ms over its {targetMs} ms target: a buffer {overMs} ms over "
+                        + (shouldTrim ? "must still be trimmed" : "must not be trimmed, or latency is brought down sooner than before"));
+                }
+                lanesChecked.Add($"{configuration.Describe()} {name}");
+            }
+        }
+        return $"{string.Join(", ", lanesChecked)}: a 236-sample frame gets a 5 ms frame's trim room, to the millisecond";
+    }
 
     /// <summary>A sender sending uncompressed audio at the standard rate, encrypted, from the plugin lane to a sink.</summary>
     private static string? WithPcmSender(bool lockToClock, Func<AudioSender, WireSink, string?> body)

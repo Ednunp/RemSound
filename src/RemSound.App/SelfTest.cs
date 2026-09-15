@@ -234,6 +234,12 @@ internal static partial class SelfTest
         RunStep(results, "Server releases are signed the way the relay checks", AuditServerReleasesAreSignedTheWayTheRelayChecks);
         RunStep(results, "A standard uncompressed frame goes out as one packet", PcmStandardFrameIsOnePacket);
         RunStep(results, "A lock-to-clock piece of uncompressed audio goes out as one packet", PcmLockToClockPieceIsOnePacket);
+        RunStep(results, "A receiver gives a one-packet uncompressed frame the trim room of a 5 ms frame", ReceiverGivesAOnePacketFrameTheTrimRoomOfA5MsFrame);
+        RunStep(results, "The per-person timing correction settles on the sender's clock", AuditPerPersonTimingSettlesOnTheSendersClock);
+        RunStep(results, "The per-person timing correction ignores a wildly wrong reading", AuditPerPersonTimingIgnoresAWildReading);
+        RunStep(results, "The per-person timing correction starts after one reading, used as it is", AuditPerPersonTimingStartsAfterOneReading);
+        RunStep(results, "The per-person timing correction never brings a lowered target down faster than today", AuditPerPersonTimingBringsALoweredTargetDownNoFasterThanToday);
+        RunStep(results, "The per-person timing correction never brings a backlog down faster than today", AuditPerPersonTimingBringsABacklogDownNoFasterThanToday);
         RunStep(results, "CROSS-PORT CONTRACT (the values other RemSounds depend on)", CrossPortContract);
         RunStep(results, "Password derivation (any password derives a key; cached; 100k for cross-port compat)", PasswordDerivation);
         RunStep(results, "Relay address-proof echo (AddrCheck round-trip)", RelayAddrCheckEcho);

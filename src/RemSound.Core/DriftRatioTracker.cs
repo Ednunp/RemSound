@@ -3,8 +3,9 @@ using System.Diagnostics;
 namespace RemSound.Core;
 
 /// <summary>
-/// THE ONE clock-drift calculation, shared by everything in RemSound that has to hold audio produced
-/// on one clock against a consumer running on another.
+/// The shared clock-drift calculation for holding audio produced on one clock against a consumer running
+/// on another. Every such place in RemSound uses it but one, the per-person playout on the receiving side,
+/// which keeps its own loop on purpose (see the last paragraph).
 ///
 /// <para><b>Why it is here.</b> Three places had their own copy of this arithmetic, character for
 /// character: the receive side's device output (<c>MultiOutputPlayout.DriftResamplingProvider</c>),
@@ -38,6 +39,13 @@ namespace RemSound.Core;
 ///   to where it should be, capped at 0.3 % so it stays a sub-audible pitch nudge and never a
 ///   click.</item>
 /// </list>
+///
+/// <para><b>The one loop this does not replace.</b> <c>SessionPlayout</c>, each sender's own buffer on the
+/// receiving side, keeps its own. Its window starts only once that sender's buffer has filled to target,
+/// so start-up fill never reaches its first reading, and it uses that reading as it is: discarding it, as
+/// this class does, would start its correction ten seconds later. It already ignores a wild reading, caps
+/// its depth nudge at the same 0.3 %, and adds a fast approach after a deliberate slider move. Ed,
+/// 2026-09-15: leave it as it is. The self-test drives it on a simulated clock and pins what it does.</para>
 /// </summary>
 public sealed class DriftRatioTracker
 {
