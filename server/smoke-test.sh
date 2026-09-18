@@ -69,10 +69,10 @@ fi
 # 4. Look for the expected log events for both protocols.
 sleep 1
 read_log() {
-  if [[ -r /var/log/remsound-relay.log ]]; then
-    tail -40 /var/log/remsound-relay.log 2>/dev/null
-  elif sudo -n test -r /var/log/remsound-relay.log 2>/dev/null; then
-    sudo tail -40 /var/log/remsound-relay.log 2>/dev/null
+  if [[ -r /var/log/remsound-relay/remsound-relay.log ]]; then
+    tail -40 /var/log/remsound-relay/remsound-relay.log 2>/dev/null
+  elif sudo -n test -r /var/log/remsound-relay/remsound-relay.log 2>/dev/null; then
+    sudo tail -40 /var/log/remsound-relay/remsound-relay.log 2>/dev/null
   fi
 }
 log_lines="$(read_log)"
@@ -88,7 +88,7 @@ if [[ -n "$log_lines" ]]; then
     warn "v2 path: no client_joined event for 127.0.0.1 in last 40 log lines"
   fi
 else
-  warn "cannot read /var/log/remsound-relay.log (try: sudo $0)"
+  warn "cannot read /var/log/remsound-relay/remsound-relay.log (try: sudo $0)"
 fi
 
 # 5. Auto-updater scaffolding in place?

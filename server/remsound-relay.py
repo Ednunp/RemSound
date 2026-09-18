@@ -49,7 +49,7 @@ IDLE_TIMEOUT_SECONDS = 60
 STATS_INTERVAL_SECONDS = 60
 ROSTER_HEARTBEAT_SECONDS = 1.0  # v2 only — periodic roster broadcast
 SOCKET_POLL_TIMEOUT_SECONDS = 1.0
-DEFAULT_LOG_PATH = "/var/log/remsound-relay.log"
+DEFAULT_LOG_PATH = "/var/log/remsound-relay/remsound-relay.log"  # systemd's LogsDirectory for the relay's own user
 DEFAULT_MAX_CLIENTS = 10
 LOBBY_NAME_BYTES = 32  # bytes reserved for a display name on the wire
 

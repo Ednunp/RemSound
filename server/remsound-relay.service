@@ -6,7 +6,23 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /usr/local/sbin/remsound-relay.py
+# Not root. systemd makes a throwaway user for the relay each time it starts: it only needs to
+# send and receive UDP on 47830 and write its log. Nothing here needs useradd, so the
+# auto-updater, which installs this file, rolls it out to a running relay as it is.
+DynamicUser=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateDevices=yes
+ProtectHome=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# The log holds client IP addresses: its own folder, readable by root and the relay only.
+LogsDirectory=remsound-relay
+LogsDirectoryMode=0750
+UMask=0027
+# Before server-v2.7 the log was /var/log/remsound-relay.log, readable by everyone. Keep it, but
+# make it root-only. "+" runs just this step as root; "-" lets a relay that never had one start.
+ExecStartPre=-+/bin/chmod 0600 /var/log/remsound-relay.log
+ExecStart=/usr/bin/python3 /usr/local/sbin/remsound-relay.py --log-path /var/log/remsound-relay/remsound-relay.log
 Restart=on-failure
 RestartSec=5
 

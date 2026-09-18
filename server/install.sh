@@ -12,7 +12,9 @@
 #   2. Copies remsound-relay.py to /usr/local/sbin/.
 #   3. Copies remsound-relay.service to /etc/systemd/system/.
 #   4. Copies the auto-updater script + service + timer.
-#   5. Creates empty log files.
+#   5. Creates the update log, and makes a relay log from before server-v2.7
+#      root-only. The relay's own log folder is made by systemd for the relay's
+#      own user (see remsound-relay.service).
 #   6. Writes /etc/remsound-relay/version with the bundled tag.
 #   7. Snapshots the current install to /etc/remsound-relay/backup/ so the
 #      auto-updater has somewhere to roll back to on a bad future release.
@@ -78,10 +80,16 @@ echo "Installing auto-updater systemd units ..."
 install -o root -g root -m 644 "$SCRIPT_DIR/remsound-relay-update.service" /etc/systemd/system/remsound-relay-update.service
 install -o root -g root -m 644 "$SCRIPT_DIR/remsound-relay-update.timer" /etc/systemd/system/remsound-relay-update.timer
 
-echo "Ensuring log files exist ..."
-touch /var/log/remsound-relay.log /var/log/remsound-relay-update.log
-chown root:root /var/log/remsound-relay.log /var/log/remsound-relay-update.log
-chmod 0644 /var/log/remsound-relay.log /var/log/remsound-relay-update.log
+echo "Ensuring the update log exists ..."
+touch /var/log/remsound-relay-update.log
+chown root:root /var/log/remsound-relay-update.log
+chmod 0644 /var/log/remsound-relay-update.log
+# The relay runs as its own user and logs to /var/log/remsound-relay/, which systemd makes for it.
+# A log from before server-v2.7 holds client IP addresses and was readable by everyone: keep it,
+# root-only.
+if [[ -f /var/log/remsound-relay.log ]]; then
+  chmod 0600 /var/log/remsound-relay.log
+fi
 
 echo "Writing version stamp ..."
 mkdir -p /etc/remsound-relay /etc/remsound-relay/backup
@@ -126,7 +134,7 @@ systemctl --no-pager status remsound-relay-update.timer || true
 
 echo
 echo "=== last 10 relay log lines ==="
-tail -n 10 /var/log/remsound-relay.log 2>/dev/null || echo "(log empty so far)"
+tail -n 10 /var/log/remsound-relay/remsound-relay.log 2>/dev/null || echo "(log empty so far)"
 
 echo
 echo "=== listening socket check ==="
@@ -143,5 +151,7 @@ echo "Auto-updates: enabled (hourly via remsound-relay-update.timer)."
 echo
 echo "To disable auto-updates: sudo systemctl disable --now remsound-relay-update.timer"
 echo "To check for updates manually: sudo systemctl start remsound-relay-update.service"
+echo "The relay runs as its own unprivileged user."
+echo "Relay log (root and the relay only): /var/log/remsound-relay/remsound-relay.log"
 echo "Update history log: /var/log/remsound-relay-update.log"
 echo "See README.md for full operational notes."

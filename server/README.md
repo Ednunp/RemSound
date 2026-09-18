@@ -104,8 +104,26 @@ a relay people are connected to.
 | `/etc/systemd/system/remsound-relay-update.timer`   | updater schedule                       |
 | `/etc/remsound-relay/version`                       | currently installed tag                |
 | `/etc/remsound-relay/backup/`                       | snapshot for the updater's rollback    |
-| `/var/log/remsound-relay.log`                       | relay event log (`event=...` per line) |
+| `/var/log/remsound-relay/remsound-relay.log`        | relay event log (`event=...` per line) |
 | `/var/log/remsound-relay-update.log`                | update-check history                   |
+
+## The relay runs as its own user
+
+Since server-v2.7 the relay does not run as root. systemd makes a throwaway
+user for it each time it starts (`DynamicUser=yes` in
+`remsound-relay.service`), with no special powers: it only sends and receives
+UDP on 47830 and writes its log. The log holds client IP addresses, so it
+lives in its own folder, readable only by root and the relay:
+
+    sudo tail -f /var/log/remsound-relay/remsound-relay.log
+
+A relay that updates itself gets this with nothing to do: the updater installs
+the new service file. A log from before server-v2.7,
+`/var/log/remsound-relay.log`, is kept but made readable by root only.
+
+The auto-updater itself still runs as root, because it replaces files in
+`/usr/local/sbin` and `/etc/systemd/system` and restarts the relay. It installs
+only releases signed with the RemSound release key.
 
 ## Networking
 

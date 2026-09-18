@@ -58,6 +58,7 @@ systemctl daemon-reload
 echo
 echo "Uninstall complete."
 echo "Note: log files left in place — delete them yourself if you don't want them:"
-echo "  /var/log/remsound-relay.log"
+echo "  /var/log/remsound-relay/remsound-relay.log (the relay's log since server-v2.7)"
+echo "  /var/log/remsound-relay.log (from before server-v2.7, if there is one)"
 echo "  /var/log/remsound-relay-update.log"
 echo "Note: any router port-forward you added for UDP 47830 is unchanged — remove that yourself if you no longer need it."
