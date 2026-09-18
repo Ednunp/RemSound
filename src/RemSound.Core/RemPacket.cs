@@ -380,7 +380,7 @@ public static class RemPacket
 /// <summary>
 /// PCM transport sub-header. A PCM frame is encrypted whole and the ciphertext is split into parts of
 /// at most <see cref="RemPacket.MaxAudioPayloadBytes"/>. Since 2026-09-15 a Windows sender sizes its frames so
-/// the ciphertext fits one part (236 samples × 2 ch × 3 bytes + 28 = 1,444 B); a 5 ms frame from an older
+/// the ciphertext fits one part (233 samples × 2 ch × 3 bytes + 28 = 1,426 B); a 5 ms frame from an older
 /// sender (240 samples, 1,468 B) still arrives as two. The receiver assembles the parts back into the
 /// complete ciphertext, then decrypts, before queueing for playout.
 /// Sub-header (6 bytes) is prepended to each part:

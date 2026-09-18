@@ -40,7 +40,7 @@ internal sealed class SenderLane
     private readonly int opusBitrate;
 
     // Hot-path scratch. Sized to the largest possible single frame (Opus 20 ms = 1920 stereo
-    // samples). A Standard PCM frame uses only the first 472, Opus 10 ms only the first 960. Reusing one
+    // samples). A Standard PCM frame uses only the first 466, Opus 10 ms only the first 960. Reusing one
     // buffer means no realloc on codec change. outboundScratch is per-lane so two lanes don't
     // step on each other's packet construction.
     private readonly float[] frameAccumulator = new float[MaxFrameStereoSamples];

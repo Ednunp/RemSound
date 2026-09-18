@@ -26,20 +26,22 @@ namespace RemSound.Sender;
 public sealed class AudioSender : IDisposable
 {
     // PCM frame size is set by SendRate. Standard is the largest frame that still goes out as ONE packet once
-    // it is encrypted, on a path with a 1492-byte MTU (PPPoE broadband; a 1500-byte path has room to spare):
-    // 1492 - 20 IP - 8 UDP - 12 RemPacket header - 6 PCM sub-header - 28 AES-GCM = 1418 bytes, which is 236
-    // samples of 24-bit stereo (4.92 ms). It was 240 (5 ms): encrypted, that came to 1468 bytes, over the
-    // 1454-byte chunk, so every frame went as two packets and losing either lost the frame. Every receiver
-    // works a frame's length out from the packet, so the size can change (checked 2026-09-15 against the
-    // Windows receive path back to 5.0 and the Android and iPhone apps). Tight = 2.5 ms (120 samples) fits
+    // it is encrypted, on a path with a 1492-byte MTU (PPPoE broadband; a 1500-byte path has room to spare),
+    // even through a relay group, whose framing adds a 16-byte client id (RelayGroupClient):
+    // 1492 - 20 IP - 8 UDP - 12 RemPacket header - 16 client id - 6 PCM sub-header - 28 AES-GCM = 1402 bytes,
+    // which is 233 samples of 24-bit stereo (4.85 ms). It was 240 (5 ms): encrypted, that came to 1468 bytes,
+    // over the 1454-byte chunk, so every frame went as two packets and losing either lost the frame. Every
+    // receiver works a frame's length out from the packet, so the size can change (checked 2026-09-15 against
+    // the Windows receive path back to 5.0 and the Android and iPhone apps). Tight = 2.5 ms (120 samples) fits
     // either way.
     private const int MixChannels = 2;
     private const int OpusBitrateLan = 192_000;
     private const int PcmBytesPerSample = 3;
     private const int PcmPathMtuBytes = 1492;
     internal const int PcmStandardSamplesPerChannel =
-        (PcmPathMtuBytes - 20 - 8 - RemPacket.HeaderSize - RemPcmFrame.SubHeaderSize - RemSoundCrypto.EncryptionOverheadBytes)
-        / (PcmBytesPerSample * MixChannels);   // 236
+        (PcmPathMtuBytes - 20 - 8 - RemPacket.HeaderSize - RelayGroupClient.ClientIdSize - RemPcmFrame.SubHeaderSize
+         - RemSoundCrypto.EncryptionOverheadBytes)
+        / (PcmBytesPerSample * MixChannels);   // 233
     private const int PcmTightSamplesPerChannel = 120;     // 2.5 ms
 
     // Mutable PCM frame parameters — updated by SetSendRate. Keep them volatile because the
@@ -122,6 +124,11 @@ public sealed class AudioSender : IDisposable
     /// <summary>Short non-reversible fingerprint of the active password, advertised in the format
     /// packet for peer password-match detection. Null = none.</summary>
     public byte[]? AudioFingerprint { get => audioFingerprint; set => audioFingerprint = value; }
+    /// <summary>Set by the app to its <see cref="RelayGroupClient"/>: a relay we are in a group on gets every packet
+    /// group-framed. Null = every packet goes exactly as it always has.</summary>
+    public IRelayRouter? RelayRouter { get => relayRouter; set => relayRouter = value; }
+    private volatile IRelayRouter? relayRouter;
+    private readonly DatagramSender sendDatagram;
     private IPEndPoint[] receivers = [];
     private long packetsSent;
     private long bytesSent;
@@ -295,6 +302,7 @@ public sealed class AudioSender : IDisposable
     public AudioSender()
     {
         udp = new UdpClient(AddressFamily.InterNetwork);
+        sendDatagram = SendDatagram;
         // 1 MB kernel buffers each way — big enough to absorb GC pauses or scheduler hiccups
         // up to ~30 ms at typical PCM-stereo bitrates without dropping packets on the kernel
         // side. The old 256 KB ceiling was the actual cap on resilience to short stalls.
@@ -862,6 +870,18 @@ public sealed class AudioSender : IDisposable
     /// </summary>
     public bool SendVia(byte[] data, int length, IPEndPoint destination)
     {
+        // Through a relay group when the destination is a relay we are in a group on, or a member of one (a pong to a
+        // member goes to their relay). See RelayGroupClient.
+        var router = relayRouter;
+        if (router is not null && router.TryRoute(data.AsSpan(0, length), destination, sendDatagram)) return true;
+        if (RelayGroupClient.IsMemberAddress(destination.Address)) return false;
+        return SendRaw(data, length, destination);
+    }
+
+    /// <summary>Straight onto the socket, never routed: for a relay group's own packets (hello, goodbye), which are
+    /// group-framed already and must not be framed twice.</summary>
+    public bool SendRaw(byte[] data, int length, IPEndPoint destination)
+    {
         try
         {
             udp.Send(data, length, destination);
@@ -938,39 +958,44 @@ public sealed class AudioSender : IDisposable
         var targets = Volatile.Read(ref receivers);
         if (targets.Length == 0) return;
 
-        // Use Socket.SendTo with the span overload — UdpClient's span-Send signature is
-        // .NET 6+. Going via Client (the underlying Socket) avoids one wrapper layer too.
-        var packetLen = packet.Length;
-        // Measure the kernel-side time of just the SendTo call when diagnostics are enabled.
-        // If this number spikes, the bottleneck is the TX path (kernel buffer pressure, NIC,
-        // single-socket cross-thread contention) rather than our encode pipeline. Hoisted
-        // out of the per-target loop so a multi-peer broadcast pays one branch instead of N.
-        var diag = RemSound.Core.DiagnosticsGate.Enabled;
+        var router = relayRouter;
         foreach (var target in targets)
         {
-            try
-            {
-                if (diag)
-                {
-                    var sendStart = Stopwatch.GetTimestamp();
-                    udp.Client.SendTo(packet, target);
-                    RecordSendCallTicks(Stopwatch.GetTimestamp() - sendStart);
-                }
-                else
-                {
-                    udp.Client.SendTo(packet, target);
-                }
-                Interlocked.Increment(ref packetsSent);
-                Interlocked.Add(ref bytesSent, packetLen);
-            }
-            catch (SocketException)
-            {
-                // Single-packet failures are a non-event; UDP is unreliable by design.
-            }
-            catch (ObjectDisposedException)
-            {
-                return;
-            }
+            // A relay we are in a group on gets the packet group-framed (and, beside a paired phone, in ordinary form
+            // as well); everyone else gets it exactly as before. See RelayGroupClient.
+            if (router is not null && router.TryRoute(packet, target, sendDatagram)) continue;
+            SendDatagram(packet, target);
         }
+    }
+
+    /// <summary>
+    /// One datagram onto the socket, with the send-time diagnostics and counters. Socket.SendTo's span overload, so
+    /// nothing allocates. Never throws: single-packet failures are a non-event (UDP is unreliable by design), and a
+    /// closed socket means we are shutting down. A relay-group member's reserved address is never sent to: reaching
+    /// here with one would be a routing bug, and it must not become traffic.
+    /// </summary>
+    private void SendDatagram(ReadOnlySpan<byte> datagram, IPEndPoint target)
+    {
+        if (RelayGroupClient.IsMemberAddress(target.Address)) return;
+        try
+        {
+            // Measure the kernel-side time of just the SendTo call when diagnostics are enabled. If this number
+            // spikes, the bottleneck is the TX path (kernel buffer pressure, NIC, single-socket cross-thread
+            // contention) rather than our encode pipeline.
+            if (RemSound.Core.DiagnosticsGate.Enabled)
+            {
+                var sendStart = Stopwatch.GetTimestamp();
+                udp.Client.SendTo(datagram, target);
+                RecordSendCallTicks(Stopwatch.GetTimestamp() - sendStart);
+            }
+            else
+            {
+                udp.Client.SendTo(datagram, target);
+            }
+            Interlocked.Increment(ref packetsSent);
+            Interlocked.Add(ref bytesSent, datagram.Length);
+        }
+        catch (SocketException) { }
+        catch (ObjectDisposedException) { }
     }
 }

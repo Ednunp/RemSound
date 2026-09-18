@@ -59,6 +59,9 @@ internal sealed class PeerLineStatus
     public string? CodecLabel;
     /// <summary>Round-trip ping ms from heartbeat. Null when not connected or pending.</summary>
     public int? RttMs;
+    /// <summary>When this peer is a relay we are in a group on: who else is in it ("a group with Andre, Jonathan").
+    /// Null for anything else.</summary>
+    public string? Group;
 }
 
 internal sealed class PeerListItem
@@ -107,6 +110,7 @@ internal sealed class PeerListItem
         if (direction is not null) parts.Add(direction);
 
         if (Status.RttMs is { } rtt) parts.Add($"{rtt}ms");
+        if (Status.Group is { Length: > 0 } group) parts.Add(group);
 
         return $"{basePart} — {string.Join(", ", parts)}";
     }

@@ -35,6 +35,8 @@ internal sealed class ServiceNetworkPresence : IDisposable
     private readonly PeerDiscoveryService discovery = new();
     private readonly AudioReceiver receiver = new();
     private HeartbeatService? heartbeat;
+    // One person among several on a relay, exactly as the app is (RelayGroupClient; GitHub #29, 2026-09-18).
+    private RelayGroupClient? relayGroup;
     private bool running;
     private bool disposed;
 
@@ -45,6 +47,19 @@ internal sealed class ServiceNetworkPresence : IDisposable
     }
 
     public bool IsUp => running;
+
+    /// <summary>
+    /// A relay's address check, echoed back exactly as it came — the proof this address really receives, which keeps the
+    /// service reachable once a relay enforces it — and the sign that the peer is a relay, so the service joins its group.
+    /// The service never echoed these before 2026-09-18 (the app has since 2026-07-27): an enforcing relay would have
+    /// shut it out.
+    /// </summary>
+    private void EchoAddrCheck(byte[] packet, int length, IPEndPoint remote)
+    {
+        try { sender.SendVia(packet, length, remote); }
+        catch (Exception ex) { log?.Invoke($"service: addr-check echo to {remote} failed: {ex.GetType().Name}: {ex.Message}"); }
+        relayGroup?.NoteRelay(remote);
+    }
 
     /// <summary>Test seam: is the well-known-port listener actually bound?</summary>
     internal bool ListenerBound => receiver.IsListenerRunning;
@@ -66,13 +81,24 @@ internal sealed class ServiceNetworkPresence : IDisposable
         // packets — audio/format returns are ignored because we never play received audio.
         heartbeat = new HeartbeatService(m => log?.Invoke($"heartbeat: {m}"));
         heartbeat.SendTransport = sender.SendVia;
+        var group = relayGroup = new RelayGroupClient(AppConfig.LoadOrCreateRelayClientId(), m => log?.Invoke($"relay group: {m}"));
+        group.SetIdentity(Environment.MachineName, sender.AudioFingerprint);
+        group.SetTargets(endpoints);
+        sender.RelayRouter = group;
+        heartbeat.RelayOfMember = group.RelayOf;
 
         receiver.OnHeartbeatReceived = (buf, len, remote) => heartbeat?.HandleInjectedPacket(buf, len, remote);
+        receiver.OnAddrCheckReceived = EchoAddrCheck;
         sender.OnInboundPacket = (buf, len, remote) =>
         {
+            // A group member's packet through a relay, back in ordinary form and credited to that member; the member
+            // list stops here.
+            if (group.HandleInbound(buf, ref len, remote, out var member) == RelayInbound.Consumed) return;
+            if (member is not null) remote = member;
             if (len < RemPacket.HeaderSize) return;
-            if (RemPacket.TryReadHeader(buf.AsSpan(0, len), out var type, out _, out _) && type == RemPacketType.Heartbeat)
-                heartbeat?.HandleInjectedPacket(buf, len, remote);
+            if (!RemPacket.TryReadHeader(buf.AsSpan(0, len), out var type, out _, out _)) return;
+            if (type == RemPacketType.Heartbeat) heartbeat?.HandleInjectedPacket(buf, len, remote);
+            else if (type == RemPacketType.AddrCheck) EchoAddrCheck(buf, len, remote);
             // Send-only: Format / Audio / KeepAlive returns are deliberately dropped — the service never
             // plays received audio, so there is no receive pipeline to feed.
         };
@@ -90,6 +116,7 @@ internal sealed class ServiceNetworkPresence : IDisposable
 
         heartbeat.SetTrackedPeers(endpoints);
         heartbeat.Start();
+        group.Start(sender.SendRaw);
 
         // Announce ourselves: LAN broadcast plus a unicast to each configured peer, so a peer across the
         // internet (reached via the relay/Tailscale/port-forward) also learns we're here. Send-only.
@@ -114,7 +141,11 @@ internal sealed class ServiceNetworkPresence : IDisposable
         try { discovery.Stop(); } catch { }
         try { heartbeat?.Stop(); heartbeat?.Dispose(); } catch { }
         heartbeat = null;
+        try { relayGroup?.Stop(); } catch { }   // says goodbye, so the group sees us leave at once
+        relayGroup = null;
+        sender.RelayRouter = null;
         try { receiver.OnHeartbeatReceived = null; } catch { }
+        try { receiver.OnAddrCheckReceived = null; } catch { }
         try { receiver.Stop(); } catch { }
         try { sender.OnInboundPacket = null; } catch { }
         log?.Invoke("service: network presence down (shell — the network is free for the interactive app)");

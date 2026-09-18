@@ -349,6 +349,23 @@ public sealed class AppConfig
     /// <see cref="DisabledAsioDrivers"/>: a driver can be warned-about-but-still-enabled.</summary>
     public List<string> AsioDriversWarnedAbout { get; set; } = new();
 
+    /// <summary>This install's id in a relay group (GitHub #29, 2026-09-18). Made the first time it is needed and
+    /// kept, so the same person keeps the same place in everyone else's app — and the volume and pan they gave them.
+    /// The app and the send-only service share it: they are one person, never on the network at the same time.</summary>
+    public string? RelayClientId { get; set; }
+
+    /// <summary>The relay-group id, made and saved on first use. Never throws: if it cannot be saved, a fresh id still
+    /// works for this run; it just won't be the same next time.</summary>
+    public static Guid LoadOrCreateRelayClientId()
+    {
+        var config = Load();
+        if (Guid.TryParse(config.RelayClientId, out var id) && id != Guid.Empty) return id;
+        id = Guid.NewGuid();
+        config.RelayClientId = id.ToString("D");
+        try { config.Save(); } catch { /* this run still works */ }
+        return id;
+    }
+
     /// <summary>True if RemSound should refuse to interact with the named ASIO driver in any way.</summary>
     public bool IsAsioDriverDisabled(string? driverName) =>
         !string.IsNullOrWhiteSpace(driverName)

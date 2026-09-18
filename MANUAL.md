@@ -621,6 +621,10 @@ One audio channel number is used for everything — Tailscale, local network con
 
 There's no public RemSound relay. You can run your own on a Linux machine or a Raspberry Pi: the code and its setup instructions are in the [server folder of the RemSound repository](https://github.com/Ednunp/RemSound/tree/main/server) on GitHub.
 
+A relay isn't limited to two people. Everyone who connects to the same relay with the same password is one group: each of you hears everyone else, and each person gets their own volume, pan and EQ, their own recording track and their own place in the DAW plugin, just like someone you'd ticked. The relay's line in the connected list says who else is in the group. People on a different password can use the same relay at the same time without ever hearing you, or you them.
+
+The iPhone and Android apps, and RemSound before 6.0, don't know about groups yet. Through a relay they can still reach one person in the group, the same way two people always could.
+
 The health check-ins travel on the same channel as the audio, so if your sound reaches the other computer, your check-ins do too — one firewall rule covers both.
 
 ### Network priority

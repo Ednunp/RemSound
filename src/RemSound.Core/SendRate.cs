@@ -6,7 +6,7 @@ namespace RemSound.Core;
 /// second.
 ///
 /// Mapping per codec (for Opus, <see cref="AudioTransportRules.EffectiveOpusFrameSamples"/>):
-///   * PCM:         Standard = 4.92 ms (236 samples, the largest that goes out as one encrypted packet),
+///   * PCM:         Standard = 4.85 ms (233 samples, the largest that goes out as one encrypted packet, even through a relay group),
 ///                  Tight = 2.5 ms (120 samples).
 ///   * Opus 20 ms:  Standard = 20 ms, Tight = 10 ms.
 ///   * Opus 2.5 ms: Standard = Tight = 2.5 ms — Tight halves an Opus frame but never below 120

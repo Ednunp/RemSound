@@ -40,11 +40,11 @@ internal sealed class SessionPlayout : IDisposable
     // Updated from the network thread; read from the audio thread. Volatile is enough
     // because we only ever monotonically increase it within a session lifetime.
     private volatile int largestWriteMs;
-    // A standard uncompressed frame from a current sender is 236 samples, 4.92 ms, so that it fits one packet; it was 240,
-    // exactly 5 ms. Rounding 4.92 down to 4 would leave 2 to 4 ms less room before a trim, so a buffer would be trimmed
+    // A standard uncompressed frame from a current sender is 233 samples, 4.85 ms, so that it fits one packet even through a relay group; it was 240,
+    // exactly 5 ms. Rounding 4.85 down to 4 would leave 2 to 4 ms less room before a trim, so a buffer would be trimmed
     // down sooner than before. A write this few frames short of a whole millisecond counts as that millisecond. No other
     // size in use moves: 2.5, 10 and 20 ms frames, and 32- to 2,048-frame buffers, all come out as they always did.
-    private const int WriteMsShortfallFrames = 4;
+    private const int WriteMsShortfallFrames = 7;
 
     // === Drop-cause split ===
     // Codex pointed out that the legacy `DropCount` on the ring buffer rolled up every reason

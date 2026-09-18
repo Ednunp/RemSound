@@ -15,6 +15,7 @@ import logging
 import os
 import struct
 import sys
+import time
 import unittest
 import uuid
 
@@ -170,6 +171,190 @@ class HeaderGate(unittest.TestCase):
         self.assertEqual(r.stats.rejected_bad_header, 3, "short / wrong-magic / unknown-version must all be rejected")
         self.assertEqual(len(r.v1_peers), 0)
         self.assertEqual(len(r.v2_clients), 0)
+
+
+G1 = bytes([0x11] * 8)   # two password fingerprints, used as group tags
+G2 = bytes([0x22] * 8)
+
+
+def cid(n: int) -> bytes:
+    return uuid.UUID(bytes=bytes([n]) * 16).bytes
+
+
+def hello(client_id: bytes, name: str, group: bytes | None) -> bytes:
+    """A LobbyHello: the 32-byte name, then the 8-byte group tag (None = a hello from before groups)."""
+    payload = name.encode("utf-8")[:relay.LOBBY_NAME_BYTES].ljust(relay.LOBBY_NAME_BYTES, b"\x00")
+    return v2_packet(relay.TYPE_LOBBY_HELLO, client_id, payload + (group or b""))
+
+
+def format_payload(fingerprint: bytes) -> bytes:
+    """A Format payload long enough to carry its password fingerprint at offset 36, as a sending app's does."""
+    return bytes(relay.FORMAT_FINGERPRINT_OFFSET) + fingerprint
+
+
+def rosters_to(sock: FakeSocket, addr) -> list[tuple[set[bytes], int | None]]:
+    """Every LobbyRoster the relay sent to addr: (the member ids it listed, its flags byte)."""
+    out = []
+    for data, to in sock.sent:
+        if to != addr or len(data) <= relay.V2_HEADER_LEN or data[4] != relay.V2_VERSION or data[5] != relay.TYPE_LOBBY_ROSTER:
+            continue
+        body = data[relay.V2_HEADER_LEN:]
+        count = body[0]
+        ids = {body[1 + i * 48:1 + i * 48 + 16] for i in range(count)}
+        out.append((ids, body[1 + count * 48] if len(body) > 1 + count * 48 else None))
+    return out
+
+
+class Groups(unittest.TestCase):
+    """Ed, 2026-09-18: a relay carries groups. Everyone on one password hears everyone else in it; two
+    passwords never meet. Before this a relay carried one pair, and a third person heard nothing."""
+
+    def _six(self):
+        r = make_relay(max_clients=64)
+        members = []
+        for n in range(6):
+            addr = (f"10.1.0.{n + 1}", 7000 + n)
+            group = G1 if n < 3 else G2
+            r.handle_packet(hello(cid(n + 1), f"person{n + 1}", group), addr)
+            members.append((cid(n + 1), addr, group))
+        return r, members
+
+    def test_audio_reaches_everyone_in_the_group_and_no_one_outside_it(self):
+        r, m = self._six()
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, m[0][0], b"GROUP-ONE-AUDIO"), m[0][1])
+        for n in (1, 2):
+            self.assertTrue(forwarded_to(r.sock, m[n][1], b"GROUP-ONE-AUDIO"),
+                            f"person{n + 1} shares person1's password and must be sent their audio")
+        for n in (3, 4, 5):
+            self.assertFalse(forwarded_to(r.sock, m[n][1], b"GROUP-ONE-AUDIO"),
+                             f"person{n + 1} is on another password and must not be sent person1's audio")
+        self.assertFalse(forwarded_to(r.sock, m[0][1], b"GROUP-ONE-AUDIO"), "a sender is never sent its own audio")
+
+    def test_each_member_is_told_only_about_its_own_group(self):
+        r, m = self._six()
+        r.sock.sent.clear()
+        r.v2_roster_dirty = True
+        r.tick(time.monotonic())
+        for n, (_, addr, group) in enumerate(m):
+            rosters = rosters_to(r.sock, addr)
+            self.assertTrue(rosters, f"person{n + 1} must be sent a roster")
+            ids, flags = rosters[-1]
+            self.assertEqual(ids, {c for c, _, g in m if g == group},
+                             f"person{n + 1}'s roster must list exactly the members of its own group")
+            self.assertEqual(flags, 0, "nobody holds a v1 pair here, so the paired flag must be clear")
+
+    def test_a_hello_from_before_groups_still_reaches_its_kind(self):
+        r = make_relay()
+        a, b, c = ("10.2.0.1", 7100), ("10.2.0.2", 7101), ("10.2.0.3", 7102)
+        r.handle_packet(hello(cid(1), "old-a", None), a)
+        r.handle_packet(hello(cid(2), "old-b", None), b)
+        r.handle_packet(hello(cid(3), "grouped", G1), c)
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"NO-TAG"), a)
+        self.assertTrue(forwarded_to(r.sock, b, b"NO-TAG"), "two clients whose hello carries no group tag still hear each other")
+        self.assertFalse(forwarded_to(r.sock, c, b"NO-TAG"), "a client with no tag is not in a tagged group")
+
+
+class AdmissionOrder(unittest.TestCase):
+    """Review 2026-09-13, item 11: v2 used to admit an unknown client id first and check the packet type after."""
+
+    def test_only_a_joining_packet_admits_an_unknown_client(self):
+        r = make_relay()
+        addr = ("10.3.0.1", 7200)
+        for t in (relay.TYPE_ADDR_CHECK, relay.TYPE_LOBBY_BYE, relay.TYPE_LOBBY_ROSTER, relay.TYPE_LOBBY_FULL):
+            r.handle_packet(v2_packet(t, cid(9), bytes(16)), addr)
+        self.assertEqual(len(r.v2_clients), 0, "an echo, a BYE or a relay-only type from an unknown client id must admit nobody")
+        r.handle_packet(hello(cid(9), "joiner", G1), addr)
+        self.assertEqual(len(r.v2_clients), 1, "a hello admits")
+
+
+class PhonesStillPair(unittest.TestCase):
+    """A v1-only device (a phone, an older app) pairs exactly as before. A group member can partner it, so it
+    still reaches one person; two members never pair over v1, because they already reach each other."""
+
+    def test_two_v1_devices_pair_exactly_as_before(self):
+        r = make_relay()
+        a, b, c = ("10.4.4.1", 7700), ("10.4.4.2", 7701), ("10.4.4.3", 7702)
+        for addr in (a, b, c):
+            r.handle_packet(v1_packet(relay.TYPE_AUDIO, b"x"), addr)
+        self.assertEqual([p.addr for p in r.v1_peers], [a, b], "the first two v1-only devices pair; a third waits")
+        r.sock.sent.clear()
+        r.handle_packet(v1_packet(relay.TYPE_AUDIO, b"A-TO-B"), a)
+        self.assertTrue(forwarded_to(r.sock, b, b"A-TO-B"), "a pair still reaches each other")
+        self.assertFalse(forwarded_to(r.sock, c, b"A-TO-B"), "and nobody else")
+
+    def test_a_member_partners_a_waiting_phone(self):
+        r = make_relay()
+        phone, win = ("10.4.0.1", 7300), ("10.4.0.2", 7301)
+        r.handle_packet(hello(cid(1), "windows", G1), win)
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), win)
+        self.assertEqual(len(r.v1_peers), 0, "a group member must not wait alone in a pair slot")
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), phone)
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), win)
+        self.assertEqual({p.addr for p in r.v1_peers}, {phone, win}, "the member must partner the phone waiting for it")
+        r.sock.sent.clear()
+        r.handle_packet(v1_packet(relay.TYPE_AUDIO, b"PHONE-TO-WIN"), phone)
+        self.assertTrue(forwarded_to(r.sock, win, b"PHONE-TO-WIN"), "the phone's audio must reach its partner")
+        r.v2_roster_dirty = True
+        r.tick(time.monotonic())
+        self.assertEqual(rosters_to(r.sock, win)[-1][1], relay.ROSTER_FLAG_V1_PAIRED,
+                         "the member must be told it has a v1 partner, so it keeps a v1 copy of its audio flowing")
+
+    def test_two_members_never_pair_over_v1(self):
+        r = make_relay()
+        phone, w1, w2 = ("10.4.1.1", 7400), ("10.4.1.2", 7401), ("10.4.1.3", 7402)
+        r.handle_packet(hello(cid(1), "w1", G1), w1)
+        r.handle_packet(hello(cid(2), "w2", G1), w2)
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), phone)
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), w1)
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), w2)
+        self.assertEqual({p.addr for p in r.v1_peers}, {phone, w1}, "the second member must not take the other slot")
+        # The phone goes quiet and its slot expires, leaving w1 alone in the pair: w2 still must not join it.
+        for p in r.v1_peers:
+            if p.addr == phone:
+                p.last_seen -= relay.IDLE_TIMEOUT_SECONDS + 1
+        r._v1_expire_idle(time.monotonic())
+        self.assertEqual([p.addr for p in r.v1_peers], [w1], "the phone's slot must have expired for this to prove anything")
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), w2)
+        self.assertEqual([p.addr for p in r.v1_peers], [w1], "a member left alone in the pair must not be partnered by another member")
+
+    def test_a_pair_of_two_members_is_dissolved(self):
+        r = make_relay()
+        a, b = ("10.4.2.1", 7500), ("10.4.2.2", 7501)
+        r.handle_packet(v1_packet(relay.TYPE_AUDIO, b"x"), a)
+        r.handle_packet(v1_packet(relay.TYPE_AUDIO, b"x"), b)
+        self.assertEqual(len(r.v1_peers), 2, "two v1 senders pair, exactly as before")
+        r.handle_packet(hello(cid(1), "a", G1), a)
+        self.assertEqual(len(r.v1_peers), 2, "one member beside a v1-only device keeps the pair")
+        r.handle_packet(hello(cid(2), "b", G1), b)
+        self.assertEqual(len(r.v1_peers), 0, "once both are group members, the v1 pair must be freed")
+
+    def test_a_member_does_not_partner_a_phone_on_another_password(self):
+        r = make_relay()
+        phone, win, win2 = ("10.4.3.1", 7600), ("10.4.3.2", 7601), ("10.4.3.3", 7602)
+        r.handle_packet(v1_packet(relay.TYPE_FORMAT, format_payload(G2)), phone)
+        r.handle_packet(hello(cid(1), "windows", G1), win)
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), win)
+        self.assertEqual([p.addr for p in r.v1_peers], [phone], "a member must not partner a phone talking on another password")
+        r.handle_packet(hello(cid(2), "windows2", G2), win2)
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), win2)
+        self.assertEqual({p.addr for p in r.v1_peers}, {phone, win2}, "a member on the phone's own password may partner it")
+
+
+class RelayHint(unittest.TestCase):
+    def test_a_device_the_pair_has_no_room_for_learns_it_reached_a_relay(self):
+        r = make_relay()
+        a, b, c = ("10.5.0.1", 7800), ("10.5.0.2", 7801), ("10.5.0.3", 7802)
+        r.handle_packet(v1_packet(relay.TYPE_AUDIO, b"x"), a)
+        r.handle_packet(v1_packet(relay.TYPE_AUDIO, b"x"), b)
+        r.sock.sent.clear()
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), c)
+        self.assertIsNotNone(cookie_sent_to(r.sock, c),
+                             "a device the pair has no room for must get an address check back, so a newer app knows it reached a relay")
+        r.sock.sent.clear()
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), c)
+        self.assertIsNone(cookie_sent_to(r.sock, c), "and not again within the rate limit")
 
 
 class _CapturedLog(logging.Handler):

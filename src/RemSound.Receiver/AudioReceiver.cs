@@ -435,11 +435,17 @@ public sealed class AudioReceiver : IDisposable
         }
     }
 
+    /// <summary>The relay behind a relay-group member's address (RelayGroupClient.RelayOf), or null for anyone else. A
+    /// member of a selected relay's group is let in just as the relay itself is: choosing the relay and the password is
+    /// choosing everyone who shares them there.</summary>
+    public Func<IPEndPoint, IPEndPoint?>? RelayOfMember { get; set; }
+
     private bool IsSenderAllowed(IPEndPoint remote)
     {
         var snapshot = allowedSenders;
         if (snapshot is null) return true; // null = no filter
-        return snapshot.Contains(remote.Address);
+        if (snapshot.Contains(remote.Address)) return true;
+        return RelayOfMember?.Invoke(remote) is { } relay && snapshot.Contains(relay.Address);
     }
 
     /// <summary>Optional diagnostic sink (App writes to log file).</summary>
@@ -506,7 +512,7 @@ public sealed class AudioReceiver : IDisposable
     public int TargetLatencyMs => playoutEngine.TargetLatencyMs;
 
     /// <summary>
-    /// Frame duration of the active streams (PCM frames are 236 samples, just under 5 ms, from a current
+    /// Frame duration of the active streams (PCM frames are 233 samples, just under 5 ms, from a current
     /// sender, 240 from an older one, or 120 in Tight; Opus frames
     /// are whatever the sender chose). null when no stream is active. With multiple streams this
     /// picks the largest frame duration as the

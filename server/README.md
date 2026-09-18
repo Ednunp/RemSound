@@ -5,14 +5,25 @@ internet without Tailscale in the audio path. It never decodes audio: it
 checks each packet's RemSound header and forwards or drops it. Two modes run
 in one process, on one UDP port:
 
-- **v1 (pairwise)** — a two-slot reflector. The first two endpoints to send a
-  valid RemSound v1 packet claim the slots, and their traffic is mirrored to
-  each other. The Windows RemSound app sends v1 packets (a 12-byte header).
-- **v2 (lobby)** — a multi-peer lobby (default cap: 10) keyed on a
-  per-instance CLIENT_ID, for clients that send the 28-byte v2 header.
-  Periodic LobbyRoster packets tell each client who is in.
+- **v2 (groups)** — RemSound 6.0 and later for Windows. Everyone who uses the
+  relay with the same password is one group: each packet carries its sender's
+  CLIENT_ID (a 28-byte header) and goes to every other member of the sender's
+  group, and nobody else. A client's LobbyHello carries its name and an 8-byte
+  group tag, its password fingerprint, which its Format packets already carry
+  in the clear. Periodic LobbyRoster packets tell each member who else is in
+  its group. Capacity: 64 clients across all groups by default.
+- **v1 (pairwise)** — a two-slot reflector, for everything else: the iPhone
+  and Android apps and RemSound before 6.0 (a 12-byte header). The first two
+  endpoints to send a valid v1 packet claim the slots, and their traffic is
+  mirrored to each other.
 
-A v1 client and a v2 client cannot hear each other through the relay.
+Where they meet: a v2 client also sends v1 heartbeats, and may take a v1 slot,
+but only beside a v1-only device, and only one on its own password when that
+device has said which it is. So a phone still reaches one member of the group.
+Two group members never pair over v1, and a pair that turns out to be two
+members is dissolved. A v1 device the pair has no room for gets an
+address-check cookie back (rate-limited), which is how a newer app learns it
+has reached a relay and can join its group.
 
 ## What's in this bundle
 
@@ -30,8 +41,10 @@ A v1 client and a v2 client cannot hear each other through the relay.
 | `README.md`                           | this file                                                                                          |
 
 The `server/` folder in the repository also holds `test_relay.py` (unit tests
-for the relay's logic, run by the Windows build gate) and two historical
-design documents. A relay doesn't need any of them.
+for the relay's logic, run by the Windows build gate), `RELAY-GROUPS.md` (how
+an app joins a relay group, for anyone adding group support to another
+RemSound app) and two historical design documents. A relay doesn't need any of
+them.
 
 ## Installing on a fresh host
 
@@ -146,26 +159,30 @@ only releases signed with the RemSound release key.
   `REMSOUND_REQUIRE_ADDR_CHECK=1`) it withholds all forwarded traffic, the
   lobby roster included, from any address that has not echoed its cookie. A
   lobby client that turns up at a new address has to prove the new one.
-- **Per-IP cap.** One source IP may hold at most 4 pair or lobby entries at
-  once, counted across v1 and v2 together. This is always on.
+- **Per-IP cap.** One source IP may hold at most 4 pair or group entries at
+  once, counted across v1 and v2 together (a v2 client holding a v1 slot beside
+  a phone counts twice). This is always on; `--max-per-ip` changes the number.
 
 ## Log format
 
 Structured key=value lines. Notable events:
 
 ```
-event=startup version_supported=v1,v2 listen=0.0.0.0:47830 max_clients=10 addr_check=watch-only
+event=startup version_supported=v1,v2 listen=0.0.0.0:47830 max_clients=64 max_per_ip=4 addr_check=watch-only
 
 # v1 (pairwise)
 event=peer_joined addr=1.2.3.4:5555 slots_filled=1
 event=peer_paired a=1.2.3.4:5555 b=5.6.7.8:9999
 event=peer_dropped reason=idle addr=1.2.3.4:5555 remaining=1
 event=peer_replaced old=1.2.3.4:5555 new=9.8.7.6:4444
+event=pair_dissolved reason=both_in_groups a=1.2.3.4:5555 b=5.6.7.8:9999
+event=pair_dissolved reason=different_group member=1.2.3.4:5555
 
-# v2 (lobby)
+# v2 (groups)
 event=client_joined client_id=<uuid> addr=1.2.3.4:5555 count=2
 event=client_endpoint_update client_id=<uuid> old=1.2.3.4:5555 new=1.2.3.4:6666
 event=client_named client_id=<uuid> name='Andre'
+event=client_grouped client_id=<uuid> group=1a2b   (the first 2 bytes of the tag only)
 event=client_left client_id=<uuid> addr=... reason=bye
 event=client_idle_expired client_id=<uuid> addr=...
 event=lobby_full attempted_client_id=<uuid> addr=... count=10 max=10
@@ -209,9 +226,9 @@ payload.
 | Listen port (47830)      | `ExecStart=` `--port=N` in the service unit                              |
 | Listen address           | `ExecStart=` `--host=X` in the service unit                              |
 | Log file                 | `ExecStart=` `--log-path=PATH` in the service unit                       |
-| Lobby capacity (10)      | `--max-clients=N` or env var `REMSOUND_MAX_CLIENTS=N` in the service unit |
+| Group capacity (64, all groups together) | `--max-clients=N` or env var `REMSOUND_MAX_CLIENTS=N` in the service unit |
 | Address proof (watch-only) | `--require-addr-check` or env var `REMSOUND_REQUIRE_ADDR_CHECK=1` in the service unit |
-| Per-IP entry cap (4)     | edit `MAX_ENTRIES_PER_IP` in `remsound-relay.py`                         |
+| Per-IP entry cap (4)     | `--max-per-ip=N` or env var `REMSOUND_MAX_PER_IP=N` in the service unit |
 | Idle timeout (60 s)      | edit `IDLE_TIMEOUT_SECONDS` in `remsound-relay.py`                       |
 | Stats interval (60 s)    | edit `STATS_INTERVAL_SECONDS` in `remsound-relay.py`                     |
 | Update check (hourly)    | edit `remsound-relay-update.timer`                                       |

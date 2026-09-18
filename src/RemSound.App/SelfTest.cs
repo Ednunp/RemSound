@@ -233,6 +233,10 @@ internal static partial class SelfTest
         RunStep(results, "The relay updater installs only a release signed by the release key", AuditRelayUpdaterInstallsOnlySignedReleases);
         RunStep(results, "Server releases are signed the way the relay checks", AuditServerReleasesAreSignedTheWayTheRelayChecks);
         RunStep(results, "The relay runs as its own user, with a private log", AuditRelayRunsAsItsOwnUserWithAPrivateLog);
+        RunStep(results, "Relay groups: framing, member addresses and the member list", AuditRelayGroupFramingAndMembers);
+        RunStep(results, "Several people share one relay, each heard as themselves", AuditSeveralPeopleShareOneRelay);
+        RunStep(results, "Heartbeats through a relay group", AuditRelayGroupHeartbeats);
+        RunStep(results, "The app and the send-only service both take part in relay groups", AuditAppAndServiceTakePartInRelayGroups);
         RunStep(results, "A standard uncompressed frame goes out as one packet", PcmStandardFrameIsOnePacket);
         RunStep(results, "A lock-to-clock piece of uncompressed audio goes out as one packet", PcmLockToClockPieceIsOnePacket);
         RunStep(results, "A receiver gives a one-packet uncompressed frame the trim room of a 5 ms frame", ReceiverGivesAOnePacketFrameTheTrimRoomOfA5MsFrame);

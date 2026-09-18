@@ -11,16 +11,25 @@ Listens on a single UDP port and handles two protocol versions concurrently:
   remsound-relay.py behaviour, preserved here unchanged so legacy clients keep
   working against the new server.
 
-- v2 ("lobby"): 28-byte header with embedded CLIENT_ID (UUID). Up to
-  REMSOUND_MAX_CLIENTS instances (default 10) form a single lobby. Each
-  incoming packet is forwarded unmodified to every OTHER registered client.
-  Identity is the CLIENT_ID, not the network endpoint — NAT rebinds and
-  same-NAT-multiple-clients are no longer special cases. Periodic LobbyRoster
-  packets keep clients informed of the current membership.
+- v2 ("groups"): 28-byte header with embedded CLIENT_ID (UUID). Up to
+  REMSOUND_MAX_CLIENTS instances (default 64) share the relay. A client's
+  LobbyHello carries its display name and an 8-byte group tag, its password
+  fingerprint (which its Format packets already carry in the clear). Each
+  packet is forwarded unmodified to every OTHER client in the SAME group, so
+  everyone on one password hears everyone else and two groups on different
+  passwords never see each other. Identity is the CLIENT_ID, not the network
+  endpoint. Periodic LobbyRoster packets tell each client who is in its group.
 
-The two protocols share state only via the listening socket and the stats
-counters. They never interact otherwise: a v1 client and a v2 client cannot
-hear each other in this release (deliberate — see the design doc).
+The two protocols meet in one place. A v1-only device (a phone, an older app)
+pairs through the two v1 slots exactly as before. A v2 client also sends v1
+heartbeats from the same socket, and may take a v1 slot, but only to partner a
+v1-only device, so that device can still reach one member of the group. Two
+group members never pair over v1 (they already reach each other in their
+group), and a pair that turns out to be two members is dissolved.
+
+A v1 packet from an endpoint the pair has no room for gets an address-check
+cookie back, rate-limited, so a newer client learns it is talking to a relay
+and can join its group.
 
 Operator guide: server/README.md. The original design (historical, not current):
 server/remsound server update.md.
@@ -50,8 +59,18 @@ STATS_INTERVAL_SECONDS = 60
 ROSTER_HEARTBEAT_SECONDS = 1.0  # v2 only — periodic roster broadcast
 SOCKET_POLL_TIMEOUT_SECONDS = 1.0
 DEFAULT_LOG_PATH = "/var/log/remsound-relay/remsound-relay.log"  # systemd's LogsDirectory for the relay's own user
-DEFAULT_MAX_CLIENTS = 10
+DEFAULT_MAX_CLIENTS = 64
 LOBBY_NAME_BYTES = 32  # bytes reserved for a display name on the wire
+# v2 LobbyHello: the group tag follows the name. It is the client's 8-byte password fingerprint, the same
+# bytes a Format packet carries at payload offset 36, so it tells the relay nothing a Format did not.
+GROUP_TAG_BYTES = 8
+FORMAT_FINGERPRINT_OFFSET = 36
+# Roster flags byte (after the member list): bit 0 = the recipient holds a v1 slot with a partner.
+ROSTER_FLAG_V1_PAIRED = 0x01
+# The relay hint (an address-check cookie to a v1 endpoint the pair has no room for): at most one per
+# address this often, and a bounded table, so forged sources cannot make the relay an amplifier.
+RELAY_HINT_INTERVAL_SECONDS = 5.0
+RELAY_HINT_MAX_PENDING = 1024
 
 # Wire format constants.
 MAGIC = b"RMND"
@@ -107,6 +126,9 @@ class PeerSlot:
     cookie: bytes = b""
     cookie_sent: float = 0.0
     would_block_logged: bool = False
+    # The password fingerprint from this device's Format packets, once it has sent one (a listen-only
+    # device never does). Used only to keep a group member from pairing with a device on another password.
+    fingerprint: bytes = b""
 
 
 @dataclass
@@ -122,6 +144,8 @@ class ClientEntry:
     cookie: bytes = b""
     cookie_sent: float = 0.0
     would_block_logged: bool = False
+    # The group tag from this client's LobbyHello (empty until one arrives, or from a pre-groups hello).
+    group: bytes = b""
 
 
 @dataclass
@@ -203,10 +227,11 @@ class Relay:
     """Dispatcher that owns both the v1 pair state and the v2 lobby state."""
 
     def __init__(self, sock: socket.socket, log: logging.Logger, max_clients: int,
-                 require_addr_check: bool = False):
+                 require_addr_check: bool = False, max_per_ip: int = MAX_ENTRIES_PER_IP):
         self.sock = sock
         self.log = log
         self.max_clients = max_clients
+        self.max_per_ip = max_per_ip
         # Enforcement switch for the address-proof: False = watch-only (log who WOULD be blocked,
         # forward anyway — safe while pre-5.6 clients that can't echo are still around); True =
         # withhold all forwarded traffic from unverified addresses. Flipped by --require-addr-check
@@ -218,6 +243,8 @@ class Relay:
         self.v2_clients: dict[uuid.UUID, ClientEntry] = {}
         self.v2_roster_dirty = False  # set when membership changes
         self.v2_last_roster_broadcast = 0.0
+        # v1 endpoints recently sent the relay hint, and when (see _hint_relay)
+        self.v1_hinted: dict[tuple[str, int], float] = {}
         # shared
         self.stats = RelayStats()
         self.last_stats_log = time.monotonic()
@@ -256,10 +283,81 @@ class Relay:
             self.log.info("event=addr_verified addr=%s", _fmt_addr(addr))
 
     def _ip_at_cap(self, ip: str) -> bool:
-        """True when this source IP already holds MAX_ENTRIES_PER_IP lobby/pair entries."""
+        """True when this source IP already holds max_per_ip lobby/pair entries (MAX_ENTRIES_PER_IP by default)."""
         count = sum(1 for p in self.v1_peers if p.addr[0] == ip)
         count += sum(1 for e in self.v2_clients.values() if e.addr[0] == ip)
-        return count >= MAX_ENTRIES_PER_IP
+        return count >= self.max_per_ip
+
+    # ------- where v1 and v2 meet ------------------------------------------
+
+    def _v2_entry_at(self, addr: tuple[str, int]) -> Optional[ClientEntry]:
+        """The group member registered at this endpoint, if any. A v2 client sends its v1 heartbeats from the
+        same socket, so this is how a v1 packet is recognised as coming from a group member."""
+        for e in self.v2_clients.values():
+            if e.addr == addr:
+                return e
+        return None
+
+    def _v1_paired(self, addr: tuple[str, int]) -> bool:
+        return len(self.v1_peers) == 2 and any(p.addr == addr for p in self.v1_peers)
+
+    def _v1_may_pair(self, addr: tuple[str, int], partner: PeerSlot) -> bool:
+        """May the endpoint at addr share the v1 pair with partner? A v1-only device pairs as it always has. A
+        group member pairs only with a v1-only device (never another member: they reach each other in their
+        group), and only one on its own password when that device has told us its fingerprint."""
+        me = self._v2_entry_at(addr)
+        if me is None:
+            return True
+        if self._v2_entry_at(partner.addr) is not None:
+            return False
+        return not partner.fingerprint or not me.group or partner.fingerprint == me.group
+
+    def _v1_dissolve_group_pairs(self) -> None:
+        """Both pair slots held by group members (they paired before either joined over v2): the pair only
+        duplicates what their groups already carry, and keeps both slots from a v1-only device. Free them."""
+        if len(self.v1_peers) == 2 and all(self._v2_entry_at(p.addr) is not None for p in self.v1_peers):
+            self.log.info(
+                "event=pair_dissolved reason=both_in_groups a=%s b=%s",
+                _fmt_addr(self.v1_peers[0].addr), _fmt_addr(self.v1_peers[1].addr),
+            )
+            self.v1_peers = []
+            self.stats.pair_changes += 1
+            self.v2_roster_dirty = True
+
+    def _v1_drop_mismatched_member(self, peer: PeerSlot) -> None:
+        """A v1-only device has just told us its password fingerprint. If its partner is a group member on a
+        different password, the pair can carry nothing either way: free the member's slot so a member of the
+        right group can take it."""
+        if not peer.fingerprint:
+            return
+        for other in self.v1_peers:
+            if other is peer:
+                continue
+            member = self._v2_entry_at(other.addr)
+            if member is not None and member.group and member.group != peer.fingerprint:
+                self.v1_peers.remove(other)
+                self.log.info("event=pair_dissolved reason=different_group member=%s", _fmt_addr(other.addr))
+                self.stats.pair_changes += 1
+                self.v2_roster_dirty = True
+                return
+
+    def _hint_relay(self, addr: tuple[str, int], now: float) -> None:
+        """A v1 packet from an endpoint the pair has no room for. Answer with an address-check cookie, so a
+        newer client learns it is talking to a relay and can join its group over v2; an older client ignores
+        it or echoes it, and either is harmless. At most one every RELAY_HINT_INTERVAL_SECONDS per address,
+        and a bounded table, so a flood of forged sources cannot turn the relay into an amplifier."""
+        if self._v2_entry_at(addr) is not None:
+            return
+        last = self.v1_hinted.get(addr)
+        if last is not None and (now - last) < RELAY_HINT_INTERVAL_SECONDS:
+            return
+        if last is None and len(self.v1_hinted) >= RELAY_HINT_MAX_PENDING:
+            return
+        self.v1_hinted[addr] = now
+        try:
+            self.sock.sendto(self._addr_check_packet(os.urandom(ADDR_CHECK_COOKIE_LEN)), addr)
+        except OSError as e:
+            self.log.warning("event=relay_hint_send_failed to=%s err=%s", _fmt_addr(addr), e)
 
     def _may_forward_to(self, entry, proto: str) -> bool:
         """The enforcement point: may forwarded traffic be delivered to this entry's address?
@@ -298,6 +396,7 @@ class Relay:
                 dropped.append(p.addr)
         if dropped:
             self.v1_peers = kept
+            self.v2_roster_dirty = True  # a member's paired flag may have changed
             for addr in dropped:
                 self.log.info(
                     "event=peer_dropped reason=idle addr=%s remaining=%d",
@@ -307,6 +406,11 @@ class Relay:
 
     def _v1_admit_or_replace(self, addr: tuple[str, int], now: float) -> int:
         if len(self.v1_peers) < 2:
+            if not self.v1_peers and self._v2_entry_at(addr) is not None:
+                return -1  # a group member takes a slot only beside a v1-only device already waiting in one
+            if self.v1_peers and not self._v1_may_pair(addr, self.v1_peers[0]):
+                return -1
+            self.v2_roster_dirty = True  # a member's paired flag may change
             self.v1_peers.append(PeerSlot(addr=addr, last_seen=now))
             self.log.info(
                 "event=peer_joined addr=%s slots_filled=%d",
@@ -322,6 +426,9 @@ class Relay:
             return len(self.v1_peers) - 1
         oldest = 0 if self.v1_peers[0].last_seen <= self.v1_peers[1].last_seen else 1
         if (now - self.v1_peers[oldest].last_seen) > IDLE_TIMEOUT_SECONDS:
+            if not self._v1_may_pair(addr, self.v1_peers[1 - oldest]):
+                return -1
+            self.v2_roster_dirty = True
             old_addr = self.v1_peers[oldest].addr
             self.v1_peers[oldest] = PeerSlot(addr=addr, last_seen=now)
             self.log.info(
@@ -360,10 +467,17 @@ class Relay:
             idx = self._v1_admit_or_replace(addr, now)
             if idx < 0:
                 self.stats.dropped_unpaired += 1
+                self._hint_relay(addr, now)
                 return
         peer = self.v1_peers[idx]
         peer.last_seen = now
         peer.rx_packets += 1
+        if pkt_type == TYPE_FORMAT and len(data) >= V1_HEADER_LEN + FORMAT_FINGERPRINT_OFFSET + GROUP_TAG_BYTES:
+            start = V1_HEADER_LEN + FORMAT_FINGERPRINT_OFFSET
+            fingerprint = bytes(data[start:start + GROUP_TAG_BYTES])
+            if fingerprint != peer.fingerprint:
+                peer.fingerprint = fingerprint
+                self._v1_drop_mismatched_member(peer)
         self._send_addr_check(peer, addr, now)
         if len(self.v1_peers) == 2:
             other = self.v1_peers[1 - idx]
@@ -383,8 +497,10 @@ class Relay:
 
     # ------- v2 (lobby) ----------------------------------------------------
 
-    def _v2_build_roster_packet(self) -> bytes:
-        """Build a LobbyRoster packet with the current membership."""
+    def _v2_build_roster_packet(self, recipient: ClientEntry) -> bytes:
+        """A LobbyRoster for one recipient: the members of ITS group only (another group's names and ids are
+        none of its business), then one flags byte. Bit 0 is set when the recipient holds a v1 slot with a
+        partner, which tells it to keep a v1 copy of its audio flowing to that v1-only device."""
         # Use a separate per-build sequence — clients can ignore it; we use 0.
         header = bytearray(V2_HEADER_LEN)
         header[0:4] = MAGIC
@@ -394,11 +510,12 @@ class Relay:
         struct.pack_into("<I", header, 8, 0)  # sequence (unused)
         header[V2_CLIENT_ID_OFFSET:V2_CLIENT_ID_OFFSET + V2_CLIENT_ID_LEN] = SERVER_CLIENT_ID_BYTES
         payload = bytearray()
-        members = list(self.v2_clients.items())[:255]  # 1-byte count
+        members = [(cid, e) for cid, e in self.v2_clients.items() if e.group == recipient.group][:255]  # 1-byte count
         payload.append(len(members))
         for cid, entry in members:
             payload.extend(cid.bytes)
             payload.extend(_encode_lobby_name(entry.display_name))
+        payload.append(ROSTER_FLAG_V1_PAIRED if self._v1_paired(recipient.addr) else 0)
         return bytes(header) + bytes(payload)
 
     def _v2_broadcast_roster(self) -> None:
@@ -406,14 +523,13 @@ class Relay:
             self.v2_roster_dirty = False
             self.v2_last_roster_broadcast = time.monotonic()
             return
-        packet = self._v2_build_roster_packet()
         for entry in self.v2_clients.values():
             # Under enforcement even the roster stays away from unverified addresses — it's
             # relay-originated traffic too, and it grows with the lobby. (Watch-only: send.)
             if self.require_addr_check and not entry.verified:
                 continue
             try:
-                self.sock.sendto(packet, entry.addr)
+                self.sock.sendto(self._v2_build_roster_packet(entry), entry.addr)
             except OSError as e:
                 self.log.warning(
                     "event=send_failed proto=v2 reason=roster to=%s err=%s",
@@ -483,7 +599,11 @@ class Relay:
         # a BYE to evict them. A genuine BYE always comes from the client's own registered endpoint.
         from_registered_endpoint = entry is not None and entry.addr == addr
         if entry is None:
-            # Admit attempt.
+            # Admit attempt — but only on a packet a joining client really sends. An address-check echo, a
+            # BYE or a relay-originated type bearing an unknown client id admits nobody (review 2026-09-13,
+            # item 11: it used to admit first and check the type after).
+            if pkt_type != TYPE_LOBBY_HELLO and pkt_type not in V2_FORWARDABLE_TYPES:
+                return
             if self._ip_at_cap(addr[0]):
                 self.stats.rejected_ip_cap += 1
                 self.log.warning(
@@ -517,6 +637,8 @@ class Relay:
                 entry.would_block_logged = False
             entry.last_seen = now
         entry.rx_packets += 1
+        # A member may just have joined, or moved, onto an endpoint that holds a v1 slot beside another member.
+        self._v1_dissolve_group_pairs()
         if pkt_type == TYPE_ADDR_CHECK:
             # The cookie coming home (the client echoes our v1-framed challenge, so it can land in
             # the v2 handler only if the client wrapped it v2 — accept both framings). Never forward.
@@ -527,12 +649,23 @@ class Relay:
 
         # Type-specific handling.
         if pkt_type == TYPE_LOBBY_HELLO:
-            payload = data[V2_HEADER_LEN:V2_HEADER_LEN + LOBBY_NAME_BYTES]
-            new_name = _decode_lobby_name(payload)
+            body = data[V2_HEADER_LEN:]
+            new_name = _decode_lobby_name(body[:LOBBY_NAME_BYTES])
+            # The group tag follows the name. A 32-byte hello from before groups existed carries none, and lands
+            # in the empty group with every other client that sent none.
+            tag_end = LOBBY_NAME_BYTES + GROUP_TAG_BYTES
+            new_group = bytes(body[LOBBY_NAME_BYTES:tag_end]) if len(body) >= tag_end else b""
             if new_name != entry.display_name:
                 entry.display_name = new_name
                 self.log.info(
                     "event=client_named client_id=%s name=%r", client_id, new_name,
+                )
+                self.v2_roster_dirty = True
+            if new_group != entry.group:
+                entry.group = new_group
+                # A short prefix only: enough to see in the log who shares a group, not the whole tag.
+                self.log.info(
+                    "event=client_grouped client_id=%s group=%s", client_id, new_group[:2].hex() or "none",
                 )
                 self.v2_roster_dirty = True
             return
@@ -557,9 +690,9 @@ class Relay:
             # Unknown / server-originated type from a client. Ignore quietly.
             return
 
-        # Fan-out forwarding to every OTHER client (verified addresses only, once enforcing).
+        # Fan-out forwarding to every OTHER client in the same group (verified addresses only, once enforcing).
         for other_id, other in self.v2_clients.items():
-            if other_id == client_id:
+            if other_id == client_id or other.group != entry.group:
                 continue
             if not self._may_forward_to(other, "v2"):
                 continue
@@ -591,6 +724,8 @@ class Relay:
         """Periodic housekeeping: idle expiry + roster broadcast."""
         self._v1_expire_idle(now)
         self._v2_expire_idle(now)
+        if self.v1_hinted:
+            self.v1_hinted = {a: t for a, t in self.v1_hinted.items() if (now - t) < IDLE_TIMEOUT_SECONDS}
         if self.v2_clients and (
             self.v2_roster_dirty
             or (now - self.v2_last_roster_broadcast) >= ROSTER_HEARTBEAT_SECONDS
@@ -660,15 +795,24 @@ def main() -> int:
              "have not echoed their cookie (default off = watch-only, which only logs). Flip on "
              "once the 5.6+ client rollout is complete - pre-5.6 clients cannot echo.",
     )
+    parser.add_argument(
+        "--max-per-ip", type=int,
+        default=int(os.environ.get("REMSOUND_MAX_PER_IP", str(MAX_ENTRIES_PER_IP))),
+        help=f"how many devices one address may have on the relay at once (default {MAX_ENTRIES_PER_IP}, "
+             "overridable via REMSOUND_MAX_PER_IP env var)",
+    )
     args = parser.parse_args()
     if args.max_clients < 2:
         sys.stderr.write("remsound-relay: --max-clients must be >= 2\n")
         return 2
+    if args.max_per_ip < 1:
+        sys.stderr.write("remsound-relay: --max-per-ip must be >= 1\n")
+        return 2
 
     log = setup_logger(args.log_path)
     log.info(
-        "event=startup version_supported=v1,v2 listen=%s:%d max_clients=%d addr_check=%s",
-        args.host, args.port, args.max_clients,
+        "event=startup version_supported=v1,v2 listen=%s:%d max_clients=%d max_per_ip=%d addr_check=%s",
+        args.host, args.port, args.max_clients, args.max_per_ip,
         "ENFORCED" if args.require_addr_check else "watch-only",
     )
 
@@ -680,7 +824,8 @@ def main() -> int:
         log.error("event=bind_failed err=%s", e)
         return 1
 
-    relay = Relay(sock, log, args.max_clients, require_addr_check=args.require_addr_check)
+    relay = Relay(sock, log, args.max_clients, require_addr_check=args.require_addr_check,
+                  max_per_ip=args.max_per_ip)
     stop_flag = {"stop": False}
 
     def _stop_signal(_signum, _frame):

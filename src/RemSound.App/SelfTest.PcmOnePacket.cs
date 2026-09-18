@@ -8,12 +8,18 @@ namespace RemSound.App;
 /// <summary>
 /// Uncompressed audio goes out one packet per frame. Ed, 2026-09-15. A 5 ms uncompressed frame (240 samples of 24-bit
 /// stereo) came to 1,468 bytes once encrypted, 14 over the 1,454-byte chunk, so every frame went as two packets and losing
-/// either lost the frame. Frames are now 236 samples, the largest that fits one packet on a 1,492-byte path.
+/// either lost the frame. Frames are now 233 samples, the largest that fits one packet on a 1,492-byte path even through a
+/// relay group, whose framing adds a 16-byte client id.
 /// </summary>
 internal static partial class SelfTest
 {
-    /// <summary>An encrypted standard frame on the wire: 236 samples × 2 channels × 3 bytes, plus the cipher's overhead.</summary>
-    private const int OnePacketPcmCiphertextBytes = 236 * 6 + RemSoundCrypto.EncryptionOverheadBytes;   // 1,444
+    /// <summary>What a frame must fit in one packet: a 1,492-byte path (PPPoE), less 28 bytes of IP and UDP.</summary>
+    private const int OnePacketPathBytes = 1492 - 28;
+
+    /// <summary>A frame on the wire at its biggest, through a relay group: the header, the group's 16-byte client id, the PCM
+    /// sub-header and the encrypted part.</summary>
+    private static int OnWireThroughRelayGroup(int encryptedPart) =>
+        RemPacket.HeaderSize + RelayGroupClient.ClientIdSize + RemPcmFrame.SubHeaderSize + encryptedPart;
 
     /// <summary>
     /// A STANDARD UNCOMPRESSED FRAME GOES OUT AS ONE PACKET.
@@ -28,8 +34,9 @@ internal static partial class SelfTest
         var (packets, split, largest) = PcmParts(sink);
         Check(split == 0,
             $"every standard uncompressed frame must go out as ONE packet — {split} of {packets} were halves of a split frame, and losing either half loses the frame");
-        Check(largest == OnePacketPcmCiphertextBytes,
-            $"a standard frame must be the largest that fits one encrypted packet ({OnePacketPcmCiphertextBytes} bytes on the wire; the largest was {largest})");
+        Check(OnWireThroughRelayGroup(largest) <= OnePacketPathBytes && OnWireThroughRelayGroup(largest + 6) > OnePacketPathBytes,
+            $"a standard frame must be the largest that fits one packet on a 1,492-byte path, even through a relay group "
+            + $"({OnWireThroughRelayGroup(largest)} of {OnePacketPathBytes} bytes; one more sample would be {OnWireThroughRelayGroup(largest + 6)})");
         return $"{packets} standard uncompressed frames, each one packet of {largest} bytes";
     });
 
@@ -47,8 +54,9 @@ internal static partial class SelfTest
         var (packets, split, largest) = PcmParts(sink);
         Check(split == 0,
             $"every piece of a large buffer must go out as ONE packet — {split} of {packets} were halves of a split piece");
-        Check(largest == OnePacketPcmCiphertextBytes,
-            $"a large buffer must be cut into the largest pieces that fit one encrypted packet ({OnePacketPcmCiphertextBytes} bytes; the largest was {largest})");
+        Check(OnWireThroughRelayGroup(largest) <= OnePacketPathBytes && OnWireThroughRelayGroup(largest + 6) > OnePacketPathBytes,
+            $"a large buffer must be cut into the largest pieces that fit one packet on a 1,492-byte path, even through a relay group "
+            + $"({OnWireThroughRelayGroup(largest)} of {OnePacketPathBytes} bytes; one more sample would be {OnWireThroughRelayGroup(largest + 6)})");
         return $"480- and 512-frame buffers went as {packets} pieces, each one packet, the largest {largest} bytes";
     });
 
@@ -56,7 +64,7 @@ internal static partial class SelfTest
     /// A RECEIVER GIVES A ONE-PACKET FRAME THE TRIM ROOM OF A 5 MS FRAME.
     ///
     /// <para>A receiver leaves room over target before it trims a buffer, sized from the largest frame it has been sent. A
-    /// 236-sample frame is 4.92 ms; rounded down to 4 it would leave 2 ms less room on an ASIO output and 4 ms less on a
+    /// 233-sample frame is 4.85 ms; rounded down to 4 it would leave 2 ms less room on an ASIO output and 4 ms less on a
     /// WASAPI one, and trim latency down sooner than before. Each lane must still ride out a buffer 1 ms inside a 5 ms
     /// frame's room, and still trim one 1 ms past it.</para>
     /// </summary>
@@ -91,7 +99,7 @@ internal static partial class SelfTest
                 lanesChecked.Add($"{configuration.Describe()} {name}");
             }
         }
-        return $"{string.Join(", ", lanesChecked)}: a 236-sample frame gets a 5 ms frame's trim room, to the millisecond";
+        return $"{string.Join(", ", lanesChecked)}: a {AudioSender.PcmStandardSamplesPerChannel}-sample frame gets a 5 ms frame's trim room, to the millisecond";
     }
 
     /// <summary>A sender sending uncompressed audio at the standard rate, encrypted, from the plugin lane to a sink.</summary>

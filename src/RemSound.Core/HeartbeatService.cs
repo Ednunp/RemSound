@@ -52,6 +52,10 @@ public sealed class HeartbeatService : IDisposable
     private readonly object gate = new();
     private readonly Dictionary<string, PeerState> peers = new(StringComparer.OrdinalIgnoreCase);
     private readonly Stopwatch monotonic = Stopwatch.StartNew();
+    // The timestamps our last pings carried. A pong counts only if it answers one of them: in a relay group everyone's
+    // pongs reach everyone, each carrying the clock of whoever pinged, and read against ours they are nonsense.
+    private readonly long[] recentPingTicks = new long[16];
+    private int recentPingNext;
 
     private CancellationTokenSource? cts;
     private Task? sendTask;
@@ -71,6 +75,10 @@ public sealed class HeartbeatService : IDisposable
     /// error / socket not bound). Pong replies route through the same transport.
     /// </summary>
     public Func<byte[], int, IPEndPoint, bool>? SendTransport { get; set; }
+
+    /// <summary>The relay behind a relay-group member's address (RelayGroupClient.RelayOf), or null. A member's pong
+    /// counts for the relay we ping: in a group, the relay itself never answers, the people behind it do.</summary>
+    public Func<IPEndPoint, IPEndPoint?>? RelayOfMember { get; set; }
 
     public HeartbeatService(Action<string>? onDiagnostic = null)
     {
@@ -244,6 +252,11 @@ public sealed class HeartbeatService : IDisposable
         // future stream-aware filter; sequence increments locally per send.
         var seq = Interlocked.Increment(ref sequence);
         var tickMs = monotonic.ElapsedMilliseconds;
+        lock (gate)
+        {
+            recentPingTicks[recentPingNext] = tickMs;
+            recentPingNext = (recentPingNext + 1) % recentPingTicks.Length;
+        }
         var packetSpan = outboundPingBuffer.AsSpan();
         RemPacket.WriteHeader(packetSpan, RemPacketType.Heartbeat, 0xFFFF, seq);
         RemPacket.WriteHeartbeatPayload(packetSpan[RemPacket.HeaderSize..], HeartbeatKind.Ping, tickMs);
@@ -313,6 +326,11 @@ public sealed class HeartbeatService : IDisposable
         // tracked (we sent a ping that produced this pong) — but we match by IP only since
         // the source port of an incoming pong is the peer's outbound source port (NAT can
         // rewrite, and on LAN it's the peer's ephemeral sender port, not the audio port).
+        lock (gate)
+        {
+            if (Array.IndexOf(recentPingTicks, originatorTickMs) < 0) return;   // answers someone else's ping
+        }
+        var matchAddress = RelayOfMember?.Invoke(remote)?.Address ?? remote.Address;
         var nowMs = monotonic.ElapsedMilliseconds;
         var rttMs = (int)Math.Max(0, nowMs - originatorTickMs);
         var nowUtc = DateTime.UtcNow;
@@ -321,7 +339,7 @@ public sealed class HeartbeatService : IDisposable
         {
             foreach (var p in peers.Values)
             {
-                if (!p.AudioEndpoint.Address.Equals(remote.Address)) continue;
+                if (!p.AudioEndpoint.Address.Equals(matchAddress)) continue;
                 p.RttEwmaMs = p.RttEwmaMs is null ? rttMs : (int)(p.RttEwmaMs.Value * 0.7 + rttMs * 0.3);
                 p.LastPongUtc = nowUtc;
                 matchedCount++;

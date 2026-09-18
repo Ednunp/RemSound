@@ -584,6 +584,9 @@ public sealed partial class MainForm : Form
     private int continuousTuneIntervalSec = 5;
     private long lastObservedUnderrunCount;
     private HeartbeatService? heartbeatService;
+    // One person among several on a relay (GitHub #29, 2026-09-18). Created with the sender's inbound plumbing; see
+    // RelayGroupClient for what it does and what it leaves alone.
+    private readonly RelayGroupClient relayGroup = new(AppConfig.LoadOrCreateRelayClientId());
     // Tracks whether each peer was last considered CONNECTED, for the connect/disconnect cues.
     // "Connected" now means audio is actually flowing OR the heartbeat is healthy — not the
     // heartbeat alone (see DetectAndAnnouncePeerHealthTransitions). The bool, rather than the
@@ -1048,6 +1051,8 @@ public sealed partial class MainForm : Form
         recordingController.ConnectedPeersProvider = () =>
             selectedPeerEndpoints
                 .Select(kv => (kv.Value.Address, selectedPeerLabels.GetValueOrDefault(kv.Key, kv.Value.Address.ToString())))
+                // Everyone in a relay group gets a track of their own, as a ticked peer does.
+                .Concat(SelectedRelayGroupMembers().Select(m => (m.Address.Address, MemberLabel(m))))
                 .ToList();
 
         // Load the machine-wide named-peers book and make every peer list resolve display names through
@@ -1248,8 +1253,17 @@ public sealed partial class MainForm : Form
         // direct to the receiver's well-known port), but in relay mode this is where audio and
         // heartbeat replies show up — they come back through the NAT pinhole opened by the first
         // outbound packet from this socket. We dispatch by packet type to the right pipeline.
+        //
+        // A relay we share with more than one other person speaks in groups: each packet carries the id of whoever sent
+        // it. The relay group puts such a packet back into ordinary form and credits it to that person's own address, so
+        // from here on each of them is a peer of their own. Its bookkeeping (the member list) stops here.
+        relayGroup.Log = msg => logFile.Event($"relay group: {msg}");
+        sender.RelayRouter = relayGroup;
+        receiver.RelayOfMember = relayGroup.RelayOf;
         sender.OnInboundPacket = (buffer, length, remote) =>
         {
+            if (relayGroup.HandleInbound(buffer, ref length, remote, out var member) == RelayInbound.Consumed) return;
+            if (member is not null) remote = member;
             if (length < RemPacket.HeaderSize) return;
             if (!RemPacket.TryReadHeader(buffer.AsSpan(0, length), out var type, out _, out _)) return;
             if (type == RemPacketType.Heartbeat)
@@ -1621,6 +1635,7 @@ public sealed partial class MainForm : Form
             // request handle and matches our timeBeginPeriod with a timeEndPeriod.
             try { PerformanceMode.Apply(false, msg => logFile.Event(msg)); } catch { /* harmless */ }
             try { discovery.Dispose(); } catch { }
+            try { relayGroup.Stop(); } catch { }   // says goodbye, so the others see us leave at once
             try { heartbeatService?.Dispose(); } catch { }
 
             // Audio dispose can hang for many seconds on certain ASIO drivers (Audient is the
@@ -2418,6 +2433,8 @@ public sealed partial class MainForm : Form
         // total and stable even for two peers sharing a name.
         return selectedPeerEndpoints
             .Select(kv => (Address: kv.Value.Address, Name: selectedPeerLabels.GetValueOrDefault(kv.Key, kv.Value.Address.ToString())))
+            // Everyone in a relay group can be put on a track of their own, as a ticked peer can.
+            .Concat(SelectedRelayGroupMembers().Select(m => (Address: m.Address.Address, Name: MemberLabel(m))))
             .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
             .ThenBy(p => p.Address.ToString(), StringComparer.Ordinal)
             .Select(p => (p.Address, p.Name))
@@ -4628,6 +4645,12 @@ public sealed partial class MainForm : Form
             var label = selectedPeerLabels.GetValueOrDefault(id, key);
             desired.Add(new PanEqPeerItem(label, ep.Address, key));
         }
+        // Everyone in a relay group gets pan and EQ of their own, as a ticked peer does.
+        foreach (var member in SelectedRelayGroupMembers())
+        {
+            var key = member.Address.Address.ToString();
+            if (seen.Add(key)) desired.Add(new PanEqPeerItem(MemberLabel(member), member.Address.Address, key));
+        }
         desired = desired.OrderBy(d => d.Label).ThenBy(d => d.Key).ToList();
         var signature = string.Join("|", desired.Select(d => d.Key + "=" + d.Label));
         if (signature == lastPanEqPeerSignature) return;
@@ -5462,6 +5485,7 @@ public sealed partial class MainForm : Form
                     }
                 }
                 label ??= ph.AudioEndpoint.ToString();
+                if (DescribeRelayGroup(ph.AudioEndpoint) is { } group) label = $"{label}, {group}";
                 int? rtt = ph.RttMs is { } r ? RoundToFive(r) : null;
                 healthy.Add((label, rtt));
             }
@@ -5640,7 +5664,12 @@ public sealed partial class MainForm : Form
 
             s.Connected = isHealthy;
             s.Sending = isHealthy && sendingNow;
-            s.Receiving = isHealthy && receiver.IsRunning && receiver.IsReceivingFromAddress(item.Peer.Address);
+            // A relay we are in a group on: its people arrive under addresses of their own, so it is "receiving" when any
+            // of them is, and the row says who they are.
+            var rowEndpoint = new System.Net.IPEndPoint(item.Peer.Address, item.Peer.AudioPort);
+            s.Receiving = isHealthy && receiver.IsRunning && (receiver.IsReceivingFromAddress(item.Peer.Address)
+                || RelayGroupMembers(rowEndpoint)?.Any(m => receiver.IsReceivingFromAddress(m.Address.Address)) == true);
+            s.Group = isHealthy ? DescribeRelayGroup(rowEndpoint) : null;
             s.CodecLabel = isHealthy ? codecLabel : null;
             s.RttMs = isHealthy && ph is { RttMs: { } rtt }
                 ? RoundToFive(rtt)
@@ -5738,9 +5767,31 @@ public sealed partial class MainForm : Form
 
         lines.Add("Sending: " + DescribeSending(peer));
         lines.Add("Receiving your audio: " + (item.Status.Sending ? "yes" : "no"));
+        if (DescribeRelayGroup(new System.Net.IPEndPoint(peer.Address, peer.AudioPort)) is { } group)
+            lines.Add($"Through this relay: {group}");
 
         return string.Join(Environment.NewLine, lines);
     }
+
+    // === Relay groups (GitHub #29, 2026-09-18) ===
+
+    /// <summary>The people behind a relay we are in a group on, or null when that endpoint is not such a relay.</summary>
+    private List<RelayGroupClient.Member>? RelayGroupMembers(System.Net.IPEndPoint relay) =>
+        relayGroup.IsInGroup(relay) ? relayGroup.Members.Where(m => m.Relay.Equals(relay)).ToList() : null;
+
+    /// <summary>Everyone in a group on a relay we have chosen. Each is a person of their own for pan and EQ, the DAW
+    /// plugin and split recording, exactly as a peer we ticked is.</summary>
+    private List<RelayGroupClient.Member> SelectedRelayGroupMembers() =>
+        relayGroup.Members.Where(m => selectedPeerEndpoints.Values.Any(ep => ep.Equals(m.Relay))).ToList();
+
+    private static string MemberLabel(RelayGroupClient.Member member) =>
+        string.IsNullOrWhiteSpace(member.Name) ? "someone not yet named, through the relay" : member.Name;
+
+    /// <summary>"a group with Andre, Jonathan" for a relay we are in a group on; null for anything else.</summary>
+    private string? DescribeRelayGroup(System.Net.IPEndPoint relay) =>
+        RelayGroupMembers(relay) is not { } members ? null
+        : members.Count == 0 ? "a group, nobody else here yet"
+        : "a group with " + string.Join(", ", members.Select(MemberLabel));
 
     /// <summary>"2 devices on ASIO at 48 kHz, Opus" — built from the live receive streams (each stream is
     /// one capture device; its lane tells us WASAPI vs ASIO). Falls back gracefully when we're not
@@ -6101,8 +6152,12 @@ public sealed partial class MainForm : Form
         {
             heartbeatService = new HeartbeatService(msg => logFile.Event($"heartbeat: {msg}"));
             heartbeatService.SendTransport = sender.SendVia;
+            heartbeatService.RelayOfMember = relayGroup.RelayOf;
             receiver.OnHeartbeatReceived = (buffer, length, remote) =>
                 heartbeatService.HandleInjectedPacket(buffer, length, remote);
+            // The relay group sends its own hellos and goodbyes straight onto the socket: they are group-framed already.
+            relayGroup.SetIdentity(Environment.MachineName, currentAudioFingerprint);
+            relayGroup.Start(sender.SendRaw);
             // Remote-control handler (volume up/down, mute toggle from a connected peer).
             // Hooks into the same single-port receive path: the audio receiver's listener
             // sees the Control packet, parses it, and fires this delegate. We marshal back
@@ -6116,6 +6171,8 @@ public sealed partial class MainForm : Form
             {
                 try { sender.SendVia(packet, length, remote); }
                 catch (Exception ex) { logFile.Event($"addr-check echo to {remote} failed: {ex.GetType().Name}: {ex.Message}"); }
+                // Only a relay sends one of these, so it is also how we learn a peer is a relay, and join its group.
+                relayGroup.NoteRelay(remote);
             };
             heartbeatService.Start();
         }
@@ -6226,6 +6283,8 @@ public sealed partial class MainForm : Form
         // the audio NAT pinhole on the audio port — no separate socket, no +2 port. The
         // heartbeat tracks the FULL set so a recovered endpoint is detected and re-armed.
         heartbeatService?.SetTrackedPeers(endpoints);
+        // A relay among them is joined as a group; one we no longer send to is told goodbye.
+        relayGroup.SetTargets(endpoints);
         // Arm the audio sender with the full set initially (nothing is known-dead yet). The
         // 1 Hz tick (RefreshAudioReceivers) then drops any endpoint that stays unreachable,
         // so we don't blast the stream at a dead address.
@@ -10102,6 +10161,8 @@ public sealed partial class MainForm : Form
         sender.AudioFingerprint = currentAudioFingerprint;
         receiver.AudioKey = currentAudioKey;
         receiver.AudioFingerprint = currentAudioFingerprint;
+        // A relay groups people by password, so a new password is a new group.
+        relayGroup.SetIdentity(Environment.MachineName, currentAudioFingerprint);
     }
 
     // Bumped on every password change so a slow background derive that finishes AFTER a newer change
@@ -10864,9 +10925,11 @@ public sealed partial class MainForm : Form
             // not their announced audio port. This is a coarse first gate; the REAL authentication
             // is the seal check below (source IPs are forgeable, the audio key is not).
             var allowed = false;
+            // A member of a selected relay's group is allowed as the relay is (see AudioReceiver.RelayOfMember).
+            var viaRelay = relayGroup.RelayOf(remote);
             foreach (var ep in selectedPeerEndpoints.Values)
             {
-                if (ep.Address.Equals(remote.Address)) { allowed = true; break; }
+                if (ep.Address.Equals(remote.Address) || (viaRelay is not null && ep.Address.Equals(viaRelay.Address))) { allowed = true; break; }
             }
             if (!allowed)
             {
