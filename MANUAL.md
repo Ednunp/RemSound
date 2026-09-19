@@ -625,6 +625,8 @@ A relay isn't limited to two people. Everyone who connects to the same relay wit
 
 The iPhone and Android apps, and RemSound before 6.0, don't know about groups yet. Through a relay they can still reach one person in the group, the same way two people always could.
 
+If you reach someone through a relay, don't also tick them directly in your peer list. Their audio would then arrive by both routes, and you'd hear them twice.
+
 The health check-ins travel on the same channel as the audio, so if your sound reaches the other computer, your check-ins do too — one firewall rule covers both.
 
 ### Network priority
