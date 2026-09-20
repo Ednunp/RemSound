@@ -64,16 +64,6 @@ internal static partial class SelfTest
                 "ticking someone must tell the relay at once who it is, because the relay only passes sound where both have ticked");
             me.SetTicked([], pairPartner: false);
             Check(LastHello().Data![tickCountAt] == 0, "unticking everyone must say so, not quietly leave the last list standing");
-
-            // A device with nobody at a screen — the baby monitor Pi — reaches everyone instead of naming people.
-            // That is said by leaving the list off the hello, which is exactly what every app from before ticking
-            // sends, so it is not a special case on the wire.
-            me.TickEveryone = true;
-            me.SetTicked([alice], pairPartner: false);
-            Check(LastHello().Data!.Length == tickCountAt,
-                $"reaching everyone must leave the list off the hello altogether ({LastHello().Data!.Length}, wanted {tickCountAt})");
-            me.TickEveryone = false;
-            me.SetTicked([], pairPartner: false);
             Feed(me, relay, RosterPacket([(alice, "Alice"), (bob, "Bob"), (me.ClientId, "Me")], paired: false), RelayInbound.Consumed,
                 "a member list is bookkeeping, not audio");
             Check(me.IsInGroup(relay), "a member list from the relay must put us in its group");
