@@ -490,6 +490,7 @@ public sealed partial class MainForm
 
     internal RelayGroupClient RelayGroupForTest => relayGroup;
     internal CheckedListBox RelayPeersListForTest => relayPeersList;
+    internal CheckedListBox DiscoveredPeersListForTest => discoveredPeersList;
     internal Button RelayConnectButtonForTest => relayConnectButton;
     internal string RelayStatusForTest => relayStatusLine?.Text ?? "";
     internal string RelayEntryTextForTest => relayEntryText;

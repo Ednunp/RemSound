@@ -231,6 +231,14 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         Tick();
     }
 
+    /// <summary>
+    /// Reach EVERYONE in the group, without naming anybody. A hello with no tick list at all means exactly that, and
+    /// is what every app that knows nothing about ticking already sends — so this is not a special case on the wire.
+    /// It is for a device with nobody at a screen to tick with: the baby monitor Pi, which anyone on the password
+    /// should be able to hear the moment they tick IT. The app itself leaves this off and says who, every time.
+    /// </summary>
+    public bool TickEveryone { get; set; }
+
     /// <summary>Start sending hellos. <paramref name="send"/> must go straight to the socket: our own packets are already
     /// group-framed and must not be routed again.</summary>
     public void Start(Func<byte[], int, IPEndPoint, bool> send)
@@ -512,6 +520,9 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
     /// nothing about ticking sends; ours always says exactly who, even when that is nobody.</summary>
     private byte[] BuildHelloLocked()
     {
+        // Reaching everyone is said by leaving the list off the hello altogether, which is what the relay reads as
+        // "everyone in my group" and what every app from before ticking sends.
+        if (TickEveryone) return BuildHelloNoListLocked();
         var ids = ticked.Take(MaxTickedIds).ToArray();
         var packet = new byte[GroupHeaderSize + NameBytes + GroupTagBytes + 1 + ids.Length * ClientIdSize];
         RemPacket.WriteHeader(packet, (RemPacketType)TypeHello, 0, 0);
@@ -522,6 +533,18 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         var at = GroupHeaderSize + NameBytes + GroupTagBytes;
         packet[at] = (byte)ids.Length;
         for (var i = 0; i < ids.Length; i++) ids[i].TryWriteBytes(packet.AsSpan(at + 1 + i * ClientIdSize), bigEndian: true, out _);
+        return packet;
+    }
+
+    /// <summary>A hello with no tick list at all: name and group tag, nothing more.</summary>
+    private byte[] BuildHelloNoListLocked()
+    {
+        var packet = new byte[GroupHeaderSize + NameBytes + GroupTagBytes];
+        RemPacket.WriteHeader(packet, (RemPacketType)TypeHello, 0, 0);
+        packet[4] = GroupVersion;
+        clientId.CopyTo(packet.AsSpan(RemPacket.HeaderSize));
+        EncodeName(displayName, packet.AsSpan(GroupHeaderSize, NameBytes));
+        groupTag?.CopyTo(packet.AsSpan(GroupHeaderSize + NameBytes));
         return packet;
     }
 

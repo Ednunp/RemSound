@@ -335,7 +335,7 @@ public sealed partial class MainForm : Form
     // --- Connectivity tab controls (Phase 2 refactor) ---
     private readonly LiveCheckedListBox connectedPeersList = new() { CheckOnClick = true, Width = 430, Height = 90, AccessibleName = "Connected peers (Alt+C)" };
     private readonly Label connectedPeersStatus = new() { AutoSize = true, Text = "No peer connected." };
-    private readonly CheckedListBox discoveredPeersList = new() { CheckOnClick = true, Width = 430, Height = 90, AccessibleName = "Discovered peers (Alt+D)" };
+    private readonly CheckedListBox discoveredPeersList = new() { CheckOnClick = true, Width = 430, Height = 90, AccessibleName = "Discovered peers not on a server (Alt+D)" };
     private readonly Label discoveredPeersStatus = new() { AutoSize = true, Text = "No peer discovered." };
     private readonly CheckedListBox rememberedPeersList = new() { CheckOnClick = true, Width = 430, Height = 90, AccessibleName = "Remembered peers (Alt+R)" };
     private readonly Label rememberedPeersStatus = new() { AutoSize = true, Text = "No remembered peer selected." };

@@ -49,7 +49,7 @@ Step| What happens
 ---|---
 1| You tick “Send my audio” on the Audio inputs and outputs tab and choose which microphone or sound output you want sent.
 2| Your friend ticks “Receive audio” on the same tab and chooses which speakers or headphones should play the sound they receive.
-3| One of you ticks the other person in the Discovered peers list on the Connectivity tab (or types their address by hand).
+3| One of you ticks the other person in the Discovered peers not on a server list on the Connectivity tab (or types their address by hand).
 4| Sound starts flowing. The other direction works exactly the same way, on its own — both of you can speak at the same time.
 
 There is no central server, no account, and nothing stored online. The sound goes straight from one computer to the other.
@@ -67,7 +67,7 @@ Let's assume you and a friend both have RemSound running, and that your two comp
   1. Start RemSound. The first thing you'll see is the **profile picker**. On a brand-new install your only choice is **New profile** — select it and press Enter or click OK. Later, once you've saved a setup or two of your own, this is the dialog where you choose which one to load. See Profiles for the full story.
   2. Once the main window opens, go to the **Audio inputs and outputs** tab. Tick **Receive audio (Alt+R)** , then tick the device you want incoming sound played through in **WASAPI outputs for received audio (Alt+3)**.
   3. On the same tab, tick **Send my audio (Alt+S)** and tick your microphone in **WASAPI audio inputs to send (Alt+5)**.
-  4. Go to the **Connectivity** tab, find your friend in the **Discovered peers (Alt+D)** list, and tick them. If they aren't showing up, use **Add peer by IP (Alt+A)** and type their address.
+  4. Go to the **Connectivity** tab, find your friend in the **Discovered peers not on a server (Alt+D)** list, and tick them. If they aren't showing up, use **Add peer by IP (Alt+A)** and type their address.
   5. Have your friend do the same with you on their computer.
   6. Within a second or two, both of you will hear each other.
   7. In the **File menu** (Alt+F), choose **Save as** to give your setup a name. Next time you start the program, picking that name from the startup dialog restores all your settings, device choices, peers, and connections in one go.
@@ -245,7 +245,7 @@ RemSound only ever runs as a single copy. If you try to open it while it's alrea
 
 There are six menus on the main window: **File (Alt+F)** , **Record (Alt+K)** , **Service (Alt+J)** , **DAW plugin (Alt+G)** , **Options (Alt+O)** and **Help (Alt+H)**.
 
-Three of those shortcut letters look odd, and all three are deliberate. A checkbox on the main window beats a menu for the same Alt key, so Record uses **K** because Alt+R belongs to _Receive audio_ , Service uses **J** because Alt+S belongs to _Send my audio_ , and DAW plugin uses **G** because Alt+D belongs to the _Discovered peers_ list. Each menu shows its own shortcut in its title, so you can always see which letter opens it.
+Three of those shortcut letters look odd, and all three are deliberate. A checkbox on the main window beats a menu for the same Alt key, so Record uses **K** because Alt+R belongs to _Receive audio_ , Service uses **J** because Alt+S belongs to _Send my audio_ , and DAW plugin uses **G** because Alt+D belongs to the _Discovered peers not on a server_ list. Each menu shows its own shortcut in its title, so you can always see which letter opens it.
 
 ### File menu
 
@@ -325,7 +325,7 @@ Control| Shortcut| What it does
 **Colour theme**|  Alt+T|  _Match Windows_ (the default), _Light_ , or _Dark_. RemSound follows your Windows light/dark setting unless you pick a fixed one.
 **Show the volume, pan and EQ for peers tab**|  Alt+Q| On by default. Untick to hide the Volume, pan and EQ for peers tab from the main window.
 **Tab order**|  Alt+O| A list of the main window's tabs. Pick one, then use **Move up (Alt+U)** and **Move down (Alt+N)** to change the order the tabs appear in — which also sets their Ctrl+number (Ctrl+1 is always whichever tab is first). All four tabs are listed even when the volume/pan/EQ tab is hidden.
-**Enable the discovered peers list on the Connectivity tab**|  Alt+D| On by default. Untick to hide the Discovered peers list from the Connectivity tab.
+**Enable the discovered peers list on the Connectivity tab**|  Alt+D| On by default. Untick to hide the Discovered peers not on a server list from the Connectivity tab.
 **Enable the remembered peers list on the Connectivity tab**|  Alt+R| On by default. Untick to hide the Remembered peers list from the Connectivity tab.
 
 The **Service** menu (Alt+J) installs and controls the optional lock-screen service that keeps sending your audio when you are not at the machine. See that section for the details.
@@ -602,7 +602,7 @@ A “peer” is another computer running RemSound that you want to talk to. You 
 List| Contents| What ticking does
 ---|---|---
 **Connected peers**|  People you currently have sound flowing with.| Unticking disconnects.
-**Discovered peers**|  People RemSound has heard from in the last few seconds — either from an announcement sent across your local network, or from a direct announcement (which is how it works over Tailscale and other VPNs).| Connects you to that peer. Sound starts flowing both ways.
+**Discovered peers not on a server**|  People RemSound has heard from in the last few seconds — either from an announcement sent across your local network, or from a direct announcement (which is how it works over Tailscale and other VPNs).| Connects you to that peer. Sound starts flowing both ways.
 **Remembered peers**|  People you've connected to before, plus any addresses you've typed in by hand. This list is kept between sessions.| Connects to that remembered peer if they're online (and adds them as a manual connection if discovery hasn't found them yet).
 
 There's also the **Add peer by IP (Alt+A)** button, which opens a small box for a computer name or address. It's useful for a first connection over a VPN, where discovery hasn't reached the other computer yet.
@@ -611,7 +611,7 @@ There's also the **Add peer by IP (Alt+A)** button, which opens a small box for 
 
 There are two ways to reach another computer, and the difference matters if that computer has more than one address:
 
-  * **By name** — ticking someone in **Discovered peers**. RemSound found them from their announcement, and the entry shows their computer name. This is the easy, automatic way on an ordinary network.
+  * **By name** — ticking someone in **Discovered peers not on a server**. RemSound found them from their announcement, and the entry shows their computer name. This is the easy, automatic way on an ordinary network.
   * **By a fixed address** — **Add peer by IP (Alt+A)** , then type the exact address, for example `10.8.0.1`.
 
 
@@ -716,7 +716,7 @@ The ordinary “I'm here” announcements that work on a home network don't trav
   1. One time only: each side adds the other's Tailscale address to its Remembered peers list (using the “Add peer by IP” button).
   2. From then on, RemSound sends announcements straight to those addresses every 1.5 seconds.
   3. The other side hears the announcement, adds the sender to its own list, and announces back.
-  4. Within seconds, both sides see each other in Discovered peers, with no further typing.
+  4. Within seconds, both sides see each other in Discovered peers not on a server, with no further typing.
 
 
 
@@ -912,7 +912,7 @@ Key| Action
 Alt+C| Focus the Connected peers list
 Alt+E| Focus the Peer details box (for the highlighted connected peer)
 Alt+M or F2| Rename the highlighted connected peer (F2 matches the Windows Explorer rename key)
-Alt+D| Focus the Discovered peers list
+Alt+D| Focus the Discovered peers not on a server list
 Alt+R| Focus the Remembered peers list
 Alt+A| Add peer by IP
 Alt+L| Toggle Lock to these exact peer addresses
@@ -1577,7 +1577,7 @@ The same buffer explains a couple of other oddities: muting the track takes a no
   1. Audio inputs and outputs tab: is **Send my audio** ticked?
   2. Same tab: is at least one capture source ticked across the three send lists?
   3. If you're using a microphone: is Windows allowing apps to use it? RemSound now pops up a warning when you switch on a microphone Windows is blocking — including when a profile loads with one already on — but to check by hand, open Settings → Privacy & security → Microphone and make sure both _Microphone access_ and _Let desktop apps access your microphone_ are on. (When Windows blocks it the mic sends silence rather than failing, so it's easy to miss.)
-  4. Have they ticked _your_ name in their Discovered peers list?
+  4. Have they ticked _your_ name in their Discovered peers not on a server list?
 
 
 
@@ -1604,7 +1604,7 @@ The same buffer explains a couple of other oddities: muting the track takes a no
 
 Most likely your ASIO jitter buffer is below the network's real-world jitter level. The receiving side fights to hold the reserve at the target, and that fight is audible. Raise **ASIO jitter buffer in milliseconds (Alt+I)** on the Audio profile tab to 25 ms or more and the graininess should disappear. Even pure-ASIO setups can't safely sustain a receive reserve below about 15 ms over real networks; aim higher on Wi-Fi.
 
-### I can't see my friend in Discovered peers
+### I can't see my friend in Discovered peers not on a server
 
   * If you're on the same local network: are both computers on the same Wi-Fi or Ethernet network? Some guest networks deliberately keep devices from seeing each other.
   * If you're using Tailscale: type their Tailscale address into “Add peer by IP” (Connectivity tab, Alt+A) once. After that, both sides see each other automatically.
@@ -1614,7 +1614,7 @@ Most likely your ASIO jitter buffer is below the network's real-world jitter lev
 
 ### A peer rebooted or changed address and the sound didn't come back
 
-RemSound keeps trying the address you connected to, so when a peer comes back at the same address — the usual case after a reboot — the sound returns on its own within a few seconds, with nothing for you to do. If the peer comes back at a _different_ address (a new DHCP lease, say), reconnect to it: pick it again from **Discovered peers** , or enter its new address with **Add peer by IP** (Connectivity tab, Alt+A). If the sound still doesn't return, the peer is genuinely unreachable — off, asleep, or a firewall is blocking the path.
+RemSound keeps trying the address you connected to, so when a peer comes back at the same address — the usual case after a reboot — the sound returns on its own within a few seconds, with nothing for you to do. If the peer comes back at a _different_ address (a new DHCP lease, say), reconnect to it: pick it again from **Discovered peers not on a server** , or enter its new address with **Add peer by IP** (Connectivity tab, Alt+A). If the sound still doesn't return, the peer is genuinely unreachable — off, asleep, or a firewall is blocking the path.
 
 ### RemSound closed unexpectedly
 

@@ -67,7 +67,7 @@ ul, ol { padding-left: 1.4em; }
 <tr><th>Step</th><th>What happens</th></tr>
 <tr><td>1</td><td>You tick &ldquo;Send my audio&rdquo; on the Audio inputs and outputs tab and choose which microphone or sound output you want sent.</td></tr>
 <tr><td>2</td><td>Your friend ticks &ldquo;Receive audio&rdquo; on the same tab and chooses which speakers or headphones should play the sound they receive.</td></tr>
-<tr><td>3</td><td>One of you ticks the other person in the Discovered peers list on the Connectivity tab (or types their address by hand).</td></tr>
+<tr><td>3</td><td>One of you ticks the other person in the Discovered peers not on a server list on the Connectivity tab (or types their address by hand).</td></tr>
 <tr><td>4</td><td>Sound starts flowing. The other direction works exactly the same way, on its own &mdash; both of you can speak at the same time.</td></tr>
 </table>
 
@@ -93,7 +93,7 @@ ul, ol { padding-left: 1.4em; }
 <li>Start RemSound. The first thing you'll see is the <strong>profile picker</strong>. On a brand-new install your only choice is <strong>New profile</strong> &mdash; select it and press Enter or click OK. Later, once you've saved a setup or two of your own, this is the dialog where you choose which one to load. See <a href="#profiles">Profiles</a> for the full story.</li>
 <li>Once the main window opens, go to the <strong>Audio inputs and outputs</strong> tab. Tick <strong>Receive audio (Alt+R)</strong>, then tick the device you want incoming sound played through in <strong>WASAPI outputs for received audio (Alt+3)</strong>.</li>
 <li>On the same tab, tick <strong>Send my audio (Alt+S)</strong> and tick your microphone in <strong>WASAPI audio inputs to send (Alt+5)</strong>.</li>
-<li>Go to the <strong>Connectivity</strong> tab, find your friend in the <strong>Discovered peers (Alt+D)</strong> list, and tick them. If they aren't showing up, use <strong>Add peer by IP (Alt+A)</strong> and type their address.</li>
+<li>Go to the <strong>Connectivity</strong> tab, find your friend in the <strong>Discovered peers not on a server (Alt+D)</strong> list, and tick them. If they aren't showing up, use <strong>Add peer by IP (Alt+A)</strong> and type their address.</li>
 <li>Have your friend do the same with you on their computer.</li>
 <li>Within a second or two, both of you will hear each other.</li>
 <li>In the <strong>File menu</strong> (Alt+F), choose <strong>Save as</strong> to give your setup a name. Next time you start the program, picking that name from the startup dialog restores all your settings, device choices, peers, and connections in one go.</li>
@@ -281,7 +281,7 @@ ul, ol { padding-left: 1.4em; }
 
 <p>There are six menus on the main window: <strong>File (Alt+F)</strong>, <strong>Record (Alt+K)</strong>, <strong>Service (Alt+J)</strong>, <strong>DAW plugin (Alt+G)</strong>, <strong>Options (Alt+O)</strong> and <strong>Help (Alt+H)</strong>.</p>
 
-<p>Three of those shortcut letters look odd, and all three are deliberate. A checkbox on the main window beats a menu for the same Alt key, so Record uses <strong>K</strong> because Alt+R belongs to <em>Receive audio</em>, Service uses <strong>J</strong> because Alt+S belongs to <em>Send my audio</em>, and DAW plugin uses <strong>G</strong> because Alt+D belongs to the <em>Discovered peers</em> list. Each menu shows its own shortcut in its title, so you can always see which letter opens it.</p>
+<p>Three of those shortcut letters look odd, and all three are deliberate. A checkbox on the main window beats a menu for the same Alt key, so Record uses <strong>K</strong> because Alt+R belongs to <em>Receive audio</em>, Service uses <strong>J</strong> because Alt+S belongs to <em>Send my audio</em>, and DAW plugin uses <strong>G</strong> because Alt+D belongs to the <em>Discovered peers not on a server</em> list. Each menu shows its own shortcut in its title, so you can always see which letter opens it.</p>
 
 <h3>File menu</h3>
 
@@ -365,7 +365,7 @@ ul, ol { padding-left: 1.4em; }
 <tr><td><strong>Colour theme</strong></td><td>Alt+T</td><td><em>Match Windows</em> (the default), <em>Light</em>, or <em>Dark</em>. RemSound follows your Windows light/dark setting unless you pick a fixed one.</td></tr>
 <tr><td><strong>Show the volume, pan and EQ for peers tab</strong></td><td>Alt+Q</td><td>On by default. Untick to hide the <a href="#pan-eq">Volume, pan and EQ for peers tab</a> from the main window.</td></tr>
 <tr><td><strong>Tab order</strong></td><td>Alt+O</td><td>A list of the main window's tabs. Pick one, then use <strong>Move up (Alt+U)</strong> and <strong>Move down (Alt+N)</strong> to change the order the tabs appear in &mdash; which also sets their Ctrl+number (Ctrl+1 is always whichever tab is first). All four tabs are listed even when the volume/pan/EQ tab is hidden.</td></tr>
-<tr><td><strong>Enable the discovered peers list on the Connectivity tab</strong></td><td>Alt+D</td><td>On by default. Untick to hide the Discovered peers list from the Connectivity tab.</td></tr>
+<tr><td><strong>Enable the discovered peers list on the Connectivity tab</strong></td><td>Alt+D</td><td>On by default. Untick to hide the Discovered peers not on a server list from the Connectivity tab.</td></tr>
 <tr><td><strong>Enable the remembered peers list on the Connectivity tab</strong></td><td>Alt+R</td><td>On by default. Untick to hide the Remembered peers list from the Connectivity tab.</td></tr>
 </table>
 
@@ -655,7 +655,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <table>
 <tr><th>List</th><th>Contents</th><th>What ticking does</th></tr>
 <tr><td><strong>Connected peers</strong></td><td>People you currently have sound flowing with.</td><td>Unticking disconnects.</td></tr>
-<tr><td><strong>Discovered peers</strong></td><td>People RemSound has heard from in the last few seconds &mdash; either from an announcement sent across your local network, or from a direct announcement (which is how it works over Tailscale and other VPNs).</td><td>Connects you to that peer. Sound starts flowing both ways.</td></tr>
+<tr><td><strong>Discovered peers not on a server</strong></td><td>People RemSound has heard from in the last few seconds &mdash; either from an announcement sent across your local network, or from a direct announcement (which is how it works over Tailscale and other VPNs).</td><td>Connects you to that peer. Sound starts flowing both ways.</td></tr>
 <tr><td><strong>Remembered peers</strong></td><td>People you've connected to before, plus any addresses you've typed in by hand. This list is kept between sessions.</td><td>Connects to that remembered peer if they're online (and adds them as a manual connection if discovery hasn't found them yet).</td></tr>
 </table>
 
@@ -664,7 +664,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <h3 id="lock-addresses">Locking a profile to one exact address (and only that one)</h3>
 <p>There are two ways to reach another computer, and the difference matters if that computer has more than one address:</p>
 <ul>
-<li><strong>By name</strong> &mdash; ticking someone in <strong>Discovered peers</strong>. RemSound found them from their announcement, and the entry shows their computer name. This is the easy, automatic way on an ordinary network.</li>
+<li><strong>By name</strong> &mdash; ticking someone in <strong>Discovered peers not on a server</strong>. RemSound found them from their announcement, and the entry shows their computer name. This is the easy, automatic way on an ordinary network.</li>
 <li><strong>By a fixed address</strong> &mdash; <strong>Add peer by IP (Alt+A)</strong>, then type the exact address, for example <code>10.8.0.1</code>.</li>
 </ul>
 <p>Normally RemSound is helpful about addresses, even one you typed: it can recognise that the address belongs to a computer it also hears announcing itself on the network, and if that computer turns up at a <em>different</em> address &mdash; a new IP after a reboot, or a second address over a VPN &mdash; RemSound follows it there automatically so your sound keeps flowing. Most of the time that is exactly what you want.</p>
@@ -759,7 +759,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <li>One time only: each side adds the other's Tailscale address to its Remembered peers list (using the &ldquo;Add peer by IP&rdquo; button).</li>
 <li>From then on, RemSound sends announcements straight to those addresses every 1.5 seconds.</li>
 <li>The other side hears the announcement, adds the sender to its own list, and announces back.</li>
-<li>Within seconds, both sides see each other in Discovered peers, with no further typing.</li>
+<li>Within seconds, both sides see each other in Discovered peers not on a server, with no further typing.</li>
 </ol>
 
 <p>So the rule is: <strong>only one side has to type the other's address once.</strong> After that, the discovery works both ways on its own.</p>
@@ -957,7 +957,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <tr><td>Alt+C</td><td>Focus the Connected peers list</td></tr>
 <tr><td>Alt+E</td><td>Focus the Peer details box (for the highlighted connected peer)</td></tr>
 <tr><td>Alt+M or F2</td><td>Rename the highlighted connected peer (F2 matches the Windows Explorer rename key)</td></tr>
-<tr><td>Alt+D</td><td>Focus the Discovered peers list</td></tr>
+<tr><td>Alt+D</td><td>Focus the Discovered peers not on a server list</td></tr>
 <tr><td>Alt+R</td><td>Focus the Remembered peers list</td></tr>
 <tr><td>Alt+A</td><td>Add peer by IP</td></tr>
 <tr><td>Alt+L</td><td>Toggle Lock to these exact peer addresses</td></tr>
@@ -1634,7 +1634,7 @@ RemSound.exe --connect 192.168.1.42
 <li>Audio inputs and outputs tab: is <strong>Send my audio</strong> ticked?</li>
 <li>Same tab: is at least one capture source ticked across the three send lists?</li>
 <li>If you're using a microphone: is Windows allowing apps to use it? RemSound now pops up a warning when you switch on a microphone Windows is blocking &mdash; including when a profile loads with one already on &mdash; but to check by hand, open Settings &rarr; Privacy &amp; security &rarr; Microphone and make sure both <em>Microphone access</em> and <em>Let desktop apps access your microphone</em> are on. (When Windows blocks it the mic sends silence rather than failing, so it's easy to miss.)</li>
-<li>Have they ticked <em>your</em> name in their Discovered peers list?</li>
+<li>Have they ticked <em>your</em> name in their Discovered peers not on a server list?</li>
 </ol>
 
 <h3>I can hear them but the sound crackles</h3>
@@ -1657,7 +1657,7 @@ RemSound.exe --connect 192.168.1.42
 <h3>The ASIO sound is grainy or constantly micro-clicks</h3>
 <p>Most likely your ASIO jitter buffer is below the network's real-world jitter level. The receiving side fights to hold the reserve at the target, and that fight is audible. Raise <strong>ASIO jitter buffer in milliseconds (Alt+I)</strong> on the Audio profile tab to 25 ms or more and the graininess should disappear. Even pure-ASIO setups can't safely sustain a receive reserve below about 15 ms over real networks; aim higher on Wi-Fi.</p>
 
-<h3>I can't see my friend in Discovered peers</h3>
+<h3>I can't see my friend in Discovered peers not on a server</h3>
 <ul>
 <li>If you're on the same local network: are both computers on the same Wi-Fi or Ethernet network? Some guest networks deliberately keep devices from seeing each other.</li>
 <li>If you're using Tailscale: type their Tailscale address into &ldquo;Add peer by IP&rdquo; (Connectivity tab, Alt+A) once. After that, both sides see each other automatically.</li>
@@ -1665,7 +1665,7 @@ RemSound.exe --connect 192.168.1.42
 </ul>
 
 <h3>A peer rebooted or changed address and the sound didn't come back</h3>
-<p>RemSound keeps trying the address you connected to, so when a peer comes back at the same address &mdash; the usual case after a reboot &mdash; the sound returns on its own within a few seconds, with nothing for you to do. If the peer comes back at a <em>different</em> address (a new DHCP lease, say), reconnect to it: pick it again from <strong>Discovered peers</strong>, or enter its new address with <strong>Add peer by IP</strong> (Connectivity tab, Alt+A). If the sound still doesn't return, the peer is genuinely unreachable &mdash; off, asleep, or a firewall is blocking the path.</p>
+<p>RemSound keeps trying the address you connected to, so when a peer comes back at the same address &mdash; the usual case after a reboot &mdash; the sound returns on its own within a few seconds, with nothing for you to do. If the peer comes back at a <em>different</em> address (a new DHCP lease, say), reconnect to it: pick it again from <strong>Discovered peers not on a server</strong>, or enter its new address with <strong>Add peer by IP</strong> (Connectivity tab, Alt+A). If the sound still doesn't return, the peer is genuinely unreachable &mdash; off, asleep, or a firewall is blocking the path.</p>
 
 <h3>RemSound closed unexpectedly</h3>
 <p>If RemSound ever closes on its own, it writes a small crash file into your logs folder (the RemSound folder &rarr; <strong>user settings and logs</strong> &rarr; <strong>logs</strong>, named <code>crash-</code> followed by the date and time). There's nothing you need to do with it &mdash; but if it happens, sending that file along with your report records what went wrong, so it can be tracked down and fixed.</p>

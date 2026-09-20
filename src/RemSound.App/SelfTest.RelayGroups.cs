@@ -64,6 +64,16 @@ internal static partial class SelfTest
                 "ticking someone must tell the relay at once who it is, because the relay only passes sound where both have ticked");
             me.SetTicked([], pairPartner: false);
             Check(LastHello().Data![tickCountAt] == 0, "unticking everyone must say so, not quietly leave the last list standing");
+
+            // A device with nobody at a screen — the baby monitor Pi — reaches everyone instead of naming people.
+            // That is said by leaving the list off the hello, which is exactly what every app from before ticking
+            // sends, so it is not a special case on the wire.
+            me.TickEveryone = true;
+            me.SetTicked([alice], pairPartner: false);
+            Check(LastHello().Data!.Length == tickCountAt,
+                $"reaching everyone must leave the list off the hello altogether ({LastHello().Data!.Length}, wanted {tickCountAt})");
+            me.TickEveryone = false;
+            me.SetTicked([], pairPartner: false);
             Feed(me, relay, RosterPacket([(alice, "Alice"), (bob, "Bob"), (me.ClientId, "Me")], paired: false), RelayInbound.Consumed,
                 "a member list is bookkeeping, not audio");
             Check(me.IsInGroup(relay), "a member list from the relay must put us in its group");
@@ -295,6 +305,12 @@ internal static partial class SelfTest
             var relay = new IPEndPoint(IPAddress.Parse("203.0.113.44"), RemPacket.DefaultPort);
             var entry = "relay.example.test:47830";
             bool PeersRowShown() => form.RelayPeersRowForTest is { } row && IsSetVisibleForAltAudit(row);
+            // What a screen reader reads on tabbing in is the accessible name, not the label beside it. Ed had to ask
+            // twice on 2026-09-20 because the label said one thing and the list still answered to the old name.
+            Check(form.RelayPeersListForTest.AccessibleName?.Contains("on server", StringComparison.Ordinal) == true
+                  && form.DiscoveredPeersListForTest.AccessibleName?.Contains("not on a server", StringComparison.Ordinal) == true,
+                $"both discovered lists must SAY which they are when you tab into them "
+                + $"({form.DiscoveredPeersListForTest.AccessibleName} / {form.RelayPeersListForTest.AccessibleName})");
             Check(!PeersRowShown(), "the server's own peer list must be hidden until you are connected to one");
             Check(form.RelayGroupForTest.ConnectedRelay is null, "nothing is joined until the user connects: a relay is somewhere you go");
 
