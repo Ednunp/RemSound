@@ -3375,6 +3375,12 @@ public sealed partial class MainForm : Form
                 RefreshKnownPeers();
                 logFile.Event("remembered peers list cleared (Preferences)");
             },
+            onClearRememberedRelays: () =>
+            {
+                settings.SaveRememberedRelays(Array.Empty<string>());
+                RefreshRememberedRelaysList();
+                logFile.Event("remembered relays list cleared (Preferences)");
+            },
             onClearRememberedApplications: () =>
             {
                 settings.SaveRememberedApplications(Array.Empty<string>());
@@ -3890,9 +3896,12 @@ public sealed partial class MainForm : Form
         discoveredPeersLabel = FormLayoutRows.AddCheckedListRow(panel, 4, "Discovered peers (Alt+&D)", discoveredPeersList, discoveredPeersStatus, FocusListControl);
         rememberedPeersLabel = FormLayoutRows.AddCheckedListRow(panel, 5, "Remembered peers (Alt+&R)", rememberedPeersList, rememberedPeersStatus, FocusListControl);
 
+        // The relay server: somewhere you connect to, with the people on it in a list of their own. See MainForm.Relay.
+        var afterRelay = BuildRelayRows(panel, 6);
+
         // Add a peer by address, then the lock toggle — the manual / advanced options after the lists.
-        panel.Controls.Add(new Label { Text = "Manual peer", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 6);
-        panel.Controls.Add(manualAddButton, 1, 6);
+        panel.Controls.Add(new Label { Text = "Manual peer", AutoSize = true, Anchor = AnchorStyles.Left }, 0, afterRelay);
+        panel.Controls.Add(manualAddButton, 1, afterRelay);
 
         lockPeerAddressesBox.Checked = settings.LoadLockPeerAddresses();
         lockPeerAddressesBox.CheckedChanged += (_, _) =>
@@ -3901,14 +3910,14 @@ public sealed partial class MainForm : Form
             MarkProfileDirty();
             LogUiChange("lock peer addresses", lockPeerAddressesBox.Checked ? "on" : "off");
         };
-        panel.Controls.Add(lockPeerAddressesBox, 0, 7);
+        panel.Controls.Add(lockPeerAddressesBox, 0, afterRelay + 1);
         panel.SetColumnSpan(lockPeerAddressesBox, 2);
 
         // Connection status readout — last row, tab-into-able.
         var statusLabel = new MnemonicLabel { Text = "Connection status (Alt+&S)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = statusReadout };
         statusLabel.Click += (_, _) => statusReadout.Focus();
-        panel.Controls.Add(statusLabel, 0, 8);
-        panel.Controls.Add(statusReadout, 1, 8);
+        panel.Controls.Add(statusLabel, 0, afterRelay + 2);
+        panel.Controls.Add(statusReadout, 1, afterRelay + 2);
         UpdatePeerDetails();
 
         // Tab order — the AUTHORITATIVE setting for this tab (SetTabOrder no longer touches it). The
@@ -3922,9 +3931,14 @@ public sealed partial class MainForm : Form
         renamePeerButton.TabIndex = 2;
         if (discoveredPeersList.Parent is { } discoveredWrap) discoveredWrap.TabIndex = 3;
         if (rememberedPeersList.Parent is { } rememberedWrap) rememberedWrap.TabIndex = 4;
-        manualAddButton.TabIndex = 5;
-        lockPeerAddressesBox.TabIndex = 6;
-        statusReadout.TabIndex = 7;
+        // The relay rows sit between the peer lists and the manual options: address, Connect, remembered relays, and
+        // the people on the relay. The list is wrapped by AddCheckedListRow, so its WRAPPER carries the tab order.
+        if (relayAddressBox.Parent is { } relayRowWrap) relayRowWrap.TabIndex = 5;
+        rememberedRelaysList.TabIndex = 6;
+        if (relayPeersList.Parent is { } relayPeersWrap) relayPeersWrap.TabIndex = 7;
+        manualAddButton.TabIndex = 8;
+        lockPeerAddressesBox.TabIndex = 9;
+        statusReadout.TabIndex = 10;
 
         // Initial render so the box has content the moment the user tabs into it.
         RefreshStatusReadout();
@@ -5371,6 +5385,7 @@ public sealed partial class MainForm : Form
         SyncConnectedList();
         SyncDiscoveredList();
         SyncRememberedList();
+        SyncRelayPeersList();
         RefreshPanEqPeerList();
         RefreshStatusReadout();
     }
@@ -5658,7 +5673,10 @@ public sealed partial class MainForm : Form
             var prevText = item.ToString();
 
             var addrKey = item.Peer.Address.ToString();
-            var ph = healthByAddress.GetValueOrDefault(addrKey);
+            // Somebody on a relay is reached through the relay, so the relay's own health is theirs: we ping the relay,
+            // and their pong comes back through it.
+            var relayForRow = relayGroup.RelayOf(new System.Net.IPEndPoint(item.Peer.Address, item.Peer.AudioPort));
+            var ph = healthByAddress.GetValueOrDefault(relayForRow?.Address.ToString() ?? addrKey);
             // "Connected" by the same rule as the connect cue and the status readout — see PeerConnectionRule.
             var isHealthy = ph is not null && IsPeerConnectedNow(ph);
 
@@ -6171,8 +6189,11 @@ public sealed partial class MainForm : Form
             {
                 try { sender.SendVia(packet, length, remote); }
                 catch (Exception ex) { logFile.Event($"addr-check echo to {remote} failed: {ex.GetType().Name}: {ex.Message}"); }
-                // Only a relay sends one of these, so it is also how we learn a peer is a relay, and join its group.
+                // Only a relay sends one of these. If it came from somebody in the peer list, that "peer" is a relay:
+                // offer to connect to it as one (Ed, 2026-09-20).
                 relayGroup.NoteRelay(remote);
+                try { BeginInvoke(() => OfferRelayForPeerAddress(remote)); }
+                catch (InvalidOperationException) { /* window not up yet */ }
             };
             heartbeatService.Start();
         }
@@ -6283,8 +6304,6 @@ public sealed partial class MainForm : Form
         // the audio NAT pinhole on the audio port — no separate socket, no +2 port. The
         // heartbeat tracks the FULL set so a recovered endpoint is detected and re-armed.
         heartbeatService?.SetTrackedPeers(endpoints);
-        // A relay among them is joined as a group; one we no longer send to is told goodbye.
-        relayGroup.SetTargets(endpoints);
         // Arm the audio sender with the full set initially (nothing is known-dead yet). The
         // 1 Hz tick (RefreshAudioReceivers) then drops any endpoint that stays unreachable,
         // so we don't blast the stream at a dead address.
@@ -9629,6 +9648,8 @@ public sealed partial class MainForm : Form
             receiveAudioCheckbox.Checked = p.ReceiveAudioOn;
             sendMyAudioCheckbox.Checked = p.SendAudioOn;
 
+            // The relay this profile uses, the people it had ticked there, and a connect if it asked for one.
+            ApplyRelayProfile(p);
             // Re-establish previously-connected peers. Each entry is re-resolved + re-selected
             // exactly as if the user had typed it into the manual-peer field. Discovered peers
             // (no longer reachable / different IP) just fail gracefully — no popup.
@@ -9823,6 +9844,7 @@ public sealed partial class MainForm : Form
         // headless lock-screen use case is exactly whole-system audio.
         profile.SelectedSendApplications = CheckedSendApplicationNames();
         profile.SelectedConnectedPeers = GatherSelectedPeerEntries();
+        GatherRelayProfile(profile);
         profile.EnableAllPeerShaping = enableAllPeerShapingBox.Checked;
         profile.PeerShaping = peerShaping;
         return profile;
@@ -10163,6 +10185,7 @@ public sealed partial class MainForm : Form
         receiver.AudioFingerprint = currentAudioFingerprint;
         // A relay groups people by password, so a new password is a new group.
         relayGroup.SetIdentity(Environment.MachineName, currentAudioFingerprint);
+        RelayPasswordChanged(currentAudioFingerprint);
     }
 
     // Bumped on every password change so a slow background derive that finishes AFTER a newer change
@@ -10352,6 +10375,9 @@ public sealed partial class MainForm : Form
         var result = new List<string>();
         foreach (var (instanceId, endpoint) in selectedPeerEndpoints)
         {
+            // Somebody on a relay is not written down here: they have no address of their own to type, and the relay
+            // half of the profile already remembers the relay and who was ticked on it.
+            if (RelayGroupClient.IsMemberAddress(endpoint.Address)) continue;
             // Preferred: original text the user typed (preserves hostnames vs IPs).
             string? entry = null;
             foreach (var (text, id) in rememberedPeerInstanceIds)

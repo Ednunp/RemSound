@@ -448,6 +448,9 @@ public sealed class AudioReceiver : IDisposable
         return RelayOfMember?.Invoke(remote) is { } relay && snapshot.Contains(relay.Address);
     }
 
+    /// <summary>Test seam: would audio from this address be let in right now? The same question the receive path asks.</summary>
+    internal bool IsSenderAllowedForTest(IPEndPoint remote) => IsSenderAllowed(remote);
+
     /// <summary>Optional diagnostic sink (App writes to log file).</summary>
     public Action<string>? Diagnostic { get => diagnosticSink; set => diagnosticSink = value; }
 

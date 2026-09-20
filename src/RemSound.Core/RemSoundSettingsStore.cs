@@ -230,6 +230,24 @@ public sealed class RemSoundSettingsStore
         try { c.Save(); } catch { /* best-effort, like the app's other AppConfig writes */ }
     }
 
+    /// <summary>The relay servers this machine has connected to, newest first, so the Connectivity tab can offer them
+    /// again. Machine-wide like remembered peers: a relay is somewhere this computer goes, not part of one profile.</summary>
+    public IReadOnlyList<string> LoadRememberedRelays() =>
+        Try(() => AppConfig.Load().RememberedRelays?
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList())
+        ?? [];
+
+    public void SaveRememberedRelays(IEnumerable<string> relays)
+    {
+        var c = AppConfig.Load();
+        c.RememberedRelays = relays
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Select(static value => value.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        try { c.Save(); } catch { /* best-effort, like the app's other AppConfig writes */ }
+    }
+
     /// <summary>GLOBAL remembered application names (lower-case process names) — the shared "apps I send"
     /// list, machine-wide like <see cref="LoadRememberedPeers"/>, not per-profile.</summary>
     public IReadOnlyList<string> LoadRememberedApplications() =>

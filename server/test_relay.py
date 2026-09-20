@@ -147,15 +147,17 @@ class AddrCheckV2(unittest.TestCase):
 class Caps(unittest.TestCase):
     def test_ip_cap_counts_across_protocols(self):
         r = make_relay(max_clients=10)
-        # Four v2 clients from one IP fill that IP's quota (MAX_ENTRIES_PER_IP == 4).
+        # v2 clients from one IP fill that IP's quota, whatever the cap is set to.
         ip = "9.9.9.9"
-        for i in range(4):
+        cap = relay.MAX_ENTRIES_PER_IP
+        r = make_relay(max_clients=cap + 6)
+        for i in range(cap):
             cid = uuid.UUID(bytes=bytes([i]) + bytes(15)).bytes
             r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid, b"x"), (ip, 8000 + i))
-        self.assertEqual(len(r.v2_clients), 4)
+        self.assertEqual(len(r.v2_clients), cap)
         # A v1 peer from the SAME IP must be refused — the cap counts both protocols.
         r.handle_packet(v1_packet(relay.TYPE_AUDIO, b"x"), (ip, 8100))
-        self.assertGreater(r.stats.rejected_ip_cap, 0, "a 5th entry from a capped IP must be refused")
+        self.assertGreater(r.stats.rejected_ip_cap, 0, "one more than the cap from one IP must be refused")
         self.assertEqual(len(r.v1_peers), 0, "the over-cap v1 peer must not be admitted")
         # A different IP is unaffected.
         r.handle_packet(v1_packet(relay.TYPE_AUDIO, b"x"), ("8.8.8.8", 8100))
@@ -196,17 +198,37 @@ def format_payload(fingerprint: bytes) -> bytes:
     return bytes(relay.FORMAT_FINGERPRINT_OFFSET) + fingerprint
 
 
+ROSTER_ENTRY = 16 + relay.LOBBY_NAME_BYTES + 1   # id, name, that member's own flags byte
+
+
 def rosters_to(sock: FakeSocket, addr) -> list[tuple[set[bytes], int | None]]:
-    """Every LobbyRoster the relay sent to addr: (the member ids it listed, its flags byte)."""
+    """Every LobbyRoster the relay sent to addr: (the member ids it listed, its trailing flags byte)."""
     out = []
     for data, to in sock.sent:
         if to != addr or len(data) <= relay.V2_HEADER_LEN or data[4] != relay.V2_VERSION or data[5] != relay.TYPE_LOBBY_ROSTER:
             continue
         body = data[relay.V2_HEADER_LEN:]
         count = body[0]
-        ids = {body[1 + i * 48:1 + i * 48 + 16] for i in range(count)}
-        out.append((ids, body[1 + count * 48] if len(body) > 1 + count * 48 else None))
+        ids = {body[1 + i * ROSTER_ENTRY:1 + i * ROSTER_ENTRY + 16] for i in range(count)}
+        end = 1 + count * ROSTER_ENTRY
+        out.append((ids, body[end] if len(body) > end else None))
     return out
+
+
+def who_ticks_you(sock: FakeSocket, addr) -> set[bytes]:
+    """From the last roster sent to addr: the ids of the members whose own flags byte says they have ticked it."""
+    for data, to in reversed(sock.sent):
+        if to != addr or len(data) <= relay.V2_HEADER_LEN or data[4] != relay.V2_VERSION or data[5] != relay.TYPE_LOBBY_ROSTER:
+            continue
+        body = data[relay.V2_HEADER_LEN:]
+        count = body[0]
+        out = set()
+        for i in range(count):
+            at = 1 + i * ROSTER_ENTRY
+            if body[at + ROSTER_ENTRY - 1] & relay.ROSTER_MEMBER_FLAG_TICKS_YOU:
+                out.add(body[at:at + 16])
+        return out
+    return set()
 
 
 class Groups(unittest.TestCase):
@@ -315,6 +337,61 @@ class Ticks(unittest.TestCase):
         self.assertTrue(forwarded_to(r.sock, b, b"FOR-B-ONLY"), "b ticked a and a ticked b")
         self.assertFalse(forwarded_to(r.sock, c, b"FOR-B-ONLY"),
                          "c has ticked a, but a has not ticked c: c must not be sent a's audio")
+
+
+class TicksYouFlag(unittest.TestCase):
+    """Ed's relay list has to be able to say "waiting for them to tick you". On its own an app knows only
+    who it has ticked, so the relay tells each person, in every roster, which of the others have ticked
+    THEM. Nobody learns anything about a person they cannot already see in their own group."""
+
+    def test_the_roster_says_who_has_ticked_you(self):
+        r = make_relay()
+        a, b, c = ("10.7.0.1", 9000), ("10.7.0.2", 9001), ("10.7.0.3", 9002)
+        r.handle_packet(hello(cid(1), "a", G1, ticked=[]), a)
+        r.handle_packet(hello(cid(2), "b", G1, ticked=[cid(1)]), b)
+        r.handle_packet(hello(cid(3), "c", G1, ticked=[]), c)
+        r.sock.sent.clear()
+        r.v2_roster_dirty = True
+        r._v2_broadcast_roster()
+        self.assertEqual(who_ticks_you(r.sock, a), {cid(2)},
+                         "a must be told that b has ticked it, and that c has not")
+        self.assertEqual(who_ticks_you(r.sock, b), set(),
+                         "b must be told that nobody has ticked it yet, which is why it hears nothing")
+
+    def test_ticking_sends_the_list_again_at_once(self):
+        r = make_relay()
+        a, b = ("10.7.1.1", 9100), ("10.7.1.2", 9101)
+        r.handle_packet(hello(cid(1), "a", G1, ticked=[]), a)
+        r.handle_packet(hello(cid(2), "b", G1, ticked=[]), b)
+        r._v2_broadcast_roster()          # settle: the list is up to date and nothing is outstanding
+        self.assertFalse(r.v2_roster_dirty)
+        r.sock.sent.clear()
+        r.handle_packet(hello(cid(2), "b", G1, ticked=[cid(1)]), b)
+        self.assertTrue(r.v2_roster_dirty, "a change of ticks must send the list again rather than wait a second")
+        r._v2_broadcast_roster()
+        self.assertEqual(who_ticks_you(r.sock, a), {cid(2)}, "and the list it sends must carry the new tick")
+
+    def test_a_client_that_ticks_everyone_counts_as_ticking_you(self):
+        r = make_relay()
+        a, b = ("10.7.2.1", 9200), ("10.7.2.2", 9201)
+        r.handle_packet(hello(cid(1), "a", G1, ticked=[]), a)
+        r.handle_packet(hello(cid(2), "b", G1, ticked=None), b)   # an app that knows nothing about ticking
+        r.sock.sent.clear()
+        r.v2_roster_dirty = True
+        r._v2_broadcast_roster()
+        self.assertEqual(who_ticks_you(r.sock, a), {cid(2)},
+                         "an app that sends no list has ticked everyone, so it has ticked you")
+
+    def test_another_group_is_never_named(self):
+        r = make_relay()
+        a, d = ("10.7.3.1", 9300), ("10.7.3.2", 9301)
+        r.handle_packet(hello(cid(1), "a", G1, ticked=[]), a)
+        r.handle_packet(hello(cid(4), "d", G2, ticked=[cid(1)]), d)
+        r.sock.sent.clear()
+        r.v2_roster_dirty = True
+        r._v2_broadcast_roster()
+        self.assertEqual(who_ticks_you(r.sock, a), set(),
+                         "someone on another password must not appear in your list at all, ticked or not")
 
 
 class AdmissionOrder(unittest.TestCase):

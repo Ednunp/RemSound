@@ -212,6 +212,17 @@ public sealed class Profile
     /// list at save time. On load, RemSound auto-connects to any of these that resolve.</summary>
     public List<string> SelectedConnectedPeers { get; set; } = [];
 
+    /// <summary>The relay server this profile uses, as the user typed it (a hostname or an address). Empty means this
+    /// profile doesn't use one. A relay is a place, not a peer, so it is kept apart from the list above.</summary>
+    public string? RelayServer { get; set; }
+
+    /// <summary>Connect to <see cref="RelayServer"/> as soon as this profile is loaded.</summary>
+    public bool RelayConnectOnStart { get; set; }
+
+    /// <summary>The people ticked on the relay, by their client id. They keep their tick when they come back; somebody
+    /// who arrives with a new id (a fresh set-up, a new machine) arrives unticked.</summary>
+    public List<string> RelayTickedIds { get; set; } = [];
+
     /// <summary>When true, this profile is LOCKED to the exact peer addresses set above. RemSound uses
     /// only those addresses, never matches the other computer by the name it advertises on the network,
     /// and never switches to a different address it discovers — even if the set address stops working

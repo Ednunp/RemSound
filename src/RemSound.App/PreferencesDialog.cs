@@ -64,6 +64,12 @@ internal sealed class PreferencesDialog : Form
         AccessibleName = "Clear remembered peers list",
         AutoSize = true,
     };
+    private readonly Button clearRememberedRelaysButton = new()
+    {
+        Text = "Clear remembered &relays list...",
+        AccessibleName = "Clear remembered relays list",
+        AutoSize = true,
+    };
     private readonly Button clearRememberedAppsButton = new()
     {
         Text = "Clear remembered applications &list...",
@@ -595,6 +601,7 @@ internal sealed class PreferencesDialog : Form
         Action onUpdateFrequencyChanged,
         Action onAutoSaveIntervalChanged,
         Action onClearRememberedPeers,
+        Action onClearRememberedRelays,
         Action onClearRememberedApplications,
         Action<bool> applyUpnpEnabled,
         Func<(RouterMappingStatus Status, IPEndPoint? External, string LastError)> getUpnpSnapshot,
@@ -773,6 +780,13 @@ internal sealed class PreferencesDialog : Form
                     "Clear the whole remembered peers list?\n\nThis empties the shared list of peers RemSound has remembered, for every profile. Peers you're actively connected to aren't affected, and any peer will simply be remembered again next time you connect to it.",
                     "RemSound", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
                 onClearRememberedPeers();
+        };
+        clearRememberedRelaysButton.Click += (_, _) =>
+        {
+            if (MessageBox.Show(this,
+                    "Clear the whole remembered relays list?\n\nThis empties the shared list of relay servers RemSound has remembered, for every profile. A relay you're connected to isn't affected, and any relay is remembered again the next time you connect to it.",
+                    "RemSound", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+                onClearRememberedRelays();
         };
         clearRememberedAppsButton.Click += (_, _) =>
         {
@@ -1170,7 +1184,7 @@ internal sealed class PreferencesDialog : Form
         var clearListsHeader = Theme.SectionHeader("Remembered lists (shared across all profiles)");
         tabs.TabPages.Add(MakeTab("General",
             browseProfilesFolderButton, autoSavePanel, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel,
-            clearListsHeader, clearRememberedPeersButton, clearRememberedAppsButton));
+            clearListsHeader, clearRememberedPeersButton, clearRememberedRelaysButton, clearRememberedAppsButton));
         tabs.TabPages.Add(MakeTab("Appearance",
             themeRow, showPanEqTabBox, tabOrderLabel, tabOrderList, tabOrderButtons,
             enableDiscoveredPeersBox, enableRememberedPeersBox));

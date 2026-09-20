@@ -1,0 +1,69 @@
+namespace RemSound.App;
+
+/// <summary>
+/// The notice shown when someone connects to a relay server, in Ed's own words (2026-09-20). A relay only ever shows
+/// you the people on your own password, which is the one thing about it that surprises people, so it is said once,
+/// plainly, with a way to stop saying it.
+/// </summary>
+internal sealed class RelayNoticeDialog : Form
+{
+    private readonly AccessibleCheckBox dontShowAgainBox = new()
+    {
+        Text = "&Don't show this message again",
+        AccessibleName = "Don't show this message again",
+        AutoSize = true,
+    };
+
+    /// <summary>Build it without showing it, so the dialog audits can reach it headlessly.</summary>
+    internal static RelayNoticeDialog Build() => new();
+
+    private RelayNoticeDialog()
+    {
+        Text = "Connecting to a relay server";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MinimizeBox = false;
+        MaximizeBox = false;
+        StartPosition = FormStartPosition.CenterParent;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        Padding = new Padding(12);
+
+        // A read-only multiline box rather than a label: a screen reader can arrow through it, and the text is
+        // selectable, the same shape as the app's other readouts.
+        var message = new TextBox
+        {
+            Text = "Please note: when you connect to a relay server, you will only be able to see and connect to users "
+                 + "on the relay who have the same password as the one set in your profile.",
+            ReadOnly = true,
+            Multiline = true,
+            Width = 420,
+            Height = 60,
+            BorderStyle = BorderStyle.None,
+            BackColor = SystemColors.Control,
+            TabStop = true,
+            AccessibleName = "Relay server notice",
+        };
+
+        var ok = new Button { Text = "&OK", DialogResult = DialogResult.OK, AutoSize = true, AccessibleName = "OK" };
+        var layout = new TableLayoutPanel { ColumnCount = 1, RowCount = 3, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill };
+        layout.Controls.Add(message, 0, 0);
+        layout.Controls.Add(dontShowAgainBox, 0, 1);
+        layout.Controls.Add(ok, 0, 2);
+        message.TabIndex = 0;
+        dontShowAgainBox.TabIndex = 1;
+        ok.TabIndex = 2;
+        Controls.Add(layout);
+        AcceptButton = ok;
+        CancelButton = ok;
+    }
+
+    /// <summary>Shows the notice. Returns true when the user asked not to see it again. Off by default, like every
+    /// other "remember this" in RemSound.</summary>
+    public static bool ShowNotice(IWin32Window? owner)
+    {
+        using var dialog = new RelayNoticeDialog();
+        ForegroundDialog.Show(_ => dialog.ShowDialog(owner));
+        return dialog.dontShowAgainBox.Checked;
+    }
+}

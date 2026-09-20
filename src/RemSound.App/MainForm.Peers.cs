@@ -291,6 +291,11 @@ public sealed partial class MainForm
             foreach (var addr in discovery.GetKnownAddresses(id))
                 if (seen.Add(addr)) allowed.Add(new IPEndPoint(addr, 0));
         }
+        // The phone or older app paired with us through the relay speaks from the relay's own address, not from a member
+        // address of its own, so ticking that row is what lets the relay's address in. Untick it and the relay's audio is
+        // turned away again, exactly as unticking anybody else is.
+        if (relayPairTicked && relayGroup.ConnectedRelay is { } pairRelay && seen.Add(pairRelay.Address))
+            allowed.Add(new IPEndPoint(pairRelay.Address, 0));
         receiver.SetAllowedSenders(allowed);
 
         // Same walk, kept as GROUPS rather than flattened: which addresses belong to one person. The
@@ -375,8 +380,15 @@ public sealed partial class MainForm
 
     private IPEndPoint[] SelectedSendEndpoints()
     {
-        // Collapse duplicates by ip:port so the same address isn't targeted twice.
-        return selectedPeerEndpoints.Values
+        // Somebody on a relay is reached AT THE RELAY, not at the made-up address we know them by here, and one copy
+        // covers everyone there: the relay passes it to each person who has ticked us. Collapse duplicates by ip:port
+        // so the same address isn't targeted twice.
+        var targets = selectedPeerEndpoints.Values.Select(ep => relayGroup.RelayOf(ep) ?? ep);
+        // Ticking the phone or older app paired with us through the relay means sending to the relay itself: that one
+        // send carries both the copy the group reads and the ordinary copy the phone reads. If someone in the group is
+        // ticked too, it is the same address, and the dedupe below keeps it to the one send.
+        if (relayPairTicked && relayGroup.ConnectedRelay is { } pairRelay) targets = targets.Append(pairRelay);
+        return targets
             .GroupBy(ep => $"{ep.Address}:{ep.Port}")
             .Select(g => g.First())
             .ToArray();

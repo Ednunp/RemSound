@@ -71,7 +71,7 @@ internal sealed class ServiceNetworkPresence : IDisposable
     /// <summary>Bring the service up as a discoverable, reachable, send-only peer on <paramref name="port"/>,
     /// tracking <paramref name="endpoints"/> (the profile's peers) for heartbeat/pairing and unicast
     /// announcements. Idempotent: re-applies cleanly if already up. Never throws.</summary>
-    public void Start(int port, IReadOnlyList<IPEndPoint> endpoints)
+    public void Start(int port, IReadOnlyList<IPEndPoint> endpoints, IPEndPoint? relay = null, IReadOnlyList<Guid>? tickedOnRelay = null)
     {
         if (disposed) return;
         if (running) Stop();
@@ -83,7 +83,13 @@ internal sealed class ServiceNetworkPresence : IDisposable
         heartbeat.SendTransport = sender.SendVia;
         var group = relayGroup = new RelayGroupClient(AppConfig.LoadOrCreateRelayClientId(), m => log?.Invoke($"relay group: {m}"));
         group.SetIdentity(Environment.MachineName, sender.AudioFingerprint);
-        group.SetTargets(endpoints);
+        // The relay the profile names, if it names one: a relay is somewhere you go, and the service goes to the same one
+        // the app does. The people ticked there are the profile's, so the relay passes our sound to exactly them.
+        if (relay is not null)
+        {
+            group.Connect(relay);
+            group.SetTicked(tickedOnRelay ?? [], pairPartner: true);
+        }
         sender.RelayRouter = group;
         heartbeat.RelayOfMember = group.RelayOf;
 
@@ -114,7 +120,10 @@ internal sealed class ServiceNetworkPresence : IDisposable
         }
         catch (Exception ex) { log?.Invoke($"service: listener bind failed {ex.GetType().Name}: {ex.Message}"); }
 
-        heartbeat.SetTrackedPeers(endpoints);
+        // The relay is pinged like a peer: that is what opens the way back through the router and claims the ordinary pair
+        // slot beside a phone. Before the relay became a place of its own it sat in this list as a peer, so this keeps it.
+        var reachable = relay is null ? endpoints : endpoints.Append(relay).ToList();
+        heartbeat.SetTrackedPeers(reachable);
         heartbeat.Start();
         group.Start(sender.SendRaw);
 
@@ -122,7 +131,7 @@ internal sealed class ServiceNetworkPresence : IDisposable
         // internet (reached via the relay/Tailscale/port-forward) also learns we're here. Send-only.
         try
         {
-            discovery.SetUnicastPeerAddresses(endpoints.Select(e => e.Address));
+            discovery.SetUnicastPeerAddresses(reachable.Select(e => e.Address));
             discovery.Start(port, sendEnabled: true, receiveEnabled: false);
         }
         catch (Exception ex) { log?.Invoke($"service: discovery failed {ex.GetType().Name}: {ex.Message}"); }

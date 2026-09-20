@@ -33,25 +33,37 @@ internal static partial class SelfTest
         void Capture(ReadOnlySpan<byte> data, IPEndPoint to) { lock (sent) sent.Add((data.ToArray(), to)); }
         var me = new RelayGroupClient(Guid.NewGuid());
         me.SetIdentity("Me", fingerprint);
-        me.SetTargets([relay]);
         me.Start((data, length, to) => { Capture(data.AsSpan(0, length), to); return true; });
         try
         {
             var audio = PlainPacket(RemPacketType.Audio, 7, [1, 2, 3, 4, 5]);
+            Check(!me.TryRoute(audio, relay, Capture) && sent.Count == 0,
+                "nothing is said to a relay until the user connects to one: a relay is somewhere you go, not a peer that finds you");
+
+            me.Connect(relay);
             Check(!me.TryRoute(audio, relay, Capture),
                 "until a relay confirms a group, a packet to it must go exactly as it always has (pairs are untouched)");
-
-            me.NoteRelay(relay);
-            var hello = sent.LastOrDefault(s => s.To.Equals(relay) && s.Data.Length > 5 && s.Data[4] == RelayGroupClient.GroupVersion
-                                                 && s.Data[5] == RelayGroupClient.TypeHello);
-            Check(hello.Data is not null, "learning a peer is a relay must send it a hello at once, to join the group for our password");
-            Check(hello.Data!.Length == RelayGroupClient.GroupHeaderSize + RelayGroupClient.NameBytes + RelayGroupClient.GroupTagBytes
-                  && hello.Data.AsSpan(RelayGroupClient.GroupHeaderSize + RelayGroupClient.NameBytes).SequenceEqual(fingerprint)
-                  && RelayGroupClient.DecodeName(hello.Data.AsSpan(RelayGroupClient.GroupHeaderSize, RelayGroupClient.NameBytes)) == "Me",
-                "the hello must carry our name and, as the group tag, our password fingerprint");
+            (byte[] Data, IPEndPoint To) LastHello() => sent.LastOrDefault(s => s.To.Equals(relay) && s.Data.Length > 5
+                && s.Data[4] == RelayGroupClient.GroupVersion && s.Data[5] == RelayGroupClient.TypeHello);
+            var hello = LastHello();
+            Check(hello.Data is not null, "connecting to a relay must say hello at once, to join the group for our password");
+            var tickCountAt = RelayGroupClient.GroupHeaderSize + RelayGroupClient.NameBytes + RelayGroupClient.GroupTagBytes;
+            Check(hello.Data!.Length == tickCountAt + 1
+                  && hello.Data.AsSpan(RelayGroupClient.GroupHeaderSize + RelayGroupClient.NameBytes, RelayGroupClient.GroupTagBytes).SequenceEqual(fingerprint)
+                  && RelayGroupClient.DecodeName(hello.Data.AsSpan(RelayGroupClient.GroupHeaderSize, RelayGroupClient.NameBytes)) == "Me"
+                  && hello.Data[tickCountAt] == 0,
+                "the hello must carry our name, our password fingerprint as the group tag, and a tick list that says nobody yet");
 
             var alice = Guid.NewGuid();
             var bob = Guid.NewGuid();
+
+            me.SetTicked([alice], pairPartner: false);
+            hello = LastHello();
+            Check(hello.Data!.Length == tickCountAt + 1 + RelayGroupClient.ClientIdSize && hello.Data[tickCountAt] == 1
+                  && new Guid(hello.Data.AsSpan(tickCountAt + 1, RelayGroupClient.ClientIdSize), bigEndian: true) == alice,
+                "ticking someone must tell the relay at once who it is, because the relay only passes sound where both have ticked");
+            me.SetTicked([], pairPartner: false);
+            Check(LastHello().Data![tickCountAt] == 0, "unticking everyone must say so, not quietly leave the last list standing");
             Feed(me, relay, RosterPacket([(alice, "Alice"), (bob, "Bob"), (me.ClientId, "Me")], paired: false), RelayInbound.Consumed,
                 "a member list is bookkeeping, not audio");
             Check(me.IsInGroup(relay), "a member list from the relay must put us in its group");
@@ -76,8 +88,19 @@ internal static partial class SelfTest
             Feed(me, relay, RosterPacket([(alice, "Alice"), (bob, "Bob")], paired: true), RelayInbound.Consumed, "a member list");
             sent.Clear();
             me.TryRoute(audio, relay, Capture);
+            Check(sent.Count == 1 && sent[0].Data[4] == RelayGroupClient.GroupVersion,
+                "a phone or older app paired with us is somebody you have to tick like anyone else: until you do, your audio must not go to it");
+            me.SetTicked([], pairPartner: true);
+            sent.Clear();
+            me.TryRoute(audio, relay, Capture);
             Check(sent.Count == 2 && sent.Any(s => s.Data[4] == RemPacket.Version) && sent.Any(s => s.Data[4] == RelayGroupClient.GroupVersion),
-                "paired with a phone or older app, audio must go in both forms: group-framed for the group, ordinary for the phone");
+                "once that phone is ticked, audio must go in both forms: group-framed for the group, ordinary for the phone");
+            me.SetTicked([], pairPartner: false);
+            sent.Clear();
+            me.TryRoute(audio, relay, Capture);
+            Check(sent.Count == 1 && sent[0].Data[4] == RelayGroupClient.GroupVersion,
+                "unticking that phone must stop the ordinary copy again, not leave it running");
+            me.SetTicked([], pairPartner: true);
 
             var fromAlice = GroupPacket((byte)RemPacketType.Audio, alice, [9, 8, 7]);
             var length = fromAlice.Length;
@@ -93,7 +116,7 @@ internal static partial class SelfTest
             Check(!aliceMember.Address.Equals(bobMember.Address), "two people must never share an address, or they would be one person again");
 
             var again = new RelayGroupClient(Guid.NewGuid());
-            again.SetTargets([relay]);
+            again.Connect(relay);
             again.NoteRelay(relay);
             Feed(again, relay, RosterPacket([(alice, "Alice")], paired: false), RelayInbound.Consumed, "a member list");
             Check(again.Members.Single().Address.Equals(aliceMember.Address),
@@ -182,13 +205,30 @@ internal static partial class SelfTest
             var partner = group.Single(a => a.Group!.IsV1Paired(relay));
 
             foreach (var (app, level) in new[] { (alice, 0.3f), (bob, 0.5f), (carol, 0.7f), (older, 0.4f) }) app.StartTalking(level);
+
+            // Nobody has ticked anybody yet, so nobody hears anybody: on a relay, as on a network, sound only flows where
+            // each has ticked the other. This is what stops a room full of strangers arriving in your ears.
+            Thread.Sleep(2500);
+            Check(group.All(a => a.Receiver.LiveSessionCountForTest == 0),
+                "before anyone is ticked, nobody on the relay must be heard ("
+                + string.Join(", ", group.Select(a => $"{a.Name}: {a.Receiver.LiveSessionCountForTest}")) + ")");
+
+            // Alice ticks Bob, but Bob has not ticked Alice: still nothing, in either direction.
+            alice.Tick(alice.Group!.Members.Where(m => m.Name == "Bob").Select(m => m.Id));
+            Thread.Sleep(2500);
+            Check(alice.Receiver.LiveSessionCountForTest == 0 && bob.Receiver.LiveSessionCountForTest == 0,
+                $"ticking someone who has not ticked you back must be heard by neither of you (Alice {alice.Receiver.LiveSessionCountForTest}, Bob {bob.Receiver.LiveSessionCountForTest})");
+
+            // Now everyone ticks everyone, which is what the relay list does when you tick a row.
+            foreach (var a in group) a.Tick(a.Group!.Members.Select(m => m.Id), pairPartner: true);
             Check(WaitUntil(() => group.All(a => a.Group!.Members.All(m => a.Receiver.IsAudioFlowingFrom(m.Address.Address, TimeSpan.FromSeconds(2)))), 8000),
                 "each member must hear the other two ("
                 + string.Join("; ", group.Select(a => $"{a.Name} hears {string.Join(", ", a.Group!.Members.Where(m => a.Receiver.IsAudioFlowingFrom(m.Address.Address, TimeSpan.FromSeconds(2))).Select(m => m.Name))}")) + ")");
             foreach (var a in group)
             {
                 var expected = a == partner ? 3 : 2;
-                Check(a.Receiver.LiveSessionCountForTest == expected,
+                // A stream only starts when its Format packet comes round again, so give the newly-ticked ones a moment.
+                Check(WaitUntil(() => a.Receiver.LiveSessionCountForTest == expected, 10000),
                     $"{a.Name} must hear each of the other two as a person of their own{(a == partner ? ", and the older app as a third" : "")} "
                     + $"({a.Receiver.LiveSessionCountForTest} streams, expected {expected}); through one relay address they used to knock each other out");
             }
@@ -199,7 +239,28 @@ internal static partial class SelfTest
             Thread.Sleep(500);
             Check(dave.Receiver.LiveSessionCountForTest == 0,
                 $"someone on another password must hear nobody from the group ({dave.Receiver.LiveSessionCountForTest} streams)");
-            return $"three people on one password heard each other as three; {partner.Name} also partnered the older app, which still heard one person; "
+
+            // Carol unticks everyone. Her sound must stop reaching the other two, and theirs must stop reaching her —
+            // a tick is one switch for both directions, and taking it off has to actually take it off.
+            var carolAddress = alice.Group!.Members.Single(m => m.Name == "Carol").Address.Address;
+            carol.Tick([]);
+            Check(WaitUntil(() => carol.Receiver.LiveSessionCountForTest == 0
+                                  && !alice.Receiver.IsAudioFlowingFrom(carolAddress, TimeSpan.FromSeconds(2))
+                                  && !bob.Receiver.IsAudioFlowingFrom(carolAddress, TimeSpan.FromSeconds(2)), 10000),
+                $"unticking must stop the sound both ways (Carol still hears {carol.Receiver.LiveSessionCountForTest}; "
+                + $"Alice still hears Carol: {alice.Receiver.IsAudioFlowingFrom(carolAddress, TimeSpan.FromSeconds(2))}; "
+                + $"Bob still hears Carol: {bob.Receiver.IsAudioFlowingFrom(carolAddress, TimeSpan.FromSeconds(2))})");
+            Check(alice.Receiver.IsAudioFlowingFrom(alice.Group.Members.Single(m => m.Name == "Bob").Address.Address, TimeSpan.FromSeconds(2)),
+                "one person unticking must not disturb the two who still have each other ticked");
+
+            // And ticking again brings it straight back, without anyone reconnecting.
+            carol.Tick(carol.Group!.Members.Select(m => m.Id), pairPartner: true);
+            Check(WaitUntil(() => carol.Receiver.LiveSessionCountForTest >= 2
+                                  && alice.Receiver.IsAudioFlowingFrom(carolAddress, TimeSpan.FromSeconds(2)), 10000),
+                $"ticking again must bring the sound back both ways without reconnecting (Carol hears {carol.Receiver.LiveSessionCountForTest})");
+
+            return $"three people on one password heard each other as three, and only once each had ticked the other; unticking stopped it both "
+                + $"ways and ticking brought it back; {partner.Name} also partnered the older app, which still heard one person; "
                 + "a fourth on another password heard nobody";
         }
         finally
@@ -207,6 +268,146 @@ internal static partial class SelfTest
             foreach (var app in apps) app.Dispose();
             try { relayProcess.Kill(entireProcessTree: true); } catch { /* already gone */ }
             try { Directory.Delete(logDir, recursive: true); } catch { /* temp */ }
+        }
+    }
+
+    /// <summary>
+    /// CONNECTING TO A RELAY, REMEMBERING IT, AND TICKING WHO IS ON IT.
+    ///
+    /// <para>Ed's design, 2026-09-20: a relay is a place you go, not a person in your peer list. This drives the real
+    /// window — the address box, the Connect button, the remembered-relays list and the tick list — through the handlers
+    /// the controls call, with a relay's member list fed in exactly as its socket would deliver one. It pins what ticking
+    /// someone on a relay actually does: they become a peer of their own, our audio goes to the RELAY once (not to the
+    /// made-up address we know them by), and their audio is let in. And it pins the two things a person cannot work out
+    /// for themselves: that the list is hidden until you connect, and that someone who has not ticked you back is named
+    /// as such rather than being silently silent.</para>
+    /// </summary>
+    private static string? AuditConnectingToARelayFromTheWindow()
+    {
+        var restoreMuted = CuePlayer.GloballyMuted;
+        CuePlayer.GloballyMuted = true;
+        MainForm? form = null;
+        try
+        {
+            try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+
+            var relay = new IPEndPoint(IPAddress.Parse("203.0.113.44"), RemPacket.DefaultPort);
+            var entry = "relay.example.test:47830";
+            bool PeersRowShown() => form.RelayPeersRowForTest is { } row && IsSetVisibleForAltAudit(row);
+            Check(!PeersRowShown(), "the relay's own peer list must be hidden until you are connected to one");
+            Check(form.RelayGroupForTest.ConnectedRelay is null, "nothing is joined until the user connects: a relay is somewhere you go");
+
+            form.ConnectToRelayForTest(entry, relay);
+            Check(relay.Equals(form.RelayGroupForTest.ConnectedRelay), "pressing Connect must join that relay");
+            Check(PeersRowShown(), "connecting must show the list of people on the relay");
+            Check(form.RememberedRelaysListForTest.Items.Cast<object>().Any(i => (string)i == entry),
+                "a relay you have connected to must be remembered, as it was typed, so you never type it twice");
+
+            // The relay's member list arrives on the sending socket, as it does in the app.
+            var alice = Guid.NewGuid();
+            var bob = Guid.NewGuid();
+            Feed(form.RelayGroupForTest, relay, RosterPacket([(alice, "Alice", true), (bob, "Bob", false)], paired: false),
+                RelayInbound.Consumed, "a member list");
+            form.SyncRelayPeersListForTest();
+            Check(form.RelayPeersListForTest.Items.Cast<object>().Select(i => i.ToString()!).Order().SequenceEqual(["Alice", "Bob"]),
+                $"the people on the relay must be listed by name ({string.Join(", ", form.RelayPeersListForTest.Items.Cast<object>())})");
+            Check(Enumerable.Range(0, form.RelayPeersListForTest.Items.Count).All(i => !form.RelayPeersListForTest.GetItemChecked(i)),
+                "nobody on a relay is ticked for you: arriving in a room is not agreeing to be heard");
+            Check(form.SelectedSendEndpointsForTest().Length == 0, "and until you tick somebody, nothing is sent anywhere");
+            // The list's own status label belongs to the list: it is what a screen reader is told on every arrow press,
+            // and the relay's connection status has a line of its own beside Connect.
+            Check(!form.RelayListStatusForTest.Contains("Connected to", StringComparison.Ordinal),
+                $"the relay list's status label must carry the list's own state, not the connection's ({form.RelayListStatusForTest})");
+
+            // Tick Alice, who has already ticked us.
+            var aliceRow = form.RelayPeersListForTest.Items.Cast<object>().ToList().FindIndex(i => i.ToString() == "Alice");
+            form.RelayPeerTickedForTest(aliceRow, true);
+            var aliceMember = form.RelayGroupForTest.Members.Single(m => m.Name == "Alice");
+            Check(form.SelectedSendEndpointsForTest() is [var only] && only.Equals(relay),
+                "ticking somebody on a relay must send our audio to the RELAY, once, not to the address we know them by");
+            Check(form.ReceiverForTest.IsSenderAllowedForTest(aliceMember.Address),
+                "and must let their audio in, at the address the relay credits them to");
+            Check(!form.ReceiverForTest.IsSenderAllowedForTest(form.RelayGroupForTest.Members.Single(m => m.Name == "Bob").Address),
+                "somebody you have not ticked must still be turned away");
+
+            // Tick Bob, who has not ticked us: the status line must say so rather than leaving it a mystery.
+            var bobRow = form.RelayPeersListForTest.Items.Cast<object>().ToList().FindIndex(i => i.ToString() == "Bob");
+            form.RelayPeerTickedForTest(bobRow, true);
+            form.SyncRelayPeersListForTest();
+            Check(form.RelayStatusForTest.Contains("waiting for Bob", StringComparison.OrdinalIgnoreCase),
+                $"somebody who has not ticked you back must be named as such, not silently silent ({form.RelayStatusForTest})");
+            Check(!form.RelayStatusForTest.Contains("Alice", StringComparison.Ordinal),
+                $"and somebody who HAS ticked you back must not be listed as waiting ({form.RelayStatusForTest})");
+            Feed(form.RelayGroupForTest, relay, RosterPacket([(alice, "Alice", true), (bob, "Bob", true)], paired: false),
+                RelayInbound.Consumed, "a member list");
+            form.SyncRelayPeersListForTest();
+            Check(!form.RelayStatusForTest.Contains("waiting", StringComparison.OrdinalIgnoreCase),
+                $"once they tick you back, nobody is waited for ({form.RelayStatusForTest})");
+
+            // A relay from before it said who had ticked you must still list its people, rather than never joining.
+            // It names somebody new, so the list can only be right if that older list was really read.
+            var dave = Guid.NewGuid();
+            Feed(form.RelayGroupForTest, relay, OlderRosterPacket([(alice, "Alice"), (bob, "Bob"), (dave, "Dave")], paired: false),
+                RelayInbound.Consumed, "a member list from an older relay");
+            form.SyncRelayPeersListForTest();
+            Check(form.RelayPeersListForTest.Items.Cast<object>().Any(i => i.ToString() == "Dave"),
+                $"a relay from before the tick flag must still show its people ({string.Join(", ", form.RelayPeersListForTest.Items.Cast<object>())})");
+
+            // Unticking takes it all off again.
+            form.RelayPeerTickedForTest(aliceRow, false);
+            form.RelayPeerTickedForTest(bobRow, false);
+            Check(form.SelectedSendEndpointsForTest().Length == 0 && !form.ReceiverForTest.IsSenderAllowedForTest(aliceMember.Address),
+                "unticking must stop sending to them and stop letting them in");
+
+            // Changing the profile password is a different set of people, so the ticks cannot carry over.
+            form.RelayPeerTickedForTest(aliceRow, true);
+            var (_, otherFingerprint) = RemSoundCrypto.ForPlainPassword("a completely different password");
+            form.RelayPasswordChangedForTest(otherFingerprint);
+            Check(form.RelayTickedForTest.Count == 0,
+                "changing your password puts you among different people, so nobody stays ticked from the group you have left");
+
+            // Delete on the remembered list forgets one.
+            form.ForgetRelayForTest(entry);
+            Check(!form.RememberedRelaysListForTest.Items.Cast<object>().Any(i => (string)i == entry),
+                "Delete on the remembered relays list must forget that relay");
+
+            form.DisconnectFromRelayForTest();
+            Check(form.RelayGroupForTest.ConnectedRelay is null && !PeersRowShown(),
+                "disconnecting must leave the relay and take its list away with it");
+
+            // A profile puts its ticks back before anybody is on the list — the list only arrives seconds later. The
+            // ticks have to be picked up when those people appear, or a profile would load and nothing would be heard.
+            var restored = Profile.NewBlank();
+            restored.RelayServer = entry;
+            restored.RelayTickedIds = [alice.ToString("D")];
+            form.ApplyRelayProfileForTest(restored);
+            form.ConnectToRelayForTest(entry, relay);
+            Check(form.SelectedSendEndpointsForTest().Length == 0, "a restored tick reaches nobody until that person is on the relay");
+            Feed(form.RelayGroupForTest, relay, RosterPacket([(alice, "Alice", true), (bob, "Bob", false)], paired: false),
+                RelayInbound.Consumed, "a member list");
+            form.SyncRelayPeersListForTest();
+            Check(form.ReceiverForTest.IsSenderAllowedForTest(form.RelayGroupForTest.Members.Single(m => m.Name == "Alice").Address)
+                  && form.SelectedSendEndpointsForTest() is [var restoredTarget] && restoredTarget.Equals(relay),
+                "a profile's ticks must take effect the moment those people appear on the relay, without the user ticking again");
+            form.DisconnectFromRelayForTest();
+
+            // Only a relay sends an address check. One arriving from an address the user typed into the peer list is
+            // how RemSound knows to offer to connect to it as a relay instead.
+            var typed = new IPEndPoint(IPAddress.Parse("203.0.113.55"), RemPacket.DefaultPort);
+            Check(!form.ShouldOfferRelayForTest(typed), "an address check from somewhere nobody chose must not be asked about");
+            form.SelectPeerForTest(new PeerAnnouncement(Guid.NewGuid(), "Typed by hand", typed.Port,
+                CanSend: true, CanReceive: true, DateTime.UtcNow, typed.Address));
+            Check(form.ShouldOfferRelayForTest(typed), "an address in the peer list that answers as a relay must be asked about");
+            Check(!form.ShouldOfferRelayForTest(typed), "and asked about once only, not on every address check it sends");
+            return "the list is hidden until you connect; connecting remembers the relay and lists its people, none ticked; "
+                + "ticking sends to the relay once and lets that person in; somebody who has not ticked you back is named; "
+                + "an older relay's list still shows; unticking, a password change, Delete and Disconnect all undo what they should";
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            CuePlayer.GloballyMuted = restoreMuted;
         }
     }
 
@@ -267,6 +468,8 @@ internal static partial class SelfTest
         string Read(string file) => File.ReadAllText(Path.Combine(root, "src", "RemSound.App", file)).Replace("\r", "");
         var app = Read("MainForm.cs");
         var service = Read("ServiceNetworkPresence.cs");
+        var host = Read("ServiceSendHost.cs");
+        var relayUi = Read("MainForm.Relay.cs");
         var missing = new List<string>();
         void Need(string text, string code, string what) { if (!text.Contains(code, StringComparison.Ordinal)) missing.Add(what); }
 
@@ -276,7 +479,11 @@ internal static partial class SelfTest
         Need(app, "heartbeatService.RelayOfMember = relayGroup.RelayOf;", "the app's heartbeat must count a member's pong for its relay");
         Need(app, "relayGroup.NoteRelay(remote);", "the app must learn a relay from its address check");
         Need(app, "relayGroup.Start(sender.SendRaw);", "the app must start its relay group on the raw socket");
-        Need(app, "relayGroup.SetTargets(endpoints);", "the app must tell its relay group who it sends to");
+        Need(relayUi, "relayGroup.Connect(resolved);", "the app must connect to a relay only when the user asks for one");
+        Need(relayUi, "relayGroup.SetTicked(relayTicked, relayPairTicked);", "the app must tell the relay who it has ticked");
+        Need(relayUi, "relayGroup.Disconnect();", "the app must be able to leave a relay");
+        Need(app, "GatherRelayProfile(profile);", "a profile must remember its relay and who was ticked on it");
+        Need(app, "ApplyRelayProfile(p);", "loading a profile must put its relay and its ticks back");
         Need(app, "relayGroup.SetIdentity(Environment.MachineName, currentAudioFingerprint);", "the app must tell its relay group its password");
         Need(service, "sender.RelayRouter = group;", "the service must route what it sends through its relay group");
         Need(service, "group.HandleInbound(buf, ref len, remote, out var member)", "the service must hand what arrives on its sending socket to the relay group first");
@@ -284,7 +491,9 @@ internal static partial class SelfTest
         Need(service, "else if (type == RemPacketType.AddrCheck) EchoAddrCheck(buf, len, remote);", "the service must echo a relay's address check that arrives on its sending socket");
         Need(service, "relayGroup?.NoteRelay(remote);", "the service must learn a relay from its address check");
         Need(service, "group.Start(sender.SendRaw);", "the service must start its relay group on the raw socket");
-        Need(service, "group.SetTargets(endpoints);", "the service must tell its relay group who it sends to");
+        Need(service, "group.Connect(relay);", "the service must connect to the relay its profile names");
+        Need(service, "group.SetTicked(tickedOnRelay ?? [], pairPartner: true);", "the service must tell the relay who its profile has ticked");
+        Need(host, "presence.Start(RemPacket.DefaultPort, endpoints, relay, tickedOnRelay);", "the service must pass its profile's relay and ticks to its network presence");
         Check(missing.Count == 0, string.Join(" | ", missing));
         return "the app and the send-only service both route through, listen to, learn and leave their relay groups";
     }
@@ -300,6 +509,23 @@ internal static partial class SelfTest
         public RelayGroupClient? Group { get; }
         private readonly CancellationTokenSource talking = new();
 
+        /// <summary>Tick people on the relay, exactly as MainForm does it: the relay is told who, our audio goes to the
+        /// relay for them, and their audio is let in at the address the relay credits them to. Ticking the phone paired
+        /// with us instead opens the relay's own address, which is where a phone's audio comes from.</summary>
+        public void Tick(IEnumerable<Guid> memberIds, bool pairPartner = false)
+        {
+            var wanted = memberIds.ToHashSet();
+            var group = Group!;
+            group.SetTicked(wanted, pairPartner);
+            var members = group.Members.Where(m => wanted.Contains(m.Id)).ToList();
+            var targets = members.Select(m => group.RelayOf(m.Address) ?? m.Address).ToList();
+            if (pairPartner && group.ConnectedRelay is { } pairRelay) targets.Add(pairRelay);
+            Sender.SetReceivers(targets.GroupBy(e => $"{e.Address}:{e.Port}").Select(g => g.First()).ToList());
+            var allowed = members.Select(m => new IPEndPoint(m.Address.Address, 0)).ToList();
+            if (pairPartner && group.ConnectedRelay is { } allowRelay) allowed.Add(new IPEndPoint(allowRelay.Address, 0));
+            Receiver.SetAllowedSenders(allowed);
+        }
+
         public RelayTestApp(string name, string password, IPEndPoint relay, bool groups)
         {
             Name = name;
@@ -309,18 +535,20 @@ internal static partial class SelfTest
             Sender.ConfigureCodec(AudioTransportCodec.Pcm);
             Sender.SetSendRate(SendRate.Standard);
             Sender.SetTightLatency(false);
-            Sender.SetReceivers([relay]);
+            // An app that knows nothing of groups pairs through the relay as it always has: it sends to the relay and
+            // takes what the relay sends back. One that does know waits for the user to tick somebody (see Tick).
+            Sender.SetReceivers(groups ? [] : [relay]);
             Receiver.AudioKey = key;
             Receiver.AudioFingerprint = fingerprint;
             Receiver.SetOutputDevices([]);       // decode only; the gate never opens a device or makes a sound
             Receiver.SetPlaybackEnabled(true);
-            Receiver.SetAllowedSenders([relay]); // only the relay is chosen: its members must get in through it
+            Receiver.SetAllowedSenders(groups ? [] : [relay]);
             Heartbeat.SendTransport = Sender.SendVia;
             if (groups)
             {
                 Group = new RelayGroupClient(Guid.NewGuid());
                 Group.SetIdentity(name, fingerprint);
-                Group.SetTargets([relay]);
+                Group.Connect(relay);
                 Sender.RelayRouter = Group;
                 Receiver.RelayOfMember = Group.RelayOf;
                 Heartbeat.RelayOfMember = Group.RelayOf;
@@ -410,6 +638,27 @@ internal static partial class SelfTest
     /// <summary>A member list as the relay sends it: the count, each member's id and name, then the flags byte. The
     /// relay's own id is all zeros.</summary>
     private static byte[] RosterPacket((Guid Id, string Name)[] members, bool paired)
+        => RosterPacket(members.Select(m => (m.Id, m.Name, false)).ToArray(), paired);
+
+    /// <summary>A member list exactly as the relay builds one: each member's id and name, then that member's own flags
+    /// byte saying whether they have ticked the person being sent it, then one flags byte for the whole list.</summary>
+    private static byte[] RosterPacket((Guid Id, string Name, bool TicksUs)[] members, bool paired)
+    {
+        const int entry = RelayGroupClient.RosterEntryBytes;
+        var payload = new byte[1 + members.Length * entry + 1];
+        payload[0] = (byte)members.Length;
+        for (var i = 0; i < members.Length; i++)
+        {
+            IdBytes(members[i].Id).CopyTo(payload, 1 + i * entry);
+            RelayGroupClient.EncodeName(members[i].Name, payload.AsSpan(1 + i * entry + RelayGroupClient.ClientIdSize, RelayGroupClient.NameBytes));
+            payload[1 + i * entry + entry - 1] = members[i].TicksUs ? RelayGroupClient.RosterMemberFlagTicksUs : (byte)0;
+        }
+        payload[^1] = paired ? RelayGroupClient.RosterFlagV1Paired : (byte)0;
+        return GroupPacket(RelayGroupClient.TypeRoster, Guid.Empty, payload);
+    }
+
+    /// <summary>A member list from a relay from before it said who had ticked you: entries one byte shorter.</summary>
+    private static byte[] OlderRosterPacket((Guid Id, string Name)[] members, bool paired)
     {
         const int entry = RelayGroupClient.ClientIdSize + RelayGroupClient.NameBytes;
         var payload = new byte[1 + members.Length * entry + 1];

@@ -11,7 +11,9 @@ in one process, on one UDP port:
   group, and nobody else. A client's LobbyHello carries its name and an 8-byte
   group tag, its password fingerprint, which its Format packets already carry
   in the clear. Periodic LobbyRoster packets tell each member who else is in
-  its group. Capacity: 64 clients across all groups by default.
+  its group, and, for each of them, whether that person has ticked the reader —
+  which is what lets an app say "waiting for them to tick you" rather than just
+  going quiet. Capacity: 64 clients across all groups by default.
   A hello may also carry the list of people that client has ticked. Sound passes
   between two clients only when each has ticked the other, exactly as two people
   on one network must each tick the other. A hello with no list means "everyone
@@ -163,7 +165,7 @@ only releases signed with the RemSound release key.
   `REMSOUND_REQUIRE_ADDR_CHECK=1`) it withholds all forwarded traffic, the
   lobby roster included, from any address that has not echoed its cookie. A
   lobby client that turns up at a new address has to prove the new one.
-- **Per-IP cap.** One source IP may hold at most 4 pair or group entries at
+- **Per-IP cap.** One source IP may hold at most 8 pair or group entries at
   once, counted across v1 and v2 together (a v2 client holding a v1 slot beside
   a phone counts twice). This is always on; `--max-per-ip` changes the number.
 
@@ -172,7 +174,7 @@ only releases signed with the RemSound release key.
 Structured key=value lines. Notable events:
 
 ```
-event=startup version_supported=v1,v2 listen=0.0.0.0:47830 max_clients=64 max_per_ip=4 addr_check=watch-only
+event=startup version_supported=v1,v2 listen=0.0.0.0:47830 max_clients=64 max_per_ip=8 addr_check=watch-only
 
 # v1 (pairwise)
 event=peer_joined addr=1.2.3.4:5555 slots_filled=1
@@ -233,7 +235,7 @@ payload.
 | Log file                 | `ExecStart=` `--log-path=PATH` in the service unit                       |
 | Group capacity (64, all groups together) | `--max-clients=N` or env var `REMSOUND_MAX_CLIENTS=N` in the service unit |
 | Address proof (watch-only) | `--require-addr-check` or env var `REMSOUND_REQUIRE_ADDR_CHECK=1` in the service unit |
-| Per-IP entry cap (4)     | `--max-per-ip=N` or env var `REMSOUND_MAX_PER_IP=N` in the service unit |
+| Per-IP entry cap (8)     | `--max-per-ip=N` or env var `REMSOUND_MAX_PER_IP=N` in the service unit |
 | Idle timeout (60 s)      | edit `IDLE_TIMEOUT_SECONDS` in `remsound-relay.py`                       |
 | Stats interval (60 s)    | edit `STATS_INTERVAL_SECONDS` in `remsound-relay.py`                     |
 | Update check (hourly)    | edit `remsound-relay-update.timer`                                       |

@@ -116,6 +116,15 @@ internal static partial class SelfTest
         new("renamePeerButton", "opens the rename dialog for the selected peer", GovernsNothing: true),
         new("peerDetailsBox", "read-only details of the selected peer", GovernsNothing: true),
 
+        // ---- The relay server: somewhere you go, with the people on it in a list of their own ----
+        new("relayAddressBox", "the relay server to connect to - what it reaches is PROVEN by 'Connecting to a relay, remembering it and ticking who is on it' and by 'Several people share one relay'", GovernsNothing: true),
+        new("relayConnectButton", "connects to, and leaves, that relay - PROVEN by 'Connecting to a relay, remembering it and ticking who is on it'", GovernsNothing: true),
+        new("rememberedRelaysList", "the relays remembered from before: Enter connects, Delete forgets one - PROVEN by 'Connecting to a relay, remembering it and ticking who is on it'", GovernsNothing: true),
+        new("relayPeersList", "who on the relay you have ticked, which is what makes their sound flow both ways - PROVEN by 'Several people share one relay'", GovernsNothing: true),
+        new("relayPeersStatus", "what the relay list is doing, spoken as it changes", GovernsNothing: true),
+        new("relayPeersLabel", "the label of the relay's own peer list", GovernsNothing: true),
+        new("relayStatusLine", "whether you are connected to a relay, and how many people there share your password", GovernsNothing: true),
+
         // ---- Audio inputs and outputs -----------------------------------------------------------
         new("sendInputDevicesList", "which microphones/inputs are captured", GovernsNothing: true),
         new("sendOutputDevicesList", "which outputs are captured (loopback)", GovernsNothing: true),

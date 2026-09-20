@@ -235,6 +235,7 @@ internal static partial class SelfTest
         RunStep(results, "The relay runs as its own user, with a private log", AuditRelayRunsAsItsOwnUserWithAPrivateLog);
         RunStep(results, "Relay groups: framing, member addresses and the member list", AuditRelayGroupFramingAndMembers);
         RunStep(results, "Several people share one relay, each heard as themselves", AuditSeveralPeopleShareOneRelay);
+        RunStep(results, "Connecting to a relay, remembering it and ticking who is on it", AuditConnectingToARelayFromTheWindow);
         RunStep(results, "Heartbeats through a relay group", AuditRelayGroupHeartbeats);
         RunStep(results, "The app and the send-only service both take part in relay groups", AuditAppAndServiceTakePartInRelayGroups);
         RunStep(results, "A standard uncompressed frame goes out as one packet", PcmStandardFrameIsOnePacket);
@@ -1397,6 +1398,9 @@ internal static partial class SelfTest
             ["SelectedSendApplications"] = "control-owned: app tick list (pinned by MainWindowProfileRoundTrip)",
             ["RememberedPeers"] = "control-owned: peers lists (global remembered store + ticks)",
             ["SelectedConnectedPeers"] = "control-owned: peers lists",
+            ["RelayServer"] = "control-owned: the relay box (GatherRelayProfile / ApplyRelayProfile)",
+            ["RelayConnectOnStart"] = "control-owned: whether the relay box is connected when the profile is saved",
+            ["RelayTickedIds"] = "control-owned: the ticks in the relay's own peer list",
             ["PeerShaping"] = "control-owned: pan/EQ editor state (pinned by MainWindowProfileRoundTrip)",
             ["EnableAllPeerShaping"] = "control-owned: shaping master switch (pinned by MainWindowProfileRoundTrip)",
             ["AudioPort"] = "DEAD FIELD: nothing reads it (the live port is the RemPacket constant). Wiring a custom-port UI to it requires adding real persistence first",
@@ -4739,9 +4743,10 @@ internal static partial class SelfTest
                 // and holds it to saying so.
                 () => AppConfig.Load().LoggingEnabled,
                 enabled => { var c = AppConfig.Load(); c.LoggingEnabled = enabled; c.Save(); },
-                () => { }, () => 0, () => { }, () => { }, () => { }, () => { }, () => { }, _ => { },
+                () => { }, () => 0, () => { }, () => { }, () => { }, () => { }, () => { }, () => { }, _ => { },
                 () => (default(RouterMappingStatus), (IPEndPoint?)null, ""),
                 _ => { }, _ => { })),
+            ("Relay server notice", () => RelayNoticeDialog.Build()),
             ("Service profile", () => new ServiceProfileDialog(RemSound.Core.Profile.NewBlank(), false)),
             ("About", () => new AboutDialog()),
             ("Add EQ band", () => new AddBandDialog()),

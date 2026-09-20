@@ -349,10 +349,18 @@ public sealed class AppConfig
     /// <see cref="DisabledAsioDrivers"/>: a driver can be warned-about-but-still-enabled.</summary>
     public List<string> AsioDriversWarnedAbout { get; set; } = new();
 
-    /// <summary>This install's id in a relay group (GitHub #29, 2026-09-18). Made the first time it is needed and
-    /// kept, so the same person keeps the same place in everyone else's app — and the volume and pan they gave them.
-    /// The app and the send-only service share it: they are one person, never on the network at the same time.</summary>
+    /// <summary>This copy of RemSound's id in a relay group (GitHub #29, 2026-09-18). Made the first time it is needed
+    /// and kept, so the same person keeps the same place in everyone else's app — and the volume and pan they gave
+    /// them. The app and the send-only service share it: they are one person, never on the network at the same time.</summary>
     public string? RelayClientId { get; set; }
+
+    /// <summary>Relay servers this machine has connected to, newest first, offered again in the Connectivity tab.
+    /// Cleared from Preferences → General, beside the remembered peers and applications.</summary>
+    public List<string> RememberedRelays { get; set; } = new();
+
+    /// <summary>True once the user has ticked "don't show this again" on the notice shown when connecting to a
+    /// relay. Machine-wide: it explains how relays work, not anything about one set of people.</summary>
+    public bool RelayNoticeSuppressed { get; set; }
 
     /// <summary>The relay-group id, made and saved on first use. Never throws: if it cannot be saved, a fresh id still
     /// works for this run; it just won't be the same next time.</summary>

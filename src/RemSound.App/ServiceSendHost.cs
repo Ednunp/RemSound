@@ -415,6 +415,11 @@ public sealed class ServiceSendHost : IDisposable
         if (disposed) return false;
         var specs = BuildSendSpecs(profile);
         var endpoints = BuildEndpoints(profile);
+        // The relay the profile is connected to, and the people ticked there. One copy goes up to the relay and the relay
+        // passes that copy to each of them, so the relay is a send target of its own alongside the direct peers.
+        var relay = BuildRelayEndpoint(profile);
+        var tickedOnRelay = ParseTickedIds(profile);
+        if (relay is not null && !endpoints.Any(e => e.Equals(relay))) endpoints.Add(relay);
         var appsMode = IsApplicationsMode(profile);
         lock (gate)
         {
@@ -478,7 +483,7 @@ public sealed class ServiceSendHost : IDisposable
             // They reset per sending STINT in Resume() (and on power resume).
             // Come up on the network too, so the peers can discover and connect to us — not just receive a
             // blind push. Same well-known audio port and the same components the interactive app uses.
-            presence.Start(RemPacket.DefaultPort, endpoints);
+            presence.Start(RemPacket.DefaultPort, endpoints, relay, tickedOnRelay);
             running = true;
             // Un-throttle the process while streaming. A headless Windows SERVICE is treated by the OS as a
             // background process and gets aggressively downclocked (EcoQoS), migrated onto efficiency cores
@@ -712,6 +717,28 @@ public sealed class ServiceSendHost : IDisposable
             // the same default the main app's manual-peer path uses (NOT the local listen port).
             var ep = new IPEndPoint(addr, port ?? RemPacket.DefaultPeerDialPort);
             if (seen.Add($"{ep.Address}:{ep.Port}")) result.Add(ep);
+        }
+        return result;
+    }
+
+    /// <summary>The relay the profile is connected to, resolved, or null when it names none or asks not to connect on
+    /// start. Same rules as the app's own relay box: a host or an address, with an optional port.</summary>
+    internal static IPEndPoint? BuildRelayEndpoint(Profile p)
+    {
+        if (!p.RelayConnectOnStart || string.IsNullOrWhiteSpace(p.RelayServer)) return null;
+        var entry = p.RelayServer!.Trim();
+        var (_, port) = PeerAddress.Split(entry);
+        var addr = PeerAddress.ResolveHost(entry);
+        return addr is null ? null : new IPEndPoint(addr, port ?? RemPacket.DefaultPort);
+    }
+
+    /// <summary>The people the profile has ticked on its relay. Anything unreadable is simply skipped.</summary>
+    internal static List<Guid> ParseTickedIds(Profile p)
+    {
+        var result = new List<Guid>();
+        foreach (var text in p.RelayTickedIds)
+        {
+            if (Guid.TryParse(text, out var id) && !result.Contains(id)) result.Add(id);
         }
         return result;
     }

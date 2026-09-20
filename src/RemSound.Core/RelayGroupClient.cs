@@ -66,9 +66,17 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
     public const byte TypeBye = 9;
     public const int NameBytes = 32;
     public const int GroupTagBytes = RemPacket.PasswordFingerprintSize;
-    private const int RosterEntryBytes = ClientIdSize + NameBytes;
+    /// <summary>The most people one hello can name as ticked, matching the relay's own cap.</summary>
+    public const int MaxTickedIds = 64;
+    /// <summary>One member-list entry: their id, their name, and their own flags byte.</summary>
+    public const int RosterEntryBytes = ClientIdSize + NameBytes + 1;
+    /// <summary>A member-list entry from a relay from before it said who had ticked you.</summary>
+    private const int RosterEntryBytesWithoutFlags = ClientIdSize + NameBytes;
     /// <summary>Member-list flags byte, bit 0: we hold one of the relay's ordinary pair slots with a partner.</summary>
     public const byte RosterFlagV1Paired = 0x01;
+    /// <summary>A member's own flags byte, bit 0: that person has ticked us. It is what lets the app say "waiting for
+    /// them to tick you" instead of simply going quiet, which is the one thing nobody can work out for themselves.</summary>
+    public const byte RosterMemberFlagTicksUs = 0x01;
     public static readonly TimeSpan HelloInterval = TimeSpan.FromSeconds(2);
     /// <summary>The relay sends the member list every second; this long without one and we go back to ordinary form.</summary>
     public static readonly TimeSpan GroupAliveFor = TimeSpan.FromSeconds(5);
@@ -78,6 +86,9 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
     private readonly Dictionary<IPEndPoint, RelayState> relays = new();
     private readonly Dictionary<IPEndPoint, MemberState> memberByAddress = new();
     private HashSet<IPEndPoint> targets = [];
+    private readonly HashSet<Guid> ticked = [];
+    private bool pairPartnerTicked;
+    private volatile bool pairTickedFlag;
     private string displayName = Environment.MachineName;
     private byte[]? groupTag;
     private Func<byte[], int, IPEndPoint, bool>? rawSend;
@@ -101,8 +112,11 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
     /// <summary>Raised (on whichever thread noticed) when the groups or their members change.</summary>
     public event Action? Changed;
 
-    /// <summary>One person in one of our groups, as the rest of the app sees them.</summary>
-    public sealed record Member(IPEndPoint Address, string Name, IPEndPoint Relay);
+    /// <summary>One person in our group, as the rest of the app sees them: their own id, their own address, their
+    /// name, and the relay they are behind.</summary>
+    /// <param name="TicksUs">True when the relay says this person has ticked us. Sound only flows when both have, so
+    /// this is the difference between "not set up yet" and "something is wrong".</param>
+    public sealed record Member(Guid Id, IPEndPoint Address, string Name, IPEndPoint Relay, bool TicksUs);
 
     private sealed class RelayState(IPEndPoint endpoint)
     {
@@ -121,6 +135,7 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         public IPEndPoint Relay { get; } = relay;
         public string Name = "";
         public bool Listed;
+        public bool TicksUs;
     }
 
     /// <summary>What the audio path reads on every packet, without a lock: the relays we are in a group on, and the
@@ -153,19 +168,67 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         if (changed) Tick();
     }
 
-    /// <summary>The peers we send to. Only a relay among them is joined; one we no longer send to is told goodbye.</summary>
-    public void SetTargets(IEnumerable<IPEndPoint> endpoints)
+    /// <summary>
+    /// Connect to a relay. From now on we say hello to it every couple of seconds and its people fill the relay list.
+    /// Connecting to a different one leaves the first. Nothing is joined without this: a relay is somewhere you go, not
+    /// a person in your list.
+    /// </summary>
+    public void Connect(IPEndPoint relay)
     {
-        var desired = new HashSet<IPEndPoint>(endpoints);
         List<IPEndPoint> leaving;
         lock (gate)
         {
-            targets = desired;
-            leaving = relays.Keys.Where(r => !desired.Contains(r)).ToList();
+            leaving = relays.Keys.Where(r => !r.Equals(relay)).ToList();
             foreach (var r in leaving) ForgetRelayLocked(r);
+            targets = [relay];
+            if (!relays.ContainsKey(relay))
+            {
+                relays[relay] = new RelayState(relay);
+                Log?.Invoke($"connecting to the relay at {relay}");
+            }
         }
         foreach (var r in leaving) SendBye(r);
-        if (leaving.Count > 0) Publish();
+        Publish();
+        Tick();
+    }
+
+    /// <summary>Leave the relay: say goodbye so the others see us go at once, and empty the list.</summary>
+    public void Disconnect()
+    {
+        List<IPEndPoint> leaving;
+        lock (gate)
+        {
+            leaving = relays.Values.Where(r => r.InGroup).Select(r => r.Endpoint).ToList();
+            foreach (var r in relays.Keys.ToList()) ForgetRelayLocked(r);
+            targets = [];
+            ticked.Clear();
+            pairPartnerTicked = false;
+        }
+        foreach (var r in leaving) SendBye(r);
+        if (leaving.Count > 0) Log?.Invoke("left the relay");
+        Publish();
+    }
+
+    /// <summary>
+    /// The people we have ticked, by client id, and whether the phone or older app we are paired with through the relay
+    /// is ticked. The ids go to the relay in every hello: it passes sound between two people only when each has ticked
+    /// the other. The pair partner is ours to gate, because the relay's ordinary pair slots work as they always have.
+    /// </summary>
+    public void SetTicked(IEnumerable<Guid> memberIds, bool pairPartner)
+    {
+        bool changed;
+        lock (gate)
+        {
+            var wanted = new HashSet<Guid>(memberIds);
+            changed = !wanted.SetEquals(ticked) || pairPartner != pairPartnerTicked;
+            if (!changed) return;
+            ticked.Clear();
+            foreach (var id in wanted) ticked.Add(id);
+            pairPartnerTicked = pairPartner;
+            pairTickedFlag = pairPartner;
+            foreach (var r in relays.Values) r.LastHelloUtc = DateTime.MinValue;   // tell the relay at once
+        }
+        Tick();
     }
 
     /// <summary>Start sending hellos. <paramref name="send"/> must go straight to the socket: our own packets are already
@@ -201,6 +264,13 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         snapshot.MemberRelay.TryGetValue(address, out var relay) ? relay : null;
 
     public bool IsInGroup(IPEndPoint relay) => snapshot.GroupRelays.ContainsKey(relay);
+
+    /// <summary>The relay we are connected to, or null. A relay is somewhere you go: nothing is joined without
+    /// <see cref="Connect"/>.</summary>
+    public IPEndPoint? ConnectedRelay
+    {
+        get { lock (gate) return relays.Keys.FirstOrDefault(); }
+    }
 
     /// <summary>True while the relay's member list says we also hold one of its ordinary pair slots with a partner (a
     /// phone or an older app), so our audio goes to it in ordinary form as well.</summary>
@@ -302,14 +372,20 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
     {
         if (payload.Length < 1) return;
         var count = payload[0];
-        if (payload.Length < 1 + count * RosterEntryBytes) return;
-        var flags = payload.Length > 1 + count * RosterEntryBytes ? payload[1 + count * RosterEntryBytes] : (byte)0;
-        var listed = new Dictionary<Guid, string>();
+        // A relay from before it said who had ticked you sends entries one byte shorter. Read either, so a mismatched
+        // pair still shows the list rather than silently never joining.
+        var entryBytes = RosterEntryBytes;
+        if (count > 0 && payload.Length < 1 + count * RosterEntryBytes) entryBytes = RosterEntryBytesWithoutFlags;
+        if (payload.Length < 1 + count * entryBytes) return;
+        var flags = payload.Length > 1 + count * entryBytes ? payload[1 + count * entryBytes] : (byte)0;
+        var listed = new Dictionary<Guid, (string Name, bool TicksUs)>();
         for (var i = 0; i < count; i++)
         {
-            var entry = payload.Slice(1 + i * RosterEntryBytes, RosterEntryBytes);
+            var entry = payload.Slice(1 + i * entryBytes, entryBytes);
             if (entry[..ClientIdSize].SequenceEqual(clientId)) continue;
-            listed[new Guid(entry[..ClientIdSize], bigEndian: true)] = DecodeName(entry[ClientIdSize..]);
+            var ticksUs = entryBytes == RosterEntryBytes && (entry[^1] & RosterMemberFlagTicksUs) != 0;
+            listed[new Guid(entry[..ClientIdSize], bigEndian: true)] =
+                (DecodeName(entry.Slice(ClientIdSize, NameBytes)), ticksUs);
         }
 
         var events = new List<string>();
@@ -324,7 +400,7 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
             if (relay.V1Paired != paired) events.Add(paired ? $"a phone or older app on {relayEndpoint} is paired with us: sending it our audio as well" : $"no longer paired with a phone or older app on {relayEndpoint}");
             relay.InGroup = true;
             relay.V1Paired = paired;
-            foreach (var (id, name) in listed)
+            foreach (var (id, seen) in listed)
             {
                 if (!relay.Members.TryGetValue(id, out var member))
                 {
@@ -332,12 +408,18 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
                     relay.Members[id] = member;
                     memberByAddress[member.Address] = member;
                 }
-                if (!member.Listed || member.Name != name)
+                if (!member.Listed || member.Name != seen.Name)
                 {
-                    if (!member.Listed) events.Add($"{Describe(name)} joined the group on {relayEndpoint} (as {member.Address})");
-                    else events.Add($"{Describe(member.Name)} on {relayEndpoint} is now called {Describe(name)}");
+                    if (!member.Listed) events.Add($"{Describe(seen.Name)} joined the group on {relayEndpoint} (as {member.Address})");
+                    else events.Add($"{Describe(member.Name)} on {relayEndpoint} is now called {Describe(seen.Name)}");
                     member.Listed = true;
-                    member.Name = name;
+                    member.Name = seen.Name;
+                    changed = true;
+                }
+                if (member.TicksUs != seen.TicksUs)
+                {
+                    events.Add(seen.TicksUs ? $"{Describe(member.Name)} has ticked us" : $"{Describe(member.Name)} has unticked us");
+                    member.TicksUs = seen.TicksUs;
                     changed = true;
                 }
             }
@@ -371,8 +453,8 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         if (type == RemPacketType.AddrCheck) return false;   // the echo goes back exactly as it came
         SendWrapped(packet, destination, send);
         // Heartbeats also go in ordinary form: they claim the pair slot beside a phone that is waiting for one. The rest
-        // goes in ordinary form only while we actually have such a partner.
-        if (type == RemPacketType.Heartbeat || v1Paired) send(packet, destination);
+        // goes in ordinary form only while we have such a partner AND have ticked them, the same rule as everyone else.
+        if (type == RemPacketType.Heartbeat || (v1Paired && pairTickedFlag)) send(packet, destination);
         return true;
     }
 
@@ -423,14 +505,21 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         if (changed) Publish();
     }
 
+    /// <summary>Our hello: name, the group tag (our password fingerprint), then the people we have ticked — a count and
+    /// that many ids. A hello with no list at all would mean "everyone in my group", which is what an app that knows
+    /// nothing about ticking sends; ours always says exactly who, even when that is nobody.</summary>
     private byte[] BuildHelloLocked()
     {
-        var packet = new byte[GroupHeaderSize + NameBytes + GroupTagBytes];
+        var ids = ticked.Take(MaxTickedIds).ToArray();
+        var packet = new byte[GroupHeaderSize + NameBytes + GroupTagBytes + 1 + ids.Length * ClientIdSize];
         RemPacket.WriteHeader(packet, (RemPacketType)TypeHello, 0, 0);
         packet[4] = GroupVersion;
         clientId.CopyTo(packet.AsSpan(RemPacket.HeaderSize));
         EncodeName(displayName, packet.AsSpan(GroupHeaderSize, NameBytes));
         groupTag?.CopyTo(packet.AsSpan(GroupHeaderSize + NameBytes));
+        var at = GroupHeaderSize + NameBytes + GroupTagBytes;
+        packet[at] = (byte)ids.Length;
+        for (var i = 0; i < ids.Length; i++) ids[i].TryWriteBytes(packet.AsSpan(at + 1 + i * ClientIdSize), bigEndian: true, out _);
         return packet;
     }
 
@@ -482,7 +571,7 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
             var groupRelays = relays.Values.Where(r => r.InGroup).ToFrozenDictionary(r => r.Endpoint, r => r.V1Paired);
             var memberRelay = memberByAddress.ToFrozenDictionary(kv => kv.Key, kv => kv.Value.Relay);
             var members = memberByAddress.Values
-                .Select(m => new Member(m.Address, m.Name, m.Relay))
+                .Select(m => new Member(m.Id, m.Address, m.Name, m.Relay, m.TicksUs))
                 .OrderBy(m => m.Name, StringComparer.CurrentCultureIgnoreCase)
                 .ToList();
             snapshot = new Snapshot(groupRelays, memberRelay, members);

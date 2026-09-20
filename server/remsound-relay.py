@@ -72,6 +72,10 @@ MAX_TICKED_IDS = 64
 FORMAT_FINGERPRINT_OFFSET = 36
 # Roster flags byte (after the member list): bit 0 = the recipient holds a v1 slot with a partner.
 ROSTER_FLAG_V1_PAIRED = 0x01
+# Each roster entry ends with its own flags byte: bit 0 = this member has ticked the recipient. It is what
+# lets an app say "waiting for them to tick you" instead of going quiet with no explanation, which is the
+# one thing a person cannot work out for themselves.
+ROSTER_MEMBER_FLAG_TICKS_YOU = 0x01
 # The relay hint (an address-check cookie to a v1 endpoint the pair has no room for): at most one per
 # address this often, and a bounded table, so forged sources cannot make the relay an amplifier.
 RELAY_HINT_INTERVAL_SECONDS = 5.0
@@ -108,10 +112,11 @@ ADDR_CHECK_RESEND_SECONDS = 2.0
 V2_FORWARDABLE_TYPES = {
     TYPE_FORMAT, TYPE_AUDIO, TYPE_KEEPALIVE, TYPE_HEARTBEAT, TYPE_CONTROL,
 }
-# Cap on how many lobby/pair entries one source IP may hold at once. Legitimate households behind
-# one NAT show a handful of machines (distinct ports, same IP); a lobby-occupation attacker shows
-# ten. Enforced immediately — it breaks no working setup.
-MAX_ENTRIES_PER_IP = 4
+# Cap on how many lobby/pair entries one source IP may hold at once. A relay is a place people meet now,
+# not a single pair, so one household or one office behind a single address can legitimately show several
+# machines and a phone or two (distinct ports, same IP). An occupation attacker shows dozens. Overridable
+# with --max-per-ip / REMSOUND_MAX_PER_IP.
+MAX_ENTRIES_PER_IP = 8
 
 # A zero UUID identifies the server in outbound v2 packets that we originate
 # (LobbyRoster, LobbyFull, LobbyBye-from-server). Clients can recognise this
@@ -519,10 +524,14 @@ class Relay:
 
     # ------- v2 (lobby) ----------------------------------------------------
 
-    def _v2_build_roster_packet(self, recipient: ClientEntry) -> bytes:
+    def _v2_build_roster_packet(self, recipient_id: uuid.UUID, recipient: ClientEntry) -> bytes:
         """A LobbyRoster for one recipient: the members of ITS group only (another group's names and ids are
-        none of its business), then one flags byte. Bit 0 is set when the recipient holds a v1 slot with a
-        partner, which tells it to keep a v1 copy of its audio flowing to that v1-only device."""
+        none of its business), each with a flags byte of its own, then one flags byte for the whole list.
+
+        Each member's flags byte says whether that member has ticked THIS recipient, which is how an app can
+        say "waiting for them to tick you" rather than going quiet with nothing to show for it. The trailing
+        byte's bit 0 is set when the recipient holds a v1 slot with a partner, which tells it to keep a v1
+        copy of its audio flowing to that v1-only device."""
         # Use a separate per-build sequence — clients can ignore it; we use 0.
         header = bytearray(V2_HEADER_LEN)
         header[0:4] = MAGIC
@@ -537,6 +546,9 @@ class Relay:
         for cid, entry in members:
             payload.extend(cid.bytes)
             payload.extend(_encode_lobby_name(entry.display_name))
+            # None means "everyone", which is what a client that knows nothing about ticking sends.
+            ticks_you = cid != recipient_id and (entry.ticked is None or recipient_id.bytes in entry.ticked)
+            payload.append(ROSTER_MEMBER_FLAG_TICKS_YOU if ticks_you else 0)
         payload.append(ROSTER_FLAG_V1_PAIRED if self._v1_paired(recipient.addr) else 0)
         return bytes(header) + bytes(payload)
 
@@ -545,13 +557,13 @@ class Relay:
             self.v2_roster_dirty = False
             self.v2_last_roster_broadcast = time.monotonic()
             return
-        for entry in self.v2_clients.values():
+        for cid, entry in self.v2_clients.items():
             # Under enforcement even the roster stays away from unverified addresses — it's
             # relay-originated traffic too, and it grows with the lobby. (Watch-only: send.)
             if self.require_addr_check and not entry.verified:
                 continue
             try:
-                self.sock.sendto(self._v2_build_roster_packet(entry), entry.addr)
+                self.sock.sendto(self._v2_build_roster_packet(cid, entry), entry.addr)
             except OSError as e:
                 self.log.warning(
                     "event=send_failed proto=v2 reason=roster to=%s err=%s",
@@ -690,6 +702,9 @@ class Relay:
                     "event=client_ticks client_id=%s ticked=%s", client_id,
                     "everyone" if new_ticked is None else len(new_ticked),
                 )
+                # Everyone in the group learns who has ticked them, so the list goes out again at once
+                # rather than on the next heartbeat.
+                self.v2_roster_dirty = True
             if new_group != entry.group:
                 entry.group = new_group
                 # A short prefix only: enough to see in the log who shares a group, not the whole tag.
