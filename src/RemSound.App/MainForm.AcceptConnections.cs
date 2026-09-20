@@ -106,7 +106,7 @@ public sealed partial class MainForm
             AcceptRelayMember(member.Id, name);
             return;
         }
-        AskThenAccept($"relay:{member.Id:D}", $"{name} on the relay server would like to connect to you.",
+        AskThenAccept($"relay:{member.Id:D}", $"{name} on the server would like to connect to you.",
             () => AcceptRelayMember(member.Id, name));
     }
 

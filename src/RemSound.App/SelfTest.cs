@@ -239,6 +239,7 @@ internal static partial class SelfTest
         RunStep(results, "Connecting to a relay, remembering it and ticking who is on it", AuditConnectingToARelayFromTheWindow);
         RunStep(results, "What happens when somebody else ticks you", WhatHappensWhenSomebodyTicksYou);
         RunStep(results, "The send-only service, and somebody ticking it on a relay", TheServiceAndSomebodyTickingItOnARelay);
+        RunStep(results, "Removing a peer while you are on a relay", RemovingAPeerWhileOnARelay);
         RunStep(results, "Heartbeats through a relay group", AuditRelayGroupHeartbeats);
         RunStep(results, "The app and the send-only service both take part in relay groups", AuditAppAndServiceTakePartInRelayGroups);
         RunStep(results, "A standard uncompressed frame goes out as one packet", PcmStandardFrameIsOnePacket);
@@ -4839,6 +4840,7 @@ internal static partial class SelfTest
                 () => (default(RouterMappingStatus), (IPEndPoint?)null, ""),
                 _ => { }, _ => { })),
             ("Relay server notice", () => RelayNoticeDialog.Build()),
+            ("Server", () => RelayConnectDialog.Build()),
             ("Service profile", () => new ServiceProfileDialog(RemSound.Core.Profile.NewBlank(), false)),
             ("About", () => new AboutDialog()),
             ("Add EQ band", () => new AddBandDialog()),

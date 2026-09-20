@@ -43,6 +43,9 @@ internal static class Program
                 $"Source:  {source}{Environment.NewLine}{Environment.NewLine}" +
                 (ex?.ToString() ?? "(no exception object)");
             File.WriteAllText(path, report);
+            // And a line in the log itself, where whoever reads it is already looking.
+            RemSoundLog.Current?.Event($"CRASH REPORT written to {Path.GetFileName(path)} — {source}: "
+                + $"{ex?.GetType().Name}: {ex?.Message}");
         }
         catch { /* a crash handler must never throw */ }
     }
@@ -64,6 +67,12 @@ internal static class Program
         // vanished with no dialog" report (#16) leaves a stack behind instead of nothing. Best-effort.
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
             WriteCrashReport("AppDomain.UnhandledException", e.ExceptionObject as Exception);
+        // And the WINDOW's own thread. WinForms catches an exception there itself and shows its
+        // "Continue / Quit" box, which is why Ed saw an error on 2026-09-20 that left no trace anywhere:
+        // this handler was never hooked, so the crash file and the log both knew nothing about it. The
+        // report is written BEFORE the box appears, so it survives whichever button is pressed.
+        Application.ThreadException += (_, e) =>
+            WriteCrashReport("Application.ThreadException (the window's own thread)", e.Exception);
         TaskScheduler.UnobservedTaskException += (_, e) =>
         {
             WriteCrashReport("TaskScheduler.UnobservedTaskException", e.Exception);

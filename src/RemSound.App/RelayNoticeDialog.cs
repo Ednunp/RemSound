@@ -19,7 +19,7 @@ internal sealed class RelayNoticeDialog : Form
 
     private RelayNoticeDialog()
     {
-        Text = "Connecting to a relay server";
+        Text = "Connecting to a server";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MinimizeBox = false;
         MaximizeBox = false;
@@ -33,8 +33,8 @@ internal sealed class RelayNoticeDialog : Form
         // selectable, the same shape as the app's other readouts.
         var message = new TextBox
         {
-            Text = "Please note: when you connect to a relay server, you will only be able to see and connect to users "
-                 + "on the relay who have the same password as the one set in your profile.",
+            Text = "Please note: when you connect to a server, you will only be able to see and connect to users "
+                 + "on the server who have the same password as the one set in your profile.",
             ReadOnly = true,
             Multiline = true,
             Width = 420,
@@ -42,7 +42,7 @@ internal sealed class RelayNoticeDialog : Form
             BorderStyle = BorderStyle.None,
             BackColor = SystemColors.Control,
             TabStop = true,
-            AccessibleName = "Relay server notice",
+            AccessibleName = "Server notice",
         };
 
         var ok = new Button { Text = "&OK", DialogResult = DialogResult.OK, AutoSize = true, AccessibleName = "OK" };

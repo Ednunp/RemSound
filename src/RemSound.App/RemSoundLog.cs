@@ -64,10 +64,16 @@ internal sealed class RemSoundLog : IDisposable
     /// before reading the user's preference; the App pushes the real value in after.</summary>
     public bool Enabled { get; set; }
 
+    /// <summary>The log the running window is writing, so the crash handlers can put the failure IN it, at the moment
+    /// it happened, rather than only in a separate file beside it. Ed's 2026-09-20 error left no trace at all; a crash
+    /// file nobody thinks to look for is only half a fix.</summary>
+    public static RemSoundLog? Current { get; private set; }
+
     public RemSoundLog()
     {
         // No file work in the constructor. EnsureFileOpenLocked does it lazily on first
         // write, only when Enabled has been confirmed true.
+        Current = this;
     }
 
     /// <summary>Open the underlying file if it hasn't been opened yet and write the schema

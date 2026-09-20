@@ -16,11 +16,9 @@ namespace RemSound.App;
 /// </summary>
 public sealed partial class MainForm
 {
-    private readonly TextBox relayAddressBox = new() { Width = 200, AccessibleName = "Relay server address (Alt+Z)" };
-    private readonly Button relayConnectButton = new() { Text = "Co&nnect (Alt+N)", AutoSize = true, AccessibleName = "Connect to relay server" };
-    private readonly ListBox rememberedRelaysList = new() { Width = 200, Height = 74, AccessibleName = "Remembered relay servers (Alt+7)" };
-    private readonly CheckedListBox relayPeersList = new() { CheckOnClick = true, Width = 430, Height = 90, AccessibleName = "Discovered peers on relay server (Alt+0)" };
-    private readonly Label relayPeersStatus = new() { AutoSize = true, Text = "Nobody on the relay yet." };
+    private readonly Button relayConnectButton = new() { Text = "Co&nnect to server (Alt+N)", AutoSize = true, AccessibleName = "Connect to server" };
+    private readonly CheckedListBox relayPeersList = new() { CheckOnClick = true, Width = 430, Height = 90, AccessibleName = "Discovered peers on server (Alt+0)" };
+    private readonly Label relayPeersStatus = new() { AutoSize = true, Text = "Nobody on the server yet." };
     private MnemonicLabel? relayPeersLabel;
     private Label? relayStatusLine;
 
@@ -30,6 +28,9 @@ public sealed partial class MainForm
     private bool relayPairTicked;
     private bool suppressRelayTickEvents;
     private string relayListSignature = "";
+    /// <summary>The relay's address as the user typed it. It used to live in a box on the tab; the box is in the relay
+    /// window now, so the text is kept here — it is what a profile remembers and what the status line says.</summary>
+    private string relayEntryText = "";
     /// <summary>The password the relay half last saw, so a change of it can start the list again. Null until the first
     /// time it is set, which is startup and not a change.</summary>
     private string? relayPasswordSignature;
@@ -41,7 +42,7 @@ public sealed partial class MainForm
     /// <summary>Who we have ticked, and whether the relay last said they had ticked us back. Sound only flows when both
     /// have ticked, so without this the app would simply go quiet and leave you guessing which it was.</summary>
     private readonly Dictionary<Guid, bool> relayTickedBack = [];
-    /// <summary>Addresses we have already asked about ("that looks like a relay"), so nobody is asked twice a run.</summary>
+    /// <summary>Addresses we have already asked about ("that looks like a server"), so nobody is asked twice a run.</summary>
     private readonly HashSet<string> relayOfferAsked = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>One row in the relay list: a person, or the phone / older app we are paired with through the relay.</summary>
@@ -52,55 +53,11 @@ public sealed partial class MainForm
 
     // ------- building the rows -------------------------------------------------------------------------------------
 
-    /// <summary>Adds the relay rows to the Connectivity tab from <paramref name="firstRow"/>, and returns the next free
-    /// row. Three rows: the address and Connect, the remembered relays, and the people on the relay.</summary>
-    private int BuildRelayRows(TableLayoutPanel panel, int firstRow)
+    /// <summary>The list of people on the relay, which sits with the other discovered-peers list. It is not there at
+    /// all until you are on a relay: there is nothing it could show.</summary>
+    private void BuildRelayPeersRow(TableLayoutPanel panel, int row)
     {
-        var addressLabel = new MnemonicLabel { Text = "Relay server (Alt+&Z)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = relayAddressBox };
-        addressLabel.Click += (_, _) => relayAddressBox.Focus();
-        var addressRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty };
-        addressRow.Controls.Add(relayAddressBox);
-        addressRow.Controls.Add(relayConnectButton);
-        relayStatusLine = new Label { AutoSize = true, Text = "Not connected to a relay server.", AccessibleName = "Relay server status", Anchor = AnchorStyles.Left };
-        addressRow.Controls.Add(relayStatusLine);
-        panel.Controls.Add(addressLabel, 0, firstRow);
-        panel.Controls.Add(addressRow, 1, firstRow);
-        relayConnectButton.Click += (_, _) => OnRelayConnectButton();
-        relayAddressBox.KeyDown += (_, args) =>
-        {
-            if (args.KeyCode != Keys.Enter) return;
-            args.SuppressKeyPress = true;
-            OnRelayConnectButton();
-        };
-
-        var rememberedLabel = new MnemonicLabel { Text = "Remembered relays (Alt+&7)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = rememberedRelaysList };
-        rememberedLabel.Click += (_, _) => rememberedRelaysList.Focus();
-        panel.Controls.Add(rememberedLabel, 0, firstRow + 1);
-        panel.Controls.Add(rememberedRelaysList, 1, firstRow + 1);
-        rememberedRelaysList.KeyDown += (_, args) =>
-        {
-            if (args.KeyCode == Keys.Enter && rememberedRelaysList.SelectedItem is string chosen)
-            {
-                args.SuppressKeyPress = true;
-                relayAddressBox.Text = chosen;
-                ConnectToRelay(chosen, userAsked: true);
-            }
-            else if (args.KeyCode == Keys.Delete && rememberedRelaysList.SelectedItem is string doomed)
-            {
-                args.SuppressKeyPress = true;
-                ForgetRelay(doomed);
-            }
-        };
-        rememberedRelaysList.DoubleClick += (_, _) =>
-        {
-            if (rememberedRelaysList.SelectedItem is string chosen)
-            {
-                relayAddressBox.Text = chosen;
-                ConnectToRelay(chosen, userAsked: true);
-            }
-        };
-
-        relayPeersLabel = FormLayoutRows.AddCheckedListRow(panel, firstRow + 2, "Discovered peers on relay server (Alt+&0)", relayPeersList, relayPeersStatus, FocusListControl);
+        relayPeersLabel = FormLayoutRows.AddCheckedListRow(panel, row, "Discovered peers on server (Alt+&0)", relayPeersList, relayPeersStatus, FocusListControl);
         WireCheckedListAccessibility(relayPeersList, relayPeersStatus, "relay peer");
         relayPeersList.ItemCheck += (_, args) =>
         {
@@ -109,23 +66,41 @@ public sealed partial class MainForm
             var ticked = args.NewValue == CheckState.Checked;
             BeginInvoke(() => OnRelayPeerTicked(index, ticked));
         };
+    }
 
-        RefreshRememberedRelaysList();
+    /// <summary>The one button on the tab for all of this, and the line beside it saying what the relay is doing.
+    /// Everything else — the address, the relays you have been on before, connecting and leaving — is in the window it
+    /// opens. Ed, 2026-09-20: "just have a close button not a cancel, that's easier".</summary>
+    private void BuildRelayButtonRow(TableLayoutPanel panel, int row)
+    {
+        var buttonRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty };
+        buttonRow.Controls.Add(relayConnectButton);
+        relayStatusLine = new Label { AutoSize = true, Text = "Not connected to a server.", AccessibleName = "Server status", Anchor = AnchorStyles.Left };
+        buttonRow.Controls.Add(relayStatusLine);
+        panel.Controls.Add(new Label { Text = "Server", AutoSize = true, Anchor = AnchorStyles.Left }, 0, row);
+        panel.Controls.Add(buttonRow, 1, row);
+        relayConnectButton.Click += (_, _) => OnRelayConnectButton();
         UpdateRelayControls();
-        return firstRow + 3;
+    }
+
+    /// <summary>The button opens the relay window and leaves it open: connecting and leaving both happen in there, and
+    /// the button inside says which of the two pressing it would do right now.</summary>
+    private void ShowRelayDialog()
+    {
+        using var dialog = new RelayConnectDialog(
+            connectedTo: () => relayGroup.ConnectedRelay is null ? null : (relayEntryText.Length > 0 ? relayEntryText : relayGroup.ConnectedRelay.ToString()),
+            connect: entry => ConnectToRelay(entry, userAsked: true),
+            disconnect: () => DisconnectFromRelay(userAsked: true),
+            loadRemembered: () => settings.LoadRememberedRelays(),
+            forget: ForgetRelay,
+            status: () => relayStatusLine?.Text ?? "");
+        ForegroundDialog.Show(owner => dialog.ShowDialog(owner));
+        UpdateRelayControls();
     }
 
     // ------- connecting --------------------------------------------------------------------------------------------
 
-    private void OnRelayConnectButton()
-    {
-        if (relayGroup.ConnectedRelay is not null)
-        {
-            DisconnectFromRelay(userAsked: true);
-            return;
-        }
-        ConnectToRelay(relayAddressBox.Text, userAsked: true);
-    }
+    private void OnRelayConnectButton() => ShowRelayDialog();
 
     /// <summary>Connect to a relay. The address is resolved OFF the UI thread: a hostname that cannot resolve right now
     /// blocks for the DNS timeout, which on the UI thread reads as the whole app locking up (issue #10).</summary>
@@ -134,13 +109,13 @@ public sealed partial class MainForm
         var entry = (typed ?? "").Trim();
         if (entry.Length == 0)
         {
-            SetRelayStatus("Type a relay server address first.");
+            SetRelayStatus("Type a server address first.");
             return;
         }
         if (userAsked) ShowRelayNotice();
         // Going somewhere else is leaving here: the people you had ticked are on the relay you are leaving.
         if (relayGroup.ConnectedRelay is not null) DisconnectFromRelay(userAsked);
-        relayAddressBox.Text = entry;
+        relayEntryText = entry;
         relayConnectButton.Enabled = false;
         SetRelayStatus($"Connecting to {entry}...");
         Task.Run(() => ResolveRelayAddress(entry)).ContinueWith(task =>
@@ -244,14 +219,13 @@ public sealed partial class MainForm
         if (!ShouldOfferRelay(remote)) return;
         logFile.Event($"relay: {remote.Address} answers as a relay — offering to connect");
         var answer = ForegroundDialog.Show(owner => MessageBox.Show(owner,
-            "You have entered the address of a relay. Would you like to connect to this relay?",
+            "You have entered the address of a server. Would you like to connect to this server?",
             AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question));
         if (answer != DialogResult.Yes) return;
         foreach (var (id, ep) in selectedPeerEndpoints.ToList())
         {
             if (ep.Address.Equals(remote.Address)) DeselectPeer(id);
         }
-        relayAddressBox.Text = remote.Address.ToString();
         ConnectToRelay(remote.Address.ToString(), userAsked: true);
     }
 
@@ -405,10 +379,10 @@ public sealed partial class MainForm
 
         var waiting = waitingFor.Count == 0 ? "" : $", waiting for {string.Join(", ", waitingFor)} to tick you";
         SetRelayStatus(relay is null
-            ? "Not connected to a relay server."
+            ? "Not connected to a server."
             : relayGroup.IsInGroup(relay)
-                ? $"Connected to {relayAddressBox.Text.Trim()} — {items.Count(i => !i.IsPairPartner)} here on your password{waiting}"
-                : $"Connecting to {relayAddressBox.Text.Trim()}...");
+                ? $"Connected to the server at {relayEntryText.Trim()} — {items.Count(i => !i.IsPairPartner)} here on your password{waiting}"
+                : $"Connecting to the server at {relayEntryText.Trim()}...");
     }
 
     // ------- odds and ends -----------------------------------------------------------------------------------------
@@ -423,25 +397,10 @@ public sealed partial class MainForm
     private void UpdateRelayControls()
     {
         var connected = relayGroup.ConnectedRelay is not null;
-        relayConnectButton.Text = connected ? "Disco&nnect (Alt+N)" : "Co&nnect (Alt+N)";
-        relayConnectButton.AccessibleName = connected ? "Disconnect from relay server" : "Connect to relay server";
+        relayConnectButton.Text = connected ? "Disco&nnect from or change server (Alt+N)" : "Co&nnect to server (Alt+N)";
+        relayConnectButton.AccessibleName = connected ? "Disconnect from or change server" : "Connect to server";
         SetConnectivityRowVisible(relayPeersLabel, relayPeersList, connected);
         SyncRelayPeersList();
-    }
-
-    private void RefreshRememberedRelaysList()
-    {
-        var remembered = settings.LoadRememberedRelays();
-        var chosen = rememberedRelaysList.SelectedItem as string;
-        rememberedRelaysList.BeginUpdate();
-        rememberedRelaysList.Items.Clear();
-        foreach (var entry in remembered) rememberedRelaysList.Items.Add(entry);
-        rememberedRelaysList.EndUpdate();
-        if (chosen is not null)
-        {
-            var index = rememberedRelaysList.Items.IndexOf(chosen);
-            if (index >= 0) rememberedRelaysList.SelectedIndex = index;
-        }
     }
 
     private void RememberRelay(string entry)
@@ -449,16 +408,13 @@ public sealed partial class MainForm
         var kept = new List<string> { entry.Trim() };
         kept.AddRange(settings.LoadRememberedRelays().Where(e => !string.Equals(e, entry.Trim(), StringComparison.OrdinalIgnoreCase)));
         settings.SaveRememberedRelays(kept);
-        RefreshRememberedRelaysList();
     }
 
     private void ForgetRelay(string entry)
     {
         settings.SaveRememberedRelays(settings.LoadRememberedRelays()
             .Where(e => !string.Equals(e, entry, StringComparison.OrdinalIgnoreCase)));
-        RefreshRememberedRelaysList();
         logFile.Event($"relay: forgot remembered relay \"{entry}\"");
-        ScreenReader.Speak($"{entry} removed");
     }
 
     /// <summary>
@@ -487,7 +443,7 @@ public sealed partial class MainForm
         ApplyAudioRuntime();
         SyncRelayPeersList();
         logFile.Event("relay: the password changed, so the list on the relay starts again");
-        ScreenReader.Speak("Password changed. The people on the relay will be listed again.");
+        ScreenReader.Speak("Password changed. The people on the server will be listed again.");
     }
 
     /// <summary>Called when a profile is loaded: its relay, its ticks, and a connect if it asked for one.</summary>
@@ -499,7 +455,7 @@ public sealed partial class MainForm
         {
             if (Guid.TryParse(text, out var id)) relayTicked.Add(id);
         }
-        relayAddressBox.Text = profile.RelayServer ?? "";
+        relayEntryText = profile.RelayServer ?? "";
         if (profile.RelayConnectOnStart && !string.IsNullOrWhiteSpace(profile.RelayServer))
         {
             ConnectToRelay(profile.RelayServer!, userAsked: false);
@@ -511,10 +467,10 @@ public sealed partial class MainForm
 
     internal RelayGroupClient RelayGroupForTest => relayGroup;
     internal CheckedListBox RelayPeersListForTest => relayPeersList;
-    internal ListBox RememberedRelaysListForTest => rememberedRelaysList;
-    internal TextBox RelayAddressBoxForTest => relayAddressBox;
     internal Button RelayConnectButtonForTest => relayConnectButton;
     internal string RelayStatusForTest => relayStatusLine?.Text ?? "";
+    internal string RelayEntryTextForTest => relayEntryText;
+    internal IReadOnlyList<string> RememberedRelaysForTest => settings.LoadRememberedRelays();
     internal string RelayListStatusForTest => relayPeersStatus.Text;
     /// <summary>The row wrapper the relay's peer list sits in, so a test can read its own visible flag: on a window
     /// that has never been shown, Control.Visible reports false for everything.</summary>
@@ -528,6 +484,9 @@ public sealed partial class MainForm
     internal void RelayPasswordChangedForTest(byte[]? fingerprint) => RelayPasswordChanged(fingerprint);
     internal IReadOnlyCollection<Guid> RelayTickedForTest => relayTicked;
     internal bool RelayPairTickedForTest => relayPairTicked;
+    internal void DeselectPeerForTest(Guid instanceId) => DeselectPeer(instanceId);
+    internal void SyncAllPeerListsForTest() => SyncAllPeerLists();
+    internal void UpdateConnectedListLiveStatusForTest() => UpdateConnectedListLiveStatus();
     internal void RelayPeerTickedForTest(int index, bool ticked) => OnRelayPeerTicked(index, ticked);
     internal bool ShouldOfferRelayForTest(IPEndPoint remote) => ShouldOfferRelay(remote);
     internal void SelectPeerForTest(PeerAnnouncement peer) => SelectPeer(peer, fromProfileRestore: true);
@@ -536,7 +495,7 @@ public sealed partial class MainForm
     /// <summary>Called when a profile is saved.</summary>
     private void GatherRelayProfile(Profile profile)
     {
-        profile.RelayServer = relayAddressBox.Text.Trim();
+        profile.RelayServer = relayEntryText.Trim();
         profile.RelayConnectOnStart = relayGroup.ConnectedRelay is not null;
         profile.RelayTickedIds = relayTicked.Select(id => id.ToString("D")).ToList();
     }

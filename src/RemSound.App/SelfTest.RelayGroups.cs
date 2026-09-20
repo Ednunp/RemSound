@@ -295,13 +295,15 @@ internal static partial class SelfTest
             var relay = new IPEndPoint(IPAddress.Parse("203.0.113.44"), RemPacket.DefaultPort);
             var entry = "relay.example.test:47830";
             bool PeersRowShown() => form.RelayPeersRowForTest is { } row && IsSetVisibleForAltAudit(row);
-            Check(!PeersRowShown(), "the relay's own peer list must be hidden until you are connected to one");
+            Check(!PeersRowShown(), "the server's own peer list must be hidden until you are connected to one");
             Check(form.RelayGroupForTest.ConnectedRelay is null, "nothing is joined until the user connects: a relay is somewhere you go");
 
             form.ConnectToRelayForTest(entry, relay);
             Check(relay.Equals(form.RelayGroupForTest.ConnectedRelay), "pressing Connect must join that relay");
-            Check(PeersRowShown(), "connecting must show the list of people on the relay");
-            Check(form.RememberedRelaysListForTest.Items.Cast<object>().Any(i => (string)i == entry),
+            Check(PeersRowShown(), "connecting must show the list of people on the server");
+            Check(form.RelayConnectButtonForTest.Text.Replace("&", "").Contains("Disconnect", StringComparison.Ordinal),
+                $"once you are on a server the button must offer to leave it or change it ({form.RelayConnectButtonForTest.Text})");
+            Check(form.RememberedRelaysForTest.Any(e => e == entry),
                 "a relay you have connected to must be remembered, as it was typed, so you never type it twice");
 
             // The relay's member list arrives on the sending socket, as it does in the app.
@@ -369,12 +371,14 @@ internal static partial class SelfTest
 
             // Delete on the remembered list forgets one.
             form.ForgetRelayForTest(entry);
-            Check(!form.RememberedRelaysListForTest.Items.Cast<object>().Any(i => (string)i == entry),
+            Check(!form.RememberedRelaysForTest.Any(e => e == entry),
                 "Delete on the remembered relays list must forget that relay");
 
             form.DisconnectFromRelayForTest();
             Check(form.RelayGroupForTest.ConnectedRelay is null && !PeersRowShown(),
-                "disconnecting must leave the relay and take its list away with it");
+                "disconnecting must leave the server and take its list away with it");
+            Check(form.RelayConnectButtonForTest.Text.Replace("&", "").Contains("Connect to server", StringComparison.Ordinal),
+                $"and the button must offer to connect again ({form.RelayConnectButtonForTest.Text})");
 
             // A profile puts its ticks back before anybody is on the list — the list only arrives seconds later. The
             // ticks have to be picked up when those people appear, or a profile would load and nothing would be heard.
@@ -516,9 +520,9 @@ internal static partial class SelfTest
                 "and must be sent to once, not twice over");
             var relayRow = new PeerListItem(new PeerAnnouncement(mate, "Ticked us", mateAddress.Port,
                 CanSend: true, CanReceive: true, DateTime.UtcNow, mateAddress.Address)).ToString();
-            Check(relayRow.Contains("on the relay", StringComparison.Ordinal)
+            Check(relayRow.Contains("on the server", StringComparison.Ordinal)
                   && !relayRow.Contains(mateAddress.Address.ToString(), StringComparison.Ordinal),
-                $"somebody reached through a relay must read as being on the relay, not as a made-up address ({relayRow})");
+                $"somebody reached through a relay must read as being on the server, not as a made-up address ({relayRow})");
 
             // And the signal itself: a Format packet from somebody not ticked is what tells us they have ticked US.
             // Everything above drives the decision directly, so without this the thing that sets it off is untested.
@@ -624,6 +628,81 @@ internal static partial class SelfTest
 
         return "the service reaches its profile's people when left off, and also ticks back whoever ticks it on the "
             + "relay when turned on, nobody twice; the choice persists and leaves the other service settings alone";
+    }
+
+    /// <summary>
+    /// REMOVING A PEER WHILE YOU ARE ON A RELAY.
+    ///
+    /// <para>Ed, 2026-09-20: taking the iPhone off the desktop put an error box on screen — the WinForms "Continue or
+    /// Quit" one, which meant an exception on the window's own thread. It left no trace anywhere, because nothing was
+    /// hooked to catch it (now fixed in Program). This drives the real removal, in the state he was in: on a relay,
+    /// with somebody ticked there, with a phone paired through it, and with an ordinary network peer as well. Every
+    /// part of the refresh that follows a removal runs here — the lists, the live status, the send targets and the
+    /// allow-list — so a throw in any of them fails this rather than landing in a box.</para>
+    /// </summary>
+    private static string? RemovingAPeerWhileOnARelay()
+    {
+        var restoreMuted = CuePlayer.GloballyMuted;
+        CuePlayer.GloballyMuted = true;
+        var restoreMode = AppConfig.Load().AcceptPeerConnections;
+        MainForm? form = null;
+        try
+        {
+            SetAcceptMode(PeerAcceptMode.Manual);   // no questions: this is about the removal, not the asking
+            try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+
+            var relay = new IPEndPoint(IPAddress.Parse("203.0.113.91"), RemPacket.DefaultPort);
+            form.ConnectToRelayForTest("remote.example.test", relay);
+            var onRelay = Guid.NewGuid();
+            Feed(form.RelayGroupForTest, relay, RosterPacket([(onRelay, "ED_LT", true)], paired: true),
+                RelayInbound.Consumed, "a member list with a phone paired too");
+            form.SyncRelayPeersListForTest();
+
+            // Tick the person on the relay and the phone paired through it, as Ed had.
+            var phoneRow = Enumerable.Range(0, form.RelayPeersListForTest.Items.Count)
+                .First(i => form.RelayPeersListForTest.Items[i]!.ToString()!.Contains("phone", StringComparison.OrdinalIgnoreCase));
+            var personRow = Enumerable.Range(0, form.RelayPeersListForTest.Items.Count).First(i => i != phoneRow);
+            form.RelayPeerTickedForTest(personRow, true);
+            form.RelayPeerTickedForTest(phoneRow, true);
+            Check(form.RelayTickedForTest.Contains(onRelay) && form.RelayPairTickedForTest,
+                "the person on the relay and the phone paired through it must both be ticked for this to mean anything");
+
+            // And an ordinary network peer beside them — the iPhone on the LAN, which is what was removed.
+            var lanPhone = new PeerAnnouncement(Guid.NewGuid(), "iPhone", RemPacket.DefaultPeerDialPort,
+                CanSend: true, CanReceive: true, DateTime.UtcNow, IPAddress.Parse("192.168.1.150"));
+            form.SelectPeerForTest(lanPhone);
+            Check(form.SelectedSendEndpointsForTest().Length == 2,
+                $"we must be sending to the relay and to the network peer ({form.SelectedSendEndpointsForTest().Length})");
+
+            // The removal, and everything the window does after one. A throw anywhere in here is the error box.
+            form.DeselectPeerForTest(lanPhone.InstanceId);
+            form.SyncAllPeerListsForTest();
+            form.UpdateConnectedListLiveStatusForTest();
+            form.SyncRelayPeersListForTest();
+            Check(form.SelectedSendEndpointsForTest() is [var left] && left.Equals(relay),
+                "after removing the network peer only the relay is left, and nothing threw doing it");
+            Check(!form.ReceiverForTest.IsSenderAllowedForTest(new IPEndPoint(lanPhone.Address, lanPhone.AudioPort)),
+                "and the peer that was removed is turned away again");
+
+            // The other order too: take the relay away while a network peer is still there.
+            form.SelectPeerForTest(lanPhone);
+            form.DisconnectFromRelayForTest();
+            form.SyncAllPeerListsForTest();
+            form.UpdateConnectedListLiveStatusForTest();
+            Check(form.SelectedSendEndpointsForTest() is [var lan] && lan.Address.Equals(lanPhone.Address),
+                "leaving the relay while a network peer is ticked must leave that peer, and nothing may throw");
+
+            return "removing a network peer while on a relay — with somebody ticked there and a phone paired through "
+                + "it — leaves the relay alone, turns the removed peer away, and throws nothing; nor does leaving the "
+                + "relay with a network peer still ticked";
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            try { SetAcceptMode(restoreMode); } catch { /* best effort */ }
+            CuePlayer.GloballyMuted = restoreMuted;
+        }
     }
 
     private static void SetAcceptMode(PeerAcceptMode mode)

@@ -89,7 +89,7 @@ internal sealed class PeerListItem
         // Somebody reached through a relay has no address of their own: the one we know them by is made up, and reads
         // as a meaningless string of digits. Say where they are instead — which is also what tells the same person
         // reached two ways (on the network AND through a relay) apart in the list.
-        var addr = RemSound.Core.RelayGroupClient.IsMemberAddress(Peer.Address) ? "on the relay" : Peer.Address.ToString();
+        var addr = RemSound.Core.RelayGroupClient.IsMemberAddress(Peer.Address) ? "on the server" : Peer.Address.ToString();
         var name = DisplayNameProvider?.Invoke(Peer) ?? Peer.Name;
         var basePart = name == addr ? addr : $"{name} ({addr})";
 

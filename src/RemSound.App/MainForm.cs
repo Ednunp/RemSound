@@ -3383,7 +3383,6 @@ public sealed partial class MainForm : Form
             onClearRememberedRelays: () =>
             {
                 settings.SaveRememberedRelays(Array.Empty<string>());
-                RefreshRememberedRelaysList();
                 logFile.Event("remembered relays list cleared (Preferences)");
             },
             onClearRememberedApplications: () =>
@@ -3898,11 +3897,13 @@ public sealed partial class MainForm : Form
         panel.Controls.Add(renamePeerButton, 1, 3);
         connectedPeersList.SelectedIndexChanged += (_, _) => UpdatePeerDetails();
 
-        discoveredPeersLabel = FormLayoutRows.AddCheckedListRow(panel, 4, "Discovered peers (Alt+&D)", discoveredPeersList, discoveredPeersStatus, FocusListControl);
-        rememberedPeersLabel = FormLayoutRows.AddCheckedListRow(panel, 5, "Remembered peers (Alt+&R)", rememberedPeersList, rememberedPeersStatus, FocusListControl);
-
-        // The relay server: somewhere you connect to, with the people on it in a list of their own. See MainForm.Relay.
-        var afterRelay = BuildRelayRows(panel, 6);
+        // The two discovered lists sit together: the people on your network, and the people on the relay you are on.
+        // The relay one is not there at all until you are on one (Ed, 2026-09-20). See MainForm.Relay.
+        discoveredPeersLabel = FormLayoutRows.AddCheckedListRow(panel, 4, "Discovered peers not on a server (Alt+&D)", discoveredPeersList, discoveredPeersStatus, FocusListControl);
+        BuildRelayPeersRow(panel, 5);
+        rememberedPeersLabel = FormLayoutRows.AddCheckedListRow(panel, 6, "Remembered peers (Alt+&R)", rememberedPeersList, rememberedPeersStatus, FocusListControl);
+        BuildRelayButtonRow(panel, 7);
+        var afterRelay = 8;
 
         // Add a peer by address, then the lock toggle — the manual / advanced options after the lists.
         panel.Controls.Add(new Label { Text = "Manual peer", AutoSize = true, Anchor = AnchorStyles.Left }, 0, afterRelay);
@@ -3935,15 +3936,14 @@ public sealed partial class MainForm : Form
         peerDetailsBox.TabIndex = 1;
         renamePeerButton.TabIndex = 2;
         if (discoveredPeersList.Parent is { } discoveredWrap) discoveredWrap.TabIndex = 3;
-        if (rememberedPeersList.Parent is { } rememberedWrap) rememberedWrap.TabIndex = 4;
-        // The relay rows sit between the peer lists and the manual options: address, Connect, remembered relays, and
-        // the people on the relay. The list is wrapped by AddCheckedListRow, so its WRAPPER carries the tab order.
-        if (relayAddressBox.Parent is { } relayRowWrap) relayRowWrap.TabIndex = 5;
-        rememberedRelaysList.TabIndex = 6;
-        if (relayPeersList.Parent is { } relayPeersWrap) relayPeersWrap.TabIndex = 7;
-        manualAddButton.TabIndex = 8;
-        lockPeerAddressesBox.TabIndex = 9;
-        statusReadout.TabIndex = 10;
+        // The people on the relay, straight after the people on your network. Both lists are wrapped by
+        // AddCheckedListRow, so the WRAPPER is what carries the tab order.
+        if (relayPeersList.Parent is { } relayPeersWrap) relayPeersWrap.TabIndex = 4;
+        if (rememberedPeersList.Parent is { } rememberedWrap) rememberedWrap.TabIndex = 5;
+        if (relayConnectButton.Parent is { } relayButtonWrap) relayButtonWrap.TabIndex = 6;
+        manualAddButton.TabIndex = 7;
+        lockPeerAddressesBox.TabIndex = 8;
+        statusReadout.TabIndex = 9;
 
         // Initial render so the box has content the moment the user tabs into it.
         RefreshStatusReadout();
@@ -5808,7 +5808,7 @@ public sealed partial class MainForm : Form
         relayGroup.Members.Where(m => selectedPeerEndpoints.Values.Any(ep => ep.Equals(m.Relay))).ToList();
 
     private static string MemberLabel(RelayGroupClient.Member member) =>
-        string.IsNullOrWhiteSpace(member.Name) ? "someone not yet named, through the relay" : member.Name;
+        string.IsNullOrWhiteSpace(member.Name) ? "someone not yet named, through the server" : member.Name;
 
     /// <summary>"a group with Andre, Jonathan" for a relay we are in a group on; null for anything else.</summary>
     private string? DescribeRelayGroup(System.Net.IPEndPoint relay) =>

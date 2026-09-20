@@ -89,8 +89,8 @@ internal sealed class PreferencesDialog : Form
     };
     private readonly Button clearRememberedRelaysButton = new()
     {
-        Text = "Clear remembered &relays list...",
-        AccessibleName = "Clear remembered relays list",
+        Text = "Clear remembered &servers list...",
+        AccessibleName = "Clear remembered servers list",
         AutoSize = true,
     };
     private readonly Button clearRememberedAppsButton = new()
@@ -825,7 +825,7 @@ internal sealed class PreferencesDialog : Form
         clearRememberedRelaysButton.Click += (_, _) =>
         {
             if (MessageBox.Show(this,
-                    "Clear the whole remembered relays list?\n\nThis empties the shared list of relay servers RemSound has remembered, for every profile. A relay you're connected to isn't affected, and any relay is remembered again the next time you connect to it.",
+                    "Clear the whole remembered servers list?\n\nThis empties the shared list of servers RemSound has remembered, for every profile. A server you're connected to isn't affected, and any server is remembered again the next time you connect to it.",
                     "RemSound", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
                 onClearRememberedRelays();
         };
@@ -1793,8 +1793,8 @@ internal sealed class PreferencesDialog : Form
                 : "Status: router port opened.",
             RouterMappingStatus.NoRouterFound => "Status: no router with UPnP / NAT-PMP / PCP found. Check that the feature is enabled on your router, or forward UDP 47830 manually.",
             RouterMappingStatus.CgnatDetected => external is not null
-                ? $"Status: the router opened the port, but the external address ({external.Address}) is on a carrier-grade NAT — peers on the public internet will not be able to reach you. Consider Tailscale or the relay instead."
-                : "Status: the router opened the port, but you are behind a carrier-grade NAT — peers on the public internet will not be able to reach you. Consider Tailscale or the relay instead.",
+                ? $"Status: the router opened the port, but the external address ({external.Address}) is on a carrier-grade NAT — peers on the public internet will not be able to reach you. Consider Tailscale or a server instead."
+                : "Status: the router opened the port, but you are behind a carrier-grade NAT — peers on the public internet will not be able to reach you. Consider Tailscale or a server instead.",
             RouterMappingStatus.MappingFailed => string.IsNullOrEmpty(lastError)
                 ? "Status: the router rejected the port-mapping request."
                 : $"Status: the router rejected the port-mapping request — {lastError}",

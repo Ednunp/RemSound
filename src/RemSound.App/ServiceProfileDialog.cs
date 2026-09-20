@@ -428,8 +428,8 @@ internal sealed class ServiceProfileDialog : Form
         // leave it to the profile. The app's own three-way setting (ask / automatically / manual) is in Preferences.
         var acceptRelay = new AccessibleCheckBox
         {
-            Text = "&Accept people who tick this service on a relay server",
-            AccessibleName = "Accept people who tick this service on a relay server",
+            Text = "&Accept people who tick this service on a server",
+            AccessibleName = "Accept people who tick this service on a server",
             AutoSize = true,
             Checked = acceptOnRelay,
         };
