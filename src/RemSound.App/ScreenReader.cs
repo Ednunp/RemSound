@@ -16,6 +16,14 @@ internal static class ScreenReader
     private static readonly object sync = new();
     private static IScreenReaderOutput? backend;
 
+    /// <summary>
+    /// Say nothing at all. The gate sets this for its whole run: a test that drives the window drives the code that
+    /// speaks, and on 2026-09-20 Ed heard fragments of it — "password", "connected", "ticked us" — coming out of
+    /// NVDA while a gate run was going on. A test that makes a noise on somebody's machine is a broken test, and
+    /// speech is a noise like any other.
+    /// </summary>
+    internal static bool Suppressed { get; set; }
+
     private static IScreenReaderOutput Backend
     {
         get { lock (sync) { return backend ??= CreateBackend(); } }
@@ -31,7 +39,7 @@ internal static class ScreenReader
 
     /// <summary>Speak text through the active screen reader (best-effort; silent if none is running).
     /// Returns true if it reached a screen reader.</summary>
-    public static bool Speak(string text, bool interrupt = true) => Backend.Speak(text, interrupt);
+    public static bool Speak(string text, bool interrupt = true) => !Suppressed && Backend.Speak(text, interrupt);
 
     /// <summary>Release the backend on app shutdown. Safe to call when nothing was ever spoken.</summary>
     public static void Shutdown()

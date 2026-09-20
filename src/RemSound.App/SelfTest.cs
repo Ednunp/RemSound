@@ -84,6 +84,12 @@ internal static partial class SelfTest
             : AppConfig.UseThrowawayUserDataDirectory(Path.Combine(Path.GetTempPath(), "remsound-selftest-" + Guid.NewGuid().ToString("N")));
         var seconds = int.TryParse(ValueAfter(args, "--seconds"), out var s) && s is > 0 and <= 30 ? s : 3;
 
+        // Not a word out loud for the whole run. Driving the window drives the code that speaks, and a gate run
+        // must never make a noise on the machine it is running on — Ed, 2026-09-20, hearing it through NVDA.
+        var restoreSpeech = ScreenReader.Suppressed;
+        ScreenReader.Suppressed = true;
+        try
+        {
         Console.WriteLine($"RemSound self-test {CommandLine.AppVersion}  ({DateTime.Now:yyyy-MM-dd HH:mm:ss})");
         Console.WriteLine();
 
@@ -237,6 +243,7 @@ internal static partial class SelfTest
         RunStep(results, "Relay groups: framing, member addresses and the member list", AuditRelayGroupFramingAndMembers);
         RunStep(results, "Several people share one relay, each heard as themselves", AuditSeveralPeopleShareOneRelay);
         RunStep(results, "Connecting to a relay, remembering it and ticking who is on it", AuditConnectingToARelayFromTheWindow);
+        RunStep(results, "GATE GUARD: a run makes no noise, including out loud", AGateRunMakesNoNoise);
         RunStep(results, "What happens when somebody else ticks you", WhatHappensWhenSomebodyTicksYou);
         RunStep(results, "The send-only service, and somebody ticking it on a relay", TheServiceAndSomebodyTickingItOnARelay);
         RunStep(results, "Removing a peer while you are on a relay", RemovingAPeerWhileOnARelay);
@@ -376,6 +383,8 @@ internal static partial class SelfTest
         Console.WriteLine($"RESULT: FAIL - {failed} failed, {passed} passed{(skipped > 0 ? $", {skipped} skipped" : "")} of {results.Count}.");
         Console.WriteLine($"        Failed: {names}");
         return 1;
+        }
+        finally { ScreenReader.Suppressed = restoreSpeech; }
     }
 
     private static void RunStep(List<Result> results, string name, Func<string?> body)

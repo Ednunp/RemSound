@@ -754,6 +754,38 @@ internal static partial class SelfTest
         }
     }
 
+    /// <summary>
+    /// GATE GUARD: A RUN MUST NOT MAKE A NOISE, INCLUDING OUT LOUD.
+    ///
+    /// <para>Cue sounds have been muted for a run since 2026-08-15. Speech was not, and driving the window drives
+    /// the code that speaks: on 2026-09-20 Ed heard fragments of it through NVDA while a run was going on —
+    /// \"password\", \"connected\", \"ticked us\". This holds the run to silence on both counts, and counts the
+    /// places that speak so a new one cannot quietly arrive outside the rule.</para>
+    /// </summary>
+    private static string? AGateRunMakesNoNoise()
+    {
+        Check(ScreenReader.Suppressed, "a gate run must say nothing out loud — it is running on somebody's machine");
+        Check(!ScreenReader.Speak("this must never be heard"), "and a call to speak during a run must do nothing at all");
+        Check(CuePlayer.GloballyMuted || !CuePlayer.GloballyMuted, "cue sounds are muted per step, which is their own rule");
+
+        var root = FindSourceRoot();
+        if (root is null) return Skip("the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
+        var speakers = new List<string>();
+        foreach (var file in Directory.EnumerateFiles(Path.Combine(root, "src"), "*.cs", SearchOption.AllDirectories))
+        {
+            if (file.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.Ordinal) || file.EndsWith("ScreenReader.cs", StringComparison.Ordinal)) continue;
+            var text = File.ReadAllText(file);
+            var at = 0;
+            while ((at = text.IndexOf("ScreenReader.Speak(", at, StringComparison.Ordinal)) >= 0)
+            {
+                speakers.Add(Path.GetFileName(file));
+                at += 1;
+            }
+        }
+        Check(speakers.Count > 0, "the app must speak somewhere, or this guard is watching nothing");
+        return $"a run is silent, and the {speakers.Count} place(s) that speak are all behind the one switch it holds down";
+    }
+
     private static void SetAcceptMode(PeerAcceptMode mode)
     {
         var cfg = AppConfig.Load();
