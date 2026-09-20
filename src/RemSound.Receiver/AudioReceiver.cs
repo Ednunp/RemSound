@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using RemSound.Core;
@@ -1206,6 +1207,9 @@ public sealed class AudioReceiver : IDisposable
             // if they want; until then, silence on our side. Counted separately so it shows in
             // diagnostics without inflating the generic "drops" stat.
             Interlocked.Increment(ref packetsRejectedNotAllowed);
+            // Somebody sending us audio we have not asked for has ticked US. That is the only signal there is
+            // that they want to connect, so it is what the app's "accept connections" setting acts on.
+            NoteUnselectedSender(remote, peerFingerprint);
             return;
         }
 
@@ -1366,6 +1370,31 @@ public sealed class AudioReceiver : IDisposable
     /// <summary>Cumulative Format packets rejected for announcing something undecodable. Surfaced so
     /// a peer that has genuinely gone wrong is visible as a number rather than only as silence.</summary>
     public long FormatPacketsRejected => Interlocked.Read(ref badFormatsTotal);
+
+    /// <summary>
+    /// Somebody who is NOT ticked is sending us audio, which means they have ticked us. Their endpoint, and whether
+    /// the password they announced is ours. Raised on the receive thread, at most once every ten seconds for any one
+    /// address, so a peer left sending cannot turn into a stream of prompts. The app decides what to do with it —
+    /// ask, tick them back, or nothing — per <c>AppConfig.AcceptPeerConnections</c>.
+    /// </summary>
+    public Action<IPEndPoint, bool>? OnUnselectedSenderHeard { get; set; }
+
+    private readonly ConcurrentDictionary<string, long> unselectedSenderNoted = new();
+    private static readonly TimeSpan UnselectedSenderInterval = TimeSpan.FromSeconds(10);
+
+    private void NoteUnselectedSender(IPEndPoint remote, ReadOnlySpan<byte> peerFingerprint)
+    {
+        var handler = OnUnselectedSenderHeard;
+        if (handler is null) return;
+        var key = remote.Address.ToString();
+        var now = Stopwatch.GetTimestamp();
+        var every = (long)(Stopwatch.Frequency * UnselectedSenderInterval.TotalSeconds);
+        if (unselectedSenderNoted.TryGetValue(key, out var last) && now - last < every) return;
+        unselectedSenderNoted[key] = now;
+        var ours = audioFingerprint;
+        var samePassword = ours is not null && peerFingerprint.Length == ours.Length && peerFingerprint.SequenceEqual(ours);
+        handler(remote, samePassword);
+    }
 
     private void NoteUnusableFormat(IPEndPoint remote, string problem)
     {

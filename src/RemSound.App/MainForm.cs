@@ -975,8 +975,8 @@ public sealed partial class MainForm : Form
 
         hotkeyController = new MainFormHotkeyController(
             settings,
-            () => sendMyAudioCheckbox.Checked = !sendMyAudioCheckbox.Checked,
-            () => receiveAudioCheckbox.Checked = !receiveAudioCheckbox.Checked,
+            ToggleSendFromHotkey,
+            ToggleReceiveFromHotkey,
             ToggleTrayFromHotkey,
             () => NudgeVolume(+5),
             () => NudgeVolume(-5),
@@ -2686,6 +2686,11 @@ public sealed partial class MainForm : Form
                 logFile.Event(startupVolume.Enabled
                     ? $"service: startup volume {startupVolume.Percent}% ({(startupVolume.BootOnly ? "first start after each boot" : "every start")})"
                     : "service: startup volume off");
+            }
+            if (dlg.PendingAcceptOnRelay is { } acceptOnRelay)
+            {
+                ServiceStore.SaveAcceptRelayConnectionsAutomatically(acceptOnRelay);
+                logFile.Event($"service: accept people who tick it on a relay: {(acceptOnRelay ? "automatically" : "off")}");
             }
             // Remove any stray copy the old design left in the user's profiles folder.
             try { profileStore?.Delete(ServiceControl.ServiceProfileTitle); } catch { /* best-effort */ }
@@ -6181,6 +6186,14 @@ public sealed partial class MainForm : Form
             // sees the Control packet, parses it, and fires this delegate. We marshal back
             // onto the UI thread to mutate volumeBar / mute state.
             receiver.OnRemoteControlReceived = HandleRemoteControlPacket;
+            // Somebody who is not ticked sending us audio has ticked US. What happens next is the user's setting:
+            // ask, tick them back, or nothing. Marshalled onto the UI thread — it can put a question on screen.
+            receiver.OnUnselectedSenderHeard = (remote, samePassword) =>
+            {
+                try { BeginInvoke(() => OnSomeoneWantsToConnect(remote, samePassword)); }
+                catch (ObjectDisposedException) { /* closing */ }
+                catch (InvalidOperationException) { /* no handle yet */ }
+            };
             // Relay address-proof (2026-07-27): echo the relay's cookie back verbatim so it can
             // verify this address really receives — the proof that keeps us forwardable once the
             // relay enforces. Echo-to-source is self-limiting (one small reply per challenge,
@@ -9925,20 +9938,49 @@ public sealed partial class MainForm : Form
     /// confirmation dialog suppressed, so it's completely unobtrusive — no sound, no popup.</summary>
     private void AutoSaveCurrentProfileIfDue()
     {
-        if (!ShouldAutoSave(profileStore is not null, currentProfileTitle, currentProfileReadOnly, unsavedChanges)) return;
+        // Say what it decided, every time. "My auto-save isn't honouring the setting" (Andre, 2026-09-20) could not be
+        // answered from a log that only ever recorded the saves: a skip and a timer that never ticked read the same.
+        var why = AutoSaveSkipReason(profileStore is not null, currentProfileTitle, currentProfileReadOnly, unsavedChanges);
+        if (why is not null)
+        {
+            logFile.Event($"auto-save: nothing done — {why}");
+            return;
+        }
         SaveProfileTo(currentProfileTitle!, showConfirmation: false, playCue: false);
+        logFile.Event($"auto-save: saved \"{currentProfileTitle}\"");
+    }
+
+    /// <summary>Why the periodic auto-save did nothing, or null when it should go ahead. In its own words, because the
+    /// difference between "read-only, so never" and "nothing to save" is the whole answer when somebody asks.</summary>
+    internal static string? AutoSaveSkipReason(bool hasStore, string? currentTitle, bool readOnly, bool dirty)
+    {
+        if (!hasStore) return "no profile store";
+        if (string.IsNullOrEmpty(currentTitle)) return "no profile is loaded (a blank template is never saved over)";
+        if (readOnly) return $"\"{currentTitle}\" is read-only, and this setting only auto-saves profiles that are not";
+        if (!dirty) return $"\"{currentTitle}\" has no unsaved changes";
+        return null;
     }
 
     /// <summary>Pure guard for the periodic auto-save (unit-testable). Only a real, saved profile that is
     /// NOT read-only and has unsaved changes may be auto-saved — a blank template, a read-only profile, or
     /// an unchanged one is left alone.</summary>
     internal static bool ShouldAutoSave(bool hasStore, string? currentTitle, bool readOnly, bool dirty)
-        => hasStore && !string.IsNullOrEmpty(currentTitle) && !readOnly && dirty;
+        => AutoSaveSkipReason(hasStore, currentTitle, readOnly, dirty) is null;
 
     // Test seams for the auto-save timer (headless): confirm ApplyAutoSaveTimer turns it on/off and sets
     // the interval from AppConfig.AutoSaveNonReadOnlyMinutes.
     internal bool AutoSaveTimerEnabledForTest => autoSaveTimer.Enabled;
     internal int AutoSaveTimerIntervalForTest => autoSaveTimer.Interval;
+
+    /// <summary>The send-my-audio switch, flipped exactly as the global hotkey flips it. A named method rather than a
+    /// lambda so the gate can press the very thing the hotkey presses — Andre, 2026-09-20: "maybe those keys aren't
+    /// getting registered as profile changes".</summary>
+    internal void ToggleSendFromHotkey() => sendMyAudioCheckbox.Checked = !sendMyAudioCheckbox.Checked;
+    /// <summary>The play-incoming-audio switch, flipped exactly as the global hotkey flips it.</summary>
+    internal void ToggleReceiveFromHotkey() => receiveAudioCheckbox.Checked = !receiveAudioCheckbox.Checked;
+    internal bool UnsavedChangesForTest => unsavedChanges;
+    internal void RunAutoSaveTickForTest() => AutoSaveCurrentProfileIfDue();
+    internal void SetProfileReadOnlyForTest(bool readOnly) => OnLockProfileToggled(readOnly);
 
     // Seams for the CONTROL SUITE (SelfTest.Controls.cs). Every user control is driven headlessly and
     // then probed HERE — on the live audio objects — to prove the control reaches what it claims to

@@ -373,6 +373,14 @@ public sealed partial class MainForm
             ApplyRelayTicks();
         }
 
+        // Somebody on the relay who has ticked us and whom we have not ticked: that is a connection waiting to happen,
+        // and what happens next is the user's setting (ask, tick back, or nothing).
+        foreach (var member in relayGroup.Members)
+        {
+            if (relay is null || !member.Relay.Equals(relay)) continue;
+            if (member.TicksUs && !relayTicked.Contains(member.Id)) OnRelayMemberWantsToConnect(member);
+        }
+
         // Somebody you have ticked who has not ticked you back: say so when it changes, and keep it in the status line.
         var waitingFor = new List<string>();
         foreach (var member in relayGroup.Members.Where(m => relay is not null && m.Relay.Equals(relay) && relayTicked.Contains(m.Id)))

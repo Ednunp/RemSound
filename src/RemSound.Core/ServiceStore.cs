@@ -239,6 +239,9 @@ public static class ServiceStore
         public bool StartupVolumeEnabled { get; set; }
         public int StartupVolumePercent { get; set; } = 50;
         public bool StartupVolumeBootOnly { get; set; } = true;
+        // Somebody on a relay ticking the service: tick them back, or leave it to the profile. There is nobody at a
+        // screen to ask, so the app's third option (ask me) has no meaning here. Off by default, house rule.
+        public bool AcceptRelayConnectionsAutomatically { get; set; }
     }
 
     private static ServiceSettings LoadSettings()
@@ -271,6 +274,18 @@ public static class ServiceStore
         s.StartupVolumeEnabled = enabled;
         s.StartupVolumePercent = Math.Clamp(percent, 0, 100);
         s.StartupVolumeBootOnly = bootOnly;
+        SaveSettings(s);
+    }
+
+    /// <summary>Whether the service ticks back somebody who ticks it on a relay. The app has three answers to this
+    /// (ask, automatic, manual); the service has two, because nobody is at the screen to be asked. Off by default:
+    /// the service reaches exactly the people its profile names until you say otherwise.</summary>
+    public static bool LoadAcceptRelayConnectionsAutomatically() => LoadSettings().AcceptRelayConnectionsAutomatically;
+
+    public static void SaveAcceptRelayConnectionsAutomatically(bool automatic)
+    {
+        var s = LoadSettings(); // load-modify-save: never clobber the other settings in the file
+        s.AcceptRelayConnectionsAutomatically = automatic;
         SaveSettings(s);
     }
 

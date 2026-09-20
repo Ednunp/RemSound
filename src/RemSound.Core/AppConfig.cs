@@ -13,6 +13,20 @@ public enum UpdateCheckFrequency
 }
 
 /// <summary>
+/// What happens when somebody else ticks you. Ed, 2026-09-20. Values are stable: don't reorder;
+/// deserialisation reads the underlying int from <c>global config.json</c>.
+/// </summary>
+public enum PeerAcceptMode
+{
+    /// <summary>Ask, with their name and where they are, and do nothing until the answer comes. The default.</summary>
+    Prompt = 0,
+    /// <summary>Tick them back the moment they tick you, so sound flows without either of you doing anything more.</summary>
+    Automatic = 1,
+    /// <summary>Nothing happens until you tick them yourself, on both sides. How RemSound has always worked.</summary>
+    Manual = 2,
+}
+
+/// <summary>
 /// App-level configuration, kept as <c>global config.json</c> in the user-data folder
 /// (<c>&lt;exe&gt;\user settings and logs\</c>, see <see cref="UserDataDirectory"/>).
 /// Distinct from <see cref="Profile"/>: profiles are user-chosen sets of audio /
@@ -256,6 +270,12 @@ public sealed class AppConfig
     /// has unsaved changes. 0 = never (the default). Set in Preferences → General. The auto-save is
     /// SILENT — it never plays the save cue or shows the confirmation. Machine-wide.</summary>
     public int AutoSaveNonReadOnlyMinutes { get; set; }
+
+    /// <summary>What happens when somebody else ticks you: ask (the default), tick them back at once, or nothing
+    /// until you tick them yourself. Machine-wide, so it holds whichever profile is loaded. Set in Preferences →
+    /// General. Somebody on a different password is never offered or accepted: their audio could not be played
+    /// anyway, so there is nothing to agree to.</summary>
+    public PeerAcceptMode AcceptPeerConnections { get; set; } = PeerAcceptMode.Prompt;
 
     // The send-only service's profile + settings live in the machine-wide RemSound.Core.ServiceStore
     // (ProgramData), NOT here — AppConfig is per-user, but the service runs as SYSTEM and needs the same

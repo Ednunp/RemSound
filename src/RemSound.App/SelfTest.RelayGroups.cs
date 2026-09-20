@@ -412,6 +412,199 @@ internal static partial class SelfTest
     }
 
     /// <summary>
+    /// WHAT HAPPENS WHEN SOMEBODY ELSE TICKS YOU.
+    ///
+    /// <para>Ed, 2026-09-20. Three ways: ask (the default), tick them back at once, or nothing until you do it
+    /// yourself. There are two ways to know somebody has ticked you — their audio arriving at our port unasked for, and
+    /// the relay's member list saying so — and both land in the same decision. This drives that decision directly, in
+    /// each of the three modes, on the real window.</para>
+    ///
+    /// <para>The question itself is a message box, which a headless run has nobody to answer; in that mode the app
+    /// declines to ask, so what "ask" is held to here is that it connects nobody on its own. The two modes that act
+    /// without a question — automatic and manual — are proven all the way to the peer list.</para>
+    /// </summary>
+    private static string? WhatHappensWhenSomebodyTicksYou()
+    {
+        // The default, before anything touches it.
+        Check(new AppConfig().AcceptPeerConnections == PeerAcceptMode.Prompt,
+            "asking must be the default: nobody should be connected to without either a question or a decision");
+        var rows = PreferencesDialog.AcceptPeerOptionsForTest;
+        Check(rows.Count == 3 && rows[0] == PeerAcceptMode.Prompt && rows[1] == PeerAcceptMode.Automatic && rows[2] == PeerAcceptMode.Manual,
+            $"the list must offer ask, automatic and manual, in that order (got {string.Join(", ", rows)})");
+        var saved = AppConfig.Load();
+        var restoreMode = saved.AcceptPeerConnections;
+        var restoreMuted = CuePlayer.GloballyMuted;
+        CuePlayer.GloballyMuted = true;
+        MainForm? form = null;
+        try
+        {
+            saved.AcceptPeerConnections = PeerAcceptMode.Manual;
+            saved.Save();
+            Check(AppConfig.Load().AcceptPeerConnections == PeerAcceptMode.Manual, "the choice must persist through AppConfig");
+
+            try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+
+            var theirs = new IPEndPoint(IPAddress.Parse("198.51.100.21"), RemPacket.DefaultPeerDialPort);
+            bool Connected(IPEndPoint ep) => form!.SelectedSendEndpointsForTest().Any(e => e.Address.Equals(ep.Address));
+
+            // Manual: nothing happens at all. This is how RemSound has always worked.
+            form.SomeoneWantsToConnectForTest(theirs, samePassword: true);
+            Check(!Connected(theirs) && form.AcceptAskedForTest.Count == 0,
+                "on manual, somebody sending to us must connect nobody and be recorded nowhere");
+
+            // Automatic: ticked back at once, so sound flows without either of you doing anything more.
+            SetAcceptMode(PeerAcceptMode.Automatic);
+            form.SomeoneWantsToConnectForTest(theirs, samePassword: true);
+            Check(Connected(theirs), "on automatic, somebody who ticks us must be ticked back at once");
+
+            // Somebody on a different password is never offered or accepted: their audio could not be played anyway.
+            var stranger = new IPEndPoint(IPAddress.Parse("198.51.100.99"), RemPacket.DefaultPeerDialPort);
+            form.SomeoneWantsToConnectForTest(stranger, samePassword: false);
+            Check(!Connected(stranger), "somebody on a different password must never be connected to, whatever the mode");
+
+            // Asking: a headless run has nobody to answer, so nobody is connected — and it is recorded as asked, so
+            // the same address cannot turn into a stream of questions.
+            SetAcceptMode(PeerAcceptMode.Prompt);
+            var asker = new IPEndPoint(IPAddress.Parse("198.51.100.31"), RemPacket.DefaultPeerDialPort);
+            form.SomeoneWantsToConnectForTest(asker, samePassword: true);
+            Check(!Connected(asker), "asking must connect nobody until the question is answered");
+            var askedOnce = form.AcceptAskCountForTest;
+            Check(askedOnce == 1, $"asking must actually ask, once ({askedOnce} times)");
+            form.SomeoneWantsToConnectForTest(asker, samePassword: true);
+            form.SomeoneWantsToConnectForTest(asker, samePassword: true);
+            Check(form.AcceptAskCountForTest == askedOnce,
+                $"and the same person must be asked about once, not every time a packet of theirs arrives "
+                + $"({form.AcceptAskCountForTest} times)");
+
+            // The same decision, from the relay's member list rather than from unasked-for audio.
+            var relay = new IPEndPoint(IPAddress.Parse("203.0.113.77"), RemPacket.DefaultPort);
+            form.ConnectToRelayForTest("relay.example.test", relay);
+            var mate = Guid.NewGuid();
+            Feed(form.RelayGroupForTest, relay, RosterPacket([(mate, "Ticked us", true)], paired: false),
+                RelayInbound.Consumed, "a member list");
+            SetAcceptMode(PeerAcceptMode.Manual);
+            form.SyncRelayPeersListForTest();
+            Check(form.RelayTickedForTest.Count == 0, "on manual, somebody ticking us on a relay must not tick them back");
+            SetAcceptMode(PeerAcceptMode.Automatic);
+            form.SyncRelayPeersListForTest();
+            Check(form.RelayTickedForTest.Contains(mate),
+                "on automatic, somebody who ticks us on a relay must be ticked back, the same as anybody else");
+
+            // And the signal itself: a Format packet from somebody not ticked is what tells us they have ticked US.
+            // Everything above drives the decision directly, so without this the thing that sets it off is untested.
+            using (var receiver = new Receiver.AudioReceiver())
+            {
+                var heard = new List<(IPEndPoint From, bool Same)>();
+                receiver.OnUnselectedSenderHeard = (from, same) => { lock (heard) heard.Add((from, same)); };
+                var (_, ourFingerprint) = RemSoundCrypto.ForPlainPassword("the password we are on");
+                var (_, otherFingerprint) = RemSoundCrypto.ForPlainPassword("some other password");
+                receiver.AudioFingerprint = ourFingerprint;
+                try { receiver.Start(FreeUdpPort()); }
+                catch (Exception ex) { return Skip($"could not start a receiver: {ex.Message}"); }
+                receiver.SetOutputDevices([]);
+                receiver.SetPlaybackEnabled(true);
+                var welcome = new IPEndPoint(IPAddress.Parse("198.51.100.41"), RemPacket.DefaultPeerDialPort);
+                receiver.SetAllowedSenders([welcome]);
+
+                static byte[] FormatPacket(ReadOnlySpan<byte> fingerprint, out int length)
+                {
+                    var packet = new byte[RemPacket.HeaderSize + 96];
+                    RemPacket.WriteHeader(packet, RemPacketType.Format, 1, 1);
+                    length = RemPacket.HeaderSize + RemPacket.WriteFormatPayload(packet.AsSpan(RemPacket.HeaderSize),
+                        new AudioFormatInfo(48000, 2, 24, 1, 6, 48000 * 6), fingerprint);
+                    return packet;
+                }
+
+                var ours = FormatPacket(ourFingerprint, out var oursLength);
+                var unasked = new IPEndPoint(IPAddress.Parse("198.51.100.42"), RemPacket.DefaultPeerDialPort);
+                receiver.InjectExternalPacket(ours, oursLength, unasked);
+                Check(heard.Count == 1 && heard[0].From.Address.Equals(unasked.Address) && heard[0].Same,
+                    $"audio arriving from somebody not ticked must be reported as them wanting to connect, on our password ({heard.Count} reported)");
+
+                receiver.InjectExternalPacket(ours, oursLength, unasked);
+                Check(heard.Count == 1, "and reported once, not on every packet they send");
+
+                receiver.InjectExternalPacket(ours, oursLength, welcome);
+                Check(heard.Count == 1, "somebody already ticked is not somebody asking to connect");
+
+                var fromElsewhere = FormatPacket(otherFingerprint, out var elsewhereLength);
+                var stranger2 = new IPEndPoint(IPAddress.Parse("198.51.100.43"), RemPacket.DefaultPeerDialPort);
+                receiver.InjectExternalPacket(fromElsewhere, elsewhereLength, stranger2);
+                Check(heard.Count == 2 && !heard[1].Same,
+                    "somebody on another password must be reported as such, so the app can leave them alone");
+            }
+
+            return "asking is the default and the list offers ask, automatic and manual in that order; manual connects "
+                + "nobody, automatic ticks them back at once, asking connects nobody until answered and asks once per "
+                + "person; a different password is never accepted; the relay's list drives the same decision; and "
+                + "unasked-for audio is what sets it off, once per person, never for somebody already ticked";
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            try { var c = AppConfig.Load(); c.AcceptPeerConnections = restoreMode; c.Save(); } catch { /* best effort */ }
+            CuePlayer.GloballyMuted = restoreMuted;
+        }
+    }
+
+    /// <summary>
+    /// THE SEND-ONLY SERVICE, AND SOMEBODY TICKING IT ON A RELAY.
+    ///
+    /// <para>Ed, 2026-09-20. The service has nobody at a screen to ask, so it gets two answers rather than the app's
+    /// three: tick them back, or leave it to the profile. Off by default — the service reaches exactly the people its
+    /// profile names until you say otherwise. Left as it was, somebody who joins the relay after the profile was saved
+    /// could never hear the service, because sound only passes where each has ticked the other.</para>
+    /// </summary>
+    private static string? TheServiceAndSomebodyTickingItOnARelay()
+    {
+        var relay = new IPEndPoint(IPAddress.Parse("203.0.113.90"), RemPacket.DefaultPort);
+        var fromProfile = Guid.NewGuid();
+        var tickedUs = Guid.NewGuid();
+        var silent = Guid.NewGuid();
+        RelayGroupClient.Member Member(Guid id, string name, bool ticksUs) =>
+            new(id, new IPEndPoint(IPAddress.Parse("240.0.0.1"), RemPacket.DefaultPort), name, relay, ticksUs);
+        var members = new[] { Member(tickedUs, "Ticked the service", true), Member(silent, "Has not", false) };
+
+        var off = ServiceNetworkPresence.TicksFor([fromProfile], members, acceptAutomatically: false);
+        Check(off.Count == 1 && off[0] == fromProfile,
+            $"left off, the service must reach exactly the people its profile names ({off.Count})");
+
+        var on = ServiceNetworkPresence.TicksFor([fromProfile], members, acceptAutomatically: true);
+        Check(on.Contains(fromProfile) && on.Contains(tickedUs) && !on.Contains(silent),
+            "turned on, it must also tick back everybody on the relay who has ticked IT, and nobody who has not");
+        Check(on.Count == 2, $"and nobody twice ({on.Count} for two people)");
+
+        var already = ServiceNetworkPresence.TicksFor([tickedUs], members, acceptAutomatically: true);
+        Check(already.Count == 1, $"somebody the profile already names must not be counted twice ({already.Count})");
+
+        // The setting itself: off by default, and it survives a save.
+        var stored = ServiceStore.LoadAcceptRelayConnectionsAutomatically();
+        try
+        {
+            ServiceStore.SaveAcceptRelayConnectionsAutomatically(true);
+            Check(ServiceStore.LoadAcceptRelayConnectionsAutomatically(), "the service's choice must persist");
+            ServiceStore.SaveAcceptRelayConnectionsAutomatically(false);
+            Check(!ServiceStore.LoadAcceptRelayConnectionsAutomatically(), "and persist when turned off again");
+            // Turning it on must not disturb the other settings in the same file.
+            var volume = ServiceStore.LoadStartupVolume();
+            ServiceStore.SaveAcceptRelayConnectionsAutomatically(true);
+            Check(ServiceStore.LoadStartupVolume() == volume, "and must leave the other service settings alone");
+        }
+        finally { try { ServiceStore.SaveAcceptRelayConnectionsAutomatically(stored); } catch { /* best effort */ } }
+
+        return "the service reaches its profile's people when left off, and also ticks back whoever ticks it on the "
+            + "relay when turned on, nobody twice; the choice persists and leaves the other service settings alone";
+    }
+
+    private static void SetAcceptMode(PeerAcceptMode mode)
+    {
+        var cfg = AppConfig.Load();
+        cfg.AcceptPeerConnections = mode;
+        cfg.Save();
+    }
+
+    /// <summary>
     /// HEARTBEATS THROUGH A RELAY GROUP.
     ///
     /// <para>In a group the relay itself never answers a ping; the people behind it do, from their own member addresses,
@@ -492,7 +685,10 @@ internal static partial class SelfTest
         Need(service, "relayGroup?.NoteRelay(remote);", "the service must learn a relay from its address check");
         Need(service, "group.Start(sender.SendRaw);", "the service must start its relay group on the raw socket");
         Need(service, "group.Connect(relay);", "the service must connect to the relay its profile names");
-        Need(service, "group.SetTicked(tickedOnRelay ?? [], pairPartner: true);", "the service must tell the relay who its profile has ticked");
+        Need(service, "group.SetTicked(TicksFor(profileTicks, group.Members, acceptRelayAutomatically), pairPartner: true);",
+            "the service must tell the relay who its profile has ticked, plus anyone it is set to accept");
+        Need(service, "group.Changed += OnRelayGroupChanged;",
+            "the service must work that out again each time the relay's member list changes, not only at start-up");
         Need(host, "presence.Start(RemPacket.DefaultPort, endpoints, relay, tickedOnRelay);", "the service must pass its profile's relay and ticks to its network presence");
         Check(missing.Count == 0, string.Join(" | ", missing));
         return "the app and the send-only service both route through, listen to, learn and leave their relay groups";

@@ -56,6 +56,29 @@ internal sealed class PreferencesDialog : Form
     // Parallel to autoSaveList.Items: the minute interval each row means (0 = Never).
     private static readonly int[] AutoSaveMinuteOptions = { 0, 2, 5, 10, 15, 20, 30 };
 
+    // What happens when somebody else ticks you (Ed, 2026-09-20). A plain list, like the auto-save one above.
+    // Machine-wide, so it holds whichever profile is loaded.
+    private readonly Label acceptPeersLabel = new()
+    {
+        Text = "Accept co&nnections from other peers (Alt+N):",
+        AccessibleName = "Accept connections from other peers",
+        AutoSize = true,
+        Padding = new Padding(0, 6, 0, 4),
+    };
+    private readonly ListBox acceptPeersList = new()
+    {
+        IntegralHeight = false,
+        Width = 360,
+        Height = 66,
+        AccessibleName = "Accept connections from other peers",
+    };
+    // Parallel to acceptPeersList.Items. Prompt leads, because it is the default.
+    private static readonly PeerAcceptMode[] AcceptPeerOptions =
+        { PeerAcceptMode.Prompt, PeerAcceptMode.Automatic, PeerAcceptMode.Manual };
+
+    /// <summary>Test seam: the accept-connection rows, in order, so a self-test can hold the list to its meaning.</summary>
+    internal static IReadOnlyList<PeerAcceptMode> AcceptPeerOptionsForTest => AcceptPeerOptions;
+
     // Clear the GLOBAL (machine-wide) remembered lists — peers and applications are a shared address book
     // across all profiles, so these live in Preferences, not per-profile. Each asks for confirmation first.
     private readonly Button clearRememberedPeersButton = new()
@@ -774,6 +797,24 @@ internal sealed class PreferencesDialog : Form
         };
         autoSaveLabel.Click += (_, _) => autoSaveList.Focus();
 
+        acceptPeersList.Items.AddRange(new object[]
+        {
+            "Ask me each time",
+            "Automatically - connect when someone ticks me",
+            "Manual - I tick them myself",
+        });
+        var savedAccept = AppConfig.Load().AcceptPeerConnections;
+        var acceptRow = Array.IndexOf(AcceptPeerOptions, savedAccept);
+        acceptPeersList.SelectedIndex = acceptRow >= 0 ? acceptRow : 0;
+        acceptPeersList.SelectedIndexChanged += (_, _) =>
+        {
+            if (acceptPeersList.SelectedIndex < 0) return;
+            var cfg = AppConfig.Load();
+            cfg.AcceptPeerConnections = AcceptPeerOptions[acceptPeersList.SelectedIndex];
+            TrySaveConfig(cfg);
+        };
+        acceptPeersLabel.Click += (_, _) => acceptPeersList.Focus();
+
         clearRememberedPeersButton.Click += (_, _) =>
         {
             if (MessageBox.Show(this,
@@ -1179,11 +1220,20 @@ internal sealed class PreferencesDialog : Form
         };
         autoSavePanel.Controls.Add(autoSaveLabel);
         autoSavePanel.Controls.Add(autoSaveList);
+        // Same shape for "what happens when somebody ticks me", directly under it.
+        var acceptPeersPanel = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.TopDown,
+            AutoSize = true,
+            WrapContents = false,
+        };
+        acceptPeersPanel.Controls.Add(acceptPeersLabel);
+        acceptPeersPanel.Controls.Add(acceptPeersList);
         // The two "clear remembered list" actions sit at the END of the General tab (they're machine-wide
         // maintenance, not a per-profile setting). A header separates them from the settings above.
         var clearListsHeader = Theme.SectionHeader("Remembered lists (shared across all profiles)");
         tabs.TabPages.Add(MakeTab("General",
-            browseProfilesFolderButton, autoSavePanel, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel,
+            browseProfilesFolderButton, autoSavePanel, acceptPeersPanel, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel,
             clearListsHeader, clearRememberedPeersButton, clearRememberedRelaysButton, clearRememberedAppsButton));
         tabs.TabPages.Add(MakeTab("Appearance",
             themeRow, showPanEqTabBox, tabOrderLabel, tabOrderList, tabOrderButtons,

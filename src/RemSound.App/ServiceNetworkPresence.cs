@@ -37,6 +37,8 @@ internal sealed class ServiceNetworkPresence : IDisposable
     private HeartbeatService? heartbeat;
     // One person among several on a relay, exactly as the app is (RelayGroupClient; GitHub #29, 2026-09-18).
     private RelayGroupClient? relayGroup;
+    private List<Guid> profileTicks = [];
+    private bool acceptRelayAutomatically;
     private bool running;
     private bool disposed;
 
@@ -61,8 +63,39 @@ internal sealed class ServiceNetworkPresence : IDisposable
         relayGroup?.NoteRelay(remote);
     }
 
+    /// <summary>
+    /// Who the service should have ticked on its relay: the people its profile names, plus — when the service is set
+    /// to accept automatically — everybody on the relay who has ticked IT. The relay passes sound only where each has
+    /// ticked the other, so without this a person who joins later cannot hear the service until somebody opens the app
+    /// and saves the profile again.
+    /// </summary>
+    internal static List<Guid> TicksFor(IEnumerable<Guid> fromProfile, IEnumerable<RelayGroupClient.Member> members, bool acceptAutomatically)
+    {
+        var wanted = new List<Guid>();
+        foreach (var id in fromProfile)
+        {
+            if (!wanted.Contains(id)) wanted.Add(id);
+        }
+        if (acceptAutomatically)
+        {
+            foreach (var member in members)
+            {
+                if (member.TicksUs && !wanted.Contains(member.Id)) wanted.Add(member.Id);
+            }
+        }
+        return wanted;
+    }
+
     /// <summary>Test seam: is the well-known-port listener actually bound?</summary>
     internal bool ListenerBound => receiver.IsListenerRunning;
+
+    private void OnRelayGroupChanged()
+    {
+        var group = relayGroup;
+        if (group is null) return;
+        try { group.SetTicked(TicksFor(profileTicks, group.Members, acceptRelayAutomatically), pairPartner: true); }
+        catch (Exception ex) { log?.Invoke($"service: relay ticks not applied {ex.GetType().Name}: {ex.Message}"); }
+    }
 
     /// <summary>Current per-peer heartbeat health (reachable / stale / unreachable + age), so the host can
     /// gate the audio send on reachability — the same signal the interactive app uses. Empty when down.</summary>
@@ -87,8 +120,13 @@ internal sealed class ServiceNetworkPresence : IDisposable
         // the app does. The people ticked there are the profile's, so the relay passes our sound to exactly them.
         if (relay is not null)
         {
+            profileTicks = (tickedOnRelay ?? []).ToList();
+            acceptRelayAutomatically = ServiceStore.LoadAcceptRelayConnectionsAutomatically();
             group.Connect(relay);
-            group.SetTicked(tickedOnRelay ?? [], pairPartner: true);
+            group.SetTicked(TicksFor(profileTicks, group.Members, acceptRelayAutomatically), pairPartner: true);
+            // The member list says who has ticked us, and it arrives seconds after we connect and again whenever
+            // somebody joins, so the answer is worked out each time it changes rather than once at start-up.
+            group.Changed += OnRelayGroupChanged;
         }
         sender.RelayRouter = group;
         heartbeat.RelayOfMember = group.RelayOf;
@@ -150,6 +188,7 @@ internal sealed class ServiceNetworkPresence : IDisposable
         try { discovery.Stop(); } catch { }
         try { heartbeat?.Stop(); heartbeat?.Dispose(); } catch { }
         heartbeat = null;
+        if (relayGroup is not null) relayGroup.Changed -= OnRelayGroupChanged;
         try { relayGroup?.Stop(); } catch { }   // says goodbye, so the group sees us leave at once
         relayGroup = null;
         sender.RelayRouter = null;

@@ -339,17 +339,22 @@ internal sealed class ServiceProfileDialog : Form
         // Reopening it before this dialog closes shows what was chosen last time, not the stored value.
         var stored = ServiceStore.LoadStartupVolume();
         var start = PendingStartupVolume ?? (stored.Enabled, stored.Percent, stored.BootOnly);
-        var (dlg, logging, volume) = BuildAdditionalOptions(ServiceLoggingEnabled, start.Enabled, start.Percent, start.BootOnly);
+        var startAccept = PendingAcceptOnRelay ?? ServiceStore.LoadAcceptRelayConnectionsAutomatically();
+        var (dlg, logging, volume, accept) = BuildAdditionalOptions(ServiceLoggingEnabled, start.Enabled, start.Percent, start.BootOnly, startAccept);
         using (dlg)
         {
             if (ForegroundDialog.Show(owner => dlg.ShowDialog(owner)) == DialogResult.OK)
-                AcceptAdditionalOptions(logging.Checked, volume.Enabled.Checked, (int)volume.Percent.Value, volume.When.SelectedIndex == 0);
+                AcceptAdditionalOptions(logging.Checked, volume.Enabled.Checked, (int)volume.Percent.Value, volume.When.SelectedIndex == 0, accept.Checked);
         }
     }
 
     /// <summary>The startup volume chosen in Additional options, waiting for THIS dialog's OK. Null when
     /// Additional options was never accepted, which leaves the stored value exactly as it was.</summary>
     internal (bool Enabled, int Percent, bool BootOnly)? PendingStartupVolume { get; private set; }
+
+    /// <summary>Whether the service should tick back somebody who ticks it on a relay, waiting for THIS dialog's OK.
+    /// Null when Additional options was never accepted, which leaves the stored value exactly as it was.</summary>
+    internal bool? PendingAcceptOnRelay { get; private set; }
 
     /// <summary>OK in Additional options. It HOLDS the choices rather than saving them: they are saved by
     /// the caller along with the service profile, only if this dialog is accepted too.
@@ -358,10 +363,12 @@ internal sealed class ServiceProfileDialog : Form
     /// pressed, so cancelling the service dialog afterwards kept a change the user had just cancelled —
     /// and this class promises that nothing is persisted until the caller acts on OK. The logging flag
     /// beside it was always held this way; the volume now matches. 2026-09-13 review.</para></summary>
-    internal void AcceptAdditionalOptions(bool loggingEnabled, bool volumeEnabled, int volumePercent, bool volumeBootOnly)
+    internal void AcceptAdditionalOptions(bool loggingEnabled, bool volumeEnabled, int volumePercent, bool volumeBootOnly,
+        bool acceptOnRelay = false)
     {
         ServiceLoggingEnabled = loggingEnabled;
         PendingStartupVolume = (volumeEnabled, Math.Clamp(volumePercent, 0, 100), volumeBootOnly);
+        PendingAcceptOnRelay = acceptOnRelay;
     }
 
     /// <summary>Construction split from ShowDialog so the accessibility audit can inspect this inner
@@ -371,8 +378,9 @@ internal sealed class ServiceProfileDialog : Form
     /// Startup volume (2026-07-26 feature): unmute + set the default output's level when the service
     /// starts — the WHEN list picks "first start after each boot" (default) or "every start".</summary>
     internal static (Form Dialog, AccessibleCheckBox Logging,
-        (AccessibleCheckBox Enabled, NumericUpDown Percent, ComboBox When) Volume)
-        BuildAdditionalOptions(bool loggingEnabled, bool volumeEnabled = false, int volumePercent = 50, bool volumeBootOnly = true)
+        (AccessibleCheckBox Enabled, NumericUpDown Percent, ComboBox When) Volume, AccessibleCheckBox AcceptOnRelay)
+        BuildAdditionalOptions(bool loggingEnabled, bool volumeEnabled = false, int volumePercent = 50, bool volumeBootOnly = true,
+            bool acceptOnRelay = false)
     {
         var dlg = new Form
         {
@@ -382,7 +390,7 @@ internal sealed class ServiceProfileDialog : Form
             MaximizeBox = false,
             ShowInTaskbar = false,
             StartPosition = FormStartPosition.CenterParent,
-            ClientSize = new Size(560, 240),
+            ClientSize = new Size(560, 280),
             AccessibleName = "Additional service options",
         };
         var logging = new AccessibleCheckBox { Text = "Enable service &logging (Alt+L)", AccessibleName = "Enable service logging", AutoSize = true, Checked = loggingEnabled };
@@ -416,12 +424,22 @@ internal sealed class ServiceProfileDialog : Form
         volEnabled.CheckedChanged += (_, _) => SyncVolumeEnabled();
         SyncVolumeEnabled();
 
+        // The service has no screen to ask at, so it gets the two answers that mean something here: tick them back, or
+        // leave it to the profile. The app's own three-way setting (ask / automatically / manual) is in Preferences.
+        var acceptRelay = new AccessibleCheckBox
+        {
+            Text = "&Accept people who tick this service on a relay server",
+            AccessibleName = "Accept people who tick this service on a relay server",
+            AutoSize = true,
+            Checked = acceptOnRelay,
+        };
+
         var ok = new Button { Text = "&OK", AutoSize = true, DialogResult = DialogResult.OK };
         // A real Cancel, and Escape bound to it. There was only OK, so Escape did nothing at all.
         var cancel = new Button { Text = "&Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
 
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(12), AutoSize = true };
-        foreach (var single in new Control[] { logging, volEnabled })
+        foreach (var single in new Control[] { logging, acceptRelay, volEnabled })
         {
             var w = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
             w.Controls.Add(single);
@@ -442,7 +460,7 @@ internal sealed class ServiceProfileDialog : Form
         dlg.Controls.Add(layout);
         dlg.AcceptButton = ok;
         dlg.CancelButton = cancel;
-        return (dlg, logging, (volEnabled, volPercent, volWhen));
+        return (dlg, logging, (volEnabled, volPercent, volWhen), acceptRelay);
     }
 
     private static Profile CloneProfile(Profile p) =>

@@ -331,7 +331,7 @@ internal static partial class SelfTest
     /// </summary>
     private static string? AuditServiceAdditionalOptionsCanBeCancelled()
     {
-        var (options, _, _) = ServiceProfileDialog.BuildAdditionalOptions(false);
+        var (options, _, _, _) = ServiceProfileDialog.BuildAdditionalOptions(false);
         using (options)
         {
             Check(options.CancelButton is Button { DialogResult: DialogResult.Cancel } cancel && cancel.Parent is not null,
@@ -342,13 +342,18 @@ internal static partial class SelfTest
         using var service = new ServiceProfileDialog(Profile.NewBlank(), false);
         Check(service.PendingStartupVolume is null, "nothing may be pending before Additional options has been accepted");
 
+        var storedAccept = ServiceStore.LoadAcceptRelayConnectionsAutomatically();
         var wanted = (Enabled: !stored.Enabled, Percent: stored.Percent == 37 ? 38 : 37, BootOnly: !stored.BootOnly);
-        service.AcceptAdditionalOptions(true, wanted.Enabled, wanted.Percent, wanted.BootOnly);
+        service.AcceptAdditionalOptions(true, wanted.Enabled, wanted.Percent, wanted.BootOnly, !storedAccept);
 
         var after = ServiceStore.LoadStartupVolume();
         Check(after == stored,
             $"accepting Additional options must NOT save the startup volume by itself (stored {stored}, now {after}) — it is saved "
             + "with the service profile, only when the service dialog is accepted as well");
+        Check(ServiceStore.LoadAcceptRelayConnectionsAutomatically() == storedAccept,
+            "nor whether the service accepts people who tick it on a relay — that is saved with the profile too");
+        Check(service.PendingAcceptOnRelay == !storedAccept,
+            "and that choice must be held for the service dialog's own OK, the same as the startup volume");
         Check(service.PendingStartupVolume is { } pending
               && pending.Enabled == wanted.Enabled && pending.Percent == wanted.Percent && pending.BootOnly == wanted.BootOnly
               && service.ServiceLoggingEnabled,

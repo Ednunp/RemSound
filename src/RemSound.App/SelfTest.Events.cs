@@ -37,6 +37,10 @@ internal static partial class SelfTest
         // Driven for real by the control suite, in all three audio configurations: every control on
         // the window is enumerated from the live form, so a handler on a new control cannot hide.
         new("RemSound.App/MainForm.cs", "Control suite (3 configurations) + Every control is specified"),
+        new("RemSound.App/ServiceNetworkPresence.cs",
+            "The send-only service, and somebody ticking it on a relay (drives the one thing it subscribes to - the relay's " +
+            "member list changing - through the routine that handler calls) + The app and the send-only service both take part " +
+            "in relay groups (holds the subscription itself, read from source, because the service cannot be started here)"),
         new("RemSound.App/MainForm.Relay.cs",
             "Control suite (3 configurations) + Every control is specified + 'Connecting to a relay, remembering it and ticking who is on it', which drives the address box, the Connect button, the remembered list and the tick list through the real handlers"),
         new("RemSound.App/MainFormHotkeyController.cs", "Keyboard shortcut steps (keyboard shortcuts go where they say; a hotkey change leaves the profile clean; the Keyboard shortcuts window in the dialog suite)"),

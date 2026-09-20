@@ -153,6 +153,7 @@ internal static partial class SelfTest
         RunStep(results, "Main window coverage (all tabs + controls)", MainWindowCoverage);
         RunStep(results, "Main window profile round-trip (controls load + save)", MainWindowProfileRoundTrip);
         RunStep(results, "Auto-save non-read-only profiles (options + guard + silent timer)", AutoSaveNonReadOnlyProfiles);
+        RunStep(results, "A global hotkey's send/receive switch survives the auto-save", HotkeySwitchesSurviveTheAutoSave);
         RunStep(results, "Service verb gate (normal launch stays load-safe)", ServiceVerbGate);
         RunStep(results, "Main window builds where process-loopback is unsupported (Win7 launch, issue #22)", Win7SendModeConstruction);
         RunStep(results, "Menu shortcuts don't clash with controls", MenuShortcutsDontClashWithControls);
@@ -236,6 +237,8 @@ internal static partial class SelfTest
         RunStep(results, "Relay groups: framing, member addresses and the member list", AuditRelayGroupFramingAndMembers);
         RunStep(results, "Several people share one relay, each heard as themselves", AuditSeveralPeopleShareOneRelay);
         RunStep(results, "Connecting to a relay, remembering it and ticking who is on it", AuditConnectingToARelayFromTheWindow);
+        RunStep(results, "What happens when somebody else ticks you", WhatHappensWhenSomebodyTicksYou);
+        RunStep(results, "The send-only service, and somebody ticking it on a relay", TheServiceAndSomebodyTickingItOnARelay);
         RunStep(results, "Heartbeats through a relay group", AuditRelayGroupHeartbeats);
         RunStep(results, "The app and the send-only service both take part in relay groups", AuditAppAndServiceTakePartInRelayGroups);
         RunStep(results, "A standard uncompressed frame goes out as one packet", PcmStandardFrameIsOnePacket);
@@ -2572,6 +2575,95 @@ internal static partial class SelfTest
                 covered += ", send-mode, apps";
             }
             return $"round-tripped through the real controls: {covered}";
+        }
+    }
+
+    /// <summary>
+    /// A GLOBAL HOTKEY'S SEND / RECEIVE SWITCH, THROUGH THE AUTO-SAVE, TO THE FILE ON DISK.
+    ///
+    /// <para>Andre, 2026-09-20: "I swapped the send and receive using global hotkeys specifically and rebooted much
+    /// later, and it went back to the old way. Maybe those keys aren't getting registered as profile changes." This
+    /// runs the whole chain on a real profile store: the very switch the hotkey presses, the change being noticed, the
+    /// periodic auto-save, and the file afterwards. Then the same again on a LOCKED profile, which is the one case
+    /// where nothing is written — and the reason the app now gives for it, because a log that says nothing is how this
+    /// question went unanswerable in the first place.</para>
+    /// </summary>
+    private static string? HotkeySwitchesSurviveTheAutoSave()
+    {
+        var restoreMuted = CuePlayer.GloballyMuted;
+        CuePlayer.GloballyMuted = true;
+        var dir = Path.Combine(Path.GetTempPath(), "remsound-autosave-" + Guid.NewGuid().ToString("N"));
+        MainForm? form = null;
+        try
+        {
+            var store = new ProfileStore(dir);
+            var profile = Profile.NewBlank();
+            profile.Title = "Hotkey profile";
+            // A password, so flipping a switch on never stops to ask for one — that gate is its own test.
+            profile.Password = RemSoundCrypto.Obfuscate("a password for the gate");
+            profile.SendAudioOn = false;
+            profile.ReceiveAudioOn = true;
+            store.Save(profile);
+
+            try { form = new MainForm(store, profile, profile.Title, null, headless: true); }
+            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+
+            Check(!form.UnsavedChangesForTest, "a profile just loaded has nothing waiting to be saved");
+
+            // The switch the global hotkey presses. Both of them, because Andre swapped the pair. Read what they were
+            // first: a headless window has not had the profile pushed onto its controls, and the point here is the
+            // SWAP reaching the file, not what it started as.
+            var wasSending = form.SendEnabledForTest;
+            var wasReceiving = form.ReceiveEnabledForTest;
+            form.ToggleSendFromHotkey();
+            form.ToggleReceiveFromHotkey();
+            Check(form.SendEnabledForTest == !wasSending && form.ReceiveEnabledForTest == !wasReceiving,
+                "the hotkey must actually flip both switches");
+            Check(form.UnsavedChangesForTest,
+                "a global hotkey's send/receive switch must count as a change to the profile — this is the thing that was doubted");
+
+            form.RunAutoSaveTickForTest();
+            Check(!form.UnsavedChangesForTest, "the periodic auto-save must then write it and leave nothing outstanding");
+            var saved = store.Load(profile.Title);
+            Check(saved is not null && saved.SendAudioOn == !wasSending && saved.ReceiveAudioOn == !wasReceiving,
+                $"the file on disk must carry what the hotkey did (send={saved?.SendAudioOn} wanted {!wasSending}, "
+                + $"receive={saved?.ReceiveAudioOn} wanted {!wasReceiving})");
+
+            // Locked. The switch still registers — but a locked profile is never written, which is the whole point of
+            // locking it, and is the one way this can look like the setting being ignored.
+            form.SetProfileReadOnlyForTest(true);
+            form.ToggleSendFromHotkey();
+            Check(form.UnsavedChangesForTest, "the hotkey must still register the change on a locked profile");
+            form.RunAutoSaveTickForTest();
+            var afterLock = store.Load(profile.Title);
+            Check(afterLock is not null && afterLock.SendAudioOn == !wasSending,
+                $"a locked profile must not be auto-saved over (send on disk is {afterLock?.SendAudioOn}, should still be {!wasSending})");
+            Check(form.UnsavedChangesForTest, "and the change must stay outstanding rather than being quietly dropped");
+
+            // And the app must be able to SAY which of those it did. Silence here is what made this unanswerable.
+            var lockedReason = MainForm.AutoSaveSkipReason(true, "Hotkey profile", readOnly: true, dirty: true);
+            Check(lockedReason is not null && lockedReason.Contains("read-only", StringComparison.OrdinalIgnoreCase),
+                $"the auto-save must say a locked profile is why it did nothing (said: {lockedReason ?? "nothing"})");
+            Check(MainForm.AutoSaveSkipReason(true, "Hotkey profile", readOnly: false, dirty: false)?.Contains("no unsaved changes") == true,
+                "and must say when there was simply nothing to save");
+            Check(MainForm.AutoSaveSkipReason(true, "Hotkey profile", readOnly: false, dirty: true) is null,
+                "and must say nothing at all when it is about to save");
+
+            // Unlock and it saves again, so the lock is a pause and not a dead end.
+            form.SetProfileReadOnlyForTest(false);
+            form.RunAutoSaveTickForTest();
+            var afterUnlock = store.Load(profile.Title);
+            Check(afterUnlock is not null && afterUnlock.SendAudioOn == wasSending && !form.UnsavedChangesForTest,
+                $"unlocking must let the waiting change be saved on the next tick (send on disk is {afterUnlock?.SendAudioOn})");
+
+            return "a global hotkey's send and receive switches are registered as profile changes and reach the file "
+                + "through the auto-save; a locked profile is not written over, keeps the change waiting, and says why";
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            try { Directory.Delete(dir, recursive: true); } catch { /* temp */ }
+            CuePlayer.GloballyMuted = restoreMuted;
         }
     }
 
