@@ -477,6 +477,24 @@ internal static partial class SelfTest
                 $"and the same person must be asked about once, not every time a packet of theirs arrives "
                 + $"({form.AcceptAskCountForTest} times)");
 
+            // A phone or older app paired with us through the relay. It cannot say it has ticked us — it knows nothing
+            // about ticking — so being given a pair slot beside us is the statement, and it must go through the same
+            // decision. Left out, it sat in the list unticked and silent, which is exactly what happened on 2026-09-20.
+            var phoneRelay = new IPEndPoint(IPAddress.Parse("203.0.113.78"), RemPacket.DefaultPort);
+            form.ConnectToRelayForTest("phone.relay.test", phoneRelay);
+            SetAcceptMode(PeerAcceptMode.Manual);
+            Feed(form.RelayGroupForTest, phoneRelay, RosterPacket(Array.Empty<(Guid Id, string Name, bool TicksUs)>(), paired: true),
+                RelayInbound.Consumed, "a member list");
+            form.SyncRelayPeersListForTest();
+            Check(!form.RelayPairTickedForTest, "on manual, a phone paired with us through the relay must not be ticked for us");
+            SetAcceptMode(PeerAcceptMode.Automatic);
+            form.SyncRelayPeersListForTest();
+            Check(form.RelayPairTickedForTest,
+                "on automatic, a phone paired with us through the relay must be ticked back — without it, it is in the list and silent");
+            Check(form.SelectedSendEndpointsForTest().Any(e => e.Equals(phoneRelay)),
+                "and our audio must then go to the relay, which is where that phone hears it");
+            form.DisconnectFromRelayForTest();
+
             // The same decision, from the relay's member list rather than from unasked-for audio.
             var relay = new IPEndPoint(IPAddress.Parse("203.0.113.77"), RemPacket.DefaultPort);
             form.ConnectToRelayForTest("relay.example.test", relay);
@@ -490,6 +508,17 @@ internal static partial class SelfTest
             form.SyncRelayPeersListForTest();
             Check(form.RelayTickedForTest.Contains(mate),
                 "on automatic, somebody who ticks us on a relay must be ticked back, the same as anybody else");
+
+            // Accepting somebody must select them ONCE. It used to re-apply the ticks twice for one person, which put
+            // two "peer selected" lines in the log for one row and did the whole round of work twice.
+            var mateAddress = form.RelayGroupForTest.Members.Single(m => m.Id == mate).Address;
+            Check(form.SelectedSendEndpointsForTest().Count(e => e.Equals(relay)) == 1,
+                "and must be sent to once, not twice over");
+            var relayRow = new PeerListItem(new PeerAnnouncement(mate, "Ticked us", mateAddress.Port,
+                CanSend: true, CanReceive: true, DateTime.UtcNow, mateAddress.Address)).ToString();
+            Check(relayRow.Contains("on the relay", StringComparison.Ordinal)
+                  && !relayRow.Contains(mateAddress.Address.ToString(), StringComparison.Ordinal),
+                $"somebody reached through a relay must read as being on the relay, not as a made-up address ({relayRow})");
 
             // And the signal itself: a Format packet from somebody not ticked is what tells us they have ticked US.
             // Everything above drives the decision directly, so without this the thing that sets it off is untested.

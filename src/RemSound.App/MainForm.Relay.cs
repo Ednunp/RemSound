@@ -380,6 +380,9 @@ public sealed partial class MainForm
             if (relay is null || !member.Relay.Equals(relay)) continue;
             if (member.TicksUs && !relayTicked.Contains(member.Id)) OnRelayMemberWantsToConnect(member);
         }
+        // A phone or an older app cannot say it has ticked us — it knows nothing about ticking. Being GIVEN one of the
+        // relay's ordinary pair slots beside us is the same statement, so it goes through the same decision.
+        if (relay is not null && relayGroup.IsV1Paired(relay) && !relayPairTicked) OnRelayPairPartnerWantsToConnect(relay);
 
         // Somebody you have ticked who has not ticked you back: say so when it changes, and keep it in the status line.
         var waitingFor = new List<string>();
@@ -524,6 +527,7 @@ public sealed partial class MainForm
     internal IPEndPoint[] SelectedSendEndpointsForTest() => SelectedSendEndpoints();
     internal void RelayPasswordChangedForTest(byte[]? fingerprint) => RelayPasswordChanged(fingerprint);
     internal IReadOnlyCollection<Guid> RelayTickedForTest => relayTicked;
+    internal bool RelayPairTickedForTest => relayPairTicked;
     internal void RelayPeerTickedForTest(int index, bool ticked) => OnRelayPeerTicked(index, ticked);
     internal bool ShouldOfferRelayForTest(IPEndPoint remote) => ShouldOfferRelay(remote);
     internal void SelectPeerForTest(PeerAnnouncement peer) => SelectPeer(peer, fromProfileRestore: true);

@@ -113,12 +113,41 @@ public sealed partial class MainForm
     private void AcceptRelayMember(Guid id, string name)
     {
         relayTicked.Add(id);
-        relayListSignature = "";        // the row's tick has changed, so the list must be rebuilt
+        relayListSignature = "";        // the row's tick has changed, so the next refresh rebuilds the list
         ApplyRelayTicks();
-        SyncRelayPeersList();
         MarkProfileDirty();
         logFile.Event($"accept connections: ticked {name} on the relay");
         ScreenReader.Speak($"Connected to {name}.");
+    }
+
+    /// <summary>
+    /// The relay has put a phone or an older app in one of its ordinary pair slots beside us. That device chose this
+    /// relay and the relay chose us, which is as close to "they have ticked you" as an app that knows nothing about
+    /// ticking can get — so it goes through the same setting as everybody else.
+    /// </summary>
+    private void OnRelayPairPartnerWantsToConnect(IPEndPoint relay)
+    {
+        var mode = AcceptMode();
+        if (mode == PeerAcceptMode.Manual) return;
+        if (!acceptAsked.Add($"relay-phone:{relay}")) return;
+        logFile.Event($"accept connections: a phone or older app is paired with us on {relay} (mode={mode})");
+        if (mode == PeerAcceptMode.Automatic)
+        {
+            AcceptRelayPairPartner();
+            return;
+        }
+        AskThenAccept($"relay-phone:{relay}", "Someone on a phone or an older app would like to connect to you.",
+            AcceptRelayPairPartner);
+    }
+
+    private void AcceptRelayPairPartner()
+    {
+        relayPairTicked = true;
+        relayListSignature = "";
+        ApplyRelayTicks();
+        MarkProfileDirty();
+        logFile.Event("accept connections: ticked the phone or older app paired with us on the relay");
+        ScreenReader.Speak("Connected to someone on a phone or an older app.");
     }
 
     /// <summary>

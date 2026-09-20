@@ -397,7 +397,9 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
             var paired = (flags & RosterFlagV1Paired) != 0;
             changed = !relay.InGroup || relay.V1Paired != paired;
             if (!relay.InGroup) events.Add($"in a group on {relayEndpoint} with {listed.Count} other{(listed.Count == 1 ? "" : "s")}");
-            if (relay.V1Paired != paired) events.Add(paired ? $"a phone or older app on {relayEndpoint} is paired with us: sending it our audio as well" : $"no longer paired with a phone or older app on {relayEndpoint}");
+            if (relay.V1Paired != paired) events.Add(paired
+                ? $"a phone or older app on {relayEndpoint} is paired with us: it is in the relay list, and our audio goes to it once it is ticked"
+                : $"no longer paired with a phone or older app on {relayEndpoint}");
             relay.InGroup = true;
             relay.V1Paired = paired;
             foreach (var (id, seen) in listed)

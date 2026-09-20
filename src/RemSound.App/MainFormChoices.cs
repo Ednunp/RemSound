@@ -86,7 +86,10 @@ internal sealed class PeerListItem
     {
         // Base label: "hostname (ip)" for discovered peers, just "ip" for manual-by-IP entries
         // (where hostname equals the IP address). Avoids "192.168.1.95 (192.168.1.95)" duplication.
-        var addr = Peer.Address.ToString();
+        // Somebody reached through a relay has no address of their own: the one we know them by is made up, and reads
+        // as a meaningless string of digits. Say where they are instead — which is also what tells the same person
+        // reached two ways (on the network AND through a relay) apart in the list.
+        var addr = RemSound.Core.RelayGroupClient.IsMemberAddress(Peer.Address) ? "on the relay" : Peer.Address.ToString();
         var name = DisplayNameProvider?.Invoke(Peer) ?? Peer.Name;
         var basePart = name == addr ? addr : $"{name} ({addr})";
 
