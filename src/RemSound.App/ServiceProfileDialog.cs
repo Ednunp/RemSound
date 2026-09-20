@@ -23,6 +23,10 @@ internal sealed class ServiceProfileDialog : Form
     private readonly Button manualAddButton = new() { Text = "Add peer by IP (Alt+&A)", AutoSize = true, AccessibleName = "Add peer by IP" };
     private readonly Button passwordButton = new() { Text = "Set service profile pass&word...", AutoSize = true, AccessibleName = "Set service profile password" };
     private readonly Label passwordStatus = new() { AutoSize = true };
+    // The server the service goes to. It has no window of its own to press Connect in, so the address IS the
+    // instruction: set one and the service joins it every time it starts, clear it and it never does.
+    private readonly TextBox serverBox = new() { Width = 320, AccessibleName = "Server address (Alt+V)" };
+    private readonly Label serverNote = new() { AutoSize = true };
 
     // --- Audio send tab ---
     private readonly ListBox sendModeList = new() { Width = 460, Height = 40, IntegralHeight = false, AccessibleName = "How to send WASAPI audio (Alt+1)" };
@@ -138,6 +142,20 @@ internal sealed class ServiceProfileDialog : Form
         panel.Controls.Add(pwWrap, 1, 3);
         passwordButton.Click += (_, _) => SetPassword();
 
+        // The server. Nobody is at a screen when the service runs, so there is no Connect button here: an address
+        // means "join this every time you start", and an empty box means "never".
+        var serverHeader = Theme.SectionHeader("Server");
+        panel.Controls.Add(serverHeader, 0, 4);
+        panel.SetColumnSpan(serverHeader, 2);
+        var serverLabel = new MnemonicLabel { Text = "Ser&ver address (Alt+V)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = serverBox };
+        serverLabel.Click += (_, _) => serverBox.Focus();
+        panel.Controls.Add(serverLabel, 0, 5);
+        panel.Controls.Add(serverBox, 1, 5);
+        serverNote.Text = "Leave empty for no server. The service joins it whenever it starts.";
+        panel.Controls.Add(serverNote, 1, 6);
+        serverBox.TextChanged += (_, _) => UpdateServerNote();
+        UpdateServerNote();
+
         page.Controls.Add(panel);
         tabs.TabPages.Add(page);
     }
@@ -226,6 +244,7 @@ internal sealed class ServiceProfileDialog : Form
             sendModeList.SelectedIndex = appsMode ? 1 : 0;
             PopulateAppsList();
 
+            serverBox.Text = working.RelayServer ?? "";
             peersList.Items.Clear();
             var allPeers = working.RememberedPeers.Concat(working.SelectedConnectedPeers)
                 .Where(p => !string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
@@ -263,6 +282,12 @@ internal sealed class ServiceProfileDialog : Form
         // Ticked peers are the ones the service sends to; keep every listed peer as remembered.
         working.SelectedConnectedPeers = peersList.CheckedItems.OfType<string>().Distinct().ToList();
         working.RememberedPeers = peersList.Items.OfType<string>().Distinct().ToList();
+
+        // The server. An address here means join it on every start; an empty box means never. The people ticked there
+        // are kept as they were — the service learns who is on a server from the server, not from this window.
+        var server = serverBox.Text.Trim();
+        working.RelayServer = server.Length == 0 ? null : server;
+        working.RelayConnectOnStart = server.Length > 0;
     }
 
     private static void PopulateDeviceList(CheckedListBox list, IReadOnlyList<AudioDeviceChoice> devices, IReadOnlyList<string> checkedIds)
@@ -331,6 +356,23 @@ internal sealed class ServiceProfileDialog : Form
         UpdatePasswordStatus();
     }
 
+    /// <summary>The line under the address. With a server set, the service can only reach the people its profile
+    /// already names unless it is also told to accept whoever ticks it — so say so, next to the box that causes it.</summary>
+    internal void SetServerForTest(string address) => serverBox.Text = address;
+    internal Profile ResultForTest { get { SaveToProfile(); return working; } }
+
+    private void UpdateServerNote()
+    {
+        var typed = serverBox.Text.Trim().Length > 0;
+        var accepts = PendingAcceptOnRelay ?? ServiceStore.LoadAcceptRelayConnectionsAutomatically();
+        serverNote.Text = !typed
+            ? "Leave empty for no server. The service joins it whenever it starts."
+            : accepts
+                ? "The service joins this whenever it starts, and accepts anyone on it who ticks the service."
+                : "The service joins this whenever it starts. To let people on it reach the service, turn on "
+                  + "\"Accept people who tick this service on a server\" in Additional options.";
+    }
+
     private void UpdatePasswordStatus()
         => passwordStatus.Text = string.IsNullOrEmpty(working.Password) ? "No password set." : "Password set.";
 
@@ -369,6 +411,7 @@ internal sealed class ServiceProfileDialog : Form
         ServiceLoggingEnabled = loggingEnabled;
         PendingStartupVolume = (volumeEnabled, Math.Clamp(volumePercent, 0, 100), volumeBootOnly);
         PendingAcceptOnRelay = acceptOnRelay;
+        UpdateServerNote();   // the note beside the address depends on this answer
     }
 
     /// <summary>Construction split from ShowDialog so the accessibility audit can inspect this inner

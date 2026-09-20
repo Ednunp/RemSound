@@ -1466,7 +1466,7 @@ It is deliberately limited:
 
 Everything lives in the **Service** menu on the menu bar:
 
-  1. **Configure service profile …** — opens a window with two tabs: **Connectivity** (who to send to, and the password) and **Audio send** (what to send). This is a profile of its own and doesn't appear in your usual profile list. See what's in it.
+  1. **Configure service profile …** — opens a window with two tabs: **Connectivity** (who to send to, the password, and the server) and **Audio send** (what to send). This is a profile of its own and doesn't appear in your usual profile list. See what's in it.
   2. **Install service** — registers it with Windows so it starts automatically at every boot. Windows asks for administrator permission (one prompt). Do this once. Straight after installing, RemSound asks whether you'd like to **start it now** (otherwise it waits until the next reboot). (When you first install RemSound on a PC, the app installer also offers to set the service up — and start it — for you, so you may have done this already.)
   3. **Start service** / **Stop service** — run or halt it now without waiting for a reboot.
   4. **Uninstall service** — removes it entirely.
@@ -1480,6 +1480,7 @@ Setting| What it does
 ---|---
 **Use Windows default audio device, follows Windows changes**|  The first output choice on the Audio send tab. Sends whatever this machine is playing, and keeps following the Windows default if that changes later. You can pin specific devices, or one application, exactly as in the normal app.
 No “send my audio” switch| The service always sends. There is no audio-quality tab either: it uses the settings that work best for live streaming (Opus live-latency, small packets, locked to the audio clock), so you do not have to choose them.
+**Server address (Alt+V)**|  On the Connectivity tab. The server the service joins, every time it starts. Leave it empty and it never joins one. There is no Connect button: nobody is at a screen when the service runs, so the address is the instruction. The line under the box says what will happen, including whether the service can be reached by people on that server.
 **Additional options →** service log| Turns on the service's own log, which is separate from the app's.
 **Additional options →** Accept people who tick this service on a server| Off by default. With it off, the service reaches exactly the people its profile named when you saved it. Tick it and somebody who joins the server later can reach the service without you opening the app.
 **Additional options →** Set the machine's volume when the service starts| Tick it and pick a percent. The service unmutes the machine and sets that volume when it starts — useful for an unattended PC that booted muted, so it's audible with nobody at the keyboard.

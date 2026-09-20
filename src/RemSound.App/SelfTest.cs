@@ -2557,6 +2557,12 @@ internal static partial class SelfTest
             };
             input.SelectedSendApplications.Add("vlc");
             input.SelectedSendApplications.Add("firefox");
+            // The server half of a profile: where it was, that it was connected, and who was ticked there. An address
+            // rather than a name, so no lookup is needed and the connect happens here rather than on another thread.
+            var tickedThere = Guid.NewGuid();
+            input.RelayServer = "203.0.113.200";
+            input.RelayConnectOnStart = true;
+            input.RelayTickedIds = [tickedThere.ToString("D")];
 
             var back = mf.ApplyThenCaptureForTest(input);
 
@@ -2565,7 +2571,15 @@ internal static partial class SelfTest
             Check(back.ReceiveAudioOn && back.SendAudioOn, "send/receive toggles must round-trip");
             Check(back.EnableAllPeerShaping, "the peer-shaping master switch must round-trip");
 
-            var covered = "volume, mute, send/receive, shaping";
+            Check(back.RelayServer == "203.0.113.200", $"the server a profile uses must round-trip ({back.RelayServer ?? "nothing"})");
+            Check(back.RelayConnectOnStart,
+                "a profile saved while on a server must say so, or it would load without going back to it");
+            Check(back.RelayTickedIds.Contains(tickedThere.ToString("D")),
+                $"and who was ticked there must round-trip ({back.RelayTickedIds.Count} ticked)");
+            Check(mf.RelayGroupForTest.ConnectedRelay is not null,
+                "applying it must actually put us back on that server, not merely remember the address");
+
+            var covered = "volume, mute, send/receive, shaping, the server and its ticks";
             if (RemSound.Sender.ProcessLoopbackCapture.IsSupported)
             {
                 Check(back.WasapiSendMode == "applications", $"send mode must round-trip (got {back.WasapiSendMode})");

@@ -116,6 +116,14 @@ public sealed partial class MainForm
         // Going somewhere else is leaving here: the people you had ticked are on the relay you are leaving.
         if (relayGroup.ConnectedRelay is not null) DisconnectFromRelay(userAsked);
         relayEntryText = entry;
+        // An address needs no looking up, so there is nothing to wait for: connect here and now. A profile putting
+        // its own server back at start-up takes this path, and it is the one that has to work before the window has
+        // a message loop to come back to.
+        if (ResolveWithoutLookup(entry) is { } immediate)
+        {
+            FinishConnectingToRelay(entry, immediate, userAsked);
+            return;
+        }
         relayConnectButton.Enabled = false;
         SetRelayStatus($"Connecting to {entry}...");
         Task.Run(() => ResolveRelayAddress(entry)).ContinueWith(task =>
@@ -172,8 +180,8 @@ public sealed partial class MainForm
         }
     }
 
-    /// <summary>A hostname or address, optionally with a port, to an endpoint. Runs off the UI thread.</summary>
-    private static IPEndPoint? ResolveRelayAddress(string entry)
+    /// <summary>The host and port the user typed, split apart. No looking anything up.</summary>
+    private static (string Host, int Port) SplitRelayAddress(string entry)
     {
         var host = entry;
         var port = RemPacket.DefaultPort;
@@ -184,6 +192,21 @@ public sealed partial class MainForm
             host = entry[..colon];
             port = typedPort;
         }
+        return (host, port);
+    }
+
+    /// <summary>The endpoint when the entry is already an address, or null when it is a name that has to be looked
+    /// up. Costs nothing and never blocks, so the caller can take it before going anywhere near another thread.</summary>
+    private static IPEndPoint? ResolveWithoutLookup(string entry)
+    {
+        var (host, port) = SplitRelayAddress(entry.Trim());
+        return IPAddress.TryParse(host, out var direct) ? new IPEndPoint(direct, port) : null;
+    }
+
+    /// <summary>A hostname or address, optionally with a port, to an endpoint. Runs off the UI thread.</summary>
+    private static IPEndPoint? ResolveRelayAddress(string entry)
+    {
+        var (host, port) = SplitRelayAddress(entry);
         if (IPAddress.TryParse(host, out var direct)) return new IPEndPoint(direct, port);
         try
         {

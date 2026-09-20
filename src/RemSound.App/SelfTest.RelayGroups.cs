@@ -611,6 +611,39 @@ internal static partial class SelfTest
         var already = ServiceNetworkPresence.TicksFor([tickedUs], members, acceptAutomatically: true);
         Check(already.Count == 1, $"somebody the profile already names must not be counted twice ({already.Count})");
 
+        // The service profile's own server field. There is no Connect button in that window — nobody is at a screen
+        // when the service runs — so the address IS the instruction: set one and it joins on every start.
+        var blank = Profile.NewBlank();
+        using (var dialog = new ServiceProfileDialog(blank, false))
+        {
+            Check(string.IsNullOrEmpty(dialog.ResultForTest.RelayServer),
+                "a service profile with no server must not claim one");
+            Check(!dialog.ResultForTest.RelayConnectOnStart,
+                "and must not say it joins one on start");
+            dialog.SetServerForTest("203.0.113.120");
+            var withServer = dialog.ResultForTest;
+            Check(withServer.RelayServer == "203.0.113.120",
+                $"a server typed into the service profile must be saved with it ({withServer.RelayServer ?? "nothing"})");
+            Check(withServer.RelayConnectOnStart,
+                "and an address there means join it on every start — the service has no button to press later");
+            Check(ServiceSendHost.BuildRelayEndpoint(withServer) is not null,
+                "and the service host must resolve that address to somewhere to go");
+            dialog.SetServerForTest("   ");
+            Check(dialog.ResultForTest.RelayServer is null && !dialog.ResultForTest.RelayConnectOnStart,
+                "clearing the box must mean no server at all, not an empty one it tries to reach");
+        }
+
+        // And opening it again must SHOW the server it already has, or saving would quietly drop it.
+        var hasServer = Profile.NewBlank();
+        hasServer.RelayServer = "203.0.113.121";
+        hasServer.RelayConnectOnStart = true;
+        using (var reopened = new ServiceProfileDialog(hasServer, false))
+        {
+            Check(reopened.ResultForTest.RelayServer == "203.0.113.121",
+                $"a service profile that already names a server must show it when reopened, or saving drops it "
+                + $"({reopened.ResultForTest.RelayServer ?? "nothing"})");
+        }
+
         // The setting itself: off by default, and it survives a save.
         var stored = ServiceStore.LoadAcceptRelayConnectionsAutomatically();
         try
