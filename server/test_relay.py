@@ -181,10 +181,14 @@ def cid(n: int) -> bytes:
     return uuid.UUID(bytes=bytes([n]) * 16).bytes
 
 
-def hello(client_id: bytes, name: str, group: bytes | None) -> bytes:
-    """A LobbyHello: the 32-byte name, then the 8-byte group tag (None = a hello from before groups)."""
+def hello(client_id: bytes, name: str, group: bytes | None, ticked: list[bytes] | None = None) -> bytes:
+    """A LobbyHello: the 32-byte name, the 8-byte group tag (None = a hello from before groups), and
+    optionally the ticked list (a count byte then that many ids). No list at all means "everyone"."""
     payload = name.encode("utf-8")[:relay.LOBBY_NAME_BYTES].ljust(relay.LOBBY_NAME_BYTES, b"\x00")
-    return v2_packet(relay.TYPE_LOBBY_HELLO, client_id, payload + (group or b""))
+    payload += group or b""
+    if ticked is not None:
+        payload += bytes([len(ticked)]) + b"".join(ticked)
+    return v2_packet(relay.TYPE_LOBBY_HELLO, client_id, payload)
 
 
 def format_payload(fingerprint: bytes) -> bytes:
@@ -254,6 +258,63 @@ class Groups(unittest.TestCase):
         r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"NO-TAG"), a)
         self.assertTrue(forwarded_to(r.sock, b, b"NO-TAG"), "two clients whose hello carries no group tag still hear each other")
         self.assertFalse(forwarded_to(r.sock, c, b"NO-TAG"), "a client with no tag is not in a tagged group")
+
+
+class Ticks(unittest.TestCase):
+    """Ed, 2026-09-20: through a relay, sound passes only when each has ticked the other, exactly as two
+    people on one network must each tick the other. A client that sends no list has ticked everyone in its
+    group, which is what every app that knows nothing about ticking sends — so none of them is affected."""
+
+    def test_a_client_that_sends_no_list_reaches_its_whole_group(self):
+        r = make_relay()
+        a, b = ("10.6.0.1", 8000), ("10.6.0.2", 8001)
+        r.handle_packet(hello(cid(1), "a", G1), a)
+        r.handle_packet(hello(cid(2), "b", G1), b)
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"NO-LIST"), a)
+        self.assertTrue(forwarded_to(r.sock, b, b"NO-LIST"),
+                        "a client that sends no ticked list must still reach its group, as before ticking existed")
+
+    def test_both_must_tick_each_other(self):
+        r = make_relay()
+        a, b = ("10.6.1.1", 8100), ("10.6.1.2", 8101)
+        r.handle_packet(hello(cid(1), "a", G1, ticked=[cid(2)]), a)
+        r.handle_packet(hello(cid(2), "b", G1, ticked=[]), b)
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"ONE-WAY"), a)
+        self.assertFalse(forwarded_to(r.sock, b, b"ONE-WAY"),
+                         "a has ticked b, but b has ticked nobody: nothing may pass")
+        r.handle_packet(hello(cid(2), "b", G1, ticked=[cid(1)]), b)
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"BOTH-WAYS"), a)
+        self.assertTrue(forwarded_to(r.sock, b, b"BOTH-WAYS"), "once both have ticked each other, sound passes")
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(2), b"AND-BACK"), b)
+        self.assertTrue(forwarded_to(r.sock, a, b"AND-BACK"), "and it passes the other way too")
+
+    def test_unticking_stops_it_in_both_directions(self):
+        r = make_relay()
+        a, b = ("10.6.2.1", 8200), ("10.6.2.2", 8201)
+        r.handle_packet(hello(cid(1), "a", G1, ticked=[cid(2)]), a)
+        r.handle_packet(hello(cid(2), "b", G1, ticked=[cid(1)]), b)
+        r.handle_packet(hello(cid(1), "a", G1, ticked=[]), a)   # a unticks b
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"GONE-OUT"), a)
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(2), b"GONE-BACK"), b)
+        self.assertFalse(forwarded_to(r.sock, b, b"GONE-OUT"), "unticking must stop your sound reaching them")
+        self.assertFalse(forwarded_to(r.sock, a, b"GONE-BACK"), "and must stop theirs reaching you")
+
+    def test_someone_they_have_not_ticked_is_not_sent_it(self):
+        r = make_relay()
+        a, b, c = ("10.6.3.1", 8300), ("10.6.3.2", 8301), ("10.6.3.3", 8302)
+        r.handle_packet(hello(cid(1), "a", G1, ticked=[cid(2)]), a)
+        r.handle_packet(hello(cid(2), "b", G1, ticked=[cid(1)]), b)
+        r.handle_packet(hello(cid(3), "c", G1, ticked=[cid(1), cid(2)]), c)
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"FOR-B-ONLY"), a)
+        self.assertTrue(forwarded_to(r.sock, b, b"FOR-B-ONLY"), "b ticked a and a ticked b")
+        self.assertFalse(forwarded_to(r.sock, c, b"FOR-B-ONLY"),
+                         "c has ticked a, but a has not ticked c: c must not be sent a's audio")
 
 
 class AdmissionOrder(unittest.TestCase):

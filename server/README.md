@@ -12,6 +12,10 @@ in one process, on one UDP port:
   group tag, its password fingerprint, which its Format packets already carry
   in the clear. Periodic LobbyRoster packets tell each member who else is in
   its group. Capacity: 64 clients across all groups by default.
+  A hello may also carry the list of people that client has ticked. Sound passes
+  between two clients only when each has ticked the other, exactly as two people
+  on one network must each tick the other. A hello with no list means "everyone
+  in my group", so anything that knows nothing about ticking is unaffected.
 - **v1 (pairwise)** — a two-slot reflector, for everything else: the iPhone
   and Android apps and RemSound before 6.0 (a 12-byte header). The first two
   endpoints to send a valid v1 packet claim the slots, and their traffic is
@@ -183,6 +187,7 @@ event=client_joined client_id=<uuid> addr=1.2.3.4:5555 count=2
 event=client_endpoint_update client_id=<uuid> old=1.2.3.4:5555 new=1.2.3.4:6666
 event=client_named client_id=<uuid> name='Andre'
 event=client_grouped client_id=<uuid> group=1a2b   (the first 2 bytes of the tag only)
+event=client_ticks client_id=<uuid> ticked=3       (or ticked=everyone when the hello carries no list)
 event=client_left client_id=<uuid> addr=... reason=bye
 event=client_idle_expired client_id=<uuid> addr=...
 event=lobby_full attempted_client_id=<uuid> addr=... count=10 max=10

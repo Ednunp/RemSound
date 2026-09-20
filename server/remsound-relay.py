@@ -64,6 +64,11 @@ LOBBY_NAME_BYTES = 32  # bytes reserved for a display name on the wire
 # v2 LobbyHello: the group tag follows the name. It is the client's 8-byte password fingerprint, the same
 # bytes a Format packet carries at payload offset 36, so it tells the relay nothing a Format did not.
 GROUP_TAG_BYTES = 8
+# After the group tag a hello MAY carry the list of people this client has ticked: one count byte, then that
+# many 16-byte client ids. No count byte at all means "everyone in my group", which is what a client that
+# knows nothing about ticking sends — so an older client, a phone or the pre-2026-09-20 build is unaffected.
+# A count of zero means "nobody yet". Audio passes between two clients only when each has ticked the other.
+MAX_TICKED_IDS = 64
 FORMAT_FINGERPRINT_OFFSET = 36
 # Roster flags byte (after the member list): bit 0 = the recipient holds a v1 slot with a partner.
 ROSTER_FLAG_V1_PAIRED = 0x01
@@ -146,6 +151,8 @@ class ClientEntry:
     would_block_logged: bool = False
     # The group tag from this client's LobbyHello (empty until one arrives, or from a pre-groups hello).
     group: bytes = b""
+    # The client ids this client has ticked, or None for "everyone in my group" (no list sent).
+    ticked: Optional[set[bytes]] = None
 
 
 @dataclass
@@ -215,6 +222,21 @@ def _decode_lobby_name(raw: bytes) -> str:
         return raw.decode("utf-8", errors="replace").strip()
     except Exception:
         return ""
+
+
+def _read_ticked_ids(body: bytes, tag_end: int) -> Optional[set[bytes]]:
+    """The ticked-ids list from a hello body, or None when it carries none ("everyone in my group")."""
+    if len(body) <= tag_end:
+        return None
+    count = min(body[tag_end], MAX_TICKED_IDS)
+    ids: set[bytes] = set()
+    start = tag_end + 1
+    for i in range(count):
+        chunk = bytes(body[start + i * V2_CLIENT_ID_LEN:start + (i + 1) * V2_CLIENT_ID_LEN])
+        if len(chunk) < V2_CLIENT_ID_LEN:
+            break
+        ids.add(chunk)
+    return ids
 
 
 def _encode_lobby_name(name: str) -> bytes:
@@ -661,6 +683,13 @@ class Relay:
                     "event=client_named client_id=%s name=%r", client_id, new_name,
                 )
                 self.v2_roster_dirty = True
+            new_ticked = _read_ticked_ids(body, tag_end)
+            if new_ticked != entry.ticked:
+                entry.ticked = new_ticked
+                self.log.info(
+                    "event=client_ticks client_id=%s ticked=%s", client_id,
+                    "everyone" if new_ticked is None else len(new_ticked),
+                )
             if new_group != entry.group:
                 entry.group = new_group
                 # A short prefix only: enough to see in the log who shares a group, not the whole tag.
@@ -693,6 +722,12 @@ class Relay:
         # Fan-out forwarding to every OTHER client in the same group (verified addresses only, once enforcing).
         for other_id, other in self.v2_clients.items():
             if other_id == client_id or other.group != entry.group:
+                continue
+            # Both must have ticked each other, exactly as two people on one network must each tick the other
+            # before sound passes. A client that sent no list has ticked everyone in its group.
+            if entry.ticked is not None and other_id.bytes not in entry.ticked:
+                continue
+            if other.ticked is not None and client_id.bytes not in other.ticked:
                 continue
             if not self._may_forward_to(other, "v2"):
                 continue
