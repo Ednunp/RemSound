@@ -24,7 +24,10 @@
 
 param(
     [string]$Output = 'D:\Dropbox\remsound.zip',
-    [switch]$SkipGate
+    [switch]$SkipGate,
+    # Extra files to drop in beside the exe — e.g. the note telling the tester what to try. They go through
+    # the same safety scan as everything else, so a stray log or profile cannot ride in this way either.
+    [string[]]$ExtraFile = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,6 +49,13 @@ if (-not $SkipGate -and (Test-Path $gate)) {
 Write-Host "Publishing Release to a fresh folder: $staging" -ForegroundColor Cyan
 & dotnet publish $proj -c Release -o $staging --nologo -v q
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed ($LASTEXITCODE)" }
+
+# 1b. Anything handed in on -ExtraFile, beside the exe where a tester will see it.
+foreach ($f in $ExtraFile) {
+    if (-not (Test-Path -LiteralPath $f)) { throw "-ExtraFile not found: $f" }
+    Copy-Item -LiteralPath $f -Destination $staging -Force
+    Write-Host "Included: $(Split-Path -Leaf $f)" -ForegroundColor Cyan
+}
 
 # 2. SAFETY SCAN - the same rule build-release.ps1 uses. Nothing that could carry personal data may ship.
 $forbiddenFolders = @('logs','profiles','recordings','config','user settings and logs')
