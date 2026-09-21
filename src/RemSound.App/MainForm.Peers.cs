@@ -252,20 +252,53 @@ public sealed partial class MainForm
         PushAllowedReceiveSenders();
         // fromProfileRestore=true means the call originated from auto-reconnect at startup;
         // we don't want that to flag the profile as dirty. User-initiated selects do.
-        if (!fromProfileRestore) MarkProfileDirty();
+        if (fromProfileRestore) return;
+        // Ticking somebody you had unticked is you changing your mind, so the refusal goes.
+        acceptRefusedByUser.Remove($"peer:{peer.Address}");
+        acceptRefusedByUser.Remove($"relay:{peer.InstanceId:D}");
+        MarkProfileDirty();
     }
 
-    private void DeselectPeer(Guid instanceId)
+    /// <summary>Housekeeping deselects — a relay tick being pushed out, a relay being left. Not the user's doing, so
+    /// nothing is remembered about it.</summary>
+    private void DeselectPeer(Guid instanceId) => DeselectPeer(instanceId, byUser: false);
+
+    /// <summary>
+    /// Drop a peer. <paramref name="byUser"/> is the important half: when the user unticks somebody, that is a
+    /// decision, and nothing may quietly undo it. Two things used to. The accept-connections setting saw their audio
+    /// still arriving — which it does, because the other end still has you ticked — and ticked them straight back.
+    /// And somebody on a server stayed in the server tick list, so this machine put them back the next time that list
+    /// changed. Ed, 2026-09-21: "otherwise you can never cisconnect".
+    /// </summary>
+    private void DeselectPeer(Guid instanceId, bool byUser)
     {
-        if (selectedPeerEndpoints.Remove(instanceId))
+        if (selectedPeerEndpoints.TryGetValue(instanceId, out var endpoint) && selectedPeerEndpoints.Remove(instanceId))
         {
             selectedPeerLabels.TryGetValue(instanceId, out var label);
             selectedPeerLabels.Remove(instanceId);
-            logFile.Event($"peer deselected: {label ?? instanceId.ToString()}");
+            logFile.Event($"peer deselected: {label ?? instanceId.ToString()}"
+                + (byUser ? " (by you — they stay unticked until you tick them again)" : ""));
             InvalidateAutoTuneHistory();
             PushAllowedReceiveSenders();
             MarkProfileDirty();
+            if (byUser) RememberUserUnticked(instanceId, endpoint);
         }
+    }
+
+    /// <summary>
+    /// Remember that the user unticked this person, so the accept-connections setting leaves them alone, and clear
+    /// them out of the server's tick list as well. A person reached through a server is ticked in two places — the
+    /// row in the server list and the row in Connected peers — and unticking either has to mean the same thing.
+    /// </summary>
+    private void RememberUserUnticked(Guid instanceId, IPEndPoint endpoint)
+    {
+        acceptRefusedByUser.Add($"peer:{endpoint.Address}");
+        acceptRefusedByUser.Add($"relay:{instanceId:D}");
+        if (!relayTicked.Remove(instanceId)) return;
+        relayTickedBack.Remove(instanceId);
+        relayListSignature = null;              // the row comes back, unticked, on the next refresh
+        relayGroup.SetTicked(relayTicked, relayPairTicked);
+        logFile.Event($"relay group: untick of {instanceId:D} in Connected peers cleared their server tick too");
     }
 
     /// <summary>

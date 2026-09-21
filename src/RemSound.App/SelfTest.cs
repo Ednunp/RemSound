@@ -247,6 +247,9 @@ internal static partial class SelfTest
         RunStep(results, "What happens when somebody else ticks you", WhatHappensWhenSomebodyTicksYou);
         RunStep(results, "The send-only service, and somebody ticking it on a relay", TheServiceAndSomebodyTickingItOnARelay);
         RunStep(results, "Removing a peer while you are on a relay", RemovingAPeerWhileOnARelay);
+        RunStep(results, "A peer list changing under you keeps the cursor on the person", TheCursorStaysOnThePerson);
+        RunStep(results, "Unticking somebody keeps them unticked", UntickingSomebodyKeepsThemUnticked);
+        RunStep(results, "Somebody on a server is in one list at a time, and the same machine twice says so", ServerPeopleAreInOneListAtATime);
         RunStep(results, "Heartbeats through a relay group", AuditRelayGroupHeartbeats);
         RunStep(results, "The app and the send-only service both take part in relay groups", AuditAppAndServiceTakePartInRelayGroups);
         RunStep(results, "A standard uncompressed frame goes out as one packet", PcmStandardFrameIsOnePacket);

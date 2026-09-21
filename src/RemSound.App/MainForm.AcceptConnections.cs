@@ -26,6 +26,12 @@ public sealed partial class MainForm
     /// <summary>Addresses and relay people already asked about, so one answer lasts the run. A "no" is remembered the
     /// same as a "yes": the point of asking once is not asking again.</summary>
     private readonly HashSet<string> acceptAsked = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>People the user has unticked themselves this run. Without this, unticking somebody who still has you
+    /// ticked puts them straight back: their audio keeps arriving, this sees audio from somebody unticked, and ticks
+    /// them. Ed, 2026-09-21. It holds until the user ticks them again, or until the next run — a fresh start with
+    /// nobody ticked is what "connect when someone ticks me" is for.</summary>
+    private readonly HashSet<string> acceptRefusedByUser = new(StringComparer.OrdinalIgnoreCase);
     private bool acceptPromptOpen;
     private int acceptAskCount;
 
@@ -49,6 +55,7 @@ public sealed partial class MainForm
             return;
         }
         if (selectedPeerEndpoints.Values.Any(ep => ep.Address.Equals(remote.Address))) return;
+        if (acceptRefusedByUser.Contains($"peer:{remote.Address}")) return;
         // A relay's own address is not a person: the people behind it arrive in the relay list with names of their own.
         if (relayGroup.ConnectedRelay is { } relay && relay.Address.Equals(remote.Address)) return;
         if (!acceptAsked.Add($"peer:{remote.Address}")) return;
@@ -98,6 +105,7 @@ public sealed partial class MainForm
         if (mode == PeerAcceptMode.Manual) return;
         // Everybody on a relay is on our password by definition — the relay groups by it — so there is nothing more
         // to check than that we have not already answered for this person.
+        if (acceptRefusedByUser.Contains($"relay:{member.Id:D}")) return;
         if (!acceptAsked.Add($"relay:{member.Id:D}")) return;
         var name = RelayMemberName(member);
         logFile.Event($"accept connections: {name} has ticked us on the relay (mode={mode})");
@@ -113,7 +121,7 @@ public sealed partial class MainForm
     private void AcceptRelayMember(Guid id, string name)
     {
         relayTicked.Add(id);
-        relayListSignature = "";        // the row's tick has changed, so the next refresh rebuilds the list
+        relayListSignature = null;        // the row's tick has changed, so the next refresh rebuilds the list
         ApplyRelayTicks();
         MarkProfileDirty();
         logFile.Event($"accept connections: ticked {name} on the relay");
@@ -129,6 +137,7 @@ public sealed partial class MainForm
     {
         var mode = AcceptMode();
         if (mode == PeerAcceptMode.Manual) return;
+        if (acceptRefusedByUser.Contains($"relay-phone:{relay}")) return;
         if (!acceptAsked.Add($"relay-phone:{relay}")) return;
         logFile.Event($"accept connections: a phone or older app is paired with us on {relay} (mode={mode})");
         if (mode == PeerAcceptMode.Automatic)
@@ -143,7 +152,7 @@ public sealed partial class MainForm
     private void AcceptRelayPairPartner()
     {
         relayPairTicked = true;
-        relayListSignature = "";
+        relayListSignature = null;
         ApplyRelayTicks();
         MarkProfileDirty();
         logFile.Event("accept connections: ticked the phone or older app paired with us on the relay");

@@ -27,7 +27,10 @@ public sealed partial class MainForm
     private readonly HashSet<Guid> relayTicked = [];
     private bool relayPairTicked;
     private bool suppressRelayTickEvents;
-    private string relayListSignature = "";
+    /// <summary>The list as it was last built, so a screen reader is not interrupted by a rebuild that changes nothing.
+    /// Null means "build it whatever happens". It cannot be the empty string: that is the REAL signature of an empty
+    /// list, and using it as the force meant a list which legitimately emptied kept its stale rows for good.</summary>
+    private string? relayListSignature;
     /// <summary>The relay's address as the user typed it. It used to live in a box on the tab; the box is in the relay
     /// window now, so the text is kept here — it is what a profile remembers and what the status line says.</summary>
     private string relayEntryText = "";
@@ -168,7 +171,7 @@ public sealed partial class MainForm
         relayTickedBack.Clear();
         relayKnownNames.Clear();
         relayRecentlyGone.Clear();
-        relayListSignature = "";
+        relayListSignature = null;
         PushAllowedReceiveSenders();
         ApplyAudioRuntime();
         SyncRelayPeersList();
@@ -267,6 +270,9 @@ public sealed partial class MainForm
     private void OnRelayPeerTicked(int index, bool ticked)
     {
         if (index < 0 || index >= relayPeersList.Items.Count || relayPeersList.Items[index] is not RelayPeerItem item) return;
+        var refusalKey = item.IsPairPartner ? RelayPairRefusalKey() : $"relay:{item.Id:D}";
+        if (ticked) { if (refusalKey is not null) acceptRefusedByUser.Remove(refusalKey); }
+        else if (refusalKey is not null) acceptRefusedByUser.Add(refusalKey);
         if (item.IsPairPartner) relayPairTicked = ticked;
         else if (ticked) relayTicked.Add(item.Id);
         else { relayTicked.Remove(item.Id); relayTickedBack.Remove(item.Id); }
@@ -309,6 +315,11 @@ public sealed partial class MainForm
         SelectPeer(announcement, fromProfileRestore: true);
     }
 
+    /// <summary>The key an untick of the phone-or-older-app row is remembered under, or null when we are not on a
+    /// server and there is nothing to remember it against.</summary>
+    private string? RelayPairRefusalKey() =>
+        relayGroup.ConnectedRelay is { } relay ? $"relay-phone:{relay}" : null;
+
     private static string RelayMemberName(RelayGroupClient.Member member) =>
         string.IsNullOrWhiteSpace(member.Name) ? $"Someone not yet named ({member.Id.ToString("N")[..6]})" : member.Name;
 
@@ -328,6 +339,11 @@ public sealed partial class MainForm
                 liveIds.Add(member.Id);
                 relayRecentlyGone.Remove(member.Id);
                 relayKnownNames[member.Id] = RelayMemberName(member);
+                // Somebody you are connected to lives in Connected peers, exactly as somebody on your network does.
+                // Two lists sitting one above the other have to mean the same thing, or you get the same person in
+                // both at once — Ed, 2026-09-21: "I see ed_dT even though I'm connected already to ed DT on server.
+                // that's weird and should not happen". Untick them there and they come back here.
+                if (selectedPeerEndpoints.ContainsKey(member.Id)) continue;
                 items.Add(new RelayPeerItem(member.Id, RelayMemberName(member), IsPairPartner: false));
             }
             foreach (var (id, name) in relayKnownNames.ToList())
@@ -352,6 +368,7 @@ public sealed partial class MainForm
         if (listChanged)
         {
             relayListSignature = signature;
+            var wasOn = CaptureListCursor(relayPeersList);
             suppressRelayTickEvents = true;
             try
             {
@@ -365,6 +382,7 @@ public sealed partial class MainForm
                 relayPeersList.EndUpdate();
             }
             finally { suppressRelayTickEvents = false; }
+            RestoreListCursorAfterRebuild(relayPeersList, wasOn);
             // Somebody ticked before they were here — a profile putting its ticks back, or somebody who left and came
             // back — has to be picked up now they are. Ticking is about a person, not about the moment you did it.
             ApplyRelayTicks();
@@ -460,7 +478,7 @@ public sealed partial class MainForm
         relayPairTicked = false;
         relayKnownNames.Clear();
         relayRecentlyGone.Clear();
-        relayListSignature = "";
+        relayListSignature = null;
         relayGroup.SetTicked(relayTicked, relayPairTicked);
         PushAllowedReceiveSenders();
         ApplyAudioRuntime();
@@ -509,6 +527,11 @@ public sealed partial class MainForm
     internal IReadOnlyCollection<Guid> RelayTickedForTest => relayTicked;
     internal bool RelayPairTickedForTest => relayPairTicked;
     internal void DeselectPeerForTest(Guid instanceId) => DeselectPeer(instanceId);
+    internal void DeselectPeerByUserForTest(Guid instanceId) => DeselectPeer(instanceId, byUser: true);
+    internal void SelectPeerByUserForTest(PeerAnnouncement peer) => SelectPeer(peer, fromProfileRestore: false);
+    internal CheckedListBox ConnectedPeersListForTest => connectedPeersList;
+    internal IReadOnlyCollection<string> AcceptRefusedForTest => acceptRefusedByUser;
+    internal IReadOnlyCollection<Guid> SelectedPeerIdsForTest => selectedPeerEndpoints.Keys.ToList();
     internal void SyncAllPeerListsForTest() => SyncAllPeerLists();
     internal void UpdateConnectedListLiveStatusForTest() => UpdateConnectedListLiveStatus();
     internal void RelayPeerTickedForTest(int index, bool ticked) => OnRelayPeerTicked(index, ticked);

@@ -629,6 +629,15 @@ public sealed partial class MainForm : Form
 
 
     private readonly Dictionary<CheckedListBox, int> lastFocusedListIndices = [];
+    /// <summary>What each list's cursor was last on, by the PERSON rather than the row number. A row number is only a
+    /// position, and positions move: tick somebody in the discovered list and they leave it the same second, taking
+    /// every row below them up one. The laptop log of 2026-09-21 has Ed ticking a phone, the phone leaving the list,
+    /// and his next keypress landing on the machine that slid into its place — "suddenly the ed_DT not on server came
+    /// back". Keyed by person, the cursor follows them instead.</summary>
+    private readonly Dictionary<CheckedListBox, string> lastFocusedListKeys = [];
+    /// <summary>The status label and the word for one row, per list, so a rebuild can put the cursor back and say
+    /// where it landed in the same voice the list uses everywhere else.</summary>
+    private readonly Dictionary<CheckedListBox, (Label Status, string Kind)> listAccessibility = [];
 
     private readonly System.Windows.Forms.Timer statusTimer = new() { Interval = 1000 };
     // Periodic silent auto-save of the current profile (Preferences → General → "auto save non-read only
@@ -3765,7 +3774,7 @@ public sealed partial class MainForm : Form
                     && args.Index >= 0 && args.Index < connectedPeersList.Items.Count
                     && connectedPeersList.Items[args.Index] is PeerListItem item)
                 {
-                    DeselectPeer(item.Peer.InstanceId);
+                    DeselectPeer(item.Peer.InstanceId, byUser: true);
                 }
                 SyncAllPeerLists();
                 ApplyAudioRuntime();
@@ -3776,7 +3785,7 @@ public sealed partial class MainForm : Form
             if (args.KeyCode == Keys.Delete && connectedPeersList.SelectedItem is PeerListItem selected)
             {
                 var prevIndex = connectedPeersList.SelectedIndex;
-                DeselectPeer(selected.Peer.InstanceId);
+                DeselectPeer(selected.Peer.InstanceId, byUser: true);
                 SyncAllPeerLists();
                 FocusListItemAfterDelete(connectedPeersList, prevIndex);
                 ApplyAudioRuntime();
@@ -5637,22 +5646,17 @@ public sealed partial class MainForm : Form
         if (signature != lastConnectedListSignature)
         {
             lastConnectedListSignature = signature;
-            var selectedId = SafeSelectedItem(connectedPeersList) is PeerListItem si ? si.Peer.InstanceId : Guid.Empty;
+            var wasOn = CaptureListCursor(connectedPeersList);
             suppressConnectedCheck = true;
             try
             {
                 connectedPeersList.BeginUpdate();
                 connectedPeersList.Items.Clear();
-                var idx = -1;
-                foreach (var d in desired)
-                {
-                    var i = connectedPeersList.Items.Add(d.Item, isChecked: true);
-                    if (selectedId == d.Id) idx = i;
-                }
-                if (idx >= 0) connectedPeersList.SelectedIndex = idx;
+                foreach (var d in desired) connectedPeersList.Items.Add(d.Item, isChecked: true);
                 connectedPeersList.EndUpdate();
             }
             finally { suppressConnectedCheck = false; }
+            RestoreListCursorAfterRebuild(connectedPeersList, wasOn);
         }
 
         UpdateConnectedListLiveStatus();
@@ -5670,6 +5674,19 @@ public sealed partial class MainForm : Form
         }
         var sendingNow = connected && IsSendEnabled && sender.IsRunning;
         var codecLabel = FormatCodecLabel(sender.Codec, sender.OpusFrameSamplesPerChannel);
+
+        // The same machine reached two ways — on your network AND through the server — is two rows carrying the same
+        // sound twice over, under the same name. Nothing used to say so, and Ed spent a session wondering why ED_DT
+        // was in his list twice (2026-09-21). Work out who that applies to before reading the rows.
+        var routesByName = new Dictionary<string, (bool Network, bool Server)>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < connectedPeersList.Items.Count; i++)
+        {
+            if (connectedPeersList.Items[i] is not PeerListItem row) continue;
+            var rowName = ResolvePeerDisplayName(row.Peer);
+            var rowOnServer = RemSound.Core.RelayGroupClient.IsMemberAddress(row.Peer.Address);
+            var seen = routesByName.GetValueOrDefault(rowName);
+            routesByName[rowName] = (seen.Network || !rowOnServer, seen.Server || rowOnServer);
+        }
 
         for (int i = 0; i < connectedPeersList.Items.Count; i++)
         {
@@ -5693,6 +5710,12 @@ public sealed partial class MainForm : Form
             s.Receiving = isHealthy && receiver.IsRunning && (receiver.IsReceivingFromAddress(item.Peer.Address)
                 || RelayGroupMembers(rowEndpoint)?.Any(m => receiver.IsReceivingFromAddress(m.Address.Address)) == true);
             s.Group = isHealthy ? DescribeRelayGroup(rowEndpoint) : null;
+            var routes = routesByName.GetValueOrDefault(ResolvePeerDisplayName(item.Peer));
+            s.DuplicateRoute = routes.Network && routes.Server
+                ? RemSound.Core.RelayGroupClient.IsMemberAddress(item.Peer.Address)
+                    ? "same machine twice, also connected on your network"
+                    : "same machine twice, also connected through the server"
+                : null;
             s.CodecLabel = isHealthy ? codecLabel : null;
             s.RttMs = isHealthy && ph is { RttMs: { } rtt }
                 ? RoundToFive(rtt)
@@ -6044,22 +6067,17 @@ public sealed partial class MainForm : Form
         if (signature == lastDiscoveredListSignature) return;
         lastDiscoveredListSignature = signature;
 
-        var selectedId = SafeSelectedItem(discoveredPeersList) is PeerListItem si ? si.Peer.InstanceId : Guid.Empty;
+        var wasOn = CaptureListCursor(discoveredPeersList);
         suppressDiscoveredCheck = true;
         try
         {
             discoveredPeersList.BeginUpdate();
             discoveredPeersList.Items.Clear();
-            var idx = -1;
-            foreach (var d in desired)
-            {
-                var i = discoveredPeersList.Items.Add(d.Item, isChecked: false);
-                if (selectedId == d.Id) idx = i;
-            }
-            if (idx >= 0) discoveredPeersList.SelectedIndex = idx;
+            foreach (var d in desired) discoveredPeersList.Items.Add(d.Item, isChecked: false);
             discoveredPeersList.EndUpdate();
         }
         finally { suppressDiscoveredCheck = false; }
+        RestoreListCursorAfterRebuild(discoveredPeersList, wasOn);
     }
 
     private void SyncRememberedList()
@@ -6080,23 +6098,17 @@ public sealed partial class MainForm : Form
         if (signature == lastRememberedListSignature) return;
         lastRememberedListSignature = signature;
 
-        var selectedEntry = SafeSelectedItem(rememberedPeersList) is RememberedPeerItem si ? si.Entry : null;
+        var wasOn = CaptureListCursor(rememberedPeersList);
         suppressRememberedCheck = true;
         try
         {
             rememberedPeersList.BeginUpdate();
             rememberedPeersList.Items.Clear();
-            var idx = -1;
-            foreach (var entry in entries)
-            {
-                var item = new RememberedPeerItem(entry);
-                var i = rememberedPeersList.Items.Add(item, isChecked: false);
-                if (entry == selectedEntry) idx = i;
-            }
-            if (idx >= 0) rememberedPeersList.SelectedIndex = idx;
+            foreach (var entry in entries) rememberedPeersList.Items.Add(new RememberedPeerItem(entry), isChecked: false);
             rememberedPeersList.EndUpdate();
         }
         finally { suppressRememberedCheck = false; }
+        RestoreListCursorAfterRebuild(rememberedPeersList, wasOn);
     }
 
     // FocusFirstControlOnActiveTab was removed in the arrow-key fix. The original intent —
@@ -11645,6 +11657,7 @@ public sealed partial class MainForm : Form
 
     private void WireCheckedListAccessibility(CheckedListBox list, Label statusLabel, string itemKind)
     {
+        listAccessibility[list] = (statusLabel, itemKind);
         // Tick/untick sound for the inputs/outputs AND peer lists. Gated on the list being focused so
         // a real user click/spacebar clicks, but EVERY programmatic (un)check stays silent — via the
         // list-focus gate, CheckSoundService.Suppressed during profile apply, and SuppressingCheckSounds
@@ -11658,7 +11671,11 @@ public sealed partial class MainForm : Form
         };
         list.SelectedIndexChanged += (_, _) =>
         {
-            if (list.SelectedIndex >= 0) lastFocusedListIndices[list] = list.SelectedIndex;
+            if (list.SelectedIndex >= 0)
+            {
+                lastFocusedListIndices[list] = list.SelectedIndex;
+                if (ListRowKey(list.Items[list.SelectedIndex]) is { } key) lastFocusedListKeys[list] = key;
+            }
             UpdateCheckedListStatus(list, statusLabel, itemKind);
         };
         list.Enter += (_, _) => RestoreListFocus(list, statusLabel, itemKind);
@@ -11670,6 +11687,7 @@ public sealed partial class MainForm : Form
             {
                 list.SelectedIndex = index;
                 lastFocusedListIndices[list] = index;
+                if (ListRowKey(list.Items[index]) is { } clicked) lastFocusedListKeys[list] = clicked;
             }
         };
         // First-letter navigation: highlights the matching item without ever toggling its check.
@@ -11719,12 +11737,76 @@ public sealed partial class MainForm : Form
         UpdateCheckedListStatus(list, statusLabel, itemKind);
     }
 
+    /// <summary>A row's identity: WHO it is, never where it sits. Everything that puts a cursor back uses this.</summary>
+    private static string? ListRowKey(object? item) => item switch
+    {
+        PeerListItem peer => $"peer:{peer.Peer.InstanceId:D}",
+        RememberedPeerItem remembered => $"remembered:{remembered.Entry}",
+        RelayPeerItem relay => relay.IsPairPartner ? "server:pair" : $"server:{relay.Id:D}",
+        _ => null,
+    };
+
+    /// <summary>Note who the cursor is on, before a rebuild moves everybody around.</summary>
+    private string? CaptureListCursor(CheckedListBox list)
+    {
+        var key = ListRowKey(SafeSelectedItem(list)) ?? lastFocusedListKeys.GetValueOrDefault(list);
+        if (key is not null) lastFocusedListKeys[list] = key;
+        return key;
+    }
+
+    /// <summary>Where a list's cursor belongs: on the person it was last on, wherever they have moved to, and only
+    /// falling back to the old row number once that person has gone from the list altogether.</summary>
+    private int PreferredListIndex(CheckedListBox list)
+    {
+        if (list.Items.Count == 0) return -1;
+        if (lastFocusedListKeys.TryGetValue(list, out var key))
+        {
+            for (var i = 0; i < list.Items.Count; i++)
+            {
+                if (ListRowKey(list.Items[i]) == key) return i;
+            }
+        }
+        return lastFocusedListIndices.TryGetValue(list, out var saved) ? Math.Clamp(saved, 0, list.Items.Count - 1) : 0;
+    }
+
+    /// <summary>
+    /// Put a rebuilt list's cursor back where the user left it, and SAY SO when it had to move to somebody else.
+    /// All four peer lists shed rows under the user — tick a peer and they leave the discovered list for Connected
+    /// peers — and a cursor left on a row number silently ends up on a stranger, where the next space ticks the
+    /// wrong person. That is what happened to Ed on 2026-09-21, so the move is now announced.
+    /// </summary>
+    private void RestoreListCursorAfterRebuild(CheckedListBox list, string? wasKey)
+    {
+        listAccessibility.TryGetValue(list, out var wiring);
+        if (list.Items.Count == 0)
+        {
+            lastFocusedListIndices.Remove(list);
+            if (wiring.Status is not null) UpdateCheckedListStatus(list, wiring.Status, wiring.Kind);
+            return;
+        }
+        var index = PreferredListIndex(list);
+        if (index < 0) return;
+        list.SelectedIndex = index;
+        list.TopIndex = Math.Max(0, index);
+        lastFocusedListIndices[list] = index;
+        var nowKey = ListRowKey(list.Items[index]);
+        if (nowKey is not null) lastFocusedListKeys[list] = nowKey;
+        if (wiring.Status is null) return;
+        UpdateCheckedListStatus(list, wiring.Status, wiring.Kind);
+        // Only when the cursor genuinely landed on somebody else. A cursor that moved under the user is the one thing
+        // they must not be allowed to miss, so it is always written down, and said out loud when they are in the list.
+        if (wasKey is null || nowKey is null || nowKey == wasKey) return;
+        logFile.Event($"list cursor: the {wiring.Kind} list lost the row under the cursor; moved to \"{list.Items[index]}\"");
+        if (!list.Focused) return;
+        ScreenReader.Speak(list.Items[index]?.ToString() ?? "");
+        WinEventNotifier.NotifyFocus(list);
+    }
+
     private void RestoreListFocus(CheckedListBox list, Label statusLabel, string itemKind)
     {
         if (list.Items.Count == 0) { UpdateCheckedListStatus(list, statusLabel, itemKind); return; }
-        var target = list.SelectedIndex >= 0
-            ? list.SelectedIndex
-            : lastFocusedListIndices.TryGetValue(list, out var saved) ? Math.Clamp(saved, 0, list.Items.Count - 1) : 0;
+        var target = list.SelectedIndex >= 0 ? list.SelectedIndex : PreferredListIndex(list);
+        if (target < 0) target = 0;
 
         void Restore()
         {
@@ -11733,6 +11815,7 @@ public sealed partial class MainForm : Form
             list.SelectedIndex = target;
             list.TopIndex = Math.Max(0, target);
             lastFocusedListIndices[list] = target;
+            if (ListRowKey(list.Items[target]) is { } landed) lastFocusedListKeys[list] = landed;
             UpdateCheckedListStatus(list, statusLabel, itemKind);
             // Force-fire EVENT_OBJECT_FOCUS once the SelectedIndex and AccessibleDescription
             // have been set, so NVDA re-announces the list with its current item state. This is

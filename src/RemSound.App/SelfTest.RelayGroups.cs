@@ -362,14 +362,20 @@ internal static partial class SelfTest
             Check(form.RelayPeersListForTest.Items.Cast<object>().Any(i => i.ToString() == "Dave"),
                 $"a relay from before the tick flag must still show its people ({string.Join(", ", form.RelayPeersListForTest.Items.Cast<object>())})");
 
-            // Unticking takes it all off again.
-            form.RelayPeerTickedForTest(aliceRow, false);
-            form.RelayPeerTickedForTest(bobRow, false);
+            // Unticking takes it all off again. Somebody you have ticked is in Connected peers now, not in the server
+            // list, so that is where you untick them — exactly as for somebody on your network.
+            form.DeselectPeerByUserForTest(alice);
+            form.DeselectPeerByUserForTest(bob);
             Check(form.SelectedSendEndpointsForTest().Length == 0 && !form.ReceiverForTest.IsSenderAllowedForTest(aliceMember.Address),
                 "unticking must stop sending to them and stop letting them in");
+            Check(form.RelayTickedForTest.Count == 0,
+                "and must clear the server's ticks, or this machine puts them straight back");
+            form.SyncRelayPeersListForTest();
+            Check(form.RelayPeersListForTest.Items.Cast<object>().Select(i => i.ToString()!).Order().SequenceEqual(["Alice", "Bob", "Dave"]),
+                $"and they come back to the server list, beside everyone else there, ready to be ticked again ({string.Join(", ", form.RelayPeersListForTest.Items.Cast<object>())})");
 
             // Changing the profile password is a different set of people, so the ticks cannot carry over.
-            form.RelayPeerTickedForTest(aliceRow, true);
+            form.RelayPeerTickedForTest(form.RelayPeersListForTest.Items.Cast<object>().ToList().FindIndex(i => i.ToString() == "Alice"), true);
             var (_, otherFingerprint) = RemSoundCrypto.ForPlainPassword("a completely different password");
             form.RelayPasswordChangedForTest(otherFingerprint);
             Check(form.RelayTickedForTest.Count == 0,
@@ -774,6 +780,249 @@ internal static partial class SelfTest
         }
         Check(speakers.Count > 0, "the app must speak somewhere, or this guard is watching nothing");
         return $"a run is silent, and the {speakers.Count} place(s) that speak are all behind the one switch it holds down";
+    }
+
+    /// <summary>
+    /// A PEER LIST CHANGING UNDER YOU MUST KEEP THE CURSOR ON THE PERSON.
+    ///
+    /// <para>Ed, 2026-09-21. The laptop log of that night has him ticking a phone at 00:17:50, the phone leaving the
+    /// discovered list for Connected peers the same second, and at 00:17:52 "peer selected: ED_DT 192.168.1.95" — a
+    /// machine he had unticked twenty seconds earlier. Nothing in the app chose ED_DT. The list had moved under his
+    /// cursor, which was kept as a row NUMBER, and the number was clamped onto whoever slid into the gap.</para>
+    ///
+    /// <para>So the cursor follows the person. When that person leaves the list altogether it lands on their
+    /// replacement AND says so — under a screen reader a cursor that moves in silence is a keypress on a stranger.</para>
+    /// </summary>
+    private static string? TheCursorStaysOnThePerson()
+    {
+        var restoreMuted = CuePlayer.GloballyMuted;
+        CuePlayer.GloballyMuted = true;
+        var restoreMode = AppConfig.Load().AcceptPeerConnections;
+        MainForm? form = null;
+        try
+        {
+            SetAcceptMode(PeerAcceptMode.Manual);   // nothing must tick anybody back behind this test
+            try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+
+            // Four of them, on purpose. With only two, a clamped row NUMBER lands on the right person by luck and
+            // proves nothing; with four, following the number and following the person give different answers.
+            PeerAnnouncement Peer(string name, string address) => new(Guid.NewGuid(), name, RemPacket.DefaultPeerDialPort,
+                CanSend: true, CanReceive: true, DateTime.UtcNow, IPAddress.Parse(address));
+            var aaa = Peer("AAA_one", "192.168.1.11");
+            var bbb = Peer("BBB_two", "192.168.1.12");
+            var ccc = Peer("CCC_three", "192.168.1.13");
+            var phone = Peer("iPhone", "192.168.1.8");
+            foreach (var p in new[] { aaa, bbb, ccc, phone }) form.SelectPeerForTest(p);
+            form.SyncAllPeerListsForTest();
+
+            var list = form.ConnectedPeersListForTest;
+            if (list.Items.Count != 4) return Skip($"the connected list did not take all four peers ({list.Items.Count})");
+            int RowOf(string name) => Enumerable.Range(0, list.Items.Count)
+                .First(i => list.Items[i]!.ToString()!.Contains(name, StringComparison.Ordinal));
+            Check(RowOf("AAA_one") == 0 && RowOf("BBB_two") == 1,
+                "the rows must be in name order, or the arithmetic below means nothing");
+
+            // The cursor is on the second row. Somebody ABOVE them leaves, so every row below moves up one — and the
+            // row number the cursor used to sit on now belongs to somebody else entirely.
+            list.SelectedIndex = RowOf("BBB_two");
+            form.DeselectPeerForTest(aaa.InstanceId);
+            form.SyncAllPeerListsForTest();
+            Check(list.Items.Count == 3, $"the list must have shed the row that left ({list.Items.Count})");
+            Check(list.SelectedIndex == 0,
+                $"the cursor must follow BBB_two up to row 0, not stay on row 1 where CCC_three now sits "
+                + $"(it is on \"{(list.SelectedIndex >= 0 ? list.Items[list.SelectedIndex] : null)}\")");
+            Check(list.Items[list.SelectedIndex]!.ToString()!.Contains("BBB_two", StringComparison.Ordinal),
+                "the row moved; the person did not, and the cursor is on the person");
+
+            // And the case that actually bit Ed: the person UNDER the cursor is the one who goes.
+            list.SelectedIndex = RowOf("iPhone");
+            var said = new List<string>();
+            form.LogForTest.EventTapForTest = line => { lock (said) said.Add(line); };
+            try
+            {
+                form.DeselectPeerForTest(phone.InstanceId);
+                form.SyncAllPeerListsForTest();
+            }
+            finally { form.LogForTest.EventTapForTest = null; }
+
+            Check(list.Items.Count == 2 && list.SelectedIndex >= 0,
+                "with the row under the cursor gone, the cursor must land somewhere real rather than being thrown away");
+            var moved = said.Where(l => l.Contains("list cursor:", StringComparison.Ordinal)).ToList();
+            Check(moved.Count >= 1, $"a cursor that moved to somebody else must be written down, every time ({moved.Count} lines)");
+            Check(moved.Any(l => l.Contains("connected peer", StringComparison.Ordinal)),
+                $"and the line must name the list it happened in (got: {string.Join(" | ", moved)})");
+            Check(moved.Any(l => l.Contains(list.Items[list.SelectedIndex]!.ToString()!, StringComparison.Ordinal)),
+                $"and who the cursor ended up on, so the log says what the user was about to press space on "
+                + $"(cursor: \"{list.Items[list.SelectedIndex]}\", log: {string.Join(" | ", moved)})");
+
+            return "the cursor follows the person, not the row number: it stays put when somebody above them leaves, "
+                + "and when the person under it leaves it lands on their replacement and says so in the log";
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            try { SetAcceptMode(restoreMode); } catch { /* best effort */ }
+            CuePlayer.GloballyMuted = restoreMuted;
+        }
+    }
+
+    /// <summary>
+    /// UNTICKING SOMEBODY MUST KEEP THEM UNTICKED.
+    ///
+    /// <para>Ed, 2026-09-21: "otherwise you can never cisconnect". On Automatic, unticking somebody who still has you
+    /// ticked used to put them straight back — their audio keeps arriving, the app sees audio from somebody unticked,
+    /// and ticks them. His answer was to send the other end a message telling it to untick. It does not need one: the
+    /// decision is this end's to keep, so this end keeps it, and nothing goes on the wire.</para>
+    ///
+    /// <para>It holds for the run, not forever. Tick them again and the refusal goes with it.</para>
+    /// </summary>
+    private static string? UntickingSomebodyKeepsThemUnticked()
+    {
+        var restoreMuted = CuePlayer.GloballyMuted;
+        CuePlayer.GloballyMuted = true;
+        var restoreMode = AppConfig.Load().AcceptPeerConnections;
+        MainForm? form = null;
+        try
+        {
+            SetAcceptMode(PeerAcceptMode.Automatic);   // the mode Ed was actually on, per his global config
+            try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+
+            // Somebody the user has said nothing about: automatic ticks them back, which is what it is for.
+            var stranger = new IPEndPoint(IPAddress.Parse("198.51.100.77"), RemPacket.DefaultPeerDialPort);
+            form.SomeoneWantsToConnectForTest(stranger, samePassword: true);
+            Check(form.SelectedSendEndpointsForTest().Any(e => e.Address.Equals(stranger.Address)),
+                "on automatic, somebody who ticks us and whom we have never unticked must still be ticked back");
+
+            // Now somebody the user ticked themselves, and then unticked.
+            var them = new PeerAnnouncement(Guid.NewGuid(), "ED_DT", RemPacket.DefaultPeerDialPort,
+                CanSend: true, CanReceive: true, DateTime.UtcNow, IPAddress.Parse("192.168.1.95"));
+            var theirEndpoint = new IPEndPoint(them.Address, them.AudioPort);
+            bool Connected() => form!.SelectedSendEndpointsForTest().Any(e => e.Address.Equals(them.Address));
+            form.SelectPeerByUserForTest(them);
+            Check(Connected(), "ticking somebody must connect them, or the untick below proves nothing");
+
+            // The untick, and then their audio arriving again — they have not stopped ticking us.
+            var said = new List<string>();
+            form.LogForTest.EventTapForTest = line => { lock (said) said.Add(line); };
+            try { form.DeselectPeerByUserForTest(them.InstanceId); }
+            finally { form.LogForTest.EventTapForTest = null; }
+            Check(!Connected(), "unticking must actually untick");
+            Check(said.Any(l => l.Contains("peer deselected", StringComparison.Ordinal) && l.Contains("by you", StringComparison.Ordinal)),
+                $"and the log must say it was the user's doing, not housekeeping (got: {string.Join(" | ", said)})");
+            Check(form.AcceptRefusedForTest.Any(k => k.Contains("192.168.1.95", StringComparison.Ordinal)),
+                "and the decision must be remembered against them");
+
+            form.SomeoneWantsToConnectForTest(theirEndpoint, samePassword: true);
+            Check(!Connected(), "THE BUG: somebody the user has just unticked must not be ticked back by automatic");
+            form.SomeoneWantsToConnectForTest(theirEndpoint, samePassword: true);
+            Check(!Connected(), "and not on the next packet either — it is a decision, not a one-off");
+
+            // Ticking them again is the user changing their mind, and it takes the refusal with it.
+            form.SelectPeerByUserForTest(them);
+            Check(Connected(), "ticking them again must connect them");
+            Check(!form.AcceptRefusedForTest.Any(k => k.Contains("192.168.1.95", StringComparison.Ordinal)),
+                "and must clear the refusal, or automatic would stay switched off for them for the rest of the run");
+
+            return "on automatic, somebody who ticks us is ticked back — but somebody the user has just unticked stays "
+                + "unticked however long they keep ticking us, the untick is logged as the user's own, and ticking "
+                + "them again clears it; nothing is sent to the other end to achieve any of it";
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            try { SetAcceptMode(restoreMode); } catch { /* best effort */ }
+            CuePlayer.GloballyMuted = restoreMuted;
+        }
+    }
+
+    /// <summary>
+    /// SOMEBODY ON A SERVER BELONGS IN ONE LIST AT A TIME.
+    ///
+    /// <para>Ed, 2026-09-21: "in discovered peers on server I see ed_dT even though I'm connected already to ed DT on
+    /// server. that's weird and should not happen". The server list used to keep everybody and show a tick, while the
+    /// list directly above it drops people the moment you connect. Two lists side by side meaning opposite things.</para>
+    ///
+    /// <para>And the other half of the same knot: the tick lived in two places at once, so unticking somebody in
+    /// Connected peers left them in the server's tick list and this machine put them straight back.</para>
+    ///
+    /// <para>Last, the same machine reached twice — on the network AND through the server — now says so on both rows.</para>
+    /// </summary>
+    private static string? ServerPeopleAreInOneListAtATime()
+    {
+        var restoreMuted = CuePlayer.GloballyMuted;
+        CuePlayer.GloballyMuted = true;
+        var restoreMode = AppConfig.Load().AcceptPeerConnections;
+        MainForm? form = null;
+        try
+        {
+            SetAcceptMode(PeerAcceptMode.Automatic);   // the mode that used to undo the untick
+            try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+
+            var relay = new IPEndPoint(IPAddress.Parse("203.0.113.92"), RemPacket.DefaultPort);
+            form.ConnectToRelayForTest("remote.example.test", relay);
+            var onServer = Guid.NewGuid();
+            Feed(form.RelayGroupForTest, relay, RosterPacket([(onServer, "ED_DT", true)], paired: false),
+                RelayInbound.Consumed, "a member list with ED_DT on it, ticking us");
+            form.SyncRelayPeersListForTest();
+
+            var serverList = form.RelayPeersListForTest;
+            Check(serverList.Items.Count == 1, $"ED_DT must be offered in the server list before we tick them ({serverList.Items.Count})");
+
+            form.RelayPeerTickedForTest(0, true);
+            form.SyncAllPeerListsForTest();
+            form.SyncRelayPeersListForTest();
+            Check(form.RelayTickedForTest.Contains(onServer), "ticking them must tick them");
+            Check(serverList.Items.Count == 0,
+                $"THE BUG: somebody you are connected to must leave the server list, as they leave the list above it (still there: {string.Join(", ", serverList.Items.Cast<object>())})");
+            Check(form.ConnectedPeersListForTest.Items.Cast<object>().Any(i => i!.ToString()!.Contains("ED_DT", StringComparison.Ordinal)),
+                "and be in Connected peers instead — they have to be somewhere you can untick them");
+
+            // Untick them THERE. The server tick has to go with it, or this machine puts them back.
+            var said = new List<string>();
+            form.LogForTest.EventTapForTest = line => { lock (said) said.Add(line); };
+            try { form.DeselectPeerByUserForTest(onServer); }
+            finally { form.LogForTest.EventTapForTest = null; }
+            Check(!form.RelayTickedForTest.Contains(onServer),
+                "THE BUG: unticking somebody in Connected peers must clear their server tick too");
+            Check(said.Any(l => l.Contains("cleared their server tick", StringComparison.Ordinal)),
+                $"and say so, because it is two ticks going for one keypress (got: {string.Join(" | ", said)})");
+
+            form.SyncRelayPeersListForTest();
+            Check(serverList.Items.Count == 1 && !serverList.GetItemChecked(0),
+                "they come back to the server list, unticked, ready to be ticked again");
+            form.SyncRelayPeersListForTest();
+            form.SyncAllPeerListsForTest();
+            Check(!form.RelayTickedForTest.Contains(onServer) && !form.SelectedSendEndpointsForTest().Any(e => e.Equals(relay)),
+                "and they must STAY gone — they are still ticking us, and automatic must not undo the untick");
+
+            // The same machine on both routes says so, on both rows.
+            form.RelayPeerTickedForTest(0, true);
+            var lanSame = new PeerAnnouncement(Guid.NewGuid(), "ED_DT", RemPacket.DefaultPeerDialPort,
+                CanSend: true, CanReceive: true, DateTime.UtcNow, IPAddress.Parse("192.168.1.95"));
+            form.SelectPeerForTest(lanSame);
+            form.SyncAllPeerListsForTest();
+            form.UpdateConnectedListLiveStatusForTest();
+            var rows = form.ConnectedPeersListForTest.Items.Cast<object>().Select(i => i!.ToString()!).ToList();
+            var doubled = rows.Where(r => r.Contains("same machine twice", StringComparison.Ordinal)).ToList();
+            Check(doubled.Count == 2,
+                $"both rows for one machine must say it is the same machine twice ({doubled.Count} of {rows.Count}: {string.Join(" | ", rows)})");
+            Check(doubled.Any(r => r.Contains("on your network", StringComparison.Ordinal))
+                && doubled.Any(r => r.Contains("through the server", StringComparison.Ordinal)),
+                "and each must name the OTHER way in, so it is obvious which row is which");
+
+            return "somebody you are connected to leaves the server list for Connected peers, unticking them there "
+                + "clears the server tick as well and says so, they stay unticked with automatic on, and one machine "
+                + "reached both ways says so on both rows";
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            try { SetAcceptMode(restoreMode); } catch { /* best effort */ }
+            CuePlayer.GloballyMuted = restoreMuted;
+        }
     }
 
     private static void SetAcceptMode(PeerAcceptMode mode)
