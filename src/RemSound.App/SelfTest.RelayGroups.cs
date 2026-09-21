@@ -1025,6 +1025,114 @@ internal static partial class SelfTest
         }
     }
 
+    /// <summary>
+    /// SOMEBODY WHO GOES AWAY MUST LEAVE THE LIST.
+    ///
+    /// <para>Christopher Wright, issue #31, 2026-09-21: peers discovered on the network never disappear, even with the
+    /// other machine switched off, and the only cure was a restart.</para>
+    ///
+    /// <para>Expiry itself was never broken — a peer is dropped eight seconds after its last announcement. What was
+    /// missing is anything to SAY so. The window rebuilt its list only when an announcement arrived describing
+    /// something new, and a machine that has been switched off sends nothing; on a two-machine network nobody else is
+    /// sending either, so no list was ever asked to rebuild. Expiry is driven by the clock now, from the loop that
+    /// announces us, which ticks whether or not anybody else is talking.</para>
+    /// </summary>
+    private static string? SomebodyWhoGoesAwayLeavesTheList()
+    {
+        using var discovery = new PeerDiscoveryService("gate");
+        var told = 0;
+        discovery.PeersChanged += () => Interlocked.Increment(ref told);
+
+        var them = new PeerAnnouncement(Guid.NewGuid(), "ED_DT", RemPacket.DefaultPeerDialPort,
+            CanSend: true, CanReceive: true, DateTime.UtcNow, IPAddress.Parse("192.168.1.95"));
+        discovery.RecordForTest(them);
+        Check(discovery.Peers.Count == 1, $"the peer must be in the list to start with ({discovery.Peers.Count})");
+        Check(discovery.GetKnownAddresses(them.InstanceId).Count == 1, "and the address they announced from must be held");
+
+        // Still announcing: nothing goes, and nothing is announced as going.
+        var toldBefore = Volatile.Read(ref told);
+        Check(!discovery.ExpireQuietPeersForTest(), "somebody still announcing must not be dropped");
+        Check(discovery.Peers.Count == 1 && Volatile.Read(ref told) == toldBefore,
+            "and the window must not be told anything, or the list is rebuilt every second and a screen reader is talked over");
+
+        // Now they are switched off. Nothing arrives from anybody; only the clock moves.
+        discovery.BackdateForTest(them.InstanceId, TimeSpan.FromSeconds(20));
+        toldBefore = Volatile.Read(ref told);
+        Check(discovery.ExpireQuietPeersForTest(), "THE BUG: somebody who has stopped announcing must be dropped by the clock alone");
+        Check(discovery.Peers.Count == 0, $"and must actually be gone from the list ({discovery.Peers.Count} left)");
+        Check(Volatile.Read(ref told) == toldBefore + 1,
+            $"and the window must be TOLD, exactly once — that is the whole of issue #31 ({Volatile.Read(ref told) - toldBefore} times)");
+        Check(discovery.GetKnownAddresses(them.InstanceId).Count == 0,
+            "and the addresses they were holding go too, so a dead address is not left allow-listed");
+
+        // And it does not keep saying it.
+        toldBefore = Volatile.Read(ref told);
+        Check(!discovery.ExpireQuietPeersForTest() && Volatile.Read(ref told) == toldBefore,
+            "an empty list must not be reported as changing, over and over, for ever");
+
+        return "a peer still announcing is left alone and reported as nothing; one that has gone quiet is dropped by "
+            + "the clock alone, with nobody else sending anything, the window is told exactly once, and the addresses "
+            + "it was holding go with it";
+    }
+
+    /// <summary>
+    /// A SERVER THAT STOPS LISTING ITS PEOPLE LOSES THEM.
+    ///
+    /// <para>Ed, 2026-09-21, on being shown Christopher's issue: &ldquo;check every single other dialogue like this
+    /// where the same problem might happen&rdquo;. This is the one. A member of a group exists only because a member
+    /// list said so, and the only place a member was ever removed was on the arrival of a list that left them out. So
+    /// a server that went away — crashed, unplugged, off the end of the network — left everybody it had been carrying
+    /// in the list for good, and their made-up addresses still routing through it.</para>
+    ///
+    /// <para>The group already went cold after five seconds without a list. Its people go with it now.</para>
+    /// </summary>
+    private static string? AServerThatStopsListingItsPeopleLosesThem()
+    {
+        var relay = new IPEndPoint(IPAddress.Parse("203.0.113.93"), RemPacket.DefaultPort);
+        var group = new RelayGroupClient(Guid.NewGuid());
+        group.SetIdentity("us", new byte[RelayGroupClient.GroupTagBytes]);
+        group.Start((_, _, _) => true);
+        try
+        {
+            group.Connect(relay);
+            var them = Guid.NewGuid();
+            Feed(group, relay, RosterPacket([(them, "ED_DT", true)], paired: true), RelayInbound.Consumed, "a member list");
+            Check(group.Members.Count == 1, $"the member must be there to start with ({group.Members.Count})");
+            Check(group.IsInGroup(relay) && group.IsV1Paired(relay), "and the group must be live, with a pair slot too");
+            var theirAddress = group.Members[0].Address;
+            Check(group.RelayOf(theirAddress) is not null, "and their address must route through the server");
+
+            // A list arriving keeps everything as it is.
+            group.TickForTest();
+            Check(group.Members.Count == 1 && group.IsInGroup(relay),
+                "a group still being listed must not be emptied by the clock");
+
+            // The server goes away. No bye, no error — the lists simply stop.
+            group.BackdateRosterForTest(TimeSpan.FromSeconds(10));
+            group.TickForTest();
+            Check(!group.IsInGroup(relay), "a server whose member lists have stopped must no longer count as a group");
+            Check(!group.IsV1Paired(relay), "and must not still claim a pair slot there");
+            Check(group.Members.Count == 0,
+                $"THE BUG: and the people it was carrying must go with it ({string.Join(", ", group.Members.Select(m => m.Name))})");
+            Check(group.RelayOf(theirAddress) is null,
+                "and their made-up address must stop routing through it, or audio is still aimed at a server that has gone");
+            Check(!group.TryGetMember(theirAddress, out _), "and they must not still be findable by that address");
+
+            // And it comes back: a server restarted, a wifi blip, a laptop lid. Everyone has to come back with it,
+            // which only works if the cold group let go of them properly — a member half-remembered is a member who
+            // is never listed again, because the roster only files somebody it has not got.
+            Feed(group, relay, RosterPacket([(them, "ED_DT", true)], paired: true), RelayInbound.Consumed, "a member list again");
+            Check(group.IsInGroup(relay) && group.IsV1Paired(relay), "a server whose lists start again is a group again");
+            Check(group.Members.Count == 1 && group.Members[0].Id == them,
+                $"THE BUG: and the people on it must come back, not be half-remembered and never listed again ({group.Members.Count} back)");
+            Check(group.RelayOf(group.Members[0].Address) is not null, "and route through it again");
+
+            return "while the member lists keep coming nothing is disturbed; once they stop the group goes cold, the "
+                + "people it was carrying go with it, and their addresses stop routing through it";
+        }
+        finally { group.Stop(); }
+    }
+
     private static void SetAcceptMode(PeerAcceptMode mode)
     {
         var cfg = AppConfig.Load();

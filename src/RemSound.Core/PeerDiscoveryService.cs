@@ -248,6 +248,33 @@ public sealed class PeerDiscoveryService : IDisposable
     /// front of the app without a socket. Same code as the live path.</summary>
     internal void RecordForTest(PeerAnnouncement peer) => Record(peer);
 
+    /// <summary>One turn of the announce loop's expiry: drop anybody who has gone quiet and, if anybody had, say so.
+    /// Returns whether anybody went.</summary>
+    private bool ExpireQuietPeers()
+    {
+        bool wentAway;
+        lock (gate) { wentAway = PruneExpiredPeers(); }
+        if (wentAway) PeersChanged?.Invoke();
+        return wentAway;
+    }
+
+    /// <summary>Test seam: the same expiry the announce loop does, without the 1.5 second wait or a socket.</summary>
+    internal bool ExpireQuietPeersForTest() => ExpireQuietPeers();
+
+    /// <summary>Test seam: put a peer's last-seen back, so silence can be exercised without sitting through eight
+    /// seconds of it. A timestamp going stale is the only thing a real silence does.</summary>
+    internal void BackdateForTest(Guid instanceId, TimeSpan by)
+    {
+        lock (gate)
+        {
+            if (peers.TryGetValue(instanceId, out var peer)) peers[instanceId] = peer with { LastSeenUtc = peer.LastSeenUtc - by };
+            if (addressesById.TryGetValue(instanceId, out var addrs))
+            {
+                foreach (var addr in addrs.Keys.ToList()) addrs[addr] -= by;
+            }
+        }
+    }
+
     private void AddUnicastTarget(IPAddress address)
     {
         // Idempotent — only swap the snapshot if this IP isn't already there. Avoids churning
@@ -264,6 +291,10 @@ public sealed class PeerDiscoveryService : IDisposable
         while (!token.IsCancellationRequested)
         {
             SendAnnouncement();
+            // Expiry has to be driven by a clock, not by traffic. Everywhere else it is done on the way past while
+            // handling somebody's announcement — which is no use at all for the case that matters, because the peer
+            // who has gone is by definition not sending anything, and on a two-machine network nobody else is either.
+            ExpireQuietPeers();
             try { await Task.Delay(1500, token).ConfigureAwait(false); }
             catch (OperationCanceledException) { break; }
         }
@@ -350,12 +381,18 @@ public sealed class PeerDiscoveryService : IDisposable
         return snapshot;
     }
 
-    private void PruneExpiredPeers()
+    /// <summary>Drop everyone we have not heard from for eight seconds. Returns whether anybody went, because a peer
+    /// LEAVING is every bit as much "something a list shows has changed" as one arriving, and until 2026-09-21 nothing
+    /// said so: a machine that was switched off sent nothing, nothing arrived, and no list was ever asked to rebuild.
+    /// Christopher Wright reported the stale rows (issue #31).</summary>
+    private bool PruneExpiredPeers()
     {
         var cutoff = DateTime.UtcNow.AddSeconds(-8);
+        var wentAway = false;
         foreach (var peer in peers.Values.Where(p => p.LastSeenUtc < cutoff).ToList())
         {
             peers.Remove(peer.InstanceId);
+            wentAway = true;
         }
         // Expire per-interface source addresses on the same window, and drop any peer left with none.
         foreach (var (id, addrs) in addressesById.ToList())
@@ -366,6 +403,7 @@ public sealed class PeerDiscoveryService : IDisposable
             }
             if (addrs.Count == 0) addressesById.Remove(id);
         }
+        return wentAway;
     }
 
     /// <summary>All source IPs a peer (by InstanceId) has announced from within the expiry window. A

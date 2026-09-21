@@ -669,6 +669,8 @@ Once you're on, the same button in that window says **Disconnect** , and the but
 
 **The same machine twice.** If the same computer is reachable both ways — on your network and through the server — and you tick both, you get two entries carrying the same sound twice over. Both rows say so: “same machine twice, also connected on your network” and “same machine twice, also connected through the server”. Untick whichever one you don't want.
 
+**When somebody goes.** Someone who leaves the server drops out of the list, marked **(gone)** for a few seconds first so a screen reader isn't reading a line that vanishes under it. If the SERVER goes — restarted, unplugged, off the end of your connection — everyone on it drops out the same way after about five seconds, and they all come back when it does.
+
 **What it costs you.** You send one copy of your sound to the server and the server passes it to each person due it. A room of six costs you no more to send than one person does. It's the server's connection that does the work, not yours.
 
 **Changing your password while you're on one.** That puts you among a different set of people, so everyone you had ticked is dropped and the list starts again. RemSound says so out loud when it happens.

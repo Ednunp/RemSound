@@ -473,6 +473,19 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         send(buffer.AsSpan(0, needed), relay);
     }
 
+    /// <summary>Test seam: one turn of the clock, without waiting a second for it.</summary>
+    internal void TickForTest() => Tick();
+
+    /// <summary>Test seam: put a relay's last-heard-from back, so a server going quiet can be exercised without
+    /// sitting through five seconds of silence. The timestamp is the only thing the silence itself changes.</summary>
+    internal void BackdateRosterForTest(TimeSpan by)
+    {
+        lock (gate)
+        {
+            foreach (var relay in relays.Values) relay.LastRosterUtc -= by;
+        }
+    }
+
     private void Tick()
     {
         var send = rawSend;
@@ -496,6 +509,17 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
                     relay.V1Paired = false;
                     changed = true;
                     events.Add($"no member list from {relay.Endpoint} for {GroupAliveFor.TotalSeconds:0} s: sending to it as an ordinary pair again");
+                    // And the people it was carrying go with it. A member only exists because a member list said so,
+                    // so once the lists stop there is nothing saying any of them is still there — and they were left
+                    // in the list for good, because the only place a member is ever removed is on the arrival of a
+                    // list that leaves them out. Ed, 2026-09-21, alongside Christopher Wright's issue #31: the same
+                    // shape of bug, one list along.
+                    foreach (var gone in relay.Members.Values)
+                    {
+                        events.Add($"{Describe(gone.Name)} is no longer listed on {relay.Endpoint}: its member lists have stopped");
+                        memberByAddress.Remove(gone.Address);
+                    }
+                    relay.Members.Clear();
                 }
             }
         }
