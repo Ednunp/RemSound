@@ -341,7 +341,7 @@ Service keeps running. No further updates. Re-enabling resumes the schedule.
 
 Same script. The differences are operational, not structural:
 
-- Andre will likely want a non-default port (e.g. 47830 is fine for one lobby; second instance on 47831 if needed). Add `--port` flag to `remsound-relay.service` `ExecStart=` line.
+- Andre will likely want a non-default port (e.g. 47830 is fine for one lobby; second instance on 47833 if needed — NOT 47831, which is the DAW plugin link). Add `--port` flag to `remsound-relay.service` `ExecStart=` line.
 - He may want the log file under `/var/log/journal/` and a smaller log retention; that's a `journald.conf` concern, not the relay's.
 - `max-clients` configurable via env var `REMSOUND_MAX_CLIENTS` so it can be set in the systemd unit without editing the script.
 
