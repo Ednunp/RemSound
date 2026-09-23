@@ -162,8 +162,10 @@ you have one. It is exactly what a paired relay sends today.
 - Forwards a group packet to every other member of the sender's group who
   passes the rule in section 5, and to nobody else. Up to 64 clients across all
   groups (`--max-clients`), and up to 8 per address (`--max-per-ip`).
-- Admits a new client only on a hello or an ordinary packet type, never on an
-  address check, a bye or a relay-only type.
+- Admits a new client only on a hello (since server-v2.10). Sound, a heartbeat
+  or anything else from a client id it does not know is dropped, so send a hello
+  before anything else, and keep sending one every 2 seconds: if your place
+  lapses (the relay restarts, say), your next hello puts you back.
 - Pairs ordinary devices exactly as before. A group member takes a pair slot
   only beside a device that has no group, and only one on its own password when
   that device has said which it is. Two members never pair. A pair that turns

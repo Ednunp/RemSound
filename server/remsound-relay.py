@@ -12,13 +12,15 @@ Listens on a single UDP port and handles two protocol versions concurrently:
   working against the new server.
 
 - v2 ("groups"): 28-byte header with embedded CLIENT_ID (UUID). Up to
-  REMSOUND_MAX_CLIENTS instances (default 64) share the relay. A client's
-  LobbyHello carries its display name and an 8-byte group tag, its password
-  fingerprint (which its Format packets already carry in the clear). Each
-  packet is forwarded unmodified to every OTHER client in the SAME group, so
-  everyone on one password hears everyone else and two groups on different
-  passwords never see each other. Identity is the CLIENT_ID, not the network
-  endpoint. Periodic LobbyRoster packets tell each client who is in its group.
+  REMSOUND_MAX_CLIENTS instances (default 64) share the relay. A client joins
+  with a LobbyHello - nothing else lets a new client in - carrying its display
+  name, an 8-byte group tag (its password fingerprint, which its Format packets
+  already carry in the clear) and the people it has ticked. A packet is
+  forwarded unmodified to another client in the SAME group only when each has
+  ticked the other (a client that sends no tick list has ticked everyone), so
+  two groups on different passwords never see each other. Identity is the
+  CLIENT_ID, not the network endpoint. Periodic LobbyRoster packets tell each
+  client who is in its group and who has ticked it.
 
 The two protocols meet in one place. A v1-only device (a phone, an older app)
 pairs through the two v1 slots exactly as before. A v2 client also sends v1
@@ -59,6 +61,7 @@ STATS_INTERVAL_SECONDS = 60
 ROSTER_HEARTBEAT_SECONDS = 1.0  # v2 only — periodic roster broadcast
 SOCKET_POLL_TIMEOUT_SECONDS = 1.0
 DEFAULT_LOG_PATH = "/var/log/remsound-relay/remsound-relay.log"  # systemd's LogsDirectory for the relay's own user
+LOG_KEEP_DAYS = 14  # a new log file each midnight; this many old ones are kept and older ones deleted
 DEFAULT_MAX_CLIENTS = 64
 LOBBY_NAME_BYTES = 32  # bytes reserved for a display name on the wire
 # v2 LobbyHello: the group tag follows the name. It is the client's 8-byte password fingerprint, the same
@@ -172,6 +175,11 @@ class RelayStats:
     blocked_unverified: int = 0        # forwards withheld (enforce mode only)
     would_block_unverified: int = 0    # forwards that WOULD be withheld (watch-only)
     rejected_ip_cap: int = 0           # admissions refused by MAX_ENTRIES_PER_IP
+    # The DEVICES behind those two, not the packets: one quiet unverified phone sends hundreds of packets a minute,
+    # and the decision these figures exist for - can enforcement be switched on? - is about how many devices it
+    # would cut off.
+    would_block_devices: set = field(default_factory=set)
+    blocked_devices: set = field(default_factory=set)
 
 
 def setup_logger(log_path: str) -> logging.Logger:
@@ -182,7 +190,10 @@ def setup_logger(log_path: str) -> logging.Logger:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     try:
-        fh = logging.handlers.WatchedFileHandler(log_path, encoding="utf-8")
+        # A fresh file every midnight, and the last LOG_KEEP_DAYS of them kept. It used to be one file that grew for
+        # ever: 2.1 MB in four days on Ed's Pi, about 190 MB a year, and nothing installed to trim it. The relay does it
+        # itself now, so an update is all it takes and there is nothing else to set up (Ed, 2026-09-23: two weeks).
+        fh = logging.handlers.TimedRotatingFileHandler(log_path, when="midnight", backupCount=LOG_KEEP_DAYS, encoding="utf-8")
         fh.setFormatter(fmt)
         logger.addHandler(fh)
     except OSError as e:
@@ -310,8 +321,10 @@ class Relay:
             self.log.info("event=addr_verified addr=%s", _fmt_addr(addr))
 
     def _ip_at_cap(self, ip: str) -> bool:
-        """True when this source IP already holds max_per_ip lobby/pair entries (MAX_ENTRIES_PER_IP by default)."""
-        count = sum(1 for p in self.v1_peers if p.addr[0] == ip)
+        """True when this source IP already holds max_per_ip lobby/pair entries (MAX_ENTRIES_PER_IP by default). A group
+        member holding a pair slot beside a phone is one device, so its slot is not counted a second time."""
+        members = {e.addr for e in self.v2_clients.values()}
+        count = sum(1 for p in self.v1_peers if p.addr[0] == ip and p.addr not in members)
         count += sum(1 for e in self.v2_clients.values() if e.addr[0] == ip)
         return count >= self.max_per_ip
 
@@ -393,8 +406,10 @@ class Relay:
             return True
         if self.require_addr_check:
             self.stats.blocked_unverified += 1
+            self.stats.blocked_devices.add(entry.addr)
             return False
         self.stats.would_block_unverified += 1
+        self.stats.would_block_devices.add(entry.addr)
         if not entry.would_block_logged:
             entry.would_block_logged = True
             self.log.info(
@@ -487,13 +502,19 @@ class Relay:
             return
         idx = self._v1_find_slot(addr)
         if idx is None:
-            if self._ip_at_cap(addr[0]):
+            # A group member's ordinary heartbeats are how it offers to partner a waiting phone. It is already in the
+            # lobby, so the cap has counted it, and with no phone waiting there is simply nothing for it to join: none of
+            # that is a refusal or a drop worth counting. These counts are what the enforcement decision is read from,
+            # and every member's heartbeats used to swell them (review, 2026-09-23).
+            member = self._v2_entry_at(addr) is not None
+            if not member and self._ip_at_cap(addr[0]):
                 self.stats.rejected_ip_cap += 1
                 return
             self._v1_expire_idle(now)
             idx = self._v1_admit_or_replace(addr, now)
             if idx < 0:
-                self.stats.dropped_unpaired += 1
+                if not member:
+                    self.stats.dropped_unpaired += 1
                 self._hint_relay(addr, now)
                 return
         peer = self.v1_peers[idx]
@@ -633,10 +654,12 @@ class Relay:
         # a BYE to evict them. A genuine BYE always comes from the client's own registered endpoint.
         from_registered_endpoint = entry is not None and entry.addr == addr
         if entry is None:
-            # Admit attempt — but only on a packet a joining client really sends. An address-check echo, a
-            # BYE or a relay-originated type bearing an unknown client id admits nobody (review 2026-09-13,
-            # item 11: it used to admit first and check the type after).
-            if pkt_type != TYPE_LOBBY_HELLO and pkt_type not in V2_FORWARDABLE_TYPES:
+            # Only a hello lets somebody in. It used to be any packet a member might send - audio, a heartbeat - so
+            # anybody could fill every place with made-up ids, from made-up addresses, with no more than one packet
+            # each a minute (review 2026-09-23; Ed agreed the fix). Every client that joins sends a hello first and
+            # every two seconds after, and one whose place has lapsed is back in on its next hello. Phones and older
+            # apps pair over the ordinary protocol, which this does not touch.
+            if pkt_type != TYPE_LOBBY_HELLO:
                 return
             if self._ip_at_cap(addr[0]):
                 self.stats.rejected_ip_cap += 1
@@ -809,10 +832,11 @@ class Relay:
         # cannot echo their cookie are still in use, and enforcement would cut them off.
         self.log.info(
             "event=addr_check_stats addr_check=%s addr_checks_verified=%d blocked_unverified=%d "
-            "would_block_unverified=%d rejected_ip_cap=%d",
+            "would_block_unverified=%d rejected_ip_cap=%d blocked_devices=%d would_block_devices=%d",
             "ENFORCED" if self.require_addr_check else "watch-only",
             s.addr_checks_verified, s.blocked_unverified,
             s.would_block_unverified, s.rejected_ip_cap,
+            len(s.blocked_devices), len(s.would_block_devices),
         )
         self.stats = RelayStats()
         for p in self.v1_peers:

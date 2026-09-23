@@ -123,7 +123,7 @@ a relay people are connected to.
 | `/etc/systemd/system/remsound-relay-update.timer`   | updater schedule                       |
 | `/etc/remsound-relay/version`                       | currently installed tag                |
 | `/etc/remsound-relay/backup/`                       | snapshot for the updater's rollback    |
-| `/var/log/remsound-relay/remsound-relay.log`        | relay event log (`event=...` per line) |
+| `/var/log/remsound-relay/remsound-relay.log`        | relay event log (`event=...` per line); a new file each midnight, 14 kept |
 | `/var/log/remsound-relay-update.log`                | update-check history                   |
 
 ## The relay runs as its own user
@@ -139,6 +139,10 @@ lives in its own folder, readable only by root and the relay:
 A relay that updates itself gets this with nothing to do: the updater installs
 the new service file. A log from before server-v2.7,
 `/var/log/remsound-relay.log`, is kept but made readable by root only.
+
+Since server-v2.10 the relay starts a new log file each midnight and keeps the
+last 14, deleting older ones itself, so the log never grows past about two
+weeks. Nothing needs installing for this; an update brings it.
 
 The auto-updater itself still runs as root, because it replaces files in
 `/usr/local/sbin` and `/etc/systemd/system` and restarts the relay. It installs

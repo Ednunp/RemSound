@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import logging.handlers
 import os
 import struct
 import sys
@@ -125,7 +126,7 @@ class AddrCheckV2(unittest.TestCase):
     def test_rebind_resets_verification(self):
         r = make_relay()
         addr1, addr2 = ("10.0.0.9", 6001), ("10.0.0.9", 6002)
-        r.handle_packet(v2_packet(relay.TYPE_AUDIO, CID, b"a"), addr1)
+        r.handle_packet(hello(CID, "a", G1), addr1)  # a client joins with a hello
         cookie = cookie_sent_to(r.sock, addr1)
         self.assertIsNotNone(cookie)
         r.handle_packet(v1_packet(relay.TYPE_ADDR_CHECK, cookie), addr1)  # echo comes back v1-framed
@@ -137,8 +138,8 @@ class AddrCheckV2(unittest.TestCase):
     def test_forged_bye_from_other_address_rejected(self):
         r = make_relay()
         addr_a, addr_b = ("10.0.0.1", 7001), ("10.0.0.2", 7002)
-        r.handle_packet(v2_packet(relay.TYPE_AUDIO, CID, b"a"), addr_a)
-        r.handle_packet(v2_packet(relay.TYPE_AUDIO, CID2, b"b"), addr_b)
+        r.handle_packet(hello(CID, "a", G1), addr_a)
+        r.handle_packet(hello(CID2, "b", G1), addr_b)
         # B forges a BYE for A's client_id from B's own address — must be refused; A stays.
         r.handle_packet(v2_packet(relay.TYPE_LOBBY_BYE, CID), addr_b)
         self.assertIn(uuid.UUID(bytes=CID), r.v2_clients, "a BYE from a non-registered address must not evict the victim")
@@ -153,7 +154,7 @@ class Caps(unittest.TestCase):
         r = make_relay(max_clients=cap + 6)
         for i in range(cap):
             cid = uuid.UUID(bytes=bytes([i]) + bytes(15)).bytes
-            r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid, b"x"), (ip, 8000 + i))
+            r.handle_packet(hello(cid, f"c{i}", G1), (ip, 8000 + i))
         self.assertEqual(len(r.v2_clients), cap)
         # A v1 peer from the SAME IP must be refused — the cap counts both protocols.
         r.handle_packet(v1_packet(relay.TYPE_AUDIO, b"x"), (ip, 8100))
@@ -553,6 +554,117 @@ class StatsLog(unittest.TestCase):
                     (0, 0, 0, 0),
                     "the counters start again from zero for the next interval",
                 )
+
+
+class OnlyAHelloAdmits(unittest.TestCase):
+    """Review 2026-09-23, agreed by Ed: v2 used to admit an unknown client id on ANY packet a member might send, so
+    anybody could fill every place with made-up ids. Only a hello lets somebody in now."""
+
+    def test_sound_and_heartbeats_from_an_unknown_id_admit_nobody(self):
+        r = make_relay()
+        addr = ("10.9.0.1", 7300)
+        for t in (relay.TYPE_FORMAT, relay.TYPE_AUDIO, relay.TYPE_KEEPALIVE, relay.TYPE_HEARTBEAT, relay.TYPE_CONTROL):
+            r.handle_packet(v2_packet(t, cid(40), b"payload"), addr)
+        self.assertEqual(len(r.v2_clients), 0, "sound, heartbeats or control from an unknown client id must admit nobody")
+        r.handle_packet(hello(cid(40), "joiner", G1), addr)
+        self.assertEqual(len(r.v2_clients), 1, "a hello admits")
+
+    def test_a_flood_of_made_up_ids_fills_nothing(self):
+        r = make_relay(max_clients=4)
+        for i in range(50):
+            r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(100 + i), b"x"), (f"10.9.{i}.1", 7400))
+        self.assertEqual(len(r.v2_clients), 0, "made-up ids sending sound must not take a single place")
+        r.handle_packet(hello(cid(1), "a real person", G1), ("10.9.200.1", 7401))
+        self.assertEqual(len(r.v2_clients), 1, "and a real person saying hello still gets in")
+
+    def test_a_member_whose_place_lapsed_is_back_on_its_next_hello(self):
+        r = make_relay()
+        addr = ("10.9.1.1", 7500)
+        r.handle_packet(hello(cid(41), "back again", G1), addr)
+        r.v2_clients.clear()   # its place lapsed (the relay restarted, say)
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(41), b"x"), addr)
+        self.assertEqual(len(r.v2_clients), 0, "its sound alone does not bring it back")
+        r.handle_packet(hello(cid(41), "back again", G1), addr)
+        self.assertIn(uuid.UUID(bytes=cid(41)), r.v2_clients, "its next hello, due within two seconds, does")
+
+
+class CountsThatMatter(unittest.TestCase):
+    """Review 2026-09-23, agreed by Ed: the counts the enforcement decision is read from were swollen by every group
+    member's ordinary heartbeats. They count what matters now, and say how many DEVICES, not just packets."""
+
+    def test_a_members_heartbeats_are_not_counted_as_drops_or_refusals(self):
+        r = make_relay(max_clients=20)
+        ip = "10.8.0.1"
+        cap = relay.MAX_ENTRIES_PER_IP
+        for i in range(cap):   # a household that fills its cap with group members
+            r.handle_packet(hello(cid(60 + i), f"m{i}", G1), (ip, 8200 + i))
+        before = (r.stats.dropped_unpaired, r.stats.rejected_ip_cap)
+        for i in range(cap):   # each member's ordinary heartbeat, offering to partner a phone that isn't there
+            r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), (ip, 8200 + i))
+        self.assertEqual((r.stats.dropped_unpaired, r.stats.rejected_ip_cap), before,
+                         "a member's heartbeats with no phone waiting are neither a drop nor a refusal")
+
+    def test_a_member_at_its_households_cap_can_still_partner_a_phone(self):
+        r = make_relay(max_clients=20)
+        phone = ("10.8.1.9", 8300)
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), phone)   # a phone waits in a pair slot
+        ip = "10.8.1.1"
+        cap = relay.MAX_ENTRIES_PER_IP
+        for i in range(cap):
+            r.handle_packet(hello(cid(80 + i), f"m{i}", G1), (ip, 8310 + i))
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), (ip, 8310))
+        self.assertTrue(r._v1_paired((ip, 8310)),
+                        "a member is already counted against its household's cap; offering to partner a phone is not a second device")
+        self.assertEqual(r.stats.rejected_ip_cap, 0, "and nothing was refused")
+
+    def test_would_block_counts_devices_as_well_as_packets(self):
+        r = make_relay()   # watch-only
+        a, b = ("10.8.2.1", 8400), ("10.8.2.2", 8401)
+        r.handle_packet(hello(cid(90), "a", G1), a)
+        r.handle_packet(hello(cid(91), "b", G1), b)
+        for _ in range(25):
+            r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(90), b"x"), a)   # a to b, and b has not proved its address
+        self.assertGreaterEqual(r.stats.would_block_unverified, 25, "the packet count still counts packets")
+        self.assertEqual(len(r.stats.would_block_devices), 1, "but it is ONE device that would have been cut off")
+
+    def test_the_device_counts_are_written_and_start_again(self):
+        log = logging.getLogger(f"remsound-relay-test-devices-{uuid.uuid4()}")
+        log.propagate = False
+        log.setLevel(logging.INFO)
+        captured = _CapturedLog()
+        log.addHandler(captured)
+        r = relay.Relay(FakeSocket(), log, 10)
+        r.stats.would_block_devices.update({("10.0.0.1", 1), ("10.0.0.2", 2), ("10.0.0.3", 3)})
+        r.stats.blocked_devices.add(("10.0.0.4", 4))
+        r.maybe_log_stats(r.last_stats_log + relay.STATS_INTERVAL_SECONDS + 1)
+        line = next(m for m in captured.messages if m.startswith("event=addr_check_stats "))
+        fields = _key_values(line)
+        self.assertEqual(fields.get("would_block_devices"), "3")
+        self.assertEqual(fields.get("blocked_devices"), "1")
+        self.assertEqual((len(r.stats.would_block_devices), len(r.stats.blocked_devices)), (0, 0),
+                         "they start again from nothing for the next interval")
+
+
+class TwoWeeksOfLog(unittest.TestCase):
+    """Review 2026-09-23, Ed: keep two weeks. The log was one file that grew for ever - 2.1 MB in four days on the Pi."""
+
+    def test_the_log_starts_a_new_file_each_midnight_and_keeps_fourteen(self):
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "relay.log")
+        log = relay.setup_logger(path)
+        try:
+            files = [h for h in log.handlers if isinstance(h, logging.FileHandler)]
+            self.assertEqual(len(files), 1, "the relay must write one log file")
+            handler = files[0]
+            self.assertIsInstance(handler, logging.handlers.TimedRotatingFileHandler,
+                                  "a file that is never trimmed grows for ever on a Pi's SD card")
+            self.assertEqual(handler.when, "MIDNIGHT", "a new file each midnight")
+            self.assertEqual(handler.backupCount, 14, "and two weeks of old ones kept, the rest deleted")
+            self.assertEqual(relay.LOG_KEEP_DAYS, 14)
+        finally:
+            for h in list(log.handlers):
+                log.removeHandler(h)
+                h.close()
 
 
 if __name__ == "__main__":
