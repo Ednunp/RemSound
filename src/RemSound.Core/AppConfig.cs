@@ -369,9 +369,8 @@ public sealed class AppConfig
     /// <see cref="DisabledAsioDrivers"/>: a driver can be warned-about-but-still-enabled.</summary>
     public List<string> AsioDriversWarnedAbout { get; set; } = new();
 
-    /// <summary>This copy of RemSound's id in a relay group (GitHub #29, 2026-09-18). Made the first time it is needed
-    /// and kept, so the same person keeps the same place in everyone else's app — and the volume and pan they gave
-    /// them. The app and the send-only service share it: they are one person, never on the network at the same time.</summary>
+    /// <summary>Where this copy kept its server id before 2026-09-23, and where it still keeps one if the computer's own
+    /// cannot be read or written. See <see cref="LoadOrCreateRelayClientId"/>.</summary>
     public string? RelayClientId { get; set; }
 
     /// <summary>Relay servers this machine has connected to, newest first, offered again in the Connectivity tab.
@@ -382,16 +381,70 @@ public sealed class AppConfig
     /// relay. Machine-wide: it explains how relays work, not anything about one set of people.</summary>
     public bool RelayNoticeSuppressed { get; set; }
 
-    /// <summary>The relay-group id, made and saved on first use. Never throws: if it cannot be saved, a fresh id still
-    /// works for this run; it just won't be the same next time.</summary>
+    /// <summary>
+    /// Who this COMPUTER is on a server: one id, kept once per computer, so every copy of the app on it and the
+    /// send-only service are the same person to everybody else — the same place in their list, their tick still on
+    /// you, the volume, pan and EQ they gave you still yours.
+    ///
+    /// <para>It used to be kept in each copy's own settings file. Two things broke that (review, 2026-09-23). The service
+    /// keeps its settings apart from the app's, so it made an id of its own and was a DIFFERENT person with the same
+    /// name: when it took over from the app, everybody had to tick it again. And a copy whose folder syncs between
+    /// computers — RemSound in Dropbox, say — carried ONE id to every computer, which would then knock each other off a
+    /// server as each announced itself as the other.</para>
+    ///
+    /// <para>So it lives in ProgramData\RemSound, which is the same folder for every account on the computer and for
+    /// the service, and syncs nowhere. Whoever needs it first makes it; the others read it. If that folder cannot be
+    /// used, this falls back to the copy's own settings, which is how it always worked. Never throws.</para>
+    /// </summary>
     public static Guid LoadOrCreateRelayClientId()
     {
+        var path = Path.Combine(MachineIdentityDirectory, MachineIdentityFileName);
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            try
+            {
+                if (File.Exists(path) && Guid.TryParse(File.ReadAllText(path).Trim(), out var kept) && kept != Guid.Empty) return kept;
+                Directory.CreateDirectory(MachineIdentityDirectory);
+                var made = Guid.NewGuid();
+                // CreateNew, not a plain write: the app and the service can both arrive here at once, and only one of
+                // them may decide who this computer is. The other finds the file on its second attempt.
+                using (var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+                using (var writer = new StreamWriter(file))
+                {
+                    writer.Write(made.ToString("D"));
+                }
+                return made;
+            }
+            catch (IOException) when (attempt == 0) { /* somebody else made it first: read theirs */ }
+            catch { break; }
+        }
+
+        // The computer's own folder could not be used. This copy's settings, as before.
         var config = Load();
         if (Guid.TryParse(config.RelayClientId, out var id) && id != Guid.Empty) return id;
         id = Guid.NewGuid();
         config.RelayClientId = id.ToString("D");
         try { config.Save(); } catch { /* this run still works */ }
         return id;
+    }
+
+    /// <summary>The file in <see cref="MachineIdentityDirectory"/> that holds this computer's server id.</summary>
+    public const string MachineIdentityFileName = "server-identity.txt";
+
+    /// <summary>ProgramData\RemSound: the same folder for every account on this computer and for the service, and never
+    /// synced anywhere. A throwaway folder instead during the self-test and under --config-dir, so neither touches the
+    /// real one.</summary>
+    public static string MachineIdentityDirectory =>
+        _machineIdentityOverride ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "RemSound");
+
+    private static string? _machineIdentityOverride;
+
+    /// <summary>Keep this process's computer-wide id in <paramref name="path"/> instead: for --config-dir, whose whole point
+    /// is a run that touches nothing real. NOT used by the service, which redirects its settings but must share the
+    /// computer's id with the app.</summary>
+    public static void SetMachineIdentityOverride(string path)
+    {
+        if (!string.IsNullOrWhiteSpace(path)) _machineIdentityOverride = Path.GetFullPath(path);
     }
 
     /// <summary>True if RemSound should refuse to interact with the named ASIO driver in any way.</summary>
@@ -458,17 +511,22 @@ public sealed class AppConfig
     private sealed class UserDataScope : IDisposable
     {
         private readonly string? previous;
+        private readonly string? previousMachine;
         private readonly string dir;
         public UserDataScope(string path)
         {
             previous = _userDataDirectoryOverride;
+            previousMachine = _machineIdentityOverride;
             dir = Path.GetFullPath(path);
             Directory.CreateDirectory(dir);
             _userDataDirectoryOverride = dir;
+            // A throwaway run must not decide who this computer is, either.
+            _machineIdentityOverride = Path.Combine(dir, "machine");
         }
         public void Dispose()
         {
             _userDataDirectoryOverride = previous;
+            _machineIdentityOverride = previousMachine;
             try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
         }
     }

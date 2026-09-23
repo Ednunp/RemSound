@@ -272,6 +272,7 @@ internal static partial class SelfTest
         RunStep(results, "GATE GUARD: a run makes no noise, including out loud", AGateRunMakesNoNoise);
         RunStep(results, "What happens when somebody else ticks you", WhatHappensWhenSomebodyTicksYou);
         RunStep(results, "The send-only service, and somebody ticking it on a relay", TheServiceAndSomebodyTickingItOnARelay);
+        RunStep(results, "One computer is one person on a server: the app, the service and every copy", OneComputerIsOnePersonOnAServer);
         RunStep(results, "Removing a peer while you are on a relay", RemovingAPeerWhileOnARelay);
         RunStep(results, "A peer list changing under you keeps the cursor on the person", TheCursorStaysOnThePerson);
         RunStep(results, "Unticking somebody keeps them unticked", UntickingSomebodyKeepsThemUnticked);

@@ -63,6 +63,18 @@ internal sealed class ServiceNetworkPresence : IDisposable
         relayGroup?.NoteRelay(remote);
     }
 
+    /// <summary>Everybody the service ticks on its server, and whether that includes a phone or older app the server
+    /// pairs with it. Both answers come from here, so the two can never disagree about what the Accept tick means.</summary>
+    internal static (List<Guid> Ticks, bool PairPartner) WhoTheServiceTicks(IEnumerable<Guid> fromProfile,
+        IEnumerable<RelayGroupClient.Member> members, bool acceptAutomatically) =>
+        (TicksFor(fromProfile, members, acceptAutomatically), acceptAutomatically);
+
+    private void ApplyTicks(RelayGroupClient group)
+    {
+        var (ticks, pairPartner) = WhoTheServiceTicks(profileTicks, group.Members, acceptRelayAutomatically);
+        group.SetTicked(ticks, pairPartner);
+    }
+
     /// <summary>
     /// Who the service should have ticked on its relay: the people its profile names, plus — when the service is set
     /// to accept automatically — everybody on the relay who has ticked IT. The relay passes sound only where each has
@@ -93,7 +105,7 @@ internal sealed class ServiceNetworkPresence : IDisposable
     {
         var group = relayGroup;
         if (group is null) return;
-        try { group.SetTicked(TicksFor(profileTicks, group.Members, acceptRelayAutomatically), pairPartner: true); }
+        try { ApplyTicks(group); }
         catch (Exception ex) { log?.Invoke($"service: relay ticks not applied {ex.GetType().Name}: {ex.Message}"); }
     }
 
@@ -123,7 +135,10 @@ internal sealed class ServiceNetworkPresence : IDisposable
             profileTicks = (tickedOnRelay ?? []).ToList();
             acceptRelayAutomatically = ServiceStore.LoadAcceptRelayConnectionsAutomatically();
             group.Connect(relay);
-            group.SetTicked(TicksFor(profileTicks, group.Members, acceptRelayAutomatically), pairPartner: true);
+            // A phone or older app the server pairs with the service is somebody ticking it, like any other: it gets
+            // sound only when the service accepts people who tick it (Ed, 2026-09-23). It used to get it regardless,
+            // which made "reaches exactly the people its profile names" untrue.
+            ApplyTicks(group);
             // The member list says who has ticked us, and it arrives seconds after we connect and again whenever
             // somebody joins, so the answer is worked out each time it changes rather than once at start-up.
             group.Changed += OnRelayGroupChanged;

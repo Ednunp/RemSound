@@ -184,7 +184,7 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
             if (!relays.ContainsKey(relay))
             {
                 relays[relay] = new RelayState(relay);
-                Log?.Invoke($"connecting to the relay at {relay}");
+                Log?.Invoke($"connecting to the relay at {relay} as {ClientId.ToString("N")[..8]} (this computer's id on servers, the same for the app and the service)");
             }
         }
         foreach (var r in leaving) SendBye(r);

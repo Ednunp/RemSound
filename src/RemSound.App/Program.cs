@@ -110,6 +110,8 @@ internal static class Program
         if (CommandLine.TryGetConfigDir(args, out var configDir))
         {
             AppConfig.SetUserDataDirectoryOverride(configDir);
+            // Including who this computer is on a server: a --config-dir run touches nothing real.
+            AppConfig.SetMachineIdentityOverride(Path.Combine(configDir, "machine"));
         }
 
         // --silent: make this launch play no cue sounds at all (startup, connect, checkbox,

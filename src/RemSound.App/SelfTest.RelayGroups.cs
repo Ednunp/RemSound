@@ -1254,6 +1254,25 @@ internal static partial class SelfTest
             Check(network == "ED_DT", $"and the one on the network keeps its plain name (got \"{network}\")");
             Check(server != network, "so the plugin window never shows two identical rows");
 
+            // The one odd case the old "server as a ticked peer" code still reached: the server's OWN address ticked as a
+            // peer while you are also on it. It used to hand the plugin everybody on that server, ticked or not, and the
+            // ticked ones twice (review, 2026-09-23). The plugin gets exactly who you ticked now.
+            var serverAddress = new IPEndPoint(IPAddress.Parse("203.0.113.98"), RemPacket.DefaultPort);
+            form.ConnectToRelayForTest("remote.example.test", serverAddress);
+            var ticked = Guid.NewGuid();
+            var notTicked = Guid.NewGuid();
+            Feed(form.RelayGroupForTest, serverAddress, RosterPacket([(ticked, "Ticked", true), (notTicked, "Not ticked", true)], paired: false),
+                RelayInbound.Consumed, "a member list with two people");
+            form.SyncRelayPeersListForTest();
+            form.RelayPeerTickedForTest(form.RelayPeersListForTest.Items.Cast<object>().ToList().FindIndex(i => i.ToString() == "Ticked"), true);
+            form.SelectPeerForTest(new PeerAnnouncement(Guid.NewGuid(), "203.0.113.98", RemPacket.DefaultPeerDialPort,
+                CanSend: true, CanReceive: true, DateTime.UtcNow, serverAddress.Address));
+            var names = form.PeerListForPluginsForTest().Select(r => r.Name).ToList();
+            Check(!names.Any(n => n.StartsWith("Not ticked", StringComparison.Ordinal)),
+                $"THE BUG: somebody on the server you have NOT ticked must never reach the plugin ({string.Join(", ", names)})");
+            Check(names.Count(n => n.StartsWith("Ticked", StringComparison.Ordinal)) == 1,
+                $"and somebody you have ticked reaches it once, not twice ({string.Join(", ", names)})");
+
             return "a server found at an address is joined on that address's own port; the plugin's peer list marks "
                 + "somebody reached through a server, so one machine reached both ways is two different rows";
         }
@@ -1262,6 +1281,122 @@ internal static partial class SelfTest
             try { form?.Dispose(); } catch { /* teardown */ }
             CuePlayer.GloballyMuted = restoreMuted;
         }
+    }
+
+    /// <summary>
+    /// ONE COMPUTER IS ONE PERSON ON A SERVER — the app, the service, and every copy of the app on it.
+    ///
+    /// <para>Review, 2026-09-23; Ed agreed the service should be the same person as the app. The id used to live in each
+    /// copy's own settings. The service keeps its settings apart, so it was a different person with the same name, and
+    /// everybody had to tick it again whenever it took over. And a copy in a synced folder (RemSound in Dropbox) carried
+    /// ONE id to every computer, so two computers would have been the same person and knocked each other off.</para>
+    ///
+    /// <para>The phone half, same day: a phone or older app the server pairs with the service now gets sound only when the
+    /// service accepts people who tick it, like everybody else who ticks it.</para>
+    /// </summary>
+    private static string? OneComputerIsOnePersonOnAServer()
+    {
+        // The self-test's throwaway folder covers the computer-wide id as well; prove that first, or this would be
+        // deciding who Ed's own computer is.
+        var real = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "RemSound");
+        Check(!string.Equals(Path.GetFullPath(AppConfig.MachineIdentityDirectory), Path.GetFullPath(real), StringComparison.OrdinalIgnoreCase),
+            $"a gate run must never use the computer's real server id folder ({AppConfig.MachineIdentityDirectory})");
+
+        var appSettings = AppConfig.UserDataDirectory;
+        var elsewhere = Path.Combine(Path.GetTempPath(), "remsound-identity-" + Guid.NewGuid().ToString("N"));
+        var serviceSettings = Path.Combine(elsewhere, "service");
+        var syncedCopy = Path.Combine(elsewhere, "dropbox-copy");
+        Directory.CreateDirectory(serviceSettings);
+        Directory.CreateDirectory(syncedCopy);
+        try
+        {
+            var app = AppConfig.LoadOrCreateRelayClientId();
+            Check(app != Guid.Empty, "the app must get an id");
+            Check(AppConfig.LoadOrCreateRelayClientId() == app, "and the same one every time");
+            Check(File.Exists(Path.Combine(AppConfig.MachineIdentityDirectory, AppConfig.MachineIdentityFileName)),
+                "and it must be kept for the COMPUTER, not in this copy's settings");
+
+            // The service: settings of its own (as ServiceEntry arranges), and an old id of its own from before — which is
+            // exactly how it came to be a different person.
+            var stale = Guid.NewGuid();
+            AppConfig.SetUserDataDirectoryOverride(serviceSettings);
+            File.WriteAllText(Path.Combine(serviceSettings, "global config.json"), $"{{\"RelayClientId\":\"{stale}\"}}");
+            var service = AppConfig.LoadOrCreateRelayClientId();
+            Check(service == app,
+                $"THE BUG: the service must be the SAME person as the app on a server (app {app}, service {service})");
+            Check(service != stale, "and an id left in its own settings from before must not win");
+
+            // A copy in a synced folder, carrying the id another computer made: here it is this computer, not that one.
+            var otherComputer = Guid.NewGuid();
+            AppConfig.SetUserDataDirectoryOverride(syncedCopy);
+            File.WriteAllText(Path.Combine(syncedCopy, "global config.json"), $"{{\"RelayClientId\":\"{otherComputer}\"}}");
+            Check(AppConfig.LoadOrCreateRelayClientId() == app,
+                "THE BUG: a copy whose folder syncs between computers must not carry another computer's id here");
+        }
+        finally
+        {
+            AppConfig.SetUserDataDirectoryOverride(appSettings);
+            try { Directory.Delete(elsewhere, recursive: true); } catch { /* teardown */ }
+        }
+
+        // The real objects agree: the window's server client and the service's.
+        var restoreMuted = CuePlayer.GloballyMuted;
+        CuePlayer.GloballyMuted = true;
+        MainForm? form = null;
+        try
+        {
+            try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+            Check(form.RelayGroupForTest.ClientId == AppConfig.LoadOrCreateRelayClientId(),
+                "the window must join servers as this computer");
+            var said = new List<string>();
+            form.LogForTest.EventTapForTest = line => { lock (said) said.Add(line); };
+            try { form.ConnectToRelayForTest("remote.example.test", new IPEndPoint(IPAddress.Parse("203.0.113.96"), RemPacket.DefaultPort)); }
+            finally { form.LogForTest.EventTapForTest = null; }
+            var shortId = form.RelayGroupForTest.ClientId.ToString("N")[..8];
+            Check(said.Any(l => l.Contains("connecting to the relay", StringComparison.Ordinal) && l.Contains(shortId, StringComparison.Ordinal)),
+                $"and the log must say which id it joined as, so the app's log and the service's can be compared (got: {string.Join(" | ", said.Where(l => l.Contains("relay")))})");
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            CuePlayer.GloballyMuted = restoreMuted;
+        }
+
+        // If the computer's folder cannot be used, the copy's own settings, as before — and steadily the same.
+        var blocked = Path.Combine(Path.GetTempPath(), "remsound-identity-blocked-" + Guid.NewGuid().ToString("N"));
+        File.WriteAllText(blocked, "a file where a folder should be");
+        var restoreMachine = AppConfig.MachineIdentityDirectory;
+        try
+        {
+            AppConfig.SetMachineIdentityOverride(Path.Combine(blocked, "machine"));
+            var fallback = AppConfig.LoadOrCreateRelayClientId();
+            Check(fallback != Guid.Empty && AppConfig.LoadOrCreateRelayClientId() == fallback,
+                "when the computer's folder cannot be used, the copy's own id must still work, and stay the same");
+        }
+        finally
+        {
+            AppConfig.SetMachineIdentityOverride(restoreMachine);
+            try { File.Delete(blocked); } catch { /* teardown */ }
+        }
+
+        // The phone paired through the server follows the Accept tick, like anybody else who ticks the service.
+        var nobody = Array.Empty<RelayGroupClient.Member>();
+        Check(!ServiceNetworkPresence.WhoTheServiceTicks([], nobody, acceptAutomatically: false).PairPartner,
+            "THE BUG: with Accept off, a phone the server pairs with the service must get nothing");
+        Check(ServiceNetworkPresence.WhoTheServiceTicks([], nobody, acceptAutomatically: true).PairPartner,
+            "and with Accept on, it gets the service's sound like anybody else who ticks it");
+        var root = FindSourceRoot();
+        if (root is not null)
+        {
+            var source = File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "ServiceNetworkPresence.cs"));
+            Check(!source.Contains("pairPartner: true", StringComparison.Ordinal),
+                "and nothing in the service may tick the phone regardless");
+        }
+
+        return "the app, the service and a copy from a synced folder are one person on a server, whatever their own "
+            + "settings held; a gate run never touches the real id; the window's log names the id it joined as; the "
+            + "copy's own id still works if the computer's folder can't be used; and the service's phone follows Accept";
     }
 
     private static void SetAcceptMode(PeerAcceptMode mode)
@@ -1352,8 +1487,10 @@ internal static partial class SelfTest
         Need(service, "relayGroup?.NoteRelay(remote);", "the service must learn a relay from its address check");
         Need(service, "group.Start(sender.SendRaw);", "the service must start its relay group on the raw socket");
         Need(service, "group.Connect(relay);", "the service must connect to the relay its profile names");
-        Need(service, "group.SetTicked(TicksFor(profileTicks, group.Members, acceptRelayAutomatically), pairPartner: true);",
+        Need(service, "ApplyTicks(group);",
             "the service must tell the relay who its profile has ticked, plus anyone it is set to accept");
+        Need(service, "WhoTheServiceTicks(profileTicks, group.Members, acceptRelayAutomatically);",
+            "and the phone paired through the server must follow the same Accept tick as everybody else (Ed, 2026-09-23)");
         Need(service, "group.Changed += OnRelayGroupChanged;",
             "the service must work that out again each time the relay's member list changes, not only at start-up");
         Need(host, "presence.Start(RemPacket.DefaultPort, endpoints, relay, tickedOnRelay);", "the service must pass its profile's relay and ticks to its network presence");

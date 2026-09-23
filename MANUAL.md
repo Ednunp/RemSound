@@ -373,7 +373,7 @@ Choice| What happens
 **Automatically**|  They are ticked back the moment they tick you, so sound flows without either of you doing anything else.
 **Manual**|  Nothing happens until you tick them yourself. How RemSound worked before this setting existed.
 
-The send-only Windows service has its own version of this, in **Additional service options** when you set the service up: **Accept people who tick this service on a server**. Only two choices there, because there is nobody at a screen to ask — off by default, which means the service reaches exactly the people its profile named when you saved it. Tick it and somebody who joins the server later can reach the service without you opening the app again.
+The send-only Windows service has its own version of this, in **Additional service options** when you set the service up: **Accept people who tick this service on a server**. Only two choices there, because there is nobody at a screen to ask — off by default, which means the service reaches exactly the people its profile named when you saved it. Tick it and somebody who joins the server later can reach the service without you opening the app again. That includes a phone or older app the server pairs with the service: it gets sound only when this is ticked.
 
 Two things set it off: somebody's audio arriving at your computer when you haven't ticked them (which only happens if they've ticked you), and the server's list saying somebody there has ticked you. Somebody on a different password is never offered or accepted — their audio couldn't be played anyway, so there is nothing to agree to. The setting is kept on this computer, so it holds whichever profile you load.
 
@@ -673,6 +673,8 @@ Once you're on, the same button in that window says **Disconnect** , and the but
 **The same machine twice.** If the same computer is reachable both ways — on your network and through the server — and you tick both, you get two entries carrying the same sound twice over. Both rows say so: “same machine twice, also connected on your network” and “same machine twice, also connected through the server”. Untick whichever one you don't want.
 
 **When somebody goes.** Someone who leaves the server drops out of the list, marked **(gone)** for a few seconds first so a screen reader isn't reading a line that vanishes under it. If the SERVER goes — restarted, unplugged, off the end of your connection — everyone on it drops out the same way after about five seconds, and they all come back when it does.
+
+**One computer, one person.** Every copy of RemSound on a computer, and its lock-screen service, are the same person on a server, so a tick on you, and any volume, pan or EQ somebody has given you, stays yours whichever of them is running. Two computers are always two people, even when they share a RemSound folder through something like Dropbox.
 
 **What it costs you.** You send one copy of your sound to the server and the server passes it to each person due it. A room of six costs you no more to send than one person does. It's the server's connection that does the work, not yours.
 
@@ -1469,7 +1471,7 @@ It is deliberately limited:
 
   * **Send only.** The service captures and sends; it never plays received audio. (Windows silences audio output when no one is logged in, so receiving on the lock screen is not possible.) Use the normal app for listening.
   * **WASAPI only.** ASIO devices cannot be used by a Windows service. If you need ASIO, use the normal app.
-  * **It gets out of your way.** Whenever you open the normal RemSound app, the service automatically stops sending and hands over to you — so you are always in control while you are at the machine. When you close the app (or it crashes, or you sign out), the service takes over again a couple of seconds later, re-reading its profile so any changes you made are picked up. You never need to stop it by hand to make a change.
+  * **It gets out of your way.** Whenever you open the normal RemSound app, the service automatically stops sending and hands over to you — so you are always in control while you are at the machine. When you close the app (or it crashes, or you sign out), the service takes over again a couple of seconds later, re-reading its profile so any changes you made are picked up. On a server the service is the same person as the app, so anybody who had ticked you doesn’t have to tick you again when it takes over. You never need to stop it by hand to make a change.
 
 
 
@@ -1493,7 +1495,7 @@ Setting| What it does
 No “send my audio” switch| The service always sends. There is no audio-quality tab either: it uses the settings that work best for live streaming (Opus live-latency, small packets, locked to the audio clock), so you do not have to choose them.
 **Server address (Alt+V)**|  On the Connectivity tab. The server the service joins, every time it starts. Leave it empty and it never joins one. There is no Connect button: nobody is at a screen when the service runs, so the address is the instruction. The line under the box says what will happen, including whether the service can be reached by people on that server.
 **Additional options →** service log| Turns on the service's own log, which is separate from the app's.
-**Additional options →** Accept people who tick this service on a server| Off by default. With it off, the service reaches exactly the people its profile named when you saved it. Tick it and somebody who joins the server later can reach the service without you opening the app.
+**Additional options →** Accept people who tick this service on a server| Off by default. With it off, the service reaches exactly the people its profile named when you saved it. Tick it and somebody who joins the server later can reach the service without you opening the app. That includes a phone or older app the server pairs with the service: it gets sound only when this is ticked.
 **Additional options →** Set the machine's volume when the service starts| Tick it and pick a percent. The service unmutes the machine and sets that volume when it starts — useful for an unattended PC that booted muted, so it's audible with nobody at the keyboard.
 **When**|  _Only the first start after each boot_ is the set-and-forget choice: it sets the volume once per boot and never touches it again, so it won't fight you while you're using the machine. _Every time the service starts_ re-applies on every start — but the service also restarts on its own for routine reasons (a RemSound update, saving the service profile), and this mode re-applies on those too. Either way, a re-apply is skipped if the volume was set within the last few minutes.
 
