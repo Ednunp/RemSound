@@ -22,6 +22,14 @@ public sealed class PeerDiscoveryService : IDisposable
 {
     public const int DefaultDiscoveryPort = 47821;
 
+    /// <summary>How often we announce ourselves. Every other RemSound has to announce at least as often as
+    /// <see cref="PeerExpiry"/> allows, or it drops out of the list between announcements.</summary>
+    internal static readonly TimeSpan AnnounceInterval = TimeSpan.FromMilliseconds(1500);
+
+    /// <summary>How long a peer stays listed without announcing: five missed announcements. Since issue #31 this is
+    /// enforced by the clock, so a port that announces less often than this flickers in and out of the list.</summary>
+    internal static readonly TimeSpan PeerExpiry = TimeSpan.FromSeconds(8);
+
     private readonly Guid instanceId = Guid.NewGuid();
     private readonly object gate = new();
     private readonly Dictionary<Guid, PeerAnnouncement> peers = [];
@@ -248,6 +256,10 @@ public sealed class PeerDiscoveryService : IDisposable
     /// front of the app without a socket. Same code as the live path.</summary>
     internal void RecordForTest(PeerAnnouncement peer) => Record(peer);
 
+    /// <summary>Test seam: an announcement exactly as this RemSound writes it onto the wire.</summary>
+    internal static string AnnouncementJsonForTest(Guid instanceId, string name, int audioPort, bool canSend, bool canReceive) =>
+        JsonSerializer.Serialize(new DiscoveryMessage(instanceId, name, audioPort, canSend, canReceive));
+
     /// <summary>One turn of the announce loop's expiry: drop anybody who has gone quiet and, if anybody had, say so.
     /// Returns whether anybody went.</summary>
     private bool ExpireQuietPeers()
@@ -295,7 +307,7 @@ public sealed class PeerDiscoveryService : IDisposable
             // handling somebody's announcement — which is no use at all for the case that matters, because the peer
             // who has gone is by definition not sending anything, and on a two-machine network nobody else is either.
             ExpireQuietPeers();
-            try { await Task.Delay(1500, token).ConfigureAwait(false); }
+            try { await Task.Delay(AnnounceInterval, token).ConfigureAwait(false); }
             catch (OperationCanceledException) { break; }
         }
     }
@@ -387,7 +399,7 @@ public sealed class PeerDiscoveryService : IDisposable
     /// Christopher Wright reported the stale rows (issue #31).</summary>
     private bool PruneExpiredPeers()
     {
-        var cutoff = DateTime.UtcNow.AddSeconds(-8);
+        var cutoff = DateTime.UtcNow - PeerExpiry;
         var wentAway = false;
         foreach (var peer in peers.Values.Where(p => p.LastSeenUtc < cutoff).ToList())
         {

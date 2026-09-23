@@ -291,6 +291,7 @@ internal static partial class SelfTest
         RunStep(results, "The per-person timing correction never brings a lowered target down faster than today", AuditPerPersonTimingBringsALoweredTargetDownNoFasterThanToday);
         RunStep(results, "The per-person timing correction never brings a backlog down faster than today", AuditPerPersonTimingBringsABacklogDownNoFasterThanToday);
         RunStep(results, "CROSS-PORT CONTRACT (the values other RemSounds depend on)", CrossPortContract);
+        RunStep(results, "CROSS-PORT CONTRACT: the relay server and the app agree", CrossPortServerAgreesWithTheApp);
         RunStep(results, "Password derivation (any password derives a key; cached; 100k for cross-port compat)", PasswordDerivation);
         RunStep(results, "Relay address-proof echo (AddrCheck round-trip)", RelayAddrCheckEcho);
         // 2026-08-23 send/receive-path audit — one step per finding that can be pinned headlessly.

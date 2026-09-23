@@ -125,6 +125,55 @@ internal static partial class SelfTest
         Pin("relay AddrCheck type", (byte)RemPacketType.AddrCheck, 10,
             "the Python relay — peers would stop proving their address and never be admitted");
 
+        // --- Discovery: how RemSounds on one network find each other. The iPhone, Android and Pi senders
+        // all announce and listen; none of this was pinned until 2026-09-23, the day Christopher Wright's
+        // issue #32 found the manual giving the wrong port for it. --------------------------------------
+        Pin("discovery port", PeerDiscoveryService.DefaultDiscoveryPort, 47821,
+            "every port that finds peers on a network — each side would announce where the other never listens");
+        Pin("discovery announce interval ms", (int)PeerDiscoveryService.AnnounceInterval.TotalMilliseconds, 1500,
+            "nothing on the wire, but it is the rate other ports are told to match");
+        Pin("discovery expiry ms", (int)PeerDiscoveryService.PeerExpiry.TotalMilliseconds, 8000,
+            "any port that announces less often than this — since issue #31 it drops out of the list between announcements");
+        // The announcement itself is JSON with these exact names, in this case. .NET reads names case-sensitively, so
+        // a renamed property is a silent break in both directions.
+        var discoveryId = Guid.Parse("11111111-2222-3333-4444-555555555555");
+        Pin("discovery announcement",
+            PeerDiscoveryService.AnnouncementJsonForTest(discoveryId, "ED_DT", 47830, canSend: true, canReceive: false),
+            "{\"InstanceId\":\"11111111-2222-3333-4444-555555555555\",\"Name\":\"ED_DT\",\"AudioPort\":47830,\"CanSend\":true,\"CanReceive\":false}",
+            "every port that finds peers on a network — a renamed field reads as a peer with no name, no port and no id");
+        var theirs = System.Text.Encoding.UTF8.GetBytes(
+            "{\"InstanceId\":\"66666666-7777-8888-9999-000000000000\",\"Name\":\"iPhone\",\"AudioPort\":47830,\"CanSend\":true,\"CanReceive\":true}");
+        var parsed = PeerDiscoveryService.TryParseAnnouncement(theirs, System.Net.IPAddress.Parse("192.168.1.8"), discoveryId, out var heard);
+        Pin("discovery announcement from another port parses",
+            parsed ? $"{heard.Name}@{heard.AudioPort}" : "rejected", "iPhone@47830",
+            "the iPhone and Android apps — their announcements would be thrown away and they would never appear");
+
+        // --- The server's group protocol: several people on one relay. The Python relay speaks it, the Pi baby
+        // monitor speaks it, and the iPhone app is about to be built from the notes that describe it. None of it was
+        // pinned until 2026-09-23. ------------------------------------------------------------------------------------
+        Pin("server group version", RelayGroupClient.GroupVersion, 2,
+            "the Python relay and anything that joins a server — group packets would be read as ordinary ones");
+        Pin("server client id size", RelayGroupClient.ClientIdSize, 16,
+            "the Python relay — every group packet's payload would start at the wrong byte");
+        Pin("server group header size", RelayGroupClient.GroupHeaderSize, 28,
+            "the Python relay and every group member");
+        Pin("server hello type", RelayGroupClient.TypeHello, 6, "the Python relay — nobody would ever join a group");
+        Pin("server member list type", RelayGroupClient.TypeRoster, 7, "every group member — nobody would ever see who is there");
+        Pin("server full type", RelayGroupClient.TypeFull, 8, "every group member");
+        Pin("server bye type", RelayGroupClient.TypeBye, 9, "the Python relay — people would linger a minute after leaving");
+        Pin("server name bytes", RelayGroupClient.NameBytes, 32, "the Python relay and every group member — names would be read from the wrong bytes");
+        Pin("server group tag bytes", RelayGroupClient.GroupTagBytes, 8,
+            "the Python relay — it groups people by these bytes, so everybody would land in the wrong group");
+        Pin("server most people one hello can tick", RelayGroupClient.MaxTickedIds, 64, "the Python relay, which caps the list at the same number");
+        Pin("server member list entry bytes", RelayGroupClient.RosterEntryBytes, 49,
+            "every group member — every name after the first would be read from the wrong place");
+        Pin("server member flag: has ticked you", RelayGroupClient.RosterMemberFlagTicksUs, 1,
+            "every group member — \"waiting for them to tick you\" would be wrong both ways");
+        Pin("server list flag: paired with a phone", RelayGroupClient.RosterFlagV1Paired, 1,
+            "phones and older apps on a server — nobody would send them anything");
+        Pin("server hello interval ms", (int)RelayGroupClient.HelloInterval.TotalMilliseconds, 2000,
+            "nothing on the wire, but the relay forgets a member after 60 s of silence and the notes tell other ports this figure");
+
         // --- The app↔plugin bridge. The VST3 is named above as a port in the wild, and it is one in
         // the most literal sense: it is INSTALLED separately, into the user's own VST3 folder, and it
         // stays there across app updates — Anthony has a build sitting in Reaper right now. Change any
@@ -153,9 +202,66 @@ internal static partial class SelfTest
 
         // A pin count that COLLAPSES is the other way this test could quietly stop working — an
         // early return, a refactor that drops half the list — so the floor is asserted too.
-        Check(pinned.Count >= 27,
+        Check(pinned.Count >= 48,
             $"only {pinned.Count} values were pinned; the contract has lost entries rather than gained them");
 
         return $"{pinned.Count} values pinned that {PortsInTheWild} all depend on: " + string.Join(", ", pinned);
+    }
+
+    /// <summary>
+    /// THE SERVER AND THE APP AGREE. The contract above pins the app's side of the server protocol; this reads the
+    /// Python relay's own source and holds it to the same numbers, so neither end can move without the other. Until
+    /// 2026-09-23 nothing connected them but care.
+    /// </summary>
+    private static string? CrossPortServerAgreesWithTheApp()
+    {
+        var root = FindSourceRoot();
+        if (root is null) return Skip("the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
+        var path = Path.Combine(root, "server", "remsound-relay.py");
+        Check(File.Exists(path), $"the relay's source must be where it always is ({path})");
+        var values = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var line in File.ReadAllLines(path))
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(line, @"^([A-Z][A-Z0-9_]*)\s*=\s*(0x[0-9A-Fa-f]+|\d+)\s*(#.*)?$");
+            if (!m.Success) continue;
+            var text = m.Groups[2].Value;
+            values[m.Groups[1].Value] = text.StartsWith("0x", StringComparison.Ordinal) ? Convert.ToInt32(text[2..], 16) : int.Parse(text);
+        }
+        var disagree = new List<string>();
+        var compared = 0;
+        void Same(string pythonName, int app)
+        {
+            compared++;
+            if (!values.TryGetValue(pythonName, out var server)) disagree.Add($"{pythonName} is missing from the relay");
+            else if (server != app) disagree.Add($"{pythonName} is {server} on the relay and {app} in the app");
+        }
+        Same("DEFAULT_PORT", RemPacket.DefaultPort);
+        Same("V1_VERSION", RemPacket.Version);
+        Same("V1_HEADER_LEN", RemPacket.HeaderSize);
+        Same("V2_VERSION", RelayGroupClient.GroupVersion);
+        Same("V2_HEADER_LEN", RelayGroupClient.GroupHeaderSize);
+        Same("V2_CLIENT_ID_OFFSET", RemPacket.HeaderSize);
+        Same("V2_CLIENT_ID_LEN", RelayGroupClient.ClientIdSize);
+        Same("TYPE_FORMAT", (int)RemPacketType.Format);
+        Same("TYPE_AUDIO", (int)RemPacketType.Audio);
+        Same("TYPE_KEEPALIVE", (int)RemPacketType.KeepAlive);
+        Same("TYPE_HEARTBEAT", (int)RemPacketType.Heartbeat);
+        Same("TYPE_LOBBY_HELLO", RelayGroupClient.TypeHello);
+        Same("TYPE_LOBBY_ROSTER", RelayGroupClient.TypeRoster);
+        Same("TYPE_LOBBY_FULL", RelayGroupClient.TypeFull);
+        Same("TYPE_LOBBY_BYE", RelayGroupClient.TypeBye);
+        Same("TYPE_ADDR_CHECK", (int)RemPacketType.AddrCheck);
+        Same("LOBBY_NAME_BYTES", RelayGroupClient.NameBytes);
+        Same("GROUP_TAG_BYTES", RelayGroupClient.GroupTagBytes);
+        Same("MAX_TICKED_IDS", RelayGroupClient.MaxTickedIds);
+        Same("FORMAT_FINGERPRINT_OFFSET", RemPacket.FormatPayloadExtendedSize);
+        Same("ROSTER_FLAG_V1_PAIRED", RelayGroupClient.RosterFlagV1Paired);
+        Same("ROSTER_MEMBER_FLAG_TICKS_YOU", RelayGroupClient.RosterMemberFlagTicksUs);
+        Check(values.Count >= 20, $"the relay's constants must actually have been read ({values.Count} found) — or this compares nothing");
+        Check(disagree.Count == 0,
+            $"THE SERVER AND THE APP DISAGREE ({disagree.Count} of {compared}): {string.Join("; ", disagree)}. "
+            + "One of them has moved without the other. Do not change either to make this pass: ask Ed, because the Pi, the "
+            + "baby monitor and every other port are already speaking the old value.");
+        return $"the relay and the app agree on all {compared} values they share";
     }
 }
