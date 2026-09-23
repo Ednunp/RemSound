@@ -290,7 +290,7 @@ internal static partial class SelfTest
         try
         {
             try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
-            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
             var relay = new IPEndPoint(IPAddress.Parse("203.0.113.44"), RemPacket.DefaultPort);
             var entry = "relay.example.test:47830";
@@ -459,7 +459,7 @@ internal static partial class SelfTest
             Check(AppConfig.Load().AcceptPeerConnections == PeerAcceptMode.Manual, "the choice must persist through AppConfig");
 
             try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
-            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
             var theirs = new IPEndPoint(IPAddress.Parse("198.51.100.21"), RemPacket.DefaultPeerDialPort);
             bool Connected(IPEndPoint ep) => form!.SelectedSendEndpointsForTest().Any(e => e.Address.Equals(ep.Address));
@@ -695,7 +695,7 @@ internal static partial class SelfTest
         {
             SetAcceptMode(PeerAcceptMode.Manual);   // no questions: this is about the removal, not the asking
             try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
-            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
             var relay = new IPEndPoint(IPAddress.Parse("203.0.113.91"), RemPacket.DefaultPort);
             form.ConnectToRelayForTest("remote.example.test", relay);
@@ -762,7 +762,6 @@ internal static partial class SelfTest
     {
         Check(ScreenReader.Suppressed, "a gate run must say nothing out loud — it is running on somebody's machine");
         Check(!ScreenReader.Speak("this must never be heard"), "and a call to speak during a run must do nothing at all");
-        Check(CuePlayer.GloballyMuted || !CuePlayer.GloballyMuted, "cue sounds are muted per step, which is their own rule");
 
         var root = FindSourceRoot();
         if (root is null) return Skip("the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
@@ -803,7 +802,7 @@ internal static partial class SelfTest
         {
             SetAcceptMode(PeerAcceptMode.Manual);   // nothing must tick anybody back behind this test
             try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
-            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
             // Four of them, on purpose. With only two, a clamped row NUMBER lands on the right person by luck and
             // proves nothing; with four, following the number and following the person give different answers.
@@ -887,7 +886,7 @@ internal static partial class SelfTest
         {
             SetAcceptMode(PeerAcceptMode.Automatic);   // the mode Ed was actually on, per his global config
             try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
-            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
             // Somebody the user has said nothing about: automatic ticks them back, which is what it is for.
             var stranger = new IPEndPoint(IPAddress.Parse("198.51.100.77"), RemPacket.DefaultPeerDialPort);
@@ -959,7 +958,7 @@ internal static partial class SelfTest
         {
             SetAcceptMode(PeerAcceptMode.Automatic);   // the mode that used to undo the untick
             try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
-            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
             var relay = new IPEndPoint(IPAddress.Parse("203.0.113.92"), RemPacket.DefaultPort);
             form.ConnectToRelayForTest("remote.example.test", relay);

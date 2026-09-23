@@ -73,7 +73,7 @@ internal static partial class SelfTest
             var profile = Profile.NewBlank();
             profile.Password = RemSoundCrypto.Obfuscate("shaping-test-password");
             try { form = new MainForm(null, profile, null, null, headless: true); }
-            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
             const string Peer = "192.168.1.50";
             Check(form.ShapingActiveForTest(Peer, masterOn: true, peerTicked: true), "master on and the peer ticked must shape them");

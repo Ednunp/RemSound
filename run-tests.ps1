@@ -210,7 +210,12 @@ else { Fail "perf sanity flagged possible runaway (exit $($pf.Code))" }
 #         touched (smoke-test brief, safety rule 1 + baseline steps 3-4) ----
 Write-Host "`nCold start and clean close (isolated config):" -ForegroundColor Cyan
 $already = @(Get-Process RemSound -ErrorAction SilentlyContinue)
+$script:coldStartSkipped = $false
 if ($already.Count -gt 0) {
+    # Remembered for the verdict. This is the ONE check that launches the real program, so a run without it cannot
+    # call a build safe to publish: on 2026-09-23 a main window broken on purpose got past every other part of the
+    # gate with RemSound open.
+    $script:coldStartSkipped = $true
     Write-Host "  [SKIP] a RemSound instance is already running (machine-wide single-instance lock) - close it to run this check" -ForegroundColor Yellow
 }
 else {
@@ -251,6 +256,13 @@ else {
 # ---- summary ----
 Remove-Item -LiteralPath $publishDir -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ""
+if ($script:failures.Count -eq 0 -and $script:coldStartSkipped) {
+    # Still a pass, so test copies and tester zips carry on. Not a clearance to publish: build-release.ps1 refuses to
+    # run with RemSound open for exactly this reason.
+    Write-Host "RESULT: PASS - but the cold-start check did not run because RemSound is open, so this build has not been" -ForegroundColor Yellow
+    Write-Host "        launched for real. Not cleared for release: close RemSound and run the gate again before publishing." -ForegroundColor Yellow
+    exit 0
+}
 if ($script:failures.Count -eq 0) {
     Write-Host "RESULT: PASS - all gate checks passed. Safe to publish." -ForegroundColor Green
     exit 0

@@ -65,6 +65,30 @@ internal static partial class SelfTest
 
     private static string Skip(string why) => throw new StepSkipped(why);
 
+    /// <summary>The first failure to build the main window, once one has happened, so the steps after it can point back
+    /// at it rather than repeat it forty times.</summary>
+    private static string? mainWindowBuildFailure;
+
+    /// <summary>
+    /// What a step does when it cannot build the main window: the FIRST such step fails with the real error, and every
+    /// one after it skips, pointing back at that failure.
+    ///
+    /// <para>It used to be a skip in all forty places. On 2026-09-23 the constructor was broken on purpose so that it
+    /// threw on Windows 10 and 11 only, and the self-test said "PASS - 223 passed, 45 skipped". With RemSound open, the
+    /// gate's one real launch check skips as well, so the whole gate would have called a window that could not open
+    /// "safe to publish". A window that cannot be built is the loudest failure there is, never a gap in coverage.</para>
+    /// </summary>
+    private static string MainWindowCouldNotBeBuilt(Exception ex)
+    {
+        var what = $"{ex.GetType().Name}: {ex.Message}";
+        if (mainWindowBuildFailure is not null)
+        {
+            return Skip($"the main window could not be built, which has already failed above ({mainWindowBuildFailure})");
+        }
+        mainWindowBuildFailure = what;
+        throw new CheckFailed($"the main window could not be built: {what}");
+    }
+
     /// <summary>Non-overlapping count of <paramref name="needle"/> in <paramref name="haystack"/> —
     /// used by the log-rotation integrity checks to prove each line survives exactly once.</summary>
     private static int CountOccurrences(string haystack, string needle)
@@ -101,6 +125,8 @@ internal static partial class SelfTest
         // longer be answered in this process. It used to sit after the whole service suite, where it
         // silently checked nothing on every run.
         RunStep(results, "Main window builds without loading the service assembly (Win7-safe)", MainWindowServiceAssemblyFree);
+        RunStep(results, "The main window can be built (the ordinary Windows 10 and 11 path)", TheMainWindowCanBeBuilt);
+        RunStep(results, "GATE GUARD: a step that cannot build the main window fails, it never quietly skips", NoStepSkipsAWindowThatCannotBeBuilt);
         RunStep(results, "Encryption round-trip", Encryption);
         RunStep(results, "Packet framing and rejection", PacketFraming);
         RunStep(results, "Server wire-format compatibility", ServerWireCompat);
@@ -2529,7 +2555,7 @@ internal static partial class SelfTest
     {
         Form? form;
         try { form = new MainForm(null, RemSound.Core.Profile.NewBlank(), null, null, headless: true); }
-        catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
         try
         {
@@ -2555,7 +2581,7 @@ internal static partial class SelfTest
     {
         MainForm mf;
         try { mf = new MainForm(null, RemSound.Core.Profile.NewBlank(), null, null, headless: true); }
-        catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
         using (mf)
         {
@@ -2635,7 +2661,7 @@ internal static partial class SelfTest
             store.Save(profile);
 
             try { form = new MainForm(store, profile, profile.Title, null, headless: true); }
-            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
             Check(!form.UnsavedChangesForTest, "a profile just loaded has nothing waiting to be saved");
 
@@ -2736,7 +2762,7 @@ internal static partial class SelfTest
         // 4. The timer turns on with the right interval, and off when set to Never.
         MainForm mf;
         try { mf = new MainForm(null, RemSound.Core.Profile.NewBlank(), null, null, headless: true); }
-        catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
         using (mf)
         {
             mf.ApplyAutoSaveTimer(5);
@@ -2875,7 +2901,7 @@ internal static partial class SelfTest
 
         Form form;
         try { form = new MainForm(null, RemSound.Core.Profile.NewBlank(), null, null, headless: true); }
-        catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
         using (form) { }
 
         // Order-dependent, and it used to hide that: any earlier step that touched the service code
@@ -2901,7 +2927,7 @@ internal static partial class SelfTest
     {
         Form form;
         try { form = new MainForm(null, RemSound.Core.Profile.NewBlank(), null, null, headless: true); }
-        catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
         using (form)
         {
@@ -2969,6 +2995,69 @@ internal static partial class SelfTest
     /// at launch. On Windows 10/11 the branch is skipped (process-loopback IS supported), which hid the bug
     /// from the gate. This forces the unsupported path so the crash is reproduced (and now prevented) on a
     /// Win10/11 test box.</summary>
+    /// <summary>
+    /// THE MAIN WINDOW CAN BE BUILT, on the path almost every machine takes. A step with a plain name for the loudest
+    /// failure there is: forty other steps build the window for their own reasons, and until 2026-09-23 every one of them
+    /// turned a failure to build it into a skip. The Windows 7 step beside this one builds it too, but deliberately on
+    /// the OTHER path, so a window that broke only on Windows 10 and 11 got past it (proven that day).
+    /// </summary>
+    private static string? TheMainWindowCanBeBuilt()
+    {
+        var restoreMuted = CuePlayer.GloballyMuted;
+        CuePlayer.GloballyMuted = true;
+        MainForm? form = null;
+        Exception? failure = null;
+        try
+        {
+            Check(RemSound.Sender.ProcessLoopbackCapture.ForceSupportedForTest is null,
+                "this must build the window on the machine's own path, not one a previous step left forced");
+            try { form = new MainForm(null, RemSound.Core.Profile.NewBlank(), null, null, headless: true); }
+            catch (Exception ex) { failure = ex; }
+            if (failure is not null) mainWindowBuildFailure ??= $"{failure.GetType().Name}: {failure.Message}";
+            Check(failure is null,
+                $"the main window must build on this machine — every step that uses it depends on it (got {failure?.GetType().Name}: {failure?.Message})");
+            return "the main window builds on the ordinary path, with a blank profile";
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            CuePlayer.GloballyMuted = restoreMuted;
+        }
+    }
+
+    /// <summary>
+    /// GATE GUARD: nothing may go back to turning a failure to build the main window into a skip. Every place a step
+    /// builds one must hand a failure to <see cref="MainWindowCouldNotBeBuilt"/>, or check it outright as the Windows 7
+    /// step does. Reads the suite's own source, so a new step written the old way fails here the day it is added.
+    /// </summary>
+    private static string? NoStepSkipsAWindowThatCannotBeBuilt()
+    {
+        var root = FindSourceRoot();
+        if (root is null) return Skip("the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
+        var needle = "new " + "MainForm(";
+        var offenders = new List<string>();
+        var sites = 0;
+        foreach (var file in Directory.EnumerateFiles(Path.Combine(root, "src", "RemSound.App"), "SelfTest*.cs"))
+        {
+            var lines = File.ReadAllLines(file);
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var at = lines[i].IndexOf(needle, StringComparison.Ordinal);
+                if (at < 0 || lines[i].TrimStart().StartsWith("//", StringComparison.Ordinal)) continue;
+                sites++;
+                var window = string.Join("\n", lines.Skip(i).Take(4));
+                var handled = window.Contains(nameof(MainWindowCouldNotBeBuilt), StringComparison.Ordinal);
+                var skips = window.Contains("Skip(", StringComparison.Ordinal) || window.Contains("StepSkipped(", StringComparison.Ordinal);
+                if (skips && !handled) offenders.Add($"{Path.GetFileName(file)}:{i + 1}");
+            }
+        }
+        Check(sites >= 30, $"the guard must actually find the places that build the main window ({sites} found) — or it is watching nothing");
+        Check(offenders.Count == 0,
+            $"these build the main window and SKIP when it fails, which hides the loudest failure there is: {string.Join(", ", offenders)}. "
+            + $"Use {nameof(MainWindowCouldNotBeBuilt)}(ex).");
+        return $"all {sites} places that build the main window fail properly when it cannot be built";
+    }
+
     private static string? Win7SendModeConstruction()
     {
         var prev = RemSound.Sender.ProcessLoopbackCapture.ForceSupportedForTest;
@@ -3750,7 +3839,7 @@ internal static partial class SelfTest
             var profile = Profile.NewBlank();
             profile.Password = RemSoundCrypto.Obfuscate("autotune-state-test");
             try { form = new MainForm(null, profile, null, null, headless: true); }
-            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
             // --- Each lane owns its evidence -----------------------------------------------------
             Check(form.LaneEvidenceIsSeparateForTest(),
@@ -4714,7 +4803,7 @@ internal static partial class SelfTest
 
             MainForm mf;
             try { mf = new MainForm(null, RemSound.Core.Profile.NewBlank(), null, null, headless: true); }
-            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
             using (mf)
             {
                 var p = new Profile { Title = "app list semantics", WasapiSendMode = "applications" };

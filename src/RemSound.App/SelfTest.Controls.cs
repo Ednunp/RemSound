@@ -307,7 +307,7 @@ internal static partial class SelfTest
             // (which is what re-opened the modal dialog and hung the second run).
             profile.Password = RemSoundCrypto.Obfuscate("control-suite-test-password");
             try { form = new MainForm(null, profile, null, null, headless: true); }
-            catch (Exception ex) { throw new StepSkipped($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { throw new StepSkipped(MainWindowCouldNotBeBuilt(ex)); }
 
             // Prove the configuration actually took before auditing anything in its name — a suite
             // that silently runs the same mode twice is the blind spot this whole exercise is about.
@@ -522,7 +522,7 @@ internal static partial class SelfTest
         try
         {
             try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
-            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
             var specified = BuildControlSpecs().Select(s => s.Field).ToHashSet(StringComparer.Ordinal);
 

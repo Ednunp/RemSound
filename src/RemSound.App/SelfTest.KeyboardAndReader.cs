@@ -51,7 +51,7 @@ internal static partial class SelfTest
 
             MainForm form;
             try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
-            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
             using (form)
             {
                 var asioRowField = Require(typeof(MainForm).GetField("asioLatencyLabel", BindingFlags.Instance | BindingFlags.NonPublic),
@@ -455,7 +455,7 @@ internal static partial class SelfTest
 
         MainForm form;
         try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
-        catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
         using (form)
         {
             const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;

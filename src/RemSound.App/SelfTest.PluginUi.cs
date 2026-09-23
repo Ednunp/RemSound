@@ -692,7 +692,7 @@ internal static partial class SelfTest
                 var profile = Profile.NewBlank();
                 profile.Password = RemSoundCrypto.Obfuscate("plugin-log-test-password");
                 try { form = new MainForm(null, profile, null, null, headless: true); }
-                catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+                catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
                 // Port 0, never 47831: a gate run must never fight the RemSound the user has open.
                 var host = form.OpenPluginLinkForTest(0);

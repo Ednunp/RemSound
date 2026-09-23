@@ -165,6 +165,15 @@ if (Test-Path $syncScript) {
 # missing-cue-sounds bug. run-tests publishes and tests its OWN throwaway copy, so it never runs
 # the app against (and never pollutes) the clean staging folder built below.
 $gate = Join-Path $repo 'run-tests.ps1'
+# A release needs the WHOLE gate, and the gate's cold-start check - the only one that launches the real program -
+# cannot run while RemSound is open. Without it a main window that crashes on start can pass everything else (proven
+# on 2026-09-23 by breaking it on purpose). So a release waits until RemSound is closed.
+if (@(Get-Process RemSound -ErrorAction SilentlyContinue).Count -gt 0) {
+    Write-Host ""
+    Write-Host "RELEASE ABORTED - close RemSound first. The gate's launch check cannot run while it is open, and a release" -ForegroundColor Red
+    Write-Host "needs every check to have run." -ForegroundColor Red
+    exit 1
+}
 if (Test-Path $gate) {
     Write-Host ""
     Write-Host "Running the build-and-test gate (run-tests.ps1)..." -ForegroundColor Cyan

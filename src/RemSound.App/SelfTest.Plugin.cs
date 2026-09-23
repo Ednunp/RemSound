@@ -559,7 +559,7 @@ internal static partial class SelfTest
             var profile = Profile.NewBlank();
             profile.Password = RemSoundCrypto.Obfuscate("menu-test-password");
             try { form = new MainForm(null, profile, null, null, headless: true); }
-            catch (Exception ex) { return Skip($"headless MainForm could not be constructed: {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
             var strip = form.MainMenuStrip ?? FindMenuStrip(form);
             Check(strip is not null, "the main window must have a menu strip");
@@ -791,7 +791,7 @@ internal static partial class SelfTest
     {
         MainForm form;
         try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
-        catch (Exception ex) { return Skip($"headless main window could not be built: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
         var restoreGate = DiagnosticsGate.Enabled;
         try

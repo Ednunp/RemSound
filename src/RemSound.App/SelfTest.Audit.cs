@@ -471,7 +471,7 @@ internal static partial class SelfTest
     {
         MainForm form;
         try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
-        catch (Exception ex) { return Skip($"headless main window could not be built: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
         using (form)
         {
@@ -652,7 +652,7 @@ internal static partial class SelfTest
         // passes whether or not this is right, which is exactly why it needs its own check.
         MainForm form;
         try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
-        catch (Exception ex) { return Skip($"headless main window could not be built: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
         using (form)
         {
@@ -798,7 +798,7 @@ internal static partial class SelfTest
     {
         MainForm form;
         try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
-        catch (Exception ex) { return Skip($"headless main window could not be built: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
         using (form)
         {
@@ -1134,7 +1134,7 @@ internal static partial class SelfTest
     {
         MainForm form;
         try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
-        catch (Exception ex) { return Skip($"headless main window could not be built: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
         using (form)
         {
@@ -1597,7 +1597,7 @@ internal static partial class SelfTest
     {
         MainForm form;
         try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
-        catch (Exception ex) { return Skip($"headless main window could not be built: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
         using (form)
         {
