@@ -2441,7 +2441,10 @@ public sealed partial class MainForm : Form
         // the very thing this is here to prevent. Address is only the tie-break, so the order is
         // total and stable even for two peers sharing a name.
         return selectedPeerEndpoints
-            .Select(kv => (Address: kv.Value.Address, Name: selectedPeerLabels.GetValueOrDefault(kv.Key, kv.Value.Address.ToString())))
+            // Somebody reached through a server says so, as they do in RemSound's own list: the same machine reached on
+            // the network AND through a server is otherwise two identical names in the plugin window (review, 2026-09-23).
+            .Select(kv => (Address: kv.Value.Address, Name: selectedPeerLabels.GetValueOrDefault(kv.Key, kv.Value.Address.ToString())
+                + (RemSound.Core.RelayGroupClient.IsMemberAddress(kv.Value.Address) ? " (on the server)" : "")))
             // Everyone in a relay group can be put on a track of their own, as a ticked peer can.
             .Concat(SelectedRelayGroupMembers().Select(m => (Address: m.Address.Address, Name: MemberLabel(m))))
             .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)

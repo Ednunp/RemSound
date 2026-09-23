@@ -1132,6 +1132,138 @@ internal static partial class SelfTest
         finally { group.Stop(); }
     }
 
+    /// <summary>
+    /// THE SERVER LINE TELLS THE TRUTH.
+    ///
+    /// <para>Review, 2026-09-23. The line beside the server button counted the ROWS in the server list, and since people
+    /// you are connected to left that list (2026-09-21) it said "0 here" while you talked to the only other person there.
+    /// And two quite different situations read the same "Connecting..." for ever: a profile with no password, which never
+    /// joins anyone because a server groups people by password, and a server that simply isn't answering.</para>
+    /// </summary>
+    private static string? TheServerLineTellsTheTruth()
+    {
+        var restoreMuted = CuePlayer.GloballyMuted;
+        CuePlayer.GloballyMuted = true;
+        var restoreMode = AppConfig.Load().AcceptPeerConnections;
+        MainForm? form = null;
+        try
+        {
+            SetAcceptMode(PeerAcceptMode.Manual);   // nothing ticks anybody behind this test
+            try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+
+            var said = new List<string>();
+            form.LogForTest.EventTapForTest = line => { lock (said) said.Add(line); };
+            try
+            {
+                // No password: the server can never put us with anyone, and the line has to say so rather than wait.
+                form.SetProfilePasswordForTest("");
+                var relay = new IPEndPoint(IPAddress.Parse("203.0.113.94"), RemPacket.DefaultPort);
+                form.ConnectToRelayForTest("remote.example.test", relay);
+                form.SyncRelayPeersListForTest();
+                Check(form.RelayStatusForTest.Contains("no password", StringComparison.OrdinalIgnoreCase),
+                    $"with no password the line must say why nobody will appear, not \"connecting\" for ever ({form.RelayStatusForTest})");
+                Check(said.Any(l => l.Contains("relay: status is now", StringComparison.Ordinal) && l.Contains("no password", StringComparison.Ordinal)),
+                    $"and the log must record it once, so a report shows what the user was told (got: {string.Join(" | ", said.Where(l => l.Contains("relay:")))})");
+                var logged = said.Count(l => l.Contains("relay: status is now", StringComparison.Ordinal));
+                form.SyncRelayPeersListForTest();
+                form.SyncRelayPeersListForTest();
+                Check(said.Count(l => l.Contains("relay: status is now", StringComparison.Ordinal)) == logged,
+                    "and only on a change — not a line a second while nothing changes");
+
+                // With a password, a server that has not answered yet is being reached; one that never answers is not.
+                form.SetProfilePasswordForTest("garden party");
+                form.SyncRelayPeersListForTest();
+                Check(form.RelayStatusForTest.StartsWith("Connecting", StringComparison.Ordinal),
+                    $"a server not heard from yet, just after connecting, is still being reached ({form.RelayStatusForTest})");
+                form.BackdateRelayConnectForTest(MainForm.RelayAnswerGrace + TimeSpan.FromSeconds(1));
+                form.SyncRelayPeersListForTest();
+                Check(form.RelayStatusForTest.Contains("isn't answering", StringComparison.Ordinal),
+                    $"THE BUG: a server that never answers must say so, not \"connecting\" for ever ({form.RelayStatusForTest})");
+                Check(said.Any(l => l.Contains("relay: status is now", StringComparison.Ordinal) && l.Contains("isn't answering", StringComparison.Ordinal)),
+                    "and that goes in the log too");
+
+                // Now it answers, with two people on our password. Tick one: they leave the server list for Connected
+                // peers, and the count must still be two — it is people on the server, not rows in a list.
+                var bob = Guid.NewGuid();
+                var carol = Guid.NewGuid();
+                Feed(form.RelayGroupForTest, relay, RosterPacket([(bob, "Bob", true), (carol, "Carol", true)], paired: false),
+                    RelayInbound.Consumed, "a member list with two people");
+                form.SyncRelayPeersListForTest();
+                Check(form.RelayStatusForTest.Contains("2 here", StringComparison.Ordinal),
+                    $"two people on the server must read as two ({form.RelayStatusForTest})");
+                form.RelayPeerTickedForTest(form.RelayPeersListForTest.Items.Cast<object>().ToList().FindIndex(i => i.ToString() == "Bob"), true);
+                form.SyncAllPeerListsForTest();
+                form.SyncRelayPeersListForTest();
+                Check(form.RelayPeersListForTest.Items.Count == 1,
+                    $"Bob must have left the server list for Connected peers, or this proves nothing ({form.RelayPeersListForTest.Items.Count} rows)");
+                Check(form.RelayStatusForTest.Contains("2 here", StringComparison.Ordinal),
+                    $"THE BUG: connecting to Bob must not take him out of the count ({form.RelayStatusForTest})");
+            }
+            finally { form.LogForTest.EventTapForTest = null; }
+
+            return "the server line counts the people on the server, not the rows in its list; with no password it says "
+                + "why nobody appears; a server that never answers says so after the grace; each change of state is logged "
+                + "once";
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            try { SetAcceptMode(restoreMode); } catch { /* best effort */ }
+            CuePlayer.GloballyMuted = restoreMuted;
+        }
+    }
+
+    /// <summary>
+    /// A SERVER FOUND AT AN ADDRESS KEEPS ITS PORT, AND THE PLUGIN'S LIST SAYS WHICH ROW IS THE SERVER ONE.
+    ///
+    /// <para>Review, 2026-09-23. Accepting "this address is a server, connect to it as one?" connected to the address
+    /// alone, so a server on any port but 47830 was joined where it was not. And the DAW plugin was handed bare names, so
+    /// the same machine reached on the network and through a server was two identical rows in its window.</para>
+    /// </summary>
+    private static string? AServerKeepsItsPortAndThePluginSaysWhichRowIsWhich()
+    {
+        var onDefault = new IPEndPoint(IPAddress.Parse("203.0.113.95"), RemPacket.DefaultPort);
+        var onAnother = new IPEndPoint(IPAddress.Parse("203.0.113.95"), 47833);
+        Check(MainForm.RelayEntryFor(onDefault) == "203.0.113.95", "a server on the usual port needs no port written");
+        Check(MainForm.RelayEntryFor(onAnother) == "203.0.113.95:47833",
+            $"THE BUG: a server on another port must keep it ({MainForm.RelayEntryFor(onAnother)})");
+        Check(MainForm.ResolveWithoutLookupForTest(MainForm.RelayEntryFor(onAnother)) is { } back && back.Equals(onAnother),
+            "and what is written must connect back to exactly that address and port");
+
+        var restoreMuted = CuePlayer.GloballyMuted;
+        CuePlayer.GloballyMuted = true;
+        MainForm? form = null;
+        try
+        {
+            try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+
+            var onNetwork = new PeerAnnouncement(Guid.NewGuid(), "ED_DT", RemPacket.DefaultPeerDialPort,
+                CanSend: true, CanReceive: true, DateTime.UtcNow, IPAddress.Parse("192.168.1.95"));
+            var throughServer = new PeerAnnouncement(Guid.NewGuid(), "ED_DT", RemPacket.DefaultPeerDialPort,
+                CanSend: true, CanReceive: true, DateTime.UtcNow, IPAddress.Parse("241.1.2.3"));
+            form.SelectPeerForTest(onNetwork);
+            form.SelectPeerForTest(throughServer);
+            var rows = form.PeerListForPluginsForTest();
+            Check(rows.Count == 2, $"both routes must reach the plugin ({rows.Count})");
+            var server = rows.Single(r => r.Address.Equals(throughServer.Address)).Name;
+            var network = rows.Single(r => r.Address.Equals(onNetwork.Address)).Name;
+            Check(server.EndsWith("(on the server)", StringComparison.Ordinal),
+                $"THE BUG: the plugin must be told which one is through the server (got \"{server}\")");
+            Check(network == "ED_DT", $"and the one on the network keeps its plain name (got \"{network}\")");
+            Check(server != network, "so the plugin window never shows two identical rows");
+
+            return "a server found at an address is joined on that address's own port; the plugin's peer list marks "
+                + "somebody reached through a server, so one machine reached both ways is two different rows";
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            CuePlayer.GloballyMuted = restoreMuted;
+        }
+    }
+
     private static void SetAcceptMode(PeerAcceptMode mode)
     {
         var cfg = AppConfig.Load();

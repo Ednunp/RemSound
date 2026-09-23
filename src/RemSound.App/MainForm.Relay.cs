@@ -45,6 +45,15 @@ public sealed partial class MainForm
     /// <summary>Who we have ticked, and whether the relay last said they had ticked us back. Sound only flows when both
     /// have ticked, so without this the app would simply go quiet and leave you guessing which it was.</summary>
     private readonly Dictionary<Guid, bool> relayTickedBack = [];
+    /// <summary>When we last pressed Connect (or a profile put a server back), so a server that never answers can be told
+    /// apart from one that is still being reached. Null while not connected.</summary>
+    private DateTime? relayConnectedUtc;
+    /// <summary>How long a server gets to send its first member list before the status line says it isn't answering.
+    /// It sends one every second, so this is several missed in a row.</summary>
+    internal static readonly TimeSpan RelayAnswerGrace = TimeSpan.FromSeconds(10);
+    /// <summary>The kind of thing the status line last said, so the log records a change of state once rather than every
+    /// second.</summary>
+    private string relayStatusKind = "";
     /// <summary>Addresses we have already asked about ("that looks like a server"), so nobody is asked twice a run.</summary>
     private readonly HashSet<string> relayOfferAsked = new(StringComparer.OrdinalIgnoreCase);
 
@@ -154,6 +163,7 @@ public sealed partial class MainForm
         // Note the password we are joining under, so a later change of it is recognised as a move to different people.
         relayPasswordSignature = currentAudioFingerprint is null ? "" : Convert.ToHexString(currentAudioFingerprint);
         relayGroup.Connect(resolved);
+        relayConnectedUtc = DateTime.UtcNow;
         RememberRelay(entry);
         logFile.Event($"relay: connected to \"{entry}\" ({resolved})");
         ApplyRelayTicks();
@@ -167,6 +177,7 @@ public sealed partial class MainForm
         var was = relayGroup.ConnectedRelay;
         foreach (var id in relayTicked.ToList()) DeselectPeer(id);
         relayGroup.Disconnect();
+        relayConnectedUtc = null;
         relayPairTicked = false;
         relayTickedBack.Clear();
         relayKnownNames.Clear();
@@ -243,6 +254,8 @@ public sealed partial class MainForm
     private void OfferRelayForPeerAddress(IPEndPoint remote)
     {
         if (!ShouldOfferRelay(remote)) return;
+        // Nobody is there to answer in a headless run, and an unanswerable question is a hang.
+        if (headless) { logFile.Event($"relay: {remote} answers as a relay — nobody to ask in a headless run"); return; }
         logFile.Event($"relay: {remote.Address} answers as a relay — offering to connect");
         var answer = ForegroundDialog.Show(owner => MessageBox.Show(owner,
             "You have entered the address of a server. Would you like to connect to this server?",
@@ -252,8 +265,14 @@ public sealed partial class MainForm
         {
             if (ep.Address.Equals(remote.Address)) DeselectPeer(id);
         }
-        ConnectToRelay(remote.Address.ToString(), userAsked: true);
+        ConnectToRelay(RelayEntryFor(remote), userAsked: true);
     }
+
+    /// <summary>What to connect to for a server found at this address. Its PORT goes with it unless it is the default:
+    /// it used to be dropped, so a server on another port (a second one on the same machine, say) was joined on 47830,
+    /// where it was not.</summary>
+    internal static string RelayEntryFor(IPEndPoint remote) =>
+        remote.Port == RemPacket.DefaultPort ? remote.Address.ToString() : $"{remote.Address}:{remote.Port}";
 
     /// <summary>Whether to ask about that address at all: only for somebody actually in the peer list, only while not
     /// already on a relay, and only once a run for any one address. Asking is a modal question, so the deciding is kept
@@ -419,11 +438,43 @@ public sealed partial class MainForm
         }
 
         var waiting = waitingFor.Count == 0 ? "" : $", waiting for {string.Join(", ", waitingFor)} to tick you";
-        SetRelayStatus(relay is null
-            ? "Not connected to a server."
-            : relayGroup.IsInGroup(relay)
-                ? $"Connected to the server at {relayEntryText.Trim()} — {items.Count(i => !i.IsPairPartner)} here on your password{waiting}"
-                : $"Connecting to the server at {relayEntryText.Trim()}...");
+        var (kind, text) = DescribeRelayState(relay, waiting);
+        if (kind != relayStatusKind)
+        {
+            // A change of state, once: the log's own record of what the user was being told.
+            if (kind is "no password" or "not answering") logFile.Event($"relay: status is now \"{text}\"");
+            relayStatusKind = kind;
+        }
+        SetRelayStatus(text);
+    }
+
+    /// <summary>
+    /// What the line beside the server button says. Two things it used to get wrong (review, 2026-09-23):
+    ///
+    /// <para>The count was the number of ROWS in the server list, and since people you are connected to left that list
+    /// on 2026-09-21 it said 0 while you talked to the only other person there. It counts the people on the server on
+    /// your password, whichever list they are in.</para>
+    ///
+    /// <para>With no password nothing is ever sent to the server (it groups people by their password), and a server
+    /// that has gone away never answers; both used to read "Connecting..." for ever, the same words, so nobody could
+    /// tell which. Each now says what it is.</para>
+    /// </summary>
+    private (string Kind, string Text) DescribeRelayState(IPEndPoint? relay, string waiting)
+    {
+        if (relay is null) return ("not connected", "Not connected to a server.");
+        var server = relayEntryText.Trim().Length > 0 ? relayEntryText.Trim() : relay.ToString();
+        if (relayGroup.IsInGroup(relay))
+        {
+            var here = relayGroup.Members.Count(m => m.Relay.Equals(relay));
+            return ("in a group", $"Connected to the server at {server} — {here} here on your password{waiting}");
+        }
+        // In a group means the server has us on a password, so the next question only arises when we are not.
+        if (string.IsNullOrEmpty(currentProfilePassword))
+            return ("no password", $"On the server at {server}, but this profile has no password, so nobody there can be shown. Set one in the File menu.");
+        var since = relayConnectedUtc is { } at ? DateTime.UtcNow - at : TimeSpan.Zero;
+        return since < RelayAnswerGrace
+            ? ("connecting", $"Connecting to the server at {server}...")
+            : ("not answering", $"The server at {server} isn't answering.");
     }
 
     // ------- odds and ends -----------------------------------------------------------------------------------------
@@ -530,6 +581,10 @@ public sealed partial class MainForm
     internal void DeselectPeerByUserForTest(Guid instanceId) => DeselectPeer(instanceId, byUser: true);
     internal void SelectPeerByUserForTest(PeerAnnouncement peer) => SelectPeer(peer, fromProfileRestore: false);
     internal CheckedListBox ConnectedPeersListForTest => connectedPeersList;
+    internal IReadOnlyList<(IPAddress Address, string Name)> PeerListForPluginsForTest() => PeerListForPlugins();
+    internal void BackdateRelayConnectForTest(TimeSpan by) { if (relayConnectedUtc is { } at) relayConnectedUtc = at - by; }
+    internal void SetProfilePasswordForTest(string password) => currentProfilePassword = password;
+    internal static IPEndPoint? ResolveWithoutLookupForTest(string entry) => ResolveWithoutLookup(entry);
     internal IReadOnlyCollection<string> AcceptRefusedForTest => acceptRefusedByUser;
     internal IReadOnlyCollection<Guid> SelectedPeerIdsForTest => selectedPeerEndpoints.Keys.ToList();
     internal void SyncAllPeerListsForTest() => SyncAllPeerLists();

@@ -278,6 +278,8 @@ internal static partial class SelfTest
         RunStep(results, "Somebody on a server is in one list at a time, and the same machine twice says so", ServerPeopleAreInOneListAtATime);
         RunStep(results, "Somebody who goes away leaves the list (issue #31)", SomebodyWhoGoesAwayLeavesTheList);
         RunStep(results, "A server that stops listing its people loses them", AServerThatStopsListingItsPeopleLosesThem);
+        RunStep(results, "The server line tells the truth: who is there, no password, not answering", TheServerLineTellsTheTruth);
+        RunStep(results, "A server found at an address keeps its port, and the plugin says which row is the server one", AServerKeepsItsPortAndThePluginSaysWhichRowIsWhich);
         RunStep(results, "Heartbeats through a relay group", AuditRelayGroupHeartbeats);
         RunStep(results, "The app and the send-only service both take part in relay groups", AuditAppAndServiceTakePartInRelayGroups);
         RunStep(results, "A standard uncompressed frame goes out as one packet", PcmStandardFrameIsOnePacket);
