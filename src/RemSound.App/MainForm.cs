@@ -1060,8 +1060,6 @@ public sealed partial class MainForm : Form
         recordingController.ConnectedPeersProvider = () =>
             selectedPeerEndpoints
                 .Select(kv => (kv.Value.Address, selectedPeerLabels.GetValueOrDefault(kv.Key, kv.Value.Address.ToString())))
-                // Everyone in a relay group gets a track of their own, as a ticked peer does.
-                .Concat(SelectedRelayGroupMembers().Select(m => (m.Address.Address, MemberLabel(m))))
                 .ToList();
 
         // Load the machine-wide named-peers book and make every peer list resolve display names through
@@ -2445,8 +2443,6 @@ public sealed partial class MainForm : Form
             // the network AND through a server is otherwise two identical names in the plugin window (review, 2026-09-23).
             .Select(kv => (Address: kv.Value.Address, Name: selectedPeerLabels.GetValueOrDefault(kv.Key, kv.Value.Address.ToString())
                 + (RemSound.Core.RelayGroupClient.IsMemberAddress(kv.Value.Address) ? " (on the server)" : "")))
-            // Everyone in a relay group can be put on a track of their own, as a ticked peer can.
-            .Concat(SelectedRelayGroupMembers().Select(m => (Address: m.Address.Address, Name: MemberLabel(m))))
             .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
             .ThenBy(p => p.Address.ToString(), StringComparer.Ordinal)
             .Select(p => (p.Address, p.Name))
@@ -4676,12 +4672,6 @@ public sealed partial class MainForm : Form
             var label = selectedPeerLabels.GetValueOrDefault(id, key);
             desired.Add(new PanEqPeerItem(label, ep.Address, key));
         }
-        // Everyone in a relay group gets pan and EQ of their own, as a ticked peer does.
-        foreach (var member in SelectedRelayGroupMembers())
-        {
-            var key = member.Address.Address.ToString();
-            if (seen.Add(key)) desired.Add(new PanEqPeerItem(MemberLabel(member), member.Address.Address, key));
-        }
         desired = desired.OrderBy(d => d.Label).ThenBy(d => d.Key).ToList();
         var signature = string.Join("|", desired.Select(d => d.Key + "=" + d.Label));
         if (signature == lastPanEqPeerSignature) return;
@@ -5707,12 +5697,7 @@ public sealed partial class MainForm : Form
 
             s.Connected = isHealthy;
             s.Sending = isHealthy && sendingNow;
-            // A relay we are in a group on: its people arrive under addresses of their own, so it is "receiving" when any
-            // of them is, and the row says who they are.
-            var rowEndpoint = new System.Net.IPEndPoint(item.Peer.Address, item.Peer.AudioPort);
-            s.Receiving = isHealthy && receiver.IsRunning && (receiver.IsReceivingFromAddress(item.Peer.Address)
-                || RelayGroupMembers(rowEndpoint)?.Any(m => receiver.IsReceivingFromAddress(m.Address.Address)) == true);
-            s.Group = isHealthy ? DescribeRelayGroup(rowEndpoint) : null;
+            s.Receiving = isHealthy && receiver.IsRunning && receiver.IsReceivingFromAddress(item.Peer.Address);
             var routes = routesByName.GetValueOrDefault(ResolvePeerDisplayName(item.Peer));
             s.DuplicateRoute = routes.Network && routes.Server
                 ? RemSound.Core.RelayGroupClient.IsMemberAddress(item.Peer.Address)
@@ -5816,9 +5801,6 @@ public sealed partial class MainForm : Form
 
         lines.Add("Sending: " + DescribeSending(peer));
         lines.Add("Receiving your audio: " + (item.Status.Sending ? "yes" : "no"));
-        if (DescribeRelayGroup(new System.Net.IPEndPoint(peer.Address, peer.AudioPort)) is { } group)
-            lines.Add($"Through this relay: {group}");
-
         return string.Join(Environment.NewLine, lines);
     }
 
@@ -5828,15 +5810,13 @@ public sealed partial class MainForm : Form
     private List<RelayGroupClient.Member>? RelayGroupMembers(System.Net.IPEndPoint relay) =>
         relayGroup.IsInGroup(relay) ? relayGroup.Members.Where(m => m.Relay.Equals(relay)).ToList() : null;
 
-    /// <summary>Everyone in a group on a relay we have chosen. Each is a person of their own for pan and EQ, the DAW
-    /// plugin and split recording, exactly as a peer we ticked is.</summary>
-    private List<RelayGroupClient.Member> SelectedRelayGroupMembers() =>
-        relayGroup.Members.Where(m => selectedPeerEndpoints.Values.Any(ep => ep.Equals(m.Relay))).ToList();
-
     private static string MemberLabel(RelayGroupClient.Member member) =>
         string.IsNullOrWhiteSpace(member.Name) ? "someone not yet named, through the server" : member.Name;
 
-    /// <summary>"a group with Andre, Jonathan" for a relay we are in a group on; null for anything else.</summary>
+    /// <summary>"a group with Andre, Jonathan" for a relay we are in a group on; null for anything else. The connection
+    /// status box uses it on the server's own line: we ping the server for everybody on it, so that line is theirs.
+    /// (Until 2026-09-23 it also labelled a ticked row that WAS the server, from the short-lived design where the
+    /// server sat in your peer list; that went with it.)</summary>
     private string? DescribeRelayGroup(System.Net.IPEndPoint relay) =>
         RelayGroupMembers(relay) is not { } members ? null
         : members.Count == 0 ? "a group, nobody else here yet"
@@ -6228,7 +6208,6 @@ public sealed partial class MainForm : Form
         catch (Exception ex)
         {
             logFile.Event($"heartbeat failed to start: {ex.Message}");
-            logFile.Event($"heartbeat failed to start: {ex.Message}");
         }
 
         // Single-port mode: bind the audio receiver's listener socket immediately on connect,
@@ -6244,7 +6223,6 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
-            logFile.Event($"receiver listener failed to start: {ex.Message}");
             logFile.Event($"receiver listener failed to start: {ex.Message}");
         }
 

@@ -59,9 +59,6 @@ internal sealed class PeerLineStatus
     public string? CodecLabel;
     /// <summary>Round-trip ping ms from heartbeat. Null when not connected or pending.</summary>
     public int? RttMs;
-    /// <summary>When this peer is a relay we are in a group on: who else is in it ("a group with Andre, Jonathan").
-    /// Null for anything else.</summary>
-    public string? Group;
     /// <summary>Set when the SAME machine is also connected by another route — on your network and through the server
     /// at once. Two rows with the same name and the same sound arriving twice is baffling to read and wasteful to
     /// carry, so each row says that the other one exists. Null when there is only one way in. Ed, 2026-09-21.</summary>
@@ -117,7 +114,6 @@ internal sealed class PeerListItem
         if (direction is not null) parts.Add(direction);
 
         if (Status.RttMs is { } rtt) parts.Add($"{rtt}ms");
-        if (Status.Group is { Length: > 0 } group) parts.Add(group);
         if (Status.DuplicateRoute is { Length: > 0 } duplicate) parts.Add(duplicate);
 
         return $"{basePart} — {string.Join(", ", parts)}";
