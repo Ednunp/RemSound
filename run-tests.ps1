@@ -209,7 +209,9 @@ else { Fail "perf sanity flagged possible runaway (exit $($pf.Code))" }
 # ---- 5. COLD START + CLEAN CLOSE, against an isolated --config-dir so the real settings are never
 #         touched (smoke-test brief, safety rule 1 + baseline steps 3-4) ----
 Write-Host "`nCold start and clean close (isolated config):" -ForegroundColor Cyan
-$already = @(Get-Process RemSound -ErrorAction SilentlyContinue)
+# Session 0 is the lock-screen service, which runs RemSound.exe but never holds the app's one-copy lock, so it
+# does not stop this check. Counting it meant the check skipped on every machine with the service running.
+$already = @(Get-Process RemSound -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 })
 $script:coldStartSkipped = $false
 if ($already.Count -gt 0) {
     # Remembered for the verdict. This is the ONE check that launches the real program, so a run without it cannot

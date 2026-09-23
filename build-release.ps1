@@ -168,7 +168,8 @@ $gate = Join-Path $repo 'run-tests.ps1'
 # A release needs the WHOLE gate, and the gate's cold-start check - the only one that launches the real program -
 # cannot run while RemSound is open. Without it a main window that crashes on start can pass everything else (proven
 # on 2026-09-23 by breaking it on purpose). So a release waits until RemSound is closed.
-if (@(Get-Process RemSound -ErrorAction SilentlyContinue).Count -gt 0) {
+# Session 0 is the lock-screen service: it runs RemSound.exe but does not block the launch check, so it is not counted.
+if (@(Get-Process RemSound -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 }).Count -gt 0) {
     Write-Host ""
     Write-Host "RELEASE ABORTED - close RemSound first. The gate's launch check cannot run while it is open, and a release" -ForegroundColor Red
     Write-Host "needs every check to have run." -ForegroundColor Red
