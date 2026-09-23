@@ -71,7 +71,7 @@ ul, ol { padding-left: 1.4em; }
 <tr><td>4</td><td>Sound starts flowing. The other direction works exactly the same way, on its own &mdash; both of you can speak at the same time.</td></tr>
 </table>
 
-<p>There is no central server, no account, and nothing stored online. The sound goes straight from one computer to the other.</p>
+<p>There is no account and nothing stored online. The sound goes straight from one computer to the other &mdash; or, if you run a <a href="#servers">server</a> of your own, through that.</p>
 
 <div class="note">
 <strong>RemSound on Android (receiver):</strong> there is a companion app that lets a phone or tablet <em>receive</em> RemSound audio &mdash; handy for listening on the move. It's a separate community project built and maintained by Aryan Choudhary, who is a screen-reader user himself and has tuned the app for TalkBack; it is not part of RemSound and is not maintained by us. Get the signed app from its releases page (download the latest <strong>app-release.apk</strong>): <a href="https://github.com/aryanchoudharypro/RemSoundAndroid/releases">RemSound Android &mdash; Releases</a>.
@@ -105,7 +105,7 @@ ul, ol { padding-left: 1.4em; }
 
 <h2 id="profiles">3. Profiles</h2>
 
-<p>RemSound saves your whole setup &mdash; which devices are ticked, whether you're sending or receiving, your sound quality settings, delay targets, your ASIO driver choice, remembered peers, currently connected peers &mdash; into a single settings file. Each saved setup is called a <em>profile</em>. You choose which profile to load every time you start the program. You might keep one profile for &ldquo;morning podcast&rdquo; and another for &ldquo;evening jam session&rdquo;, each with a different mix of devices ticked, and switch between them in a couple of clicks. (Your keyboard shortcuts are the one thing that <em>isn't</em> saved per profile &mdash; they're shared across all your profiles; see <a href="#hotkeys">Global hotkeys</a>.)</p>
+<p>RemSound saves your whole setup &mdash; which devices are ticked, whether you're sending or receiving, your sound quality settings, delay targets, your ASIO driver choice, the peers you&rsquo;re connected to, and the server you were on and who you had ticked there &mdash; into a single settings file. Each saved setup is called a <em>profile</em>. You choose which profile to load every time you start the program. You might keep one profile for &ldquo;morning podcast&rdquo; and another for &ldquo;evening jam session&rdquo;, each with a different mix of devices ticked, and switch between them in a couple of clicks. (Your keyboard shortcuts are the one thing that <em>isn't</em> saved per profile &mdash; they're shared across all your profiles; see <a href="#hotkeys">Global hotkeys</a>.)</p>
 
 <h3>The startup picker</h3>
 
@@ -157,7 +157,7 @@ ul, ol { padding-left: 1.4em; }
 
 <pre>&lt;RemSound folder&gt;\user settings and logs\profiles\&lt;your computer name&gt;\&lt;profile name&gt;</pre>
 
-<p>(If you're upgrading from an older version, RemSound moves all of this into the <strong>user settings and logs</strong> folder automatically the first time you run this version, and tells you once that it's done it. Nothing is lost.) RemSound updates never touch that folder &mdash; so anything of your own in there stays safe when you update.</p>
+<p>RemSound updates never touch that folder &mdash; so anything of your own in there stays safe when you update.</p>
 
 <p>The built-in cue sounds are kept separately, in a <strong>default sounds</strong> folder alongside the program. Those are part of RemSound itself, so an update can refresh them &mdash; if a future version ships an improved default sound, you'll get it. Your own choices are never affected: a sound you pick for a cue with the <strong>Browse</strong> button is remembered as a link to your own file (wherever you keep it), and that's left exactly as you set it.</p>
 
@@ -176,7 +176,8 @@ ul, ol { padding-left: 1.4em; }
 <li><strong>The folder profiles are read from.</strong> You choose this with the Browse&hellip; button on the startup dialog. It's kept in a small settings file on that particular computer.</li>
 <li><strong>Live connection health figures</strong> &mdash; these describe what's happening right now, not your setup.</li>
 <li><strong>Anything auto-tune has learned</strong> &mdash; this is worked out fresh each session.</li>
-<li><strong>Window position and size</strong> &mdash; Windows itself remembers these.</li>
+$1
+<li><strong>Your Preferences</strong> &mdash; the colour theme, updates, logging, whether to accept connections from other peers and the rest of Options &rarr; Preferences are kept on this computer, and apply whichever profile you load. The one exception is the cue sounds, most of which travel with the profile (see <a href="#audio-cues">Audio cue sounds</a>). So are your keyboard shortcuts, and the remembered peers, servers and applications lists.</li>
 </ul>
 
 <h3 id="profile-lock">Locking a profile (read-only)</h3>
@@ -234,7 +235,7 @@ ul, ol { padding-left: 1.4em; }
 
 <table>
 <tr><th>Tab</th><th>What it's for</th></tr>
-<tr><td><strong>Connectivity</strong></td><td>Connected, discovered and remembered peers. Adding a peer by address. A connection status read-out.</td></tr>
+<tr><td><strong>Connectivity</strong></td><td>Connected, discovered and remembered peers. Connecting to a server, and the people on it. Adding a peer by address. A connection status read-out.</td></tr>
 <tr><td><strong>Audio inputs and outputs</strong></td><td>The ASIO driver picker (when an ASIO driver is installed), the Receive audio and Send my audio checkboxes, and all the device lists. Choosing a real driver in the picker brings up the ASIO device lists alongside the ordinary Windows ones; choosing <em>(none)</em> hides them.</td></tr>
 <tr><td><strong>Volume, pan and EQ for peers</strong> (optional)</td><td>Shape each connected peer's sound on its own &mdash; their volume, pan (left/right) and EQ. Shown by default; untick &ldquo;Show the volume, pan and EQ for peers tab&rdquo; on the Appearance tab of Preferences to hide it. See <a href="#pan-eq">Volume, pan and EQ for peers tab</a>.</td></tr>
 <tr><td><strong>Audio profile</strong></td><td>Codec, packet size, jitter buffer, continuous auto-tune, buffer smoothness, artefact sound. Split into an <em>Audio send parameters</em> group and an <em>Audio receive parameters</em> group.</td></tr>
@@ -397,7 +398,7 @@ ul, ol { padding-left: 1.4em; }
 
 <table>
 <tr><th>Tab</th><th>What's on it</th></tr>
-<tr><td><strong>General</strong></td><td>The profiles folder. <strong>Auto-save the current profile, unless it's locked (Alt+A)</strong> &mdash; a list of intervals, Never by default. Accept remote volume commands. UPnP router opening. <strong>Accept connections from other peers (Alt+N)</strong>, described <a href="#accept-connections">below</a>. And three buttons that empty the shared address books: <strong>Clear remembered peers list (Alt+P)</strong>, <strong>Clear remembered servers list (Alt+R)</strong> and <strong>Clear remembered applications list (Alt+L)</strong>. Each asks you to confirm. Those lists are shared by all your profiles, so clearing one empties it everywhere.</td></tr>
+<tr><td><strong>General</strong></td><td>The profiles folder. <strong>Auto-save the current profile, unless it's locked (Alt+A)</strong> &mdash; a list of intervals, Never by default. Accept remote volume commands. UPnP router opening. <strong>Accept connections from other peers (Alt+N)</strong>, described <a href="#accept-connections">below</a>. And three buttons that empty the shared address books: <strong>Clear remembered peers list (Alt+P)</strong>, <strong>Clear remembered servers list (Alt+S)</strong> and <strong>Clear remembered applications list (Alt+L)</strong>. Each asks you to confirm. Those lists are shared by all your profiles, so clearing one empties it everywhere.</td></tr>
 <tr><td><strong>Appearance</strong></td><td><strong>Colour theme (Alt+T)</strong> &mdash; Match Windows, Light or Dark. It changes how the window looks, takes effect next launch, and makes no difference to a screen reader. &ldquo;Show the volume, pan and EQ for peers tab&rdquo;, on by default. <strong>Tab order (Alt+O)</strong> &mdash; the window's tabs, with <strong>Move up (Alt+U)</strong> and <strong>Move down (Alt+N)</strong>. And two ticks to show or hide the <strong>Discovered (Alt+D)</strong> and <strong>Remembered (Alt+R)</strong> peer lists on the Connectivity tab.</td></tr>
 <tr><td><strong>Audio cues</strong></td><td>The cue list and the sound each one plays. See <a href="#audio-cues">Audio cue sounds</a>.</td></tr>
 <tr><td><strong>Startup behaviour</strong></td><td>Start minimised, start with Windows, start with a particular profile.</td></tr>
@@ -539,7 +540,7 @@ ul, ol { padding-left: 1.4em; }
 <tr><td><strong>Packet size</strong></td><td>Alt+P</td><td><em>Standard</em> (the default) or <em>Small</em> (for a local network only). Smaller packets save a couple of milliseconds of delay on the sending side, but they double how many packets are sent.</td></tr>
 </table>
 
-<p>RemSound always <strong>locks its sending timing to the sound device's own hardware clock</strong> &mdash; this used to be a &ldquo;Lock to audio clock&rdquo; checkbox, but it is now always on, because turning it off only ever added delay. There is nothing to set.</p>
+<p>RemSound always <strong>times its sending from the sound device's own hardware clock</strong>. There is nothing to set; see <a href="#audio-clock">Locking to the audio clock</a>.</p>
 
 <h3>Audio receive parameters</h3>
 
@@ -547,7 +548,7 @@ ul, ol { padding-left: 1.4em; }
 
 <table>
 <tr><th>Control</th><th>Shortcut</th><th>What it does</th></tr>
-<tr><td><strong>ASIO jitter buffer in milliseconds</strong></td><td>Alt+I</td><td>(Only when an ASIO driver is chosen.) A small up/down number control. It sets the target amount of sound to keep buffered for the ASIO path. Default 10 ms. ASIO can sustain very low values, but going below the network's real-world jitter level (typically 15&ndash;25 ms) causes constant tiny corrections that you can hear &mdash; pick 25 ms as a safe floor unless both computers are on the same wired network or the same machine.</td></tr>
+<tr><td><strong>ASIO jitter buffer in milliseconds</strong></td><td>Alt+I</td><td>(Only when an ASIO driver is chosen.) A small up/down number control. It sets the target amount of sound to keep buffered for the ASIO path. It starts at 10 ms, which suits two computers on the same wired network or the same machine. Over anything else, going below the network&rsquo;s real-world jitter (typically 15&ndash;25 ms) causes constant tiny corrections that you can hear, so start at 25 ms and come down from there &mdash; or turn on auto-tune and let it find the level.</td></tr>
 <tr><td><strong>Continuous auto-tune ASIO jitter buffer</strong></td><td>Alt+T</td><td>(Only when an ASIO driver is chosen.) A checkbox. It nudges the ASIO delay target as the ASIO path's jitter changes. It works independently of the WASAPI toggle.</td></tr>
 <tr><td><strong>WASAPI jitter buffer in milliseconds</strong> (called &ldquo;Audio jitter buffer in milliseconds&rdquo; when there's no ASIO driver)</td><td>Alt+W (Alt+L when no ASIO driver)</td><td>A small up/down number control. It sets the target amount of sound to keep buffered for the WASAPI path (or the only path, in WASAPI-only setups). Smaller means less delay but more clicks. Most people want 20&ndash;80 ms.</td></tr>
 <tr><td><strong>Continuous auto-tune WASAPI jitter buffer</strong> (called &ldquo;Continuous auto-tune jitter buffer&rdquo; when there's no ASIO driver)</td><td>Alt+Y (Alt+T when no ASIO driver)</td><td>A checkbox. When it's on, RemSound nudges the WASAPI delay value automatically as the network changes. The companion interval combo box (<strong>Alt+N</strong>) sets how often it re-checks: 3, 5, 10, 15, or 30 seconds. The combo&rsquo;s label follows what you are actually using: &ldquo;Auto-tune interval for jitter buffer&rdquo; when only one kind of output is ticked (WASAPI only, or ASIO only), and &ldquo;Auto-tune interval for WASAPI and ASIO jitter buffer&rdquo; when you have both ticked, because that one timer drives both paths' auto-tuning. Each path still settles at whatever target its own calculation chooses; only the timing of the re-checks is shared.</td></tr>
@@ -612,7 +613,7 @@ ul, ol { padding-left: 1.4em; }
 <li><strong>Komplete Audio ASIO Driver</strong> &mdash; for Native Instruments interfaces.</li>
 <li><strong>Focusrite USB ASIO</strong> &mdash; for Scarlett, Clarett and Red.</li>
 <li><strong>RME ASIO</strong> &mdash; for Babyface, Fireface and UCX.</li>
-<li><strong>Realtek ASIO</strong> &mdash; bundled with some Realtek drivers. <em>Best avoided</em> &mdash; it's a generic driver that can grab whatever Windows considers the default device, which often clashes with your screen reader's sound.</li>
+<li><strong>Realtek ASIO</strong> &mdash; bundled with some Realtek drivers. <em>Best avoided</em>; see below.</li>
 </ul>
 
 <h3>How the driver picker decides</h3>
@@ -652,13 +653,13 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 
 <h2 id="peers">11. Peers &mdash; finding and connecting</h2>
 
-<p>A &ldquo;peer&rdquo; is another computer running RemSound that you want to talk to. You manage peers on the <strong>Connectivity</strong> tab. It has three lists, all of them checkable:</p>
+<p>A &ldquo;peer&rdquo; is another computer running RemSound that you want to talk to. You manage peers on the <strong>Connectivity</strong> tab. It has three lists, all of them checkable, and a fourth while you&rsquo;re on a server:</p>
 
 <table>
 <tr><th>List</th><th>Contents</th><th>What ticking does</th></tr>
 <tr><td><strong>Connected peers</strong></td><td>People you currently have sound flowing with.</td><td>Unticking disconnects.</td></tr>
 <tr><td><strong>Discovered peers not on a server</strong></td><td>People RemSound has heard from in the last few seconds &mdash; either from an announcement sent across your local network, or from a direct announcement (which is how it works over Tailscale and other VPNs).</td><td>Connects you to that peer. Sound starts flowing both ways.</td></tr>
-<tr><td><strong>Remembered peers</strong></td><td>People you've connected to before, plus any addresses you've typed in by hand. This list is kept between sessions.</td><td>Connects to that remembered peer if they're online (and adds them as a manual connection if discovery hasn't found them yet).</td></tr>
+$1<tr><td><strong>Discovered peers on server</strong></td><td>Only while you&rsquo;re on a server: the people on it who share your password and whom you haven&rsquo;t connected to yet. See <a href="#servers">Servers</a>.</td><td>Connects you to them. They move to Connected peers.</td></tr>
 </table>
 
 <p>There's also the <strong>Add peer by IP (Alt+A)</strong> button, which opens a small box for a computer name or address. It's useful for a first connection over a VPN, where discovery hasn't reached the other computer yet.</p>
@@ -680,7 +681,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <p>With the box left unticked, RemSound behaves as it always has: the profile remembers exactly what you ticked, reconnects by that name or address next time, and quietly follows a peer that genuinely moves to a new address.</p>
 
 <h3>You only hear peers you've ticked</h3>
-<p>Even if a peer is sending sound your way, you won't hear it until you've ticked their checkbox. This is deliberate &mdash; connecting is a step where you give your consent. A peer's name appears in Discovered the moment they come online, but they can't make any sound on your speakers until you say yes.</p>
+<p>Even if a peer is sending sound your way, you won't hear it until you've ticked their checkbox. This is deliberate &mdash; connecting is a step where you give your consent. A peer&rsquo;s name appears in Discovered the moment they come online, but they can&rsquo;t make any sound on your speakers until you say yes &mdash; or, if you&rsquo;ve set <a href="#accept-connections">Accept connections from other peers</a> to Automatically, until they tick you, which is you having said yes in advance.</p>
 
 <h3>Connection health</h3>
 <p>For each connected peer, the status read-out at the bottom of the window shows a small health note: the latest round-trip time in milliseconds, or <strong>pending</strong>, <strong>stale</strong> or <strong>unreachable</strong> if the regular check-in messages have stopped. (Round-trip time is how long sound takes to travel to the other computer and back.) RemSound plays a connect cue (a short sound) when a peer becomes healthy and a disconnect cue when one becomes unreachable. You can silence both cues using <strong>Audio cue sounds</strong> in the Preferences dialog (Options &rarr; Preferences, or Ctrl+P).</p>
@@ -692,8 +693,9 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <table>
 <tr><th>Channel</th><th>Purpose</th><th>Default</th></tr>
 <tr><td>Audio</td><td>The actual sound, sent straight from one computer to the other. The regular health check-ins use this same channel too &mdash; one channel, one firewall rule.</td><td>47830</td></tr>
-<tr><td>Discovery</td><td>&ldquo;I'm here&rdquo; announcements every 1.5 seconds, so peers can find each other.</td><td>47821</td></tr>
-</table>
+$1
+
+<p>You may also see <strong>47831</strong> in use. That is RemSound talking to its own DAW plugin, inside your computer only &mdash; it never goes on the network, so never open it in a firewall.</p>
 
 <p>One audio channel number is used for everything &mdash; Tailscale, local network connections, and any server. You never need to type a channel number after an address; the default is assumed. Both sides of a connection do need to use the same audio channel number.</p>
 
@@ -707,7 +709,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 
 <p>Once you're on, the same button in that window says <strong>Disconnect</strong>, and the button on the tab says <strong>Disconnect from or change server</strong>. To move to a different server, open the window, press Disconnect, type the new address and press Connect &mdash; the button goes back to Connect as soon as you've left. Close shuts the window; it never undoes anything, because everything happens when you press a button, not when you leave.</p>
 
-<p><strong>Who you see.</strong> While you're on a server, a list appears on the Connectivity tab called <strong>Discovered peers on server (Alt+0)</strong>, right under the ordinary <strong>Discovered peers not on a server (Alt+D)</strong> list. It's only there while you're connected. It shows the people on that server who have the same password as you &mdash; nobody else, ever. RemSound says so the first time you connect, with a &ldquo;don't show this message again&rdquo; tick on the message.</p>
+<p><strong>Who you see.</strong> While you're on a server, a list appears on the Connectivity tab called <strong>Discovered peers on server (Alt+0)</strong>, right under the ordinary <strong>Discovered peers not on a server (Alt+D)</strong> list. It's only there while you're connected. It shows the people on that server who have the same password as you &mdash; nobody else, ever. RemSound says so the first time you connect, with a &ldquo;don't show this message again&rdquo; tick on the message. If your profile has no password you&rsquo;ll see nobody at all, because a server puts people together by their password; the line beside the server button says so. And if the server doesn&rsquo;t answer within about ten seconds, that line says it isn&rsquo;t answering.</p>
 
 <p><strong>Ticking.</strong> Tick people in that list exactly as you tick anyone else. As always you both have to tick each other before any sound flows; until they tick you back, the line beside the Connect button says you're waiting for them. Everyone you tick is a peer like any other: their own volume, pan and EQ, their own recording track, their own place in the DAW plugin. In your peer lists they read as &ldquo;their name (on the server)&rdquo;, so you can tell them apart from the same person reached over your network.</p>
 
@@ -881,7 +883,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 
 <p>The saving is small &mdash; at most a few milliseconds end to end. Small packets are useful when you and your collaborator are on the same local network and want to chase every last millisecond. For any internet connection it's a false economy, because doubling how many packets are sent also doubles the chance of running into jitter at the wrong moment, which you hear as clicks.</p>
 
-<h3>Locking to the audio clock (automatic)</h3>
+<h3 id="audio-clock">Locking to the audio clock (automatic)</h3>
 
 <p>RemSound always ties its sending timing to the sound device's own hardware clock, instead of letting Windows decide the pace. This used to be a <strong>Lock to audio clock</strong> checkbox that was off by default; it is now always on and there is nothing to set, because turning it off only ever added delay. On a WASAPI-only setup the sender takes its timing from the WASAPI capture; when an ASIO driver is also in use, both paths tighten independently.</p>
 
@@ -969,7 +971,9 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <tr><td>Alt+R</td><td>Focus the Remembered peers list</td></tr>
 <tr><td>Alt+A</td><td>Add peer by IP</td></tr>
 <tr><td>Alt+L</td><td>Toggle Lock to these exact peer addresses</td></tr>
-<tr><td>Alt+S</td><td>Focus the Connection status read-out</td></tr>
+<tr><td>Alt+0</td><td>Focus the Discovered peers on server list (only while you&rsquo;re on a server)</td></tr>
+<tr><td>Alt+N</td><td>Connect to server, or Disconnect from or change server</td></tr>
+$1
 </table>
 
 <p>(The logging controls &mdash; Enable logs, Write logs now and the log-folder housekeeping &mdash; are on the Logging tab of the Preferences dialog; reach it via Options &rarr; Preferences or Ctrl+P, then use Alt+L / Alt+W within the dialog.)</p>
@@ -1065,7 +1069,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 
 <h2 id="hotkeys">16. Global hotkeys (work even when minimised)</h2>
 
-<p>Your keyboard shortcuts are <strong>shared across all your profiles</strong> — set one once and it works on every profile, and stays put when you switch between them. (Before version 4.4 they were saved separately inside each profile, so a shortcut set on one profile wouldn't work on another. If you're upgrading from before version 4.4, the first time you run the new version RemSound offers to <strong>bring your shortcuts across</strong>: it shows a list of your profiles, and you pick the one you set your shortcuts up in &mdash; or choose to start fresh with the defaults.)</p>
+<p>Your keyboard shortcuts are <strong>shared across all your profiles</strong> — set one once and it works on every profile, and stays put when you switch between them.</p>
 
 <p>You set these up in the Keyboard shortcuts dialog (Ctrl+K, or Options &rarr; Keyboard shortcuts). The dialog is a single list of every hotkey you can set: <strong>Enter</strong> sets the highlighted row, and <strong>Del</strong> &mdash; or the <strong>Clear this shortcut</strong> button &mdash; clears it (back to <em>not set</em>). When you're setting a shortcut, you can press <strong>Delete</strong> inside that box to leave it unassigned. <strong>Escape</strong> or the Close button closes the dialog. The defaults:</p>
 
@@ -1233,14 +1237,14 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <p>Every cue starts switched on, using its first sound. <strong>"(none)" is how you silence a cue</strong> &mdash; there are no separate tickboxes any more. Your choices are remembered for next time (per-event cues travel with the active profile; the app-level cues like startup and minimise are remembered for the whole installation).</p>
 
-<p>The tick settings are <strong>saved with the active profile</strong>, so different profiles can have different combinations of cues on. For example, a &ldquo;quiet listening&rdquo; profile might have all cues off, while a &ldquo;live monitoring&rdquo; profile keeps them on. When you save the profile (Ctrl+S), the new settings travel with it.</p>
+<p>Which cues are on is <strong>saved with the active profile</strong>, so different profiles can have different combinations of cues on. For example, a &ldquo;quiet listening&rdquo; profile might have all cues off, while a &ldquo;live monitoring&rdquo; profile keeps them on. When you save the profile (Ctrl+S), the new settings travel with it.</p>
 
 <h3>Previewing and choosing a different sound</h3>
 
 <p>Below the list are two buttons that act on whichever cue is currently highlighted in the list:</p>
 
 <ul>
-<li><strong>Play [cue name] (Alt+P)</strong> &mdash; previews the cue's currently-configured sound through your default Windows output, so you can hear it without having to trigger the event. Works regardless of whether the cue is ticked (so you can listen before deciding to enable it).</li>
+<li><strong>Play [cue name] (Alt+P)</strong> &mdash; previews the cue's currently-configured sound through your default Windows output, so you can hear it without having to trigger the event. Works whether the cue is switched on or set to (none), so you can listen before deciding.</li>
 <li><strong>Browse for [cue name]&hellip; (Alt+B)</strong> &mdash; opens a Windows file picker so you can choose your own WAV file for this cue, replacing the default. RemSound only accepts <code>.wav</code> files. Once picked, the button's label changes to &ldquo;(custom)&rdquo; to remind you the cue is using your file rather than the default. The next time the event fires, your custom sound plays.</li>
 </ul>
 
@@ -1270,7 +1274,6 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <p>Because these are RemSound's own built-in sounds, an update can refresh them &mdash; if a future version ships an improved default, you'll get it. To use a sound of your <em>own</em> for a cue, don't drop a file into <code>default sounds</code> (an update would overwrite it); instead use the <strong>Browse</strong> button, which links the cue to your file wherever you keep it. That link is remembered and never touched by an update, so your chosen sound always stays put.</p>
 
-<p>If a cue's WAV file is missing &mdash; either the default file doesn't exist or a custom path points at a file you've since deleted &mdash; the cue stays silent rather than producing an error. RemSound logs a note in the diagnostic log (if logging is on) so you can see what happened.</p>
 
 <div class="note">
 <strong>Tip for sound designers:</strong> the defaults are deliberately short and simple so they stay out of the way. If you'd like the cues to feel more in-character with a particular profile, the custom-sound feature is designed for exactly that. Keep WAV files short (well under a second usually works best) so cues don't overlap with each other on a busy day.
@@ -1389,7 +1392,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <h3>Starting and stopping</h3>
 
-<p>There are four ways to start or stop a recording:</p>
+<p>There are three ways to start or stop a recording, and closing RemSound stops one for you:</p>
 <ul>
 <li><strong>Ctrl+R</strong> from anywhere in the main window &mdash; a toggle. The menu item text switches between &ldquo;Start recording&rdquo; and &ldquo;Stop recording&rdquo; to show the current state.</li>
 <li><strong>Record &rarr; Start recording</strong> (or Stop, when one is in progress).</li>
@@ -1557,11 +1560,9 @@ RemSound.exe --connect 192.168.1.42
 
 <p>The top of the Service menu always shows the current state: not installed, installed and running, or installed and stopped.</p>
 
-<h3>Good to know</h3>
-
-<h3>Good to know</h3>
+$1
 <ul>
-<li>The service sends to the exact peer addresses you list in its profile (a computer on your network, or a reachable address across the internet). Automatic peer discovery and hole-punching are handled by the normal app, not the service.</li>
+<li>The service sends to the exact peer addresses you list in its profile (a computer on your network, or a reachable address across the internet), and to the people it has ticked on its server, if its profile names one. It does not go looking for peers the way the normal app does.</li>
 <li>Because the service runs even when you are not logged in, it sends from the system account. If Windows Firewall ever prompts about RemSound, allow it so the audio can get out.</li>
 <li>When RemSound updates itself, the service updates itself too, automatically &mdash; it notices the newer version, copies it in and restarts onto it on its own, with no prompt and nothing for you to do. (This happens on the service's own schedule shortly after the app updates; nothing breaks in the meantime.)</li>
 <li>If two computers should each stream to the other unattended, install the service on both.</li>
@@ -1569,7 +1570,7 @@ RemSound.exe --connect 192.168.1.42
 
 <h2 id="daw-plugin">25. The DAW plugin</h2>
 
-<p>RemSound can also work <em>inside</em> your music software. The plugin puts one person on one track: a track you are sending goes out to your peers, and a peer you are receiving arrives on a track of their own, where you can record them, shape them and mix them like anything else.</p>
+<p>RemSound can also work <em>inside</em> your music software. Put the plugin on a track and it can send that track to your peers, bring peers onto that track, or both at once. Peers who arrive on a track can be recorded, shaped and mixed like anything else, and you can have one person per track or several people on the same one.</p>
 
 <p>It is a VST3 plugin, so it works in Reaper, Cubase, Studio One and any other music software that loads VST3 plugins.</p>
 
@@ -1581,22 +1582,45 @@ RemSound.exe --connect 192.168.1.42
 
 <h3>How you use it</h3>
 
-<p>Keep RemSound itself open. RemSound holds the connection to your peers; the plugin asks it for audio. Your password, your peers and your audio settings all stay in RemSound, so the plugin has almost nothing to set up.</p>
+<p>Keep RemSound itself open. RemSound holds the connection to your peers; the plugin asks it for audio. Your password, your peers and your audio settings all stay in RemSound, so the plugin has little to set up.</p>
 
-<p>Add the plugin to a track and its window has four things:</p>
+<p>The plugin window has eight things, in this order:</p>
 
-<ol>
-<li><strong>What this plugin does</strong> &mdash; send this track to your peers, or receive one peer onto this track.</li>
-<li><strong>Peer to receive from</strong> &mdash; who arrives on this track. The list is RemSound's own peer list and keeps itself up to date, so somebody who connects while you are working turns up here without reopening anything.</li>
-<li><strong>Active</strong> &mdash; untick it to hand that person back to RemSound's normal output. Handy if your music software makes bypass awkward to reach from the keyboard.</li>
-<li><strong>Status</strong> &mdash; what is actually happening, including whether RemSound is answering at all.</li>
-</ol>
+<table>
+<tr><th>Control</th><th>Shortcut</th><th>What it does</th></tr>
+<tr><td><strong>Send this track to my peers</strong></td><td>Alt+N</td><td>Sends what is on this track to everyone you are connected to in RemSound, as a stream of its own alongside anything RemSound itself is sending.</td></tr>
+<tr><td><strong>Receive peers onto this track</strong></td><td>Alt+R</td><td>Brings the people ticked below onto this track.</td></tr>
+<tr><td><strong>Receive all peers, including whoever joins later</strong></td><td>Alt+J</td><td>Puts everybody you are connected to on this track, and anyone who connects later arrives on it by themselves. The track follows the session.</td></tr>
+<tr><td><strong>Peers to receive</strong></td><td>Alt+P</td><td>Tick the people you want on this track. It is RemSound's own list of connected peers and keeps itself up to date, so somebody who connects while you are working turns up here without reopening anything. Somebody reached through a server reads &ldquo;(on the server)&rdquo;.</td></tr>
+<tr><td><strong>Send level in decibels</strong></td><td>Alt+L</td><td>The level of what this track sends. 0 is unity, and it runs from &minus;60 to +12. All the way down is silence, not just quiet.</td></tr>
+<tr><td><strong>Receive level in decibels</strong></td><td>Alt+V</td><td>The same, for what arrives on this track.</td></tr>
+<tr><td><strong>Active</strong></td><td>Alt+A</td><td>Untick it to switch both directions off without forgetting which ones you had on; tick it again and the plugin carries on exactly as it was. Handy if your music software makes bypass awkward to reach from the keyboard.</td></tr>
+<tr><td><strong>Plugin status</strong></td><td>Alt+S</td><td>What is actually happening, including whether RemSound is answering at all.</td></tr>
+</table>
 
-<p>For two people on two tracks, add the plugin twice and choose a different person in each.</p>
+<p>Sending and receiving both start switched off. A plugin you have just put on a track does nothing until you tell it to, so it can never start sending a track to people by surprise.</p>
+
+<p>The track's own sound always passes through. Receiving adds your peers on top of whatever is already on the track; it never silences it.</p>
+
+<p>A track that sends and receives at the same time sends only its own sound, never the people it is receiving, so nobody hears themselves come back.</p>
+
+<h3>One person per track, or several</h3>
+
+<p>For recording, one person per track is usually what you want at the mix: put the plugin on several tracks and tick a different person in each. For listening, tick several people on one track and they arrive mixed together &mdash; say, three people talking while they listen to your session. The same person can be on two tracks at once, and both get their full sound.</p>
+
+<p>Each person's own volume, pan and EQ are set in RemSound, on the Volume, pan and EQ for peers tab. The plugin's two levels are for the track as a whole.</p>
+
+<h3>Why the plugin has its own levels</h3>
+
+<p>In every music program the effects on a track come before its fader. So the fader changes what you hear from the track, but not one sample of what the plugin sends. Two tracks sending at full level can add up to more than full scale at the other end, and only the plugin's send level can bring them down.</p>
 
 <h3>You never hear anyone twice</h3>
 
-<p>When a plugin takes a peer onto a track, that person stops coming out of RemSound's own output. You hear them once, through your music software, where you want them. Let the track go &mdash; switch it to sending, untick Active, remove the plugin, or close your music software &mdash; and they come straight back to RemSound's output on their own. There is nothing to set.</p>
+<p>When a track receives somebody, that person stops coming out of RemSound's own output. You hear them once, through your music software, where you want them. Let the track go &mdash; untick <strong>Receive peers onto this track</strong>, untick them in <strong>Peers to receive</strong>, untick <strong>Active</strong>, remove the plugin, or close your music software &mdash; and they come straight back to RemSound's output on their own. There is nothing to set.</p>
+
+<h3>Saved with your project</h3>
+
+<p>Each plugin remembers what it was doing, its two levels, and who it was receiving. People are remembered by their address, so a saved project finds them again the next time you open it. Somebody who is not connected when you open the project stays ticked, and arrives on the track the moment they connect again at the same address.</p>
 
 <h3>Pan and EQ</h3>
 
@@ -1623,8 +1647,9 @@ RemSound.exe --connect 192.168.1.42
 
 <ul>
 <li>Your music software can run at any sample rate. RemSound converts at the boundary, so nobody arrives at the wrong pitch.</li>
-<li>Every control in the plugin window is a standard Windows control, so a screen reader reads it the same way it reads RemSound itself. If your host makes the plugin window hard to reach, the same three choices are also plugin parameters, which every DAW lists and Reaper with OSARA reads out.</li>
-<li>Your music software cannot compensate for the network delay automatically, so a track recorded through the plugin sits a little late and needs nudging back. This is a limit of how VST3 plugins report themselves, not something RemSound can set.</li>
+<li>Every control in the plugin window is a standard Windows control, so a screen reader reads it the same way it reads RemSound itself.</li>
+<li>If your host makes the plugin window hard to reach, everything in it is also a plugin parameter, which every DAW lists and Reaper with OSARA reads out: Send this track to your peers, Receive a peer onto this track, Receive all peers, Send level, Receive level and Active. Choosing people works as a cursor and a tick: <strong>Peer in list</strong> moves along RemSound's list of connected peers, and <strong>Receive the peer in list</strong> says whether the person it is on is on this track. Moving the cursor never changes anything by itself.</li>
+<li>Your music software cannot compensate for the network delay by itself, so a track recorded through the plugin sits a little late and needs nudging back. VST3 has a way for a plugin to report its delay, but the plugin framework RemSound is built on does not offer it yet, so the plugin cannot tell your host how late it is.</li>
 </ul>
 
 <h2 id="troubleshooting">26. Troubleshooting</h2>
@@ -1673,7 +1698,7 @@ RemSound.exe --connect 192.168.1.42
 </ul>
 
 <h3>A peer rebooted or changed address and the sound didn't come back</h3>
-<p>RemSound keeps trying the address you connected to, so when a peer comes back at the same address &mdash; the usual case after a reboot &mdash; the sound returns on its own within a few seconds, with nothing for you to do. If the peer comes back at a <em>different</em> address (a new DHCP lease, say), reconnect to it: pick it again from <strong>Discovered peers not on a server</strong>, or enter its new address with <strong>Add peer by IP</strong> (Connectivity tab, Alt+A). If the sound still doesn't return, the peer is genuinely unreachable &mdash; off, asleep, or a firewall is blocking the path.</p>
+<p>RemSound keeps trying the address you connected to, so when a peer comes back at the same address &mdash; the usual case after a reboot &mdash; the sound returns on its own within a few seconds, with nothing for you to do. If the peer comes back at a <em>different</em> address (a new DHCP lease, say), RemSound follows it there on its own, within a few seconds of hearing its announcement &mdash; unless the profile is <a href="#lock-addresses">locked to exact addresses</a>, or the peer is somewhere its announcements can&rsquo;t reach you (over a VPN with its old address remembered, say). Then reconnect by hand: pick it again from <strong>Discovered peers not on a server</strong>, or enter its new address with <strong>Add peer by IP</strong> (Connectivity tab, Alt+A). If the sound still doesn't return, the peer is genuinely unreachable &mdash; off, asleep, or a firewall is blocking the path.</p>
 
 <h3>RemSound closed unexpectedly</h3>
 <p>If RemSound ever closes on its own, it writes a small crash file into your logs folder (the RemSound folder &rarr; <strong>user settings and logs</strong> &rarr; <strong>logs</strong>, named <code>crash-</code> followed by the date and time). There's nothing you need to do with it &mdash; but if it happens, sending that file along with your report records what went wrong, so it can be tracked down and fixed.</p>
@@ -1727,7 +1752,7 @@ RemSound.exe --connect 192.168.1.42
 <tr><td>NAT</td><td>Short for &ldquo;Network Address Translation&rdquo;. The way your router lets several computers share a single internet connection &mdash; one public address on the outside, lots of private addresses on the inside. Most home networks use NAT, which is why you usually need port forwarding (or UPnP, or a VPN) for two computers in different places to reach each other directly.</td></tr>
 <tr><td>Carrier-grade NAT</td><td>An extra layer of NAT that some internet providers (especially on mobile broadband and some cable connections) put in between your router and the rest of the internet. Your home router opens a port fine, but the provider's NAT in front of it still blocks incoming connections. RemSound's UPnP status line warns you when this is the case &mdash; the way through it is a VPN like Tailscale, or a server you run yourself.</td></tr>
 <tr><td>Auto-tune</td><td>RemSound automatically adjusting the jitter buffer based on how evenly packets are arriving. Off by default; turn it on with the Continuous auto-tune checkbox on the Audio profile tab.</td></tr>
-<tr><td>Profile</td><td>A saved snapshot of every RemSound setting and choice &mdash; device ticks, send / receive states, codec, jitter buffer, peers, ASIO driver choice, the lot. (Keyboard shortcuts are the exception &mdash; they're shared across all profiles, not saved per profile.) Stored as one settings file. You pick one at startup, and can switch with File &rarr; Open profile.</td></tr>
+<tr><td>Profile</td><td>A saved snapshot of every RemSound setting and choice &mdash; device ticks, send / receive states, codec, jitter buffer, peers, ASIO driver choice, the lot. (Keyboard shortcuts and Preferences are the exception &mdash; they&rsquo;re kept on the computer and shared by every profile.) Stored as one settings file. You pick one at startup, and can switch with File &rarr; Open profile.</td></tr>
 <tr><td>New profile</td><td>An entry in the startup profile picker that begins a session with all the defaults &mdash; nothing ticked, no peers, no saved name. A clean starting point for a new profile, or for a one-off session you don't plan to save.</td></tr>
 <tr><td>Lock to audio clock</td><td>A sending-side timing mode that takes its timing straight from the sound device's hardware clock instead of from Windows. Removes a few milliseconds of wobble at tight latency targets. RemSound now does this always &mdash; it used to be a checkbox on the Audio profile tab, but it is on permanently and no longer a setting.</td></tr>
 <tr><td>Concealment</td><td>A receiving-side feature that fills brief gaps in the playback reserve with a small noise burst (the default) or an obvious click. You choose which on the Audio profile tab, in the <em>Artefact sound type</em> list. Opus also has its own repair of lost packets on top of this.</td></tr>
