@@ -164,25 +164,38 @@ verify_release_signature() {
 # Fetch the releases list and pick the latest server-tag release.
 # Outputs four lines: tag, asset_url, asset_name, signature_url (empty when the
 # release has no "<asset_name>.sig"). Exits non-zero on no match.
+#
+# The list goes through a FILE. It was handed to python as one command-line argument, and Linux refuses any single
+# argument over 128 KB: once the releases (each with its notes) grew past that, the check would have failed every hour
+# and said only "no upgrade attempted" (found 2026-09-25). A hundred releases a page, not thirty, so a server release is
+# not missed behind the app's own releases in the same repository.
 get_latest_release() {
-    local json
-    if ! json="$(curl --fail --silent --show-error --max-time 30 \
-        -H "Accept: application/vnd.github+json" \
-        "https://api.github.com/repos/${REPO}/releases?per_page=30" 2>&1)"; then
-        log "ERROR: failed to query GitHub releases: $json"
+    local list rc
+    if ! list="$(mktemp)"; then
+        log "ERROR: could not make a temporary file for the release list"
         return 2
     fi
+    if ! curl --fail --silent --show-error --max-time 30 \
+        -H "Accept: application/vnd.github+json" \
+        -o "$list" \
+        "https://api.github.com/repos/${REPO}/releases?per_page=100" 2>"$list.err"; then
+        log "ERROR: failed to query GitHub releases: $(cat "$list.err" 2>/dev/null)"
+        rm -f "$list" "$list.err"
+        return 2
+    fi
+    rm -f "$list.err"
 
     REPO="$REPO" TAG_PREFIX="$TAG_PREFIX" ASSET_PATTERN="$ASSET_PATTERN" \
-    python3 - "$json" <<'PY'
+    python3 - "$list" <<'PY'
 import json, os, re, sys
 
-raw = sys.argv[1] if len(sys.argv) > 1 else ""
+path = sys.argv[1] if len(sys.argv) > 1 else ""
 prefix = os.environ.get("TAG_PREFIX", "server-")
 asset_re = re.compile(os.environ.get("ASSET_PATTERN", r"remsound-server-.*\.tar\.gz$"))
 
 try:
-    releases = json.loads(raw)
+    with open(path, encoding="utf-8") as f:
+        releases = json.load(f)
 except Exception as exc:
     sys.stderr.write(f"json parse failed: {exc}\n")
     sys.exit(3)
@@ -245,6 +258,9 @@ print(url)
 print(name)
 print(sig_url)
 PY
+    rc=$?
+    rm -f "$list"
+    return $rc
 }
 
 # -------- backup + install ---------------------------------------------------

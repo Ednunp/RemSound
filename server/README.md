@@ -81,8 +81,12 @@ sudo ./smoke-test.sh
 ```
 
 After install, the auto-updater is enabled. Future releases roll out
-automatically — no manual SCP, no manual edit. To pin to the current
-version:
+automatically — no manual SCP, no manual edit. It reads the newest hundred
+releases from GitHub (server and app releases share the repository) and
+installs the highest `server-*` one that is signed. Since server-v2.11 it
+reads that list from a file: before, it passed the whole list to python on
+the command line, which Linux refuses past 128 KB, and the list only grows.
+To pin to the current version:
 
 ```bash
 sudo systemctl disable --now remsound-relay-update.timer
