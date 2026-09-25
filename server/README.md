@@ -84,8 +84,11 @@ After install, the auto-updater is enabled. Future releases roll out
 automatically — no manual SCP, no manual edit. It reads the newest hundred
 releases from GitHub (server and app releases share the repository) and
 installs the highest `server-*` one that is signed. Since server-v2.11 it
-reads that list from a file: before, it passed the whole list to python on
-the command line, which Linux refuses past 128 KB, and the list only grows.
+reads that list from a file. Before, it passed the whole list to python on
+the command line, which Linux refuses past 32 memory pages: 128 KB on most
+machines, 512 KB on a Raspberry Pi 5. The list was already 197 KB in
+September 2026, so a relay on a Pi 4 or an ordinary Linux server had stopped
+finding updates without saying why; a Pi 5 still had room.
 To pin to the current version:
 
 ```bash

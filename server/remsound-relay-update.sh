@@ -166,8 +166,9 @@ verify_release_signature() {
 # release has no "<asset_name>.sig"). Exits non-zero on no match.
 #
 # The list goes through a FILE. It was handed to python as one command-line argument, and Linux refuses any single
-# argument over 128 KB: once the releases (each with its notes) grew past that, the check would have failed every hour
-# and said only "no upgrade attempted" (found 2026-09-25). A hundred releases a page, not thirty, so a server release is
+# argument over 32 memory pages: 128 KB on most machines (a Pi 4, an ordinary server), 512 KB on a Pi 5. Thirty releases
+# were already 197 KB in September 2026, so on most machines the check failed every hour and said only "no upgrade
+# attempted"; a Pi 5 still had room (found 2026-09-25). A hundred releases a page, not thirty, so a server release is
 # not missed behind the app's own releases in the same repository.
 get_latest_release() {
     local list rc
