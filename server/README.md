@@ -130,7 +130,7 @@ a relay people are connected to.
 | `/etc/systemd/system/remsound-relay-update.timer`   | updater schedule                       |
 | `/etc/remsound-relay/version`                       | currently installed tag                |
 | `/etc/remsound-relay/backup/`                       | snapshot for the updater's rollback    |
-| `/var/log/remsound-relay/remsound-relay.log`        | relay event log (`event=...` per line); a new file each midnight, 14 kept |
+| `/var/log/remsound-relay/remsound-relay.log`        | relay event log (`event=...` per line); a new file each midnight, 14 kept, at most 20 MB a day |
 | `/var/log/remsound-relay-update.log`                | update-check history                   |
 
 ## The relay runs as its own user
@@ -150,6 +150,21 @@ the new service file. A log from before server-v2.7,
 Since server-v2.10 the relay starts a new log file each midnight and keeps the
 last 14, deleting older ones itself, so the log never grows past about two
 weeks. Nothing needs installing for this; an update brings it.
+
+Since server-v2.12 nobody on the internet can make the log fill the disk.
+Almost every line the relay writes is set off by a packet, and anybody can
+send packets, so:
+
+- Each minute, at most 10 lines of one kind come from one address, and at most
+  100 of one kind from everybody together. The rest are counted, and the count
+  is written once a minute as `event=log_held_back`.
+- A day's file stops growing at 20 MB. After that only the once-a-minute
+  figures are written until midnight, and the next day's file starts by saying
+  how many lines were lost. A full relay writes roughly 7 MB a day, so this
+  only matters during an attack. With 14 days kept, the log can never take more
+  than about 300 MB.
+- Under systemd, the journal gets only errors. It used to keep a second copy
+  of every line, with none of these limits.
 
 The auto-updater itself still runs as root, because it replaces files in
 `/usr/local/sbin` and `/etc/systemd/system` and restarts the relay. It installs
@@ -179,6 +194,16 @@ only releases signed with the RemSound release key.
 - **Per-IP cap.** One source IP may hold at most 8 pair or group entries at
   once, counted across v1 and v2 together (a v2 client holding a v1 slot beside
   a phone counts twice). This is always on; `--max-per-ip` changes the number.
+- **When there is no room (since server-v2.12).** A hello is a single packet,
+  and the address it claims to come from can be made up. Before, anybody could
+  fill all 64 group places, or the 8 places of somebody else's address, with
+  made-up hellos, and keep real people out. Now, when the relay or an address
+  is full, the longest-waiting group client that has never echoed its cookie
+  is turned out to make room (`event=client_turned_out`). A made-up address can
+  never echo. A real app echoes within a second or two, and after that it is
+  not turned out (a client that moves to a new address echoes again there).
+  Nothing changes while there is room, and phones and older apps (v1 pairs)
+  are not affected.
 
 ## Log format
 
@@ -204,6 +229,8 @@ event=client_ticks client_id=<uuid> ticked=3       (or ticked=everyone when the 
 event=client_left client_id=<uuid> addr=... reason=bye
 event=client_idle_expired client_id=<uuid> addr=...
 event=lobby_full attempted_client_id=<uuid> addr=... count=10 max=10
+event=client_turned_out reason=address_never_proved room_for=relay_full client_id=<uuid> addr=...
+                                                    (or room_for=address_full)
 
 # address proof and the per-IP cap
 event=addr_verified addr=1.2.3.4:5555
@@ -217,6 +244,12 @@ event=stats forwarded=N dropped_unpaired=N dropped_lobby_full=N
             client_count=N v1_peers=[...] v2_clients=[...]
 event=addr_check_stats addr_check=watch-only addr_checks_verified=N
             blocked_unverified=N would_block_unverified=N rejected_ip_cap=N
+# ...and, only when the log limits held lines back that minute, one line per kind
+event=log_held_back kind=client_named lines=N (the same kind came too often this minute)
+
+# when a day's file reaches 20 MB, and at the top of the next day's file
+event=log_full limit_mb=20 (only the once-a-minute figures are written until midnight)
+event=log_was_full lines_not_written=N (the last file reached its 20 MB limit)
 ```
 
 `would_block_unverified` is logged once per client. A v1 peer refused by the
@@ -267,22 +300,33 @@ check out, or a tarball changed after signing is refused before the running
 relay is touched, and the refusal is logged. The check uses `openssl`, which
 `install.sh` requires.
 
+Since server-v2.12 it also refuses a release whose `VERSION` file does not
+name the same release as its tag. The tag comes from GitHub and is not signed;
+the `VERSION` file is inside the signed tarball. Without this check, somebody
+able to publish a release, but without the key, could put an old signed release
+up under a newer tag. The relay would go back to the old code and, thinking it
+had the newer version, never take a real update again.
+
 It only triggers on `server-*` tags, so RemSound app releases (tags like
 `vX.Y`, without the `server-` prefix) don't affect the relay. It also skips
 drafts and pre-releases.
 
 ## Publishing a server release
 
-1. Change the relay files and set `VERSION` to the new tag. Tags must keep
-   climbing (`server-vX.Y`), because the updater installs the highest one.
-2. Make the tarball. It must be named `remsound-<tag>.tar.gz` and hold a
-   single top-level folder named `remsound-<tag>`, containing the bundle
-   files listed at the top of this README:
+1. Change the relay files and set `VERSION` to the new tag, exactly. Relays
+   from server-v2.12 on refuse a release whose `VERSION` does not match its
+   tag. Tags must keep climbing (`server-vX.Y`), because the updater installs
+   the highest one.
+2. Commit, then make the tarball from the commit. It must be named
+   `remsound-<tag>.tar.gz` and hold a single top-level folder named
+   `remsound-<tag>`, containing the bundle files listed at the top of this
+   README, with Linux line endings (bash and systemd fail on Windows ones).
+   `git archive` gives exactly that, even on Windows:
 
    ```bash
    TAG=server-vX.Y
-   tar -czf "/tmp/remsound-$TAG.tar.gz" \
-       --transform "s,^<srcdir>,remsound-$TAG," <srcdir>
+   git -c core.autocrlf=false -c core.eol=lf archive --format=tar.gz \
+       --prefix="remsound-$TAG/" -o "/tmp/remsound-$TAG.tar.gz" HEAD:server
    ```
 
 3. Sign it, on the machine that holds the release private key. Every relay's

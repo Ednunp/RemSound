@@ -667,5 +667,214 @@ class TwoWeeksOfLog(unittest.TestCase):
                 h.close()
 
 
+
+def prove(r, addr) -> None:
+    """Answer the address check the relay sent to addr, as a real app does."""
+    cookie = cookie_sent_to(r.sock, addr)
+    assert cookie is not None, f"no address check was sent to {addr}"
+    r.handle_packet(v1_packet(relay.TYPE_ADDR_CHECK, cookie), addr)
+
+
+def _relay_with_captured_log(max_clients: int = 10):
+    log = logging.getLogger(f"remsound-relay-test-limits-{uuid.uuid4()}")
+    log.propagate = False
+    log.setLevel(logging.INFO)
+    captured = _CapturedLog()
+    log.addHandler(captured)
+    return relay.Relay(FakeSocket(), log, max_clients), captured
+
+
+def _lines(captured: _CapturedLog, event: str) -> list[str]:
+    return [m for m in captured.messages if m.startswith(f"event={event} ")]
+
+
+class LogLimits(unittest.TestCase):
+    """Review 2026-09-25, agreed by Ed: nearly every line the relay writes is set off by a packet, and a packet can come
+    from anybody. One sender could have it write a line for every packet and fill the Pi's memory card in a day."""
+
+    def _next_minute(self, r):
+        r.maybe_log_stats(r.last_stats_log + relay.STATS_INTERVAL_SECONDS + 1)
+
+    def test_one_sender_cannot_write_a_line_per_packet(self):
+        r, captured = _relay_with_captured_log()
+        for i in range(1000):   # a new name in every hello
+            r.handle_packet(hello(cid(1), f"name{i}", G1), ("10.20.0.1", 9000))
+        self.assertEqual(len(_lines(captured, "client_named")), relay.LOG_REPEATS_PER_ADDRESS,
+                         "a thousand renames from one address must not write a thousand lines")
+        self._next_minute(r)
+        held = _lines(captured, "log_held_back")
+        self.assertEqual(len(held), 1, "the minute's figures say what was held back, in one line")
+        fields = _key_values(held[0])
+        self.assertEqual((fields.get("kind"), fields.get("lines")),
+                         ("client_named", str(1000 - relay.LOG_REPEATS_PER_ADDRESS)))
+
+    def test_many_addresses_together_are_limited_too(self):
+        r, captured = _relay_with_captured_log(max_clients=2)
+        for n, addr in ((1, ("10.21.0.1", 9001)), (2, ("10.21.0.2", 9002))):
+            r.handle_packet(hello(cid(n), f"p{n}", G1), addr)
+            prove(r, addr)
+        for i in range(1000):   # hellos from a thousand made-up addresses at a full relay
+            r.handle_packet(hello(cid(10 + i % 200), "x", G1), (f"10.22.{i // 250}.{i % 250}", 9100))
+        self.assertEqual(len(_lines(captured, "lobby_full")), relay.LOG_LINES_PER_KIND,
+                         "however many addresses it comes from, one kind of line is limited each minute")
+        self._next_minute(r)
+        fields = _key_values(_lines(captured, "log_held_back")[0])
+        self.assertEqual(fields.get("lines"), str(1000 - relay.LOG_LINES_PER_KIND))
+
+    def test_the_limits_start_again_each_minute(self):
+        r, captured = _relay_with_captured_log()
+        addr = ("10.23.0.1", 9000)
+        for i in range(50):
+            r.handle_packet(hello(cid(1), f"a{i}", G1), addr)
+        self._next_minute(r)
+        before = len(_lines(captured, "client_named"))
+        r.handle_packet(hello(cid(1), "a new minute", G1), addr)
+        self.assertEqual(len(_lines(captured, "client_named")), before + 1, "a new minute, a new allowance")
+        self._next_minute(r)
+        self.assertEqual(len(_lines(captured, "log_held_back")), 1, "and nothing held back is reported twice")
+
+    def test_a_full_relay_starting_again_is_written_in_full(self):
+        r, captured = _relay_with_captured_log(max_clients=relay.DEFAULT_MAX_CLIENTS)
+        for n in range(relay.DEFAULT_MAX_CLIENTS - relay.MAX_ENTRIES_PER_IP):
+            r.handle_packet(hello(cid(n + 1), f"p{n}", G1), (f"10.24.0.{n + 1}", 9000))
+        for n in range(relay.MAX_ENTRIES_PER_IP):   # and a household behind one address
+            r.handle_packet(hello(cid(200 + n), f"h{n}", G1), ("10.24.1.1", 9000 + n))
+        self.assertEqual(len(_lines(captured, "client_joined")), relay.DEFAULT_MAX_CLIENTS,
+                         "every real join after a restart must still be written, a whole household's included")
+        self.assertEqual(r.log_held_back, {})
+
+
+class DailyLogLimit(unittest.TestCase):
+    """Review 2026-09-25: whatever gets past the limits, a day's file stops growing at LOG_MAX_BYTES_PER_DAY, and the
+    once-a-minute figures still get through."""
+
+    def test_a_days_file_stops_at_its_limit_and_the_figures_go_on(self):
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "relay.log")
+        handler = relay.DailyLog(path, max_bytes=4096)
+        handler.setFormatter(logging.Formatter("%(asctime)s level=%(levelname)s %(message)s"))
+        log = logging.getLogger(f"remsound-relay-test-daily-{uuid.uuid4()}")
+        log.propagate = False
+        log.setLevel(logging.INFO)
+        log.addHandler(handler)
+        try:
+            for i in range(500):
+                log.info("event=client_named client_id=%s name=%r", i, "x" * 40)
+            log.info("event=stats forwarded=1", extra={"keep": True})
+            handler.flush()
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            self.assertLess(os.path.getsize(path), 4096 + 512, "the file stops at its limit")
+            self.assertEqual(text.count("event=log_full "), 1, "and says so, once")
+            self.assertIn("event=stats forwarded=1", text, "the once-a-minute figures are still written")
+            written = text.count("event=client_named ")
+            self.assertGreater(written, 0)
+            self.assertEqual(handler.held_back, 500 - written, "and every line not written is counted")
+
+            handler.rolloverAt = int(time.time()) - 1   # midnight has just passed
+            log.info("event=client_named client_id=%s name=%r", 999, "the next day")
+            handler.flush()
+            with open(path, encoding="utf-8") as f:
+                first = f.readline()
+            self.assertIn(f"event=log_was_full lines_not_written={500 - written}", first,
+                          "the next day's file opens with how much the last one could not hold")
+            self.assertEqual(handler.held_back, 0)
+        finally:
+            log.removeHandler(handler)
+            handler.close()
+
+    def test_under_systemd_the_journal_gets_errors_only(self):
+        import tempfile
+        restore = os.environ.get("JOURNAL_STREAM")
+        try:
+            for journal, level in (("8:12345", logging.ERROR), (None, logging.NOTSET)):
+                if journal is None:
+                    os.environ.pop("JOURNAL_STREAM", None)
+                else:
+                    os.environ["JOURNAL_STREAM"] = journal
+                log = relay.setup_logger(os.path.join(tempfile.mkdtemp(), "relay.log"))
+                try:
+                    screens = [h for h in log.handlers if type(h) is logging.StreamHandler]
+                    self.assertEqual(len(screens), 1)
+                    self.assertEqual(screens[0].level, level,
+                                     "under systemd the journal kept a second copy of every line, with no limits")
+                finally:
+                    for h in list(log.handlers):
+                        log.removeHandler(h)
+                        h.close()
+        finally:
+            if restore is None:
+                os.environ.pop("JOURNAL_STREAM", None)
+            else:
+                os.environ["JOURNAL_STREAM"] = restore
+
+
+class MadeUpAddressesGiveWay(unittest.TestCase):
+    """Review 2026-09-25, agreed by Ed: a hello is one packet from an address that can be made up, so anybody could
+    fill the relay, or somebody else's address, with made-up hellos and keep real people out. A made-up address can
+    never answer its address check; when there is no room, a place that never answered gives way."""
+
+    def test_made_up_addresses_cannot_keep_a_real_person_out(self):
+        r = make_relay(max_clients=4)
+        for i in range(4):   # made up: they never answer
+            r.handle_packet(hello(cid(120 + i), "fake", G1), (f"10.30.{i}.1", 9100))
+        real = ("10.30.9.9", 9200)
+        r.handle_packet(hello(cid(1), "real", G1), real)
+        self.assertIn(uuid.UUID(bytes=cid(1)), r.v2_clients, "a real person gets in")
+        self.assertEqual(len(r.v2_clients), 4, "and the relay holds no more than it may")
+        self.assertNotIn(uuid.UUID(bytes=cid(120)), r.v2_clients, "the longest-waiting made-up place went")
+        self.assertIn(uuid.UUID(bytes=cid(121)), r.v2_clients, "and only that one")
+        prove(r, real)
+        for i in range(40):
+            r.handle_packet(hello(cid(130 + i), "fake", G1), (f"10.31.{i}.1", 9100))
+        self.assertIn(uuid.UUID(bytes=cid(1)), r.v2_clients, "once proved, no made-up hello can turn them out")
+        self.assertEqual(len(r.v2_clients), 4)
+
+    def test_a_relay_full_of_proven_people_is_still_full(self):
+        r = make_relay(max_clients=3)
+        for n in range(3):
+            addr = (f"10.32.0.{n + 1}", 9300)
+            r.handle_packet(hello(cid(n + 1), f"p{n}", G1), addr)
+            prove(r, addr)
+        late = ("10.32.9.1", 9300)
+        r.sock.sent.clear()
+        r.handle_packet(hello(cid(9), "late", G1), late)
+        self.assertNotIn(uuid.UUID(bytes=cid(9)), r.v2_clients)
+        self.assertEqual(len(r.v2_clients), 3, "nobody who proved their address is turned out")
+        self.assertTrue(any(to == late and data[5] == relay.TYPE_LOBBY_FULL for data, to in r.sock.sent),
+                        "and the latecomer is told the relay is full, as before")
+
+    def test_made_up_hellos_at_a_households_address_cannot_lock_it_out(self):
+        r = make_relay(max_clients=64)
+        elsewhere = ("10.33.9.9", 9399)
+        r.handle_packet(hello(cid(139), "somebody elsewhere, not answered yet", G1), elsewhere)
+        ip = "10.33.0.1"
+        for i in range(relay.MAX_ENTRIES_PER_IP):   # made up, at somebody else's address
+            r.handle_packet(hello(cid(140 + i), "fake", G1), (ip, 9400 + i))
+        r.handle_packet(hello(cid(2), "real", G1), (ip, 9500))
+        self.assertIn(uuid.UUID(bytes=cid(2)), r.v2_clients, "the real device at that address gets in")
+        self.assertEqual(r.stats.rejected_ip_cap, 0)
+        self.assertEqual(sum(1 for e in r.v2_clients.values() if e.addr[0] == ip), relay.MAX_ENTRIES_PER_IP,
+                         "and the address still holds no more than its limit")
+        self.assertIn(uuid.UUID(bytes=cid(139)), r.v2_clients,
+                      "room at one address is made at that address, not by turning out somebody elsewhere")
+
+    def test_a_household_of_proven_devices_is_still_capped(self):
+        r = make_relay(max_clients=64)
+        ip = "10.34.0.1"
+        for i in range(relay.MAX_ENTRIES_PER_IP):
+            r.handle_packet(hello(cid(160 + i), f"d{i}", G1), (ip, 9600 + i))
+            prove(r, (ip, 9600 + i))
+        r.handle_packet(hello(cid(3), "one more", G1), (ip, 9700))
+        self.assertNotIn(uuid.UUID(bytes=cid(3)), r.v2_clients)
+        self.assertEqual(r.stats.rejected_ip_cap, 1, "one address's limit still holds for devices that proved themselves")
+
+    def test_nothing_changes_while_there_is_room(self):
+        r = make_relay(max_clients=10)
+        for n in range(6):   # none of them has answered yet
+            r.handle_packet(hello(cid(n + 1), f"p{n}", G1), (f"10.35.0.{n + 1}", 9800))
+        self.assertEqual(len(r.v2_clients), 6, "with room to spare, nobody is turned out for not answering yet")
+
+
 if __name__ == "__main__":
     unittest.main()

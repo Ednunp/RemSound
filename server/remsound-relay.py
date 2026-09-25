@@ -62,6 +62,17 @@ ROSTER_HEARTBEAT_SECONDS = 1.0  # v2 only — periodic roster broadcast
 SOCKET_POLL_TIMEOUT_SECONDS = 1.0
 DEFAULT_LOG_PATH = "/var/log/remsound-relay/remsound-relay.log"  # systemd's LogsDirectory for the relay's own user
 LOG_KEEP_DAYS = 14  # a new log file each midnight; this many old ones are kept and older ones deleted
+# Nearly every line the relay writes is set off by a packet, and a packet can come from anybody, from any address they
+# care to put on it. With no limit one sender could have it write a line for every packet - a new name in every hello,
+# say - and fill the Pi's memory card in a day (review 2026-09-25). So, each minute: at most this many lines of one kind
+# from one address, and this many of one kind from everybody together. The rest are counted, and the count is written
+# once a minute beside the figures.
+LOG_REPEATS_PER_ADDRESS = 10  # a household behind one address can show up to MAX_ENTRIES_PER_IP (8) devices
+LOG_LINES_PER_KIND = 100      # more than a full relay's worth (DEFAULT_MAX_CLIENTS) of joins after a restart
+# And a day's file stops growing at this size, whatever gets past the limits above: then only the once-a-minute figures
+# are written until midnight. A full relay writes roughly 7 MB a day; Ed's wrote 0.6 to 2.5 MB a day in September 2026.
+# With LOG_KEEP_DAYS old files kept, the log can never take more than about 300 MB of the card.
+LOG_MAX_BYTES_PER_DAY = 20 * 1024 * 1024
 DEFAULT_MAX_CLIENTS = 64
 LOBBY_NAME_BYTES = 32  # bytes reserved for a display name on the wire
 # v2 LobbyHello: the group tag follows the name. It is the client's 8-byte password fingerprint, the same
@@ -182,24 +193,70 @@ class RelayStats:
     blocked_devices: set = field(default_factory=set)
 
 
-def setup_logger(log_path: str) -> logging.Logger:
+class DailyLog(logging.handlers.TimedRotatingFileHandler):
+    """A fresh file every midnight, the last LOG_KEEP_DAYS of them kept, and no day's file past max_bytes.
+
+    It used to be one file that grew for ever: 2.1 MB in four days on Ed's Pi, about 190 MB a year, and nothing installed
+    to trim it. The relay does it itself, so an update is all it takes and there is nothing else to set up (Ed,
+    2026-09-23: two weeks). Once a day's file is full, only lines marked keep=True - the once-a-minute figures - are
+    still written, so the relay can still be seen working; the rest are counted, and the count opens the next file."""
+
+    def __init__(self, path: str, max_bytes: int = LOG_MAX_BYTES_PER_DAY):
+        super().__init__(path, when="midnight", backupCount=LOG_KEEP_DAYS, encoding="utf-8")
+        self.max_bytes = max_bytes
+        self.held_back = 0
+
+    def _full(self) -> bool:
+        try:
+            return self.stream is not None and os.fstat(self.stream.fileno()).st_size >= self.max_bytes
+        except (OSError, ValueError):
+            return False
+
+    def _note(self, record: logging.LogRecord, message: str) -> None:
+        logging.FileHandler.emit(self, logging.LogRecord(
+            record.name, logging.WARNING, __file__, 0, message, None, None))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if self.shouldRollover(record):
+                self.doRollover()
+                if self.held_back:
+                    self._note(record, f"event=log_was_full lines_not_written={self.held_back} "
+                                       f"(the last file reached its {self.max_bytes // (1024 * 1024)} MB limit)")
+                    self.held_back = 0
+            if not getattr(record, "keep", False) and self._full():
+                if self.held_back == 0:
+                    self._note(record, f"event=log_full limit_mb={self.max_bytes // (1024 * 1024)} "
+                                       "(only the once-a-minute figures are written until midnight)")
+                self.held_back += 1
+                return
+            logging.FileHandler.emit(self, record)
+        except Exception:
+            self.handleError(record)
+
+
+def setup_logger(log_path: str, max_bytes: int = LOG_MAX_BYTES_PER_DAY) -> logging.Logger:
     logger = logging.getLogger("remsound-relay")
     logger.setLevel(logging.INFO)
     fmt = logging.Formatter(
         fmt="%(asctime)s level=%(levelname)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    have_file = False
     try:
-        # A fresh file every midnight, and the last LOG_KEEP_DAYS of them kept. It used to be one file that grew for
-        # ever: 2.1 MB in four days on Ed's Pi, about 190 MB a year, and nothing installed to trim it. The relay does it
-        # itself now, so an update is all it takes and there is nothing else to set up (Ed, 2026-09-23: two weeks).
-        fh = logging.handlers.TimedRotatingFileHandler(log_path, when="midnight", backupCount=LOG_KEEP_DAYS, encoding="utf-8")
+        fh = DailyLog(log_path, max_bytes)
         fh.setFormatter(fmt)
         logger.addHandler(fh)
+        have_file = True
     except OSError as e:
         sys.stderr.write(f"remsound-relay: could not open {log_path}: {e}\n")
     sh = logging.StreamHandler(sys.stderr)
     sh.setFormatter(fmt)
+    # Under systemd (which sets JOURNAL_STREAM) the journal kept a second copy of every line, with none of the limits
+    # above. It gets only errors now, which is what "systemctl status" should show. Run by hand, or with no file, every
+    # line still comes to the screen.
+    if have_file and os.environ.get("JOURNAL_STREAM"):
+        sh.setLevel(logging.ERROR)
     logger.addHandler(sh)
     return logger
 
@@ -286,6 +343,24 @@ class Relay:
         # shared
         self.stats = RelayStats()
         self.last_stats_log = time.monotonic()
+        # The log limits (LOG_REPEATS_PER_ADDRESS, LOG_LINES_PER_KIND), started again each minute: lines written this
+        # minute per (kind, address) and per kind, and lines held back per kind.
+        self.log_by_address: dict[tuple[str, str], int] = {}
+        self.log_by_kind: dict[str, int] = {}
+        self.log_held_back: dict[str, int] = {}
+
+    def note(self, level: int, kind: str, addr: Optional[tuple[str, int]], fmt: str, *args, exc_info: bool = False) -> None:
+        """Write one event line, unless lines of this kind have come too often this minute, from this address or from
+        everybody (see LOG_REPEATS_PER_ADDRESS). Every line a packet can set off comes through here."""
+        ip = addr[0] if addr else ""
+        from_address = self.log_by_address.get((kind, ip), 0)
+        of_kind = self.log_by_kind.get(kind, 0)
+        if from_address >= LOG_REPEATS_PER_ADDRESS or of_kind >= LOG_LINES_PER_KIND:
+            self.log_held_back[kind] = self.log_held_back.get(kind, 0) + 1
+            return
+        self.log_by_address[(kind, ip)] = from_address + 1
+        self.log_by_kind[kind] = of_kind + 1
+        self.log.log(level, fmt, *args, exc_info=exc_info)
 
     # ------- address-proof (shared by v1 + v2) -----------------------------
 
@@ -309,7 +384,8 @@ class Relay:
         try:
             self.sock.sendto(self._addr_check_packet(entry.cookie), addr)
         except OSError as e:
-            self.log.warning("event=addr_check_send_failed to=%s err=%s", _fmt_addr(addr), e)
+            self.note(logging.WARNING, "addr_check_send_failed", addr,
+                      "event=addr_check_send_failed to=%s err=%s", _fmt_addr(addr), e)
 
     def _try_verify(self, entry, data: bytes, addr: tuple[str, int], header_len: int) -> None:
         """An AddrCheck came back from a registered endpoint — verify its cookie. The echo may
@@ -318,7 +394,7 @@ class Relay:
         if entry.cookie and cookie == entry.cookie and not entry.verified:
             entry.verified = True
             self.stats.addr_checks_verified += 1
-            self.log.info("event=addr_verified addr=%s", _fmt_addr(addr))
+            self.note(logging.INFO, "addr_verified", addr, "event=addr_verified addr=%s", _fmt_addr(addr))
 
     def _ip_at_cap(self, ip: str) -> bool:
         """True when this source IP already holds max_per_ip lobby/pair entries (MAX_ENTRIES_PER_IP by default). A group
@@ -327,6 +403,30 @@ class Relay:
         count = sum(1 for p in self.v1_peers if p.addr[0] == ip and p.addr not in members)
         count += sum(1 for e in self.v2_clients.values() if e.addr[0] == ip)
         return count >= self.max_per_ip
+
+    def _turn_out_unproven(self, ip: Optional[str], why: str) -> bool:
+        """Make room for a hello by turning out the longest-waiting client that has never proved its address: anywhere
+        on the relay (ip None), or at one address. True when somebody went.
+
+        A hello is one packet, and the address it comes from can be made up. Nothing stopped anybody filling all the
+        relay's places, or the MAX_ENTRIES_PER_IP places of somebody else's address, with made-up hellos from made-up
+        addresses - one each a minute kept them - and so keeping real people out (review 2026-09-25). A made-up address
+        can never answer its address check, so when there is no room an unproven place gives way. A real app answers
+        within a second or two (all 64 joins on Ed's relay did, September 2026) and is never turned out after that; and
+        nothing changes at all until the relay or an address is full. Longest-waiting first: the dictionary keeps the
+        order people joined in."""
+        for cid, e in self.v2_clients.items():
+            if not e.verified and (ip is None or e.addr[0] == ip):
+                break
+        else:
+            return False
+        del self.v2_clients[cid]
+        self.note(logging.INFO, "client_turned_out", e.addr,
+                  "event=client_turned_out reason=address_never_proved room_for=%s client_id=%s addr=%s",
+                  why, cid, _fmt_addr(e.addr))
+        self.stats.lobby_changes += 1
+        self.v2_roster_dirty = True
+        return True
 
     # ------- where v1 and v2 meet ------------------------------------------
 
@@ -356,7 +456,7 @@ class Relay:
         """Both pair slots held by group members (they paired before either joined over v2): the pair only
         duplicates what their groups already carry, and keeps both slots from a v1-only device. Free them."""
         if len(self.v1_peers) == 2 and all(self._v2_entry_at(p.addr) is not None for p in self.v1_peers):
-            self.log.info(
+            self.note(logging.INFO, "pair_dissolved", self.v1_peers[0].addr,
                 "event=pair_dissolved reason=both_in_groups a=%s b=%s",
                 _fmt_addr(self.v1_peers[0].addr), _fmt_addr(self.v1_peers[1].addr),
             )
@@ -376,7 +476,8 @@ class Relay:
             member = self._v2_entry_at(other.addr)
             if member is not None and member.group and member.group != peer.fingerprint:
                 self.v1_peers.remove(other)
-                self.log.info("event=pair_dissolved reason=different_group member=%s", _fmt_addr(other.addr))
+                self.note(logging.INFO, "pair_dissolved", other.addr,
+                          "event=pair_dissolved reason=different_group member=%s", _fmt_addr(other.addr))
                 self.stats.pair_changes += 1
                 self.v2_roster_dirty = True
                 return
@@ -397,7 +498,8 @@ class Relay:
         try:
             self.sock.sendto(self._addr_check_packet(os.urandom(ADDR_CHECK_COOKIE_LEN)), addr)
         except OSError as e:
-            self.log.warning("event=relay_hint_send_failed to=%s err=%s", _fmt_addr(addr), e)
+            self.note(logging.WARNING, "relay_hint_send_failed", addr,
+                      "event=relay_hint_send_failed to=%s err=%s", _fmt_addr(addr), e)
 
     def _may_forward_to(self, entry, proto: str) -> bool:
         """The enforcement point: may forwarded traffic be delivered to this entry's address?
@@ -412,7 +514,7 @@ class Relay:
         self.stats.would_block_devices.add(entry.addr)
         if not entry.would_block_logged:
             entry.would_block_logged = True
-            self.log.info(
+            self.note(logging.INFO, "would_block_unverified", entry.addr,
                 "event=would_block_unverified proto=%s addr=%s (watch-only; enforcement would withhold traffic)",
                 proto, _fmt_addr(entry.addr),
             )
@@ -440,7 +542,7 @@ class Relay:
             self.v1_peers = kept
             self.v2_roster_dirty = True  # a member's paired flag may have changed
             for addr in dropped:
-                self.log.info(
+                self.note(logging.INFO, "peer_dropped", addr,
                     "event=peer_dropped reason=idle addr=%s remaining=%d",
                     _fmt_addr(addr), len(self.v1_peers),
                 )
@@ -454,13 +556,13 @@ class Relay:
                 return -1
             self.v2_roster_dirty = True  # a member's paired flag may change
             self.v1_peers.append(PeerSlot(addr=addr, last_seen=now))
-            self.log.info(
+            self.note(logging.INFO, "peer_joined", addr,
                 "event=peer_joined addr=%s slots_filled=%d",
                 _fmt_addr(addr), len(self.v1_peers),
             )
             self.stats.pair_changes += 1
             if len(self.v1_peers) == 2:
-                self.log.info(
+                self.note(logging.INFO, "peer_paired", addr,
                     "event=peer_paired a=%s b=%s",
                     _fmt_addr(self.v1_peers[0].addr),
                     _fmt_addr(self.v1_peers[1].addr),
@@ -473,7 +575,7 @@ class Relay:
             self.v2_roster_dirty = True
             old_addr = self.v1_peers[oldest].addr
             self.v1_peers[oldest] = PeerSlot(addr=addr, last_seen=now)
-            self.log.info(
+            self.note(logging.INFO, "peer_replaced", addr,
                 "event=peer_replaced old=%s new=%s",
                 _fmt_addr(old_addr), _fmt_addr(addr),
             )
@@ -536,7 +638,7 @@ class Relay:
                 other.tx_packets += 1
                 self.stats.forwarded += 1
             except OSError as e:
-                self.log.warning(
+                self.note(logging.WARNING, "send_failed", other.addr,
                     "event=send_failed proto=v1 to=%s err=%s",
                     _fmt_addr(other.addr), e,
                 )
@@ -586,7 +688,7 @@ class Relay:
             try:
                 self.sock.sendto(self._v2_build_roster_packet(cid, entry), entry.addr)
             except OSError as e:
-                self.log.warning(
+                self.note(logging.WARNING, "send_failed", entry.addr,
                     "event=send_failed proto=v2 reason=roster to=%s err=%s",
                     _fmt_addr(entry.addr), e,
                 )
@@ -607,11 +709,11 @@ class Relay:
         try:
             self.sock.sendto(bytes(header) + payload, addr)
         except OSError as e:
-            self.log.warning(
+            self.note(logging.WARNING, "send_failed", addr,
                 "event=send_failed proto=v2 reason=lobby_full to=%s err=%s",
                 _fmt_addr(addr), e,
             )
-        self.log.info(
+        self.note(logging.INFO, "lobby_full", addr,
             "event=lobby_full attempted_client_id=%s addr=%s count=%d max=%d",
             attempted_client_id, _fmt_addr(addr),
             len(self.v2_clients), self.max_clients,
@@ -627,7 +729,7 @@ class Relay:
                 expired.append(cid)
         for cid in expired:
             entry = self.v2_clients.pop(cid)
-            self.log.info(
+            self.note(logging.INFO, "client_idle_expired", entry.addr,
                 "event=client_idle_expired client_id=%s addr=%s",
                 cid, _fmt_addr(entry.addr),
             )
@@ -661,18 +763,19 @@ class Relay:
             # apps pair over the ordinary protocol, which this does not touch.
             if pkt_type != TYPE_LOBBY_HELLO:
                 return
-            if self._ip_at_cap(addr[0]):
+            # With no room, a place held by an address that has never proved itself gives way (_turn_out_unproven).
+            if self._ip_at_cap(addr[0]) and not self._turn_out_unproven(addr[0], "address_full"):
                 self.stats.rejected_ip_cap += 1
-                self.log.warning(
+                self.note(logging.WARNING, "join_rejected", addr,
                     "event=join_rejected reason=ip_cap client_id=%s addr=%s", client_id, _fmt_addr(addr),
                 )
                 return
-            if len(self.v2_clients) >= self.max_clients:
+            if len(self.v2_clients) >= self.max_clients and not self._turn_out_unproven(None, "relay_full"):
                 self._v2_send_lobby_full(client_id, addr)
                 return
             entry = ClientEntry(addr=addr, display_name="", last_seen=now)
             self.v2_clients[client_id] = entry
-            self.log.info(
+            self.note(logging.INFO, "client_joined", addr,
                 "event=client_joined client_id=%s addr=%s count=%d",
                 client_id, _fmt_addr(addr), len(self.v2_clients),
             )
@@ -683,7 +786,7 @@ class Relay:
             # itself — the new address hasn't echoed anything yet, and "rebind" is also exactly
             # what a spoofed takeover of a known client_id looks like.
             if entry.addr != addr:
-                self.log.info(
+                self.note(logging.INFO, "client_endpoint_update", addr,
                     "event=client_endpoint_update client_id=%s old=%s new=%s",
                     client_id, _fmt_addr(entry.addr), _fmt_addr(addr),
                 )
@@ -714,14 +817,14 @@ class Relay:
             new_group = bytes(body[LOBBY_NAME_BYTES:tag_end]) if len(body) >= tag_end else b""
             if new_name != entry.display_name:
                 entry.display_name = new_name
-                self.log.info(
+                self.note(logging.INFO, "client_named", addr,
                     "event=client_named client_id=%s name=%r", client_id, new_name,
                 )
                 self.v2_roster_dirty = True
             new_ticked = _read_ticked_ids(body, tag_end)
             if new_ticked != entry.ticked:
                 entry.ticked = new_ticked
-                self.log.info(
+                self.note(logging.INFO, "client_ticks", addr,
                     "event=client_ticks client_id=%s ticked=%s", client_id,
                     "everyone" if new_ticked is None else len(new_ticked),
                 )
@@ -731,7 +834,7 @@ class Relay:
             if new_group != entry.group:
                 entry.group = new_group
                 # A short prefix only: enough to see in the log who shares a group, not the whole tag.
-                self.log.info(
+                self.note(logging.INFO, "client_grouped", addr,
                     "event=client_grouped client_id=%s group=%s", client_id, new_group[:2].hex() or "none",
                 )
                 self.v2_roster_dirty = True
@@ -740,13 +843,13 @@ class Relay:
             # Only the endpoint a client is registered at may say goodbye for it — otherwise a
             # forged BYE bearing a known client_id (learned from the roster) could evict any peer.
             if not from_registered_endpoint:
-                self.log.warning(
+                self.note(logging.WARNING, "bye_rejected", addr,
                     "event=bye_rejected reason=endpoint_mismatch client_id=%s from=%s",
                     client_id, _fmt_addr(addr),
                 )
                 return
             self.v2_clients.pop(client_id, None)
-            self.log.info(
+            self.note(logging.INFO, "client_left", addr,
                 "event=client_left client_id=%s addr=%s reason=bye",
                 client_id, _fmt_addr(addr),
             )
@@ -774,7 +877,7 @@ class Relay:
                 other.tx_packets += 1
                 self.stats.forwarded += 1
             except OSError as e:
-                self.log.warning(
+                self.note(logging.WARNING, "send_failed", other.addr,
                     "event=send_failed proto=v2 to=%s err=%s",
                     _fmt_addr(other.addr), e,
                 )
@@ -825,6 +928,7 @@ class Relay:
             s.forwarded, s.dropped_unpaired, s.dropped_lobby_full,
             s.rejected_bad_header, s.pair_changes, s.lobby_changes,
             len(self.v2_clients), v1_summary, v2_summary,
+            extra={"keep": True},
         )
         # The address-proof counters get their own line, so the event=stats line above stays exactly as
         # anything already reading it expects. They are the evidence for when --require-addr-check can
@@ -837,7 +941,16 @@ class Relay:
             s.addr_checks_verified, s.blocked_unverified,
             s.would_block_unverified, s.rejected_ip_cap,
             len(s.blocked_devices), len(s.would_block_devices),
+            extra={"keep": True},
         )
+        # What the log limits held back this minute: one line per kind, so a flood shows up as a number, not as a
+        # full memory card. Then the limits start again.
+        for kind, count in sorted(self.log_held_back.items()):
+            self.log.info("event=log_held_back kind=%s lines=%d (the same kind came too often this minute)",
+                          kind, count, extra={"keep": True})
+        self.log_by_address.clear()
+        self.log_by_kind.clear()
+        self.log_held_back.clear()
         self.stats = RelayStats()
         for p in self.v1_peers:
             p.rx_packets = 0
@@ -917,7 +1030,7 @@ def main() -> int:
             except OSError as e:
                 # select() itself failed (e.g. a transient resource-pressure error on a long-
                 # running, low-RAM host). Log and pause briefly rather than spin or exit.
-                log.warning("event=select_failed err=%s", e)
+                relay.note(logging.WARNING, "select_failed", None, "event=select_failed err=%s", e)
                 time.sleep(0.1)
                 continue
             now = time.monotonic()
@@ -925,6 +1038,7 @@ def main() -> int:
             # reachable from the open internet — can never let a single packet or a housekeeping
             # tick crash the whole process: that would drop EVERY connected client and force a ~5s
             # systemd restart. Anything unexpected is logged (with a traceback) and we carry on.
+            addr = None
             try:
                 if ready:
                     data, addr = sock.recvfrom(RECV_BUFFER_BYTES)
@@ -933,9 +1047,10 @@ def main() -> int:
                 relay.maybe_log_stats(now)
             except OSError as e:
                 # recvfrom, or a sendto that escaped its own guard — transient; keep serving.
-                log.warning("event=io_error err=%s", e)
+                relay.note(logging.WARNING, "io_error", addr, "event=io_error err=%s", e)
             except Exception:
-                log.exception("event=loop_error — recovered, continuing")
+                # Through the log limits too: a packet that trips a fault could otherwise be sent over and over.
+                relay.note(logging.ERROR, "loop_error", addr, "event=loop_error — recovered, continuing", exc_info=True)
     finally:
         log.info("event=shutdown")
         sock.close()

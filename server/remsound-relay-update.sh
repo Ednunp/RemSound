@@ -11,7 +11,9 @@
 #      a. Download the matching tarball asset and its "<tarball>.sig" signature.
 #         Refuse to go any further unless the signature is valid for the
 #         RemSound release key built into this script (2026-09-13: this used
-#         to install whatever appeared, as root, unchecked).
+#         to install whatever appeared, as root, unchecked). Then refuse it
+#         unless the VERSION file inside it names the same release as the tag
+#         (2026-09-25: an old signed release could be put up under a new tag).
 #      b. Snapshot current installed files to /etc/remsound-relay/backup/.
 #      c. Stop the relay service.
 #      d. Replace the relay files with the new tarball contents.
@@ -157,6 +159,18 @@ verify_release_signature() {
     fi
     rm -f "$der"
     return "$ok"
+}
+
+# Returns 0 only if the release unpacked at $1 says, in its own VERSION file, that it IS release $2. The tag comes from
+# GitHub and is not signed; the VERSION file is inside the signed tarball. Without this, anybody able to publish a
+# release but without the key could put an old signed release up under a newer tag: the relay would go back to the old
+# code and, believing it had the newer version, never take a real update again (review 2026-09-25). Logs nothing, so
+# the app's self-test can drive it on its own.
+release_is_version() {
+    local staging="$1" tag="$2" version
+    [[ -f "$staging/VERSION" ]] || return 1
+    version="$(tr -d '[:space:]' < "$staging/VERSION")"
+    [[ -n "$version" && "$version" == "$tag" ]]
 }
 
 # -------- GitHub releases query ---------------------------------------------
@@ -400,6 +414,11 @@ main() {
         return 1
     fi
     log "staging at $staging"
+    if ! release_is_version "$staging" "$latest_tag"; then
+        log "ERROR: $asset_name says it is '$(tr -d '[:space:]' < "$staging/VERSION" 2>/dev/null || true)', not $latest_tag - refusing to install an old release under a new name"
+        return 1
+    fi
+    log "version checked: the signed release is $latest_tag"
 
     snapshot_backup
 

@@ -141,6 +141,11 @@ the rule two people already have on a network, where each has to tick the other.
   form, for that partner. On Windows that partner appears in the relay list as
   "Someone on a phone or an older app" and is ticked like anyone else.
 - Echo address checks exactly as they came, never in group framing.
+- Echo them straight away, in a group as well. Since server-v2.12, when the
+  relay or your address is full, a member that has never echoed its address
+  check is turned out to make room for a newcomer, so that made-up addresses
+  cannot keep real people out. Once you have echoed, you are not turned out
+  (if your address changes, echo the new check the relay sends there).
 
 ## 7. Receiving, once in a group
 
