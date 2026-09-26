@@ -48,6 +48,14 @@ internal sealed class MixingEngine : ICaptureBackend
 
     private readonly List<ActiveSource> active = [];
     private MixingSampleProvider? mixer;
+
+    // What this engine was asked to capture, whether or not each source opened: HealSources re-opens what is missing.
+    private List<CaptureSourceSpec> desiredSpecs = [];
+    private readonly Dictionary<string, int> failedTries = new();
+    private bool healing;   // a heal's own attempts: its failures are counted, not logged one by one
+
+    /// <summary>Self-test seam: refuse to open a source, as a busy or exclusively held device does.</summary>
+    internal static Func<CaptureSourceSpec, bool>? RefuseOpenForTest;
     private float[] mixScratch = new float[MixSamplesPerTick];
     private CancellationTokenSource? cts;
     private Task? mixTask;
@@ -220,6 +228,7 @@ internal sealed class MixingEngine : ICaptureBackend
         lock (gate)
         {
             if (IsRunning) StopInternal();
+            desiredSpecs = [.. specs];
             if (specs.Count == 0) return;
 
             var mixFormat = WaveFormat.CreateIeeeFloatWaveFormat(MixSampleRate, MixChannels);
@@ -234,18 +243,27 @@ internal sealed class MixingEngine : ICaptureBackend
 
             if (active.Count == 0)
             {
-                onDiagnostic?.Invoke("mixer: no sources opened — staying stopped");
+                if (!healing) onDiagnostic?.Invoke("mixer: no sources opened — staying stopped; they are tried again every few seconds");
                 mixer = null;
                 return;
             }
 
-            foreach (var a in active)
+            for (var i = active.Count - 1; i >= 0; i--)
             {
+                var a = active[i];
                 try { a.Source.Start(); }
                 catch (Exception ex)
                 {
-                    onDiagnostic?.Invoke($"mixer: source \"{a.Source.Name}\" failed to start: {ex.GetType().Name}: {ex.Message}");
+                    // Taken out again, so the heal sees it as missing and tries it later. Left in, it sat in the mix as a
+                    // dead entry that nothing ever re-opened.
+                    onDiagnostic?.Invoke($"mixer: source \"{a.Source.Name}\" failed to start: {ex.GetType().Name}: {ex.Message} — tried again every few seconds");
+                    DetachLocked(i);
                 }
+            }
+            if (active.Count == 0)
+            {
+                mixer = null;
+                return;
             }
 
             Interlocked.Exchange(ref clippedSampleCount, 0);
@@ -264,6 +282,56 @@ internal sealed class MixingEngine : ICaptureBackend
     public void UpdateSources(IReadOnlyList<CaptureSourceSpec> specs)
     {
         lock (gate)
+        {
+            desiredSpecs = [.. specs];
+            foreach (var key in failedTries.Keys.ToList())
+                if (!specs.Any(s => SourceKey(s.DeviceId, s.Kind) == key)) failedTries.Remove(key);
+            UpdateSourcesLocked(specs);
+        }
+    }
+
+    /// <summary>See <see cref="ICaptureBackend.HealSources"/>. Re-applies what was asked for: UpdateSources already drops a
+    /// source that has died and re-opens anything missing, and leaves every working source exactly as it is.</summary>
+    public void HealSources()
+    {
+        lock (gate)
+        {
+            if (desiredSpecs.Count == 0) return;
+            if (MixLoopDiedLocked()) return;   // the loop itself has gone: that is the whole sender's restart, not this
+            var working = active.Where(a => !a.Source.Faulted).Select(a => SourceKey(a.Source.DeviceId, a.Source.Kind)).ToHashSet();
+            var missing = desiredSpecs.Where(s => !working.Contains(SourceKey(s.DeviceId, s.Kind))).ToList();
+            if (missing.Count == 0) return;
+            healing = true;
+            try { UpdateSourcesLocked(desiredSpecs); }
+            finally { healing = false; }
+            working = active.Where(a => !a.Source.Faulted).Select(a => SourceKey(a.Source.DeviceId, a.Source.Kind)).ToHashSet();
+            foreach (var spec in missing)
+            {
+                var key = SourceKey(spec.DeviceId, spec.Kind);
+                var tries = failedTries.GetValueOrDefault(key) + 1;
+                if (working.Contains(key))
+                {
+                    failedTries.Remove(key);
+                    onDiagnostic?.Invoke($"mixer: \"{spec.Name}\" is capturing again (re-opened on try {tries})");
+                }
+                else
+                {
+                    failedTries[key] = tries;
+                    if (tries == 1 || tries % 20 == 0)
+                        onDiagnostic?.Invoke($"mixer: \"{spec.Name}\" still cannot be opened ({tries} tries) — trying again every few seconds");
+                }
+            }
+        }
+    }
+
+    /// <summary>The mix loop has ended while sources are open: nothing in the lane will ever be read again. The one fault
+    /// the heal cannot mend, so the only one reported to the sender as the lane being down.</summary>
+    internal bool MixLoopDied { get { lock (gate) return MixLoopDiedLocked(); } }
+
+    private bool MixLoopDiedLocked() => active.Count > 0 && mixTask is { IsCompleted: true };
+
+    private void UpdateSourcesLocked(IReadOnlyList<CaptureSourceSpec> specs)
+    {
         {
             // If the engine was started with no sources (specs.Count==0 returns early in
             // Start, so mixTask is never created), a later UpdateSources adding sources used
@@ -320,7 +388,8 @@ internal sealed class MixingEngine : ICaptureBackend
                 }
                 catch (Exception ex)
                 {
-                    onDiagnostic?.Invoke($"mixer: source \"{entry.Source.Name}\" failed to start: {ex.GetType().Name}: {ex.Message}");
+                    if (!healing) onDiagnostic?.Invoke($"mixer: source \"{entry.Source.Name}\" failed to start: {ex.GetType().Name}: {ex.Message} — tried again every few seconds");
+                    DetachLocked(active.IndexOf(entry));
                 }
             }
         }
@@ -328,7 +397,12 @@ internal sealed class MixingEngine : ICaptureBackend
 
     public void Stop()
     {
-        lock (gate) StopInternal();
+        lock (gate)
+        {
+            desiredSpecs = [];   // stopped on purpose: nothing left for the heal to re-open
+            failedTries.Clear();
+            StopInternal();
+        }
     }
 
     private void StopInternal()
@@ -343,6 +417,30 @@ internal sealed class MixingEngine : ICaptureBackend
         active.Clear();
         activeCount = 0;
         mixer = null;
+    }
+
+    /// <summary>Take the source at <paramref name="index"/> out of the mix and close it. Caller holds <c>gate</c>.</summary>
+    private void DetachLocked(int index)
+    {
+        if (index < 0 || index >= active.Count) return;
+        var a = active[index];
+        try { mixer?.RemoveMixerInput(a.Source.Provider); } catch { /* ignore */ }
+        DisposeEntry(a);
+        active.RemoveAt(index);
+        activeCount = active.Count;
+    }
+
+    /// <summary>Gate seam: the capture objects in the mix, by source key, so a test can tell a source that was left alone
+    /// from one that was re-opened.</summary>
+    internal IReadOnlyList<(string Key, object Source)> ActiveSourcesForTest
+    {
+        get { lock (gate) return active.Select(a => (SourceKey(a.Source.DeviceId, a.Source.Kind), (object)a.Source)).ToList(); }
+    }
+
+    /// <summary>Gate seam: make a source die as a device does when it faults in place.</summary>
+    internal void FaultSourceForTest(string deviceId)
+    {
+        lock (gate) foreach (var a in active) if (a.Source.DeviceId == deviceId) a.Source.MarkFaultedForTest();
     }
 
     /// <summary>Put an opened source into the mix. Caller holds <c>gate</c>. The one place a source is
@@ -387,6 +485,11 @@ internal sealed class MixingEngine : ICaptureBackend
     /// </summary>
     private ActiveSource? OpenSource(CaptureSourceSpec spec)
     {
+        if (RefuseOpenForTest?.Invoke(spec) == true)
+        {
+            if (!healing) onDiagnostic?.Invoke($"mixer: failed to open source \"{spec.Name}\" ({spec.Kind}): refused by the self-test");
+            return null;
+        }
         // Per-application source: no MMDevice, no render keepalive — the process-loopback client
         // captures the app's render stream directly. If the app has exited, the PID is stale and
         // activation fails; the caller simply drops it and the next reconcile re-resolves the name.
@@ -402,7 +505,7 @@ internal sealed class MixingEngine : ICaptureBackend
             }
             catch (Exception ex)
             {
-                onDiagnostic?.Invoke($"mixer: failed to open app source \"{spec.Name}\": {ex.GetType().Name}: {ex.Message}");
+                if (!healing) onDiagnostic?.Invoke($"mixer: failed to open app source \"{spec.Name}\": {ex.GetType().Name}: {ex.Message}");
                 return null;
             }
         }
@@ -436,7 +539,7 @@ internal sealed class MixingEngine : ICaptureBackend
         }
         catch (Exception ex)
         {
-            onDiagnostic?.Invoke($"mixer: failed to open source \"{spec.Name}\" ({spec.Kind}): {ex.GetType().Name}: {ex.Message}");
+            if (!healing) onDiagnostic?.Invoke($"mixer: failed to open source \"{spec.Name}\" ({spec.Kind}): {ex.GetType().Name}: {ex.Message} — tried again every few seconds");
             try { device?.Dispose(); } catch { /* ignore */ }
             return null;
         }

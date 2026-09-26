@@ -19,7 +19,14 @@ internal static class ProfilePasswordManagerDialog
         using (dialog)
         {
             if (dialog.ShowDialog(owner) != DialogResult.OK) return false;
-            return SaveChanges(store, rows);
+            var (changed, failed) = SaveChanges(store, rows);
+            // Said, not swallowed: OK closed as though everything had saved (2026-09-25 sweep).
+            if (failed.Count > 0)
+                AppMessageBox.Show(owner,
+                    $"These passwords were not saved:\n\n{string.Join("\n", failed)}\n\n"
+                    + (changed ? "The others were saved." : "Nothing was changed."),
+                    "Profile passwords", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return changed;
         }
     }
 
@@ -89,12 +96,17 @@ internal static class ProfilePasswordManagerDialog
         dialog.Controls.Add(intro);
         dialog.AcceptButton = okButton;
         dialog.CancelButton = cancelButton;
+        foreach (var row in rows) ContextHelp.Mark(row.Box, "dialog.profile-passwords-manager.password");
+        ContextHelp.Mark(okButton, "dialog.profile-passwords-manager.ok");
+        ContextHelp.Mark(cancelButton, "dialog.profile-passwords-manager.cancel");
         return (dialog, rows);
     }
 
-    private static bool SaveChanges(ProfileStore store, List<(string Title, string Original, TextBox Box)> rows)
+    /// <summary>Writes each changed password. Returns whether any was saved, and each one that was not, with why.</summary>
+    internal static (bool Changed, List<string> Failed) SaveChanges(ProfileStore store, List<(string Title, string Original, TextBox Box)> rows)
     {
         var changedAny = false;
+        var failed = new List<string>();
         foreach (var (title, original, box) in rows)
         {
             var now = box.Text.Trim();
@@ -102,18 +114,19 @@ internal static class ProfilePasswordManagerDialog
             try
             {
                 var path = store.PathFor(title);
-                if (!File.Exists(path)) continue;
+                if (!File.Exists(path)) { failed.Add($"{title}: its profile file is no longer there"); continue; }
                 var profile = JsonSerializer.Deserialize<Profile>(File.ReadAllText(path));
-                if (profile is null) continue;
+                if (profile is null) { failed.Add($"{title}: its profile file could not be read"); continue; }
                 profile.Password = RemSoundCrypto.Obfuscate(now);
                 ProfileStore.WriteProfileFile(path, profile);
                 changedAny = true;
             }
-            catch
+            catch (Exception ex)
             {
-                // Skip a profile we couldn't rewrite; the others still save.
+                // The others still save.
+                failed.Add($"{title}: {ex.Message}");
             }
         }
-        return changedAny;
+        return (changedAny, failed);
     }
 }

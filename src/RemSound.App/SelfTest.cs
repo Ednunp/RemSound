@@ -107,11 +107,48 @@ internal static partial class SelfTest
             ? null
             : AppConfig.UseThrowawayUserDataDirectory(Path.Combine(Path.GetTempPath(), "remsound-selftest-" + Guid.NewGuid().ToString("N")));
         var seconds = int.TryParse(ValueAfter(args, "--seconds"), out var s) && s is > 0 and <= 30 ? s : 3;
+        // Before any step can write it: the file every DAW's plugin reads. The last step proves it untouched.
+        realPluginPointerAtStart = ReadRealPluginPointer();
+        // --only <words>: run just the steps whose names contain them, to iterate on a few. Never a pass: the result
+        // says PARTIAL and the exit code is 3, so a partial run can't be taken for the gate.
+        onlyStepsContaining = ValueAfter(args, "--only");
 
         // Not a word out loud for the whole run. Driving the window drives the code that speaks, and a gate run
         // must never make a noise on the machine it is running on — Ed, 2026-09-20, hearing it through NVDA.
         var restoreSpeech = ScreenReader.Suppressed;
         ScreenReader.Suppressed = true;
+        // And not a sound: the cues are muted for the whole run, not step by step. A step that forgot to mute them
+        // played them at whoever was at the screen (2026-09-24). Steps that change it put it back.
+        var restoreCues = CuePlayer.GloballyMuted;
+        CuePlayer.GloballyMuted = true;
+        CuePlayer.NoDeviceForTest = true;
+        RemSound.Plugin.PluginHelpSounds.NoDeviceForTest = true;
+        // The gate is started --silent, which marks the whole PROCESS a silent launch; the steps are the app's, not a
+        // silent launch's, and several check exactly what a silent launch turns off (the update timer). The run's own
+        // silence is the cue mute and the speech switch above (2026-09-25).
+        var restoreSilentLaunch = Windowless.SilentLaunch;
+        Windowless.SilentLaunch = false;
+        PerformanceMode.NoEffectForTest = true;
+        // Every plugin instance in the run talks to a listener of the run's own unless a step points it at a host of its
+        // own - never at 47831, where the person's RemSound is usually listening. The last steps prove none did.
+        using var pluginSink = new System.Net.Sockets.UdpClient(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 0));
+        RemSound.Plugin.RemSoundPlugin.BridgePortForTest = ((System.Net.IPEndPoint)pluginSink.Client.LocalEndPoint!).Port;
+        RemSound.Plugin.RemSoundPlugin.RealPortInitialisationsForTest = 0;
+        // And the installed service's settings (ProgramData\RemSound\service) are the service's, not the run's: a step
+        // wrote them three times and put them back on a best-effort basis until 2026-09-24. The whole run gets its own.
+        var serviceStoreBefore = ServiceStore.TestDirectoryOverride;
+        var runServiceStore = Path.Combine(Path.GetTempPath(), "remsound-selftest-service-" + Guid.NewGuid().ToString("N"));
+        ServiceStore.TestDirectoryOverride = runServiceStore;
+        // Nothing in the run announces this computer on the network as a sender: the service's presence broadcast its
+        // discovery announcement to the LAN from two steps until 2026-09-24.
+        PeerDiscoveryService.NoNetworkForTest = true;
+        PeerDiscoveryService.RealStartsForTest = 0;
+        // Nor does anything in it ask the real router to open a port: a Preferences tick reaching the live mapper would.
+        RouterPortMapper.NoNetworkForTest = true;
+        // Nor open a browser: the help window's manual button, pressed by the dialog suite, would (2026-09-25). And the
+        // help window gets the app's sounds and log, as it does at startup.
+        HelpLauncher.BrowserForTest = RunBrowsed.Enqueue;
+        HelpLauncher.WireContextHelp();
         try
         {
         Console.WriteLine($"RemSound self-test {CommandLine.AppVersion}  ({DateTime.Now:yyyy-MM-dd HH:mm:ss})");
@@ -148,6 +185,7 @@ internal static partial class SelfTest
         RunStep(results, "Per-peer shaping DSP", PeerShapingDsp);
         RunStep(results, "Volume and pan actually move the sound (measured)", ShapingVolumeAndPan);
         RunStep(results, "All three EQ modes actually change the sound (measured, every band)", ShapingEqModes);
+        RunStep(results, "The pan and EQ tab's real controls reach the live sound (measured through the window)", ShapingControlsReachTheLiveSound);
         RunStep(results, "Multi-output fan-out (both lanes)", FanOutToBothOutputs);
         RunStep(results, "Per-application send enumeration", AppSendEnumeration);
         RunStep(results, "Per-application capture lifecycle", AppSendCaptureLifecycle);
@@ -159,7 +197,12 @@ internal static partial class SelfTest
         RunStep(results, "Default-output follower (service follows Windows default)", DefaultOutputFollower);
         RunStep(results, "Default follower exclusivity (locks out specific cards)", DefaultFollowerExclusivity);
         RunStep(results, "Service profile isolation (location + hidden from pickers)", ServiceProfileIsolation);
+        RunStep(results, "A send source that failed is tried again until it opens", AFailedSendSourceIsTriedAgain);
+        RunStep(results, "A send source that dies is re-opened alone; the rest, and ASIO, carry on", ADeadSendSourceIsReopenedAlone);
         RunStep(results, "Service send host (headless stream + yield)", ServiceSendHostStream);
+        RunStep(results, "The service sends only to the people ticked: nobody ticked is nobody", ServiceSendsOnlyToThePeopleTicked);
+        RunStep(results, "The service looks a name up again until it answers", ServiceLooksNamesUpAgainUntilTheyAnswer);
+        RunStep(results, "The service follows a server by name that moves to a new address", ServiceFollowsAServerThatMoves);
         RunStep(results, "Service network presence (reachable + shell teardown)", ServiceNetworkPresenceReachable);
         RunStep(results, "Service reachability-gated sending (drop dead peers, re-arm recovered)", ServiceReachabilityGating);
         RunStep(results, "Service silent-capture self-heal (issue #23 boot re-open ladder)", ServiceSilentCaptureSelfHeal);
@@ -227,6 +270,11 @@ internal static partial class SelfTest
         RunStep(results, "Two DAWs at once (summed, and hand-over when one goes)", TwoDawsAtOnce);
         RunStep(results, "Plugin drift corrector (both directions, and idle when matched)", PluginDriftCorrector);
         RunStep(results, "Plugin window (peer list, job, bypass - screen-reader safe)", PluginWindowWiring);
+        RunStep(results, "A DAW buffer of 4096 or more reaches the track whole, both ways", ABigDawBufferReachesTheTrackWhole);
+        RunStep(results, "The plugin plays every block, whatever size the host hands it", ThePluginPlaysEveryBlockWhateverItsSize);
+        RunStep(results, "The plugin keeps its choices when Active or Receive is switched off", ThePluginKeepsItsChoicesWhenSwitchedOff);
+        RunStep(results, "A plugin removed from its track stops taking part", APluginRemovedFromItsTrackStopsTakingPart);
+        RunStep(results, "The parameter watch never calls the host from its own thread", TheParameterWatchNeverCallsTheHostFromItsThread);
         RunStep(results, "Plugin rate conversion (a 44.1k DAW must not transpose anyone)", PluginRateConversion);
         RunStep(results, "The plugin actually ships in this build (and installs from it)", PluginPayloadPresent);
         RunStep(results, "The shipped plugin folder loads on its own (as a DAW loads it)", PluginFolderLoadsOnItsOwn);
@@ -263,12 +311,36 @@ internal static partial class SelfTest
         RunStep(results, "No copy of RemSound carries the signing key's folder", AuditNoCopyCarriesTheSigningKeyFolder);
         RunStep(results, "The release script hands RemSound the signing key", AuditReleaseScriptHandsOverTheSigningKey);
         RunStep(results, "Updater refuses an unsigned or badly-signed release (enforcement flow)", UpdaterRefusesUnsignedRelease);
+        RunStep(results, "A failed update keeps what it could not put back, and says so", AFailedUpdateKeepsWhatItCouldNotPutBack);
+        RunStep(results, "A download that stops arriving is given up; a slow one is not", AStalledDownloadIsGivenUpASlowOneIsNot);
+        RunStep(results, "After a stalled download, Install now works again", InstallNowWorksAgainAfterAStalledDownload);
         RunStep(results, "The relay updater installs only a release signed by the release key", AuditRelayUpdaterInstallsOnlySignedReleases);
+        RunStep(results, "The relay updater reads a long release list, and finds the server release in it", AuditRelayUpdaterReadsALongReleaseList);
+        RunStep(results, "The relay updater refuses an old release put up under a new name", AuditRelayUpdaterRefusesAnOldReleaseUnderANewName);
         RunStep(results, "Server releases are signed the way the relay checks", AuditServerReleasesAreSignedTheWayTheRelayChecks);
         RunStep(results, "The relay runs as its own user, with a private log", AuditRelayRunsAsItsOwnUserWithAPrivateLog);
         RunStep(results, "Relay groups: framing, member addresses and the member list", AuditRelayGroupFramingAndMembers);
         RunStep(results, "Several people share one relay, each heard as themselves", AuditSeveralPeopleShareOneRelay);
         RunStep(results, "Connecting to a relay, remembering it and ticking who is on it", AuditConnectingToARelayFromTheWindow);
+        RunStep(results, "A server joined before the password's key is ready keeps its ticks", AServerJoinedBeforeTheKeyKeepsItsTicks);
+        RunStep(results, "A save that fails keeps you where you are, with your changes", AFailedSaveKeepsYouWhereYouAre);
+        RunStep(results, "Switching profile asks about unsaved changes, as New profile and Exit do", SwitchingProfileAsksAboutUnsavedChanges);
+        RunStep(results, "Everybody on a server is there, and counted, while they answer - each with cues of their own", EverybodyOnAServerIsThereWhileItAnswers);
+        RunStep(results, "A volume hotkey is a change to save, and is logged", AVolumeHotkeyIsAChangeToSave);
+        RunStep(results, "The start-up update question is asked once a run, not at every profile switch", TheStartupUpdateQuestionIsAskedOnceARun);
+        RunStep(results, "Remote system volume follows the default output when it moves", RemoteSystemVolumeFollowsTheDefaultOutput);
+        RunStep(results, "Questions that can come from the tray open in front", QuestionsFromTheTrayOpenInFront);
+        RunStep(results, "Context help: F1 on every control in every window opens its own help, in the right place", ContextHelpOnEveryControl);
+        RunStep(results, "Shift+F1 opens the whole manual; F1 no longer does", ShiftF1OpensTheWholeManual);
+        RunStep(results, "F1 help through the control channel", F1HelpThroughTheControlChannel);
+        RunStep(results, "The help window reads the manual's own words", TheHelpWindowReadsTheManualsOwnWords);
+        RunStep(results, "The context help message at start-up: once a run until hidden; Preferences brings it back", TheF1HelpMessageAtStartUp);
+        RunStep(results, "GATE GUARD: every control, menu item and tab has context help, each in the manual once", EveryControlHasContextHelp);
+        RunStep(results, "The update notice's countdown waits while context help is open", TheUpdateCountdownWaitsForContextHelp);
+        RunStep(results, "The router mapping is asked for again before it runs out", RouterMappingIsAskedForAgainBeforeItRunsOut);
+        RunStep(results, "With both output types, a peer playing on ASIO keeps its session", AnAsioCopyPlayingKeepsItsSessionAlive);
+        RunStep(results, "Two receive threads each decrypt their own audio", TwoReceiveThreadsEachDecryptTheirOwnAudio);
+        RunStep(results, "A session is never freed while it decodes", ASessionIsNeverFreedWhileItDecodes);
         RunStep(results, "GATE GUARD: a run makes no noise, including out loud", AGateRunMakesNoNoise);
         RunStep(results, "What happens when somebody else ticks you", WhatHappensWhenSomebodyTicksYou);
         RunStep(results, "The send-only service, and somebody ticking it on a relay", TheServiceAndSomebodyTickingItOnARelay);
@@ -351,7 +423,7 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT: a peer or source change forgets every tuner reading and keeps what it learned", AuditPeerOrSourceChangeForgetsEveryReading);
         RunStep(results, "AUDIT: every tuned route notices its output stopping and returning, the Mixed route included", AuditEveryTunedRouteNoticesItsOutputStopping);
         RunStep(results, "AUDIT: the Total latency box is true with logging and auto-tune off (all three configurations)", AuditTotalLatencyBoxIsTrueWithLoggingOff);
-        RunStep(results, "AUDIT: the audio set-up is not redone every second, and a sending plugin keeps the sender up", AuditAudioSetupIsNotRedoneEverySecond);
+        RunStep(results, "AUDIT: the audio set-up is not redone every second, and the check asks what the set-up asks", AuditAudioSetupIsNotRedoneEverySecond);
         RunStep(results, "AUDIT: the service takes an app update only once it has finished landing, and its restart retries", AuditServiceUpdateWaitsForTheWholeSwap);
         RunStep(results, "AUDIT: the service handles a wake once and tidies its own logs", AuditServiceHandlesAWakeOnceAndTidiesItsLogs);
         RunStep(results, "AUDIT: the service sends a chosen application that starts after it does", AuditServiceSendsAnApplicationStartedLater);
@@ -398,10 +470,83 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT TICK1: the always-on per-second work runs with logging OFF", AuditTickWorkIsNotBehindTheLogSwitch);
         RunStep(results, "AUDIT SI1: force-close never reaches for the Windows service", AuditForceCloseSparesTheService);
         RunStep(results, "AUDIT DISC1: a malformed discovery broadcast is dropped, not fatal", AuditDiscoveryRejectsMalformedAnnouncements);
+        // 2026-09-24, Ed: "a way of driving remsound entirely without a window like I think you can with reaper."
+        RunStep(results, "REMOTE CONTROL: the whole app is driven through the channel, by the names a screen reader reads", RemoteControlDrivesTheWholeApp);
+        RunStep(results, "REMOTE CONTROL: a password is never read back or logged", RemoteControlNeverReadsAPasswordBack);
+        RunStep(results, "PREFERENCES: a Connectivity tab after General, with who can reach you, in the order Tab meets it", PreferencesConnectivityTab);
+        RunStep(results, "REMOTE CONTROL: the channel is this Windows account's alone, and never the network's", RemoteControlChannelIsThisAccountsAlone);
+        RunStep(results, "HEADLESS: a window stays off-screen and out of focus until it is handed over", HeadlessWindowsStayOutOfSightUntilHandedOver);
+        RunStep(results, "HEADLESS: the tray menu still opens for the person at the keyboard, and no update check at start-up", HeadlessTrayMenuOpensAndNoUpdateCheck);
+        RunStep(results, "PLUGIN MENU: Install and Remove, chosen from the real menu, use the run's own folder and never the real VST3 folder", PluginMenuInstallsAndRemovesInTheRunsOwnFolder);
+        // 2026-09-25, Ed: a choice of where the plugin goes, remembered, and updated there.
+        RunStep(results, "PLUGIN FOLDER: installed where chosen, remembered, moved, updated and removed there, Windows asked only when needed", PluginFolderIsRememberedMovedUpdatedAndRemoved);
+        RunStep(results, "PLUGIN FOLDER: the menu asks where, and Ed's message says where updates go", PluginFolderMenuAsksWhereAndSaysWhereUpdatesGo);
+        RunStep(results, "PLUGIN: the context help sounds play in a music program, and RemSound's own are left alone", PluginContextHelpSoundsAndItsOwnHost);
+        RunStep(results, "PLUGIN LINK IN THE APP: the speakers honour a plugin's claim, a DAW track reaches the send lane, and off lets both go", PluginLinkIsWiredInTheApp);
+        // 2026-09-25 sweep, Ed: "yes all 10" - the network faults, app side.
+        RunStep(results, "NAMES: a server or peer not found at start is tried again and kept, and a server that moves is followed", NamesNotFoundAtStartAreTriedAgainAndKept);
+        RunStep(results, "ECHO AND FLOODS: an address check answered only for somebody we talk to, and junk control packets stopped early", NoEchoLoopAndNoFloodReachesTheWindow);
+        RunStep(results, "UPNP: unticking it holds, even while a renewal is waiting on the router", UnTickingUpnpHoldsEvenMidRenewal);
+        RunStep(results, "NETWORK TIDY: discovery's list capped, server lists quiet, the tick list keeps who is there", NetworkTidyHolds);
+        RunStep(results, "WAITING: the password warning keeps the tick running, the quick switch waits, a silent copy asks nobody", WarningsAndQuestionsWaitProperly);
+        RunStep(results, "KEY CLICKS: the output open only while clicks are on, and opened again after its device goes", KeyClicksOpenOnlyWhileOnAndComeBack);
+        RunStep(results, "SPLASH: the audio-driver splash never sticks on screen", TheAsioSplashNeverSticks);
+        RunStep(results, "UPDATE NOTE: \"could not be put back fully\" can be answered", TheUpdateNoteCanBeAnswered);
+        RunStep(results, "SERVICE UPDATE: no copy over an unsettled app folder, and a failed copy tried again and checked", TheServiceCopiesOnlyWhatItCanCheck);
+        RunStep(results, "START AND TRAY: F1 in the uninstall window, the picker in front, the tray menu back after help", StartupWindowsAndTrayHelp);
+        RunStep(results, "TIDY-UPS: Ctrl+S, press a key, passwords, stream ids, the ASIO callback, the ticked-us table", SweepTidyUpsHold);
+        RunStep(results, "INSTALL AND UNINSTALL: changes offered for saving first, then the window's normal close", InstallAndUninstallLeaveProperly);
+        RunStep(results, "UPDATE LEFTOVERS: a cut-off update said and held, the note cleared once whole, old files removed", UpdateLeftoversArePutRight);
+        RunStep(results, "PREFERENCES: closing it keeps the keyboard where it was", PreferencesClosingKeepsYourPlace);
+        RunStep(results, "IDENTITY: one person on a server per Windows account, and the service is whoever set it up", OneServerIdentityPerWindowsAccount);
+        RunStep(results, "SERVICE FOLDER: repaired only by the account it belongs to; another is told once", TheServiceFolderIsRepairedOnlyByItsAccount);
+        RunStep(results, "AWAY DEVICES: a device not here when a profile is saved keeps its tick", ADeviceAwayKeepsItsTickInTheProfile);
+        RunStep(results, "ASIO LATE: an interface switched on after RemSound started is tried once more and its ticks come back", AnAsioInterfaceSwitchedOnLateComesBack);
+        RunStep(results, "TICKED BEFORE: a device you have ticked is let back in when it connects to listen", ADeviceTickedBeforeIsLetBackIn);
+        // 2026-09-25 sweep, Ed: "yes all 7" - the audio and plugin faults.
+        RunStep(results, "PLUGIN RECEIVE: every frame asked for is played, in order, at 44.1 kHz and with the block size changing", ThePluginPlaysEveryFrameItAskedFor);
+        RunStep(results, "PEER EQ: a person's streams each have their own, so two streams are not distorted", APeersEqIsNotSharedBetweenTheirStreams);
+        RunStep(results, "RECEIVE OFF: the ticked outputs stay closed until receiving is switched on", OutputsStayClosedWithReceiveOff);
+        RunStep(results, "RECORDING: every block moves a recording on, silent or not", ARecordingMovesOnWhileNoPeerPlays);
+        RunStep(results, "PLUGIN RECEIVE: a DAW track keeps its peer when the WASAPI output stops being read", APluginTrackPlaysWhenTheWasapiOutputStops);
+        RunStep(results, "PLUGIN STATUS: says plainly when Receive audio is off in RemSound", APluginSaysWhenReceiveIsOffInRemSound);
+        RunStep(results, "ASIO: an input or output that failed to open is tried again", AFailedAsioOpenIsTriedAgain);
+        // 2026-09-25 sweep, Ed: "fix them all please" - five small ones.
+        RunStep(results, "SWEEP FIXES: Save as unlocks, Browse switches a sound on, speech finds NVDA later, the Server window speaks, the repair's answer is in front", SweepSmallFixesHold);
+        // 2026-09-25 sweep, Ed: "yes fix those 2" - a profile saved over, and one lost track of by renaming.
+        RunStep(results, "PROFILES: one that can't be read is never saved over, and a renamed one is still found", AProfileIsNeverSavedOverOrLostByRenaming);
+        // 2026-09-25, the live phone test: Ed's phone was accepted and his wife's phone got the stream.
+        RunStep(results, "PEERS: two devices with one name are never mixed up - an accepted phone stays itself", TwoDevicesWithOneNameAreNeverMixedUp);
+        // 2026-09-25, the live phone test, Ed: "a connection should be auto accepted regardless!"
+        RunStep(results, "ACCEPT: anyone with the password is asked about or accepted, whatever they send - and nobody without it", AnyoneWithThePasswordIsOfferedOrAccepted);
+        // 2026-09-25 sweep, Ed: "yes fix that". A sending DAW track started the microphone with "Send my audio" off.
+        RunStep(results, "SEND: a DAW track sending never puts your own inputs on the wire with \"Send my audio\" off", SendOffKeepsYourOwnInputsOffWhileAPluginSends);
+        // 2026-09-24, Ed: "will the update work for them properly? particularly considering the lockscreen service."
+        RunStep(results, "UPGRADE FROM 5.9: a service watching a folder no update reaches follows the installed copy", UpgradeServiceFollowsTheInstalledCopy);
+        RunStep(results, "UPGRADE FROM 5.9: the service's update waits for the app's to finish landing, and proves its copy", UpgradeServiceUpdateWaitsAndChecksItsCopy);
+        RunStep(results, "SECURITY: nobody but SYSTEM and Administrators can move the service's folder - the folder above it is locked down too", ServiceParentFolderIsLockedDown);
+        // 2026-09-24, Ed: scripts beside the exe for the plugin and the service, "the same way as if they had done it
+        // from the application".
+        RunStep(results, "SCRIPTS: every script calls a command RemSound answers, and does what its menu item does", ScriptsDoWhatTheirMenuItemsDo);
+        // 2026-09-24, Ed's phone waiting on the server and his PC never pairing with it.
+        RunStep(results, "A PC alone on a server still pings it, so a phone waiting there can be paired", APcAloneOnAServerStillPingsIt);
+        // 2026-09-24, the first scripted plugin test in Reaper.
+        RunStep(results, "PLUGIN: a change made in the host's parameter list is acted on, and switches say on and off", PluginActsOnTheHostsParameterChanges);
+        // LAST, so every step before it has had its chance to write the real pointer, or reach the real RemSound.
+        RunStep(results, "GATE GUARD: no plugin in the run talked to the RemSound you have open", NoPluginInTheRunReachedTheRealApp);
+        RunStep(results, "GATE GUARD: nothing in the run announced this computer on the network", NothingInTheRunAnnouncedItself);
+        RunStep(results, "GATE GUARD: the run never touches the real plugin pointer every DAW reads", TheGateLeavesTheRealPluginPointerAlone);
+        RunStep(results, "SCRIPTS: the old scripts folder is tidied away, and nobody else's files go with it", OldScriptsFolderIsTidiedAway);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");
         var passed = results.Count(r => r.Status == "PASS");
+        if (onlyStepsContaining is not null)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"RESULT: PARTIAL - only steps containing \"{onlyStepsContaining}\": {passed} passed, {failed} failed, {skipped} skipped of {results.Count}. Not a gate run.");
+            return 3;
+        }
 
         Console.WriteLine();
         // Skips must be LOUD: a skipped step is coverage that did not run, and a gate that quietly
@@ -419,11 +564,27 @@ internal static partial class SelfTest
         Console.WriteLine($"        Failed: {names}");
         return 1;
         }
-        finally { ScreenReader.Suppressed = restoreSpeech; }
+        finally
+        {
+            ScreenReader.Suppressed = restoreSpeech;
+            CuePlayer.GloballyMuted = restoreCues;
+            CuePlayer.NoDeviceForTest = false;
+            Windowless.SilentLaunch = restoreSilentLaunch;
+            PerformanceMode.NoEffectForTest = false;
+            RemSound.Plugin.RemSoundPlugin.BridgePortForTest = 0;
+            ServiceStore.TestDirectoryOverride = serviceStoreBefore;
+            PeerDiscoveryService.NoNetworkForTest = false;
+            RouterPortMapper.NoNetworkForTest = false;
+            HelpLauncher.BrowserForTest = null;
+            try { if (Directory.Exists(runServiceStore)) Directory.Delete(runServiceStore, recursive: true); } catch { /* throwaway */ }
+        }
     }
+
+    private static string? onlyStepsContaining;
 
     private static void RunStep(List<Result> results, string name, Func<string?> body)
     {
+        if (onlyStepsContaining is not null && !name.Contains(onlyStepsContaining, StringComparison.OrdinalIgnoreCase)) return;
         var sw = Stopwatch.StartNew();
         var r = new Result { Name = name };
         // GUARD B: a step that asserts nothing cannot pass. Snapshot the assertion counter, and if a
@@ -474,8 +635,13 @@ internal static partial class SelfTest
     {
         var r = AudioLoopback.Run(opus, seconds);
         if (!r.Ran) return Skip(r.SkipReason ?? "audio loopback unavailable");
-        Check(r.Flowed, $"audio did not flow end-to-end (sent={r.PacketsSent}, received={r.PacketsReceived})");
-        return $"sent={r.PacketsSent}, received={r.PacketsReceived}";
+        Check(r.PacketsSent > 0 && r.PacketsReceived > 0, $"no packets crossed the loopback (sent={r.PacketsSent}, received={r.PacketsReceived})");
+        Check(r.AudioDecoded, $"packets crossed (sent={r.PacketsSent}, received={r.PacketsReceived}) but the receiver decoded no audio - format packets alone, which is all a sender with no password sends");
+        // And the codec it says: Opus squeezes a packet to a few dozen bytes, raw PCM is well over a thousand.
+        var perPacket = r.BytesReceived / Math.Max(1, r.PacketsReceived);
+        Check(opus ? perPacket < 400 : perPacket > 500,
+            $"the {r.Codec} run must carry {r.Codec} - {perPacket} bytes a packet is {(perPacket < 400 ? "Opus-sized" : "PCM-sized")}");
+        return $"sent={r.PacketsSent}, received={r.PacketsReceived} ({r.BytesReceived / Math.Max(1, r.PacketsReceived)} bytes each), audio decoded into the playout buffer";
     }
 
     /// <summary>Audio encryption: the right password decrypts to the original, the wrong one fails
@@ -811,6 +977,7 @@ internal static partial class SelfTest
 
         var handlesBefore = SafeHandleCount();
         var transitions = 0;
+        Check(handlesBefore > 0, "the handle count could not be read, so a leak would read as growth of a negative number and pass");
 
         using (var receiver = new AudioReceiver())
         using (var sender = new RemSound.Sender.AudioSender())
@@ -818,6 +985,14 @@ internal static partial class SelfTest
             try { receiver.Start(port); }
             catch (Exception ex) { return Skip($"could not bind test port {port}: {ex.Message}"); }
             receiver.SetOutputDevices(Array.Empty<string>());   // decode only — never make a sound
+            // A password and the receiver switched on, as a real link has: with neither, only format packets crossed, no audio
+            // was ever encoded or decoded, and the pan and EQ chains this churns never processed a sample (found 2026-09-24).
+            var (churnKey, churnFingerprint) = RemSoundCrypto.ForPlainPassword("remsound-churn-check");
+            sender.AudioKey = churnKey;
+            sender.AudioFingerprint = churnFingerprint;
+            receiver.AudioKey = churnKey;
+            receiver.AudioFingerprint = churnFingerprint;
+            receiver.SetPlaybackEnabled(true);
             sender.SetReceivers(new[] { new IPEndPoint(IPAddress.Loopback, port) });
             sender.Start();
 
@@ -840,6 +1015,7 @@ internal static partial class SelfTest
                     foreach (var specs in specSets)
                     {
                         sender.Configure(specs);
+                        sender.Start();   // as the app's once-a-second re-apply does: a sender started with nothing to capture never runs, and until 2026-09-24 this churn sent nothing at all
                         foreach (var recv in recvSets) receiver.SetOutputDevices(recv);
                         foreach (var dsp in dspStates)
                         {
@@ -862,6 +1038,7 @@ internal static partial class SelfTest
             for (var k = 0; k < 24; k++)
             {
                 sender.Configure(specSets[k % specSets.Count]);
+                sender.Start();
                 receiver.SetPeerDsp(IPAddress.Loopback, dspStates[k % dspStates.Length]);
                 Thread.Sleep(10);
                 transitions++;
@@ -887,16 +1064,31 @@ internal static partial class SelfTest
                 receiver.SetAudioMode(AudioMode.WasapiOnly, null);
             }
 
+            // And after all of it, audio must still go through: a churn that left the link dead would pass a handle count.
+            if (loop is not null)
+            {
+                sender.ConfigureCodec(AudioTransportCodec.Opus);
+                sender.Configure(new List<CaptureSourceSpec> { loop });
+                sender.Start();
+                var flowing = false;
+                var sentAtEnd = sender.PacketsSent; var gotAtEnd = receiver.PacketsReceived; var decodedBefore = receiver.AudioBytesDecodedForTest;
+                var waited = 0;
+                for (var w = 0; w < 200 && !flowing; w++) { Thread.Sleep(50); waited += 50; flowing = receiver.AudioBytesDecodedForTest > decodedBefore; }
+                Check(flowing, $"after the churn, audio must still be encoded, sent and decoded - the link came out of it dead (waited {waited} ms; packets sent {sentAtEnd}->{sender.PacketsSent}, received {gotAtEnd}->{receiver.PacketsReceived}, sessions {receiver.LiveSessionCountForTest}, rejected-not-allowed {receiver.PacketsRejectedNotAllowed})");
+            }
+
             sender.Stop();
             receiver.Stop();
         }
 
         SettleForLeakCheck();
-        var handleGrowth = SafeHandleCount() - handlesBefore;
+        var handlesAfter = SafeHandleCount();
+        Check(handlesAfter > 0, "the handle count could not be read after the churn");
+        var handleGrowth = handlesAfter - handlesBefore;
         Check(handleGrowth < 400, $"handle growth across the churn is too high ({handleGrowth}) — a transition may be leaking");
 
         return $"{transitions} transitions; specSets={specSets.Count}, dsp={dspStates.Length}, "
-             + $"asio={(asioDriver ?? "skipped (set REMSOUND_TEST_ASIO)")}, proc={procOk}, handles+{handleGrowth}";
+             + $"asio={(asioDriver ?? "skipped (set REMSOUND_TEST_ASIO)")}, proc={procOk}, handles+{handleGrowth}" + (loop is null ? "; no output to capture, so audio after the churn was not checked" : "; audio still decoded after it");
     }
 
     private static int SafeHandleCount()
@@ -944,7 +1136,8 @@ internal static partial class SelfTest
                     new RecordingSettings { FileFormat = fmt, Source = RecordingSource.Both, ChannelMode = RecordingChannelMode.Stereo },
                     feedReceived: true, feedSent: true);
                 Check(len > 200, $"{ext.ToUpperInvariant()} recording must have real content (got {len} bytes)");
-                summary.Add($"{ext}={len}B");
+                // And that content is the tone, read back through a decoder: a file of silence the right size passed "200 bytes".
+                summary.Add($"{ext}={len}B ({CheckHoldsTheTestTone(path, ext.ToUpperInvariant())})");
             }
             return string.Join(", ", summary);
         }
@@ -1067,13 +1260,25 @@ internal static partial class SelfTest
     /// folder it was installed from — so it can't lock the app's install folder / a dev working copy or
     /// block the auto-updater. And it grants authenticated users start/stop so it's stoppable without admin.
     /// Tests the pure pieces: the run-from path, the SDDL amendment, and the program-copy exclusions.</summary>
+    /// <summary>Read a path the REAL service uses, with the run's throwaway service store set aside for the moment of the
+    /// read. For reading only: nothing may be written inside it.</summary>
+    private static T WithRealServiceStore<T>(Func<T> read)
+    {
+        var runStore = ServiceStore.TestDirectoryOverride;
+        ServiceStore.TestDirectoryOverride = null;
+        try { return read(); }
+        finally { ServiceStore.TestDirectoryOverride = runStore; }
+    }
+
     private static string? ServiceSelfContainedInstall()
     {
         // 1. The service runs from ProgramData\RemSound\service\bin\RemSound.exe, and BuildCreateArgs points there.
         var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-        Check(ServiceStore.BinExePath.StartsWith(programData, StringComparison.OrdinalIgnoreCase)
-              && ServiceStore.BinExePath.EndsWith(@"\bin\RemSound.exe", StringComparison.OrdinalIgnoreCase),
-            $"the service must run from its own ProgramData bin copy (got {ServiceStore.BinExePath})");
+        // The path the REAL service uses, read with the run's throwaway store set aside (reading only; nothing is written).
+        var realBinExe = WithRealServiceStore(() => ServiceStore.BinExePath);
+        Check(realBinExe.StartsWith(programData, StringComparison.OrdinalIgnoreCase)
+              && realBinExe.EndsWith(@"\bin\RemSound.exe", StringComparison.OrdinalIgnoreCase),
+            $"the service must run from its own ProgramData bin copy (got {realBinExe})");
         var createArgs = ServiceControl.BuildCreateArgs(ServiceStore.BinExePath);
         Check(createArgs.Contains("\\\"" + ServiceStore.BinExePath + "\\\" " + ServiceControl.RunVerb),
             "the create command must register the ProgramData bin exe as the service binary");
@@ -1145,8 +1350,9 @@ internal static partial class SelfTest
     {
         // 1. The store lives under ProgramData, NOT the user's profiles folder.
         var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-        Check(ServiceStore.Directory.StartsWith(programData, StringComparison.OrdinalIgnoreCase),
-            $"the service profile must live under ProgramData (got {ServiceStore.Directory})");
+        var realStore = WithRealServiceStore(() => ServiceStore.Directory);
+        Check(realStore.StartsWith(programData, StringComparison.OrdinalIgnoreCase),
+            $"the service profile must live under ProgramData (got {realStore})");
 
         // 2. The reserved title is filtered out of ListProfileTitles (the picker / recents / password
         //    manager all read that), even if a stray file were present in the profiles folder.
@@ -1449,6 +1655,7 @@ internal static partial class SelfTest
             ["RelayServer"] = "control-owned: the relay box (GatherRelayProfile / ApplyRelayProfile)",
             ["RelayConnectOnStart"] = "control-owned: whether the relay box is connected when the profile is saved",
             ["RelayTickedIds"] = "control-owned: the ticks in the relay's own peer list",
+            ["RelayPairPartnerTicked"] = "control-owned: the phone-or-older-app row's tick in the relay's peer list (pinned by MainWindowProfileRoundTrip)",
             ["PeerShaping"] = "control-owned: pan/EQ editor state (pinned by MainWindowProfileRoundTrip)",
             ["EnableAllPeerShaping"] = "control-owned: shaping master switch (pinned by MainWindowProfileRoundTrip)",
             ["AudioPort"] = "DEAD FIELD: nothing reads it (the live port is the RemPacket constant). Wiring a custom-port UI to it requires adding real persistence first",
@@ -1577,10 +1784,12 @@ internal static partial class SelfTest
         receiver.InjectExternalPacket(packet, len, new IPEndPoint(IPAddress.Parse("10.1.2.3"), 5555));
         Check(receiver.PacketsRejectedNotAllowed == 1,
             "a Format packet from a non-allowed sender must be rejected and counted — never open a session");
+        Check(receiver.LiveSessionCountForTest == 0, "and no session may exist for the stranger - the name of this step is \"no session\", so count them");
 
         // The allow-list matches by ADDRESS (source ports vary); an allowed sender must pass.
         receiver.InjectExternalPacket(packet, len, new IPEndPoint(IPAddress.Parse("10.9.8.7"), 61234));
         Check(receiver.PacketsRejectedNotAllowed == 1, "the allowed sender must not be counted as rejected");
+        Check(receiver.LiveSessionCountForTest == 1, $"and the allowed sender must get a session - a gate that refused everyone would pass the counts above (sessions: {receiver.LiveSessionCountForTest})");
         return "stranger rejected + counted before any session; allowed address passes at any source port";
     }
 
@@ -2059,15 +2268,25 @@ internal static partial class SelfTest
         }
         else
         {
-            using var appHold = InteractivePresence.AcquireHold();       // the APP's entry point
-            Check(appHold is not null, "AcquireHold() must take the production token when nothing else holds it");
-            Check(InteractivePresence.IsInteractiveAppRunning(),          // the SERVICE's entry point
-                "a hold taken through AcquireHold() (what the APP calls) must be visible to IsInteractiveAppRunning() "
-                + "(what the SERVICE calls). If those two names drift the service never yields and keeps streaming over "
-                + "a running app — with nothing anywhere to say so");
-            Check(InteractivePresence.IsInteractiveAppRunning(production),
-                "and it must be the production name that is held, not some other one");
-            agreement = $"AcquireHold() and IsInteractiveAppRunning() both reach {production}";
+            // NOT the production token: taking it, even for a moment, pauses an installed service's stream (found
+            // 2026-09-24). Both no-argument entry points read one overridable name instead, so pointing that at a token
+            // of the test's own proves they agree - an entry point that hard-coded another name would ignore it.
+            var own = @"Global\RemSound.Interactive.selftest.entry." + Guid.NewGuid().ToString("N");
+            InteractivePresence.NameOverrideForTest = own;
+            try
+            {
+                using (var appHold = InteractivePresence.AcquireHold())       // the APP's entry point
+                {
+                    Check(appHold is not null, "AcquireHold() must take its token when nothing else holds it");
+                    Check(InteractivePresence.IsInteractiveAppRunning(),         // the SERVICE's entry point
+                        "a hold taken through AcquireHold() (what the APP calls) must be visible to IsInteractiveAppRunning() "
+                        + "(what the SERVICE calls). If those two names drift the service never yields and keeps streaming over "
+                        + "a running app — with nothing anywhere to say so");
+                    Check(InteractivePresence.IsInteractiveAppRunning(own), "and it must be that one token that is held");
+                }
+            }
+            finally { InteractivePresence.NameOverrideForTest = null; }
+            agreement = $"AcquireHold() and IsInteractiveAppRunning() both reach the one name {production} is read from, proved on a token of the test's own";
         }
 
         return $"held → present; released → absent; {agreement}";
@@ -2103,24 +2322,45 @@ internal static partial class SelfTest
         try { receiver.Start(port); }
         catch (Exception ex) { return Skip($"could not bind test port {port}: {ex.Message}"); }
         receiver.SetOutputDevices(Array.Empty<string>()); // decode only — never make a sound
+        receiver.SetPlaybackEnabled(true);
+        // A password, as every real service profile has: with none, the host sent format packets only and "packets must
+        // flow" passed on those while not one sample of audio crossed (found 2026-09-24).
+        const string servicePassword = "selftest-service-password";
+        var (serviceKey, serviceFingerprint) = RemSoundCrypto.ForPlainPassword(servicePassword);
+        receiver.AudioKey = serviceKey;
+        receiver.AudioFingerprint = serviceFingerprint;
 
         var profile = new Profile
         {
             Title = "selftest-service",
             WasapiSendMode = "devices",
             Codec = AudioTransportCodec.Pcm,
+            Password = RemSoundCrypto.Obfuscate(servicePassword),
         };
         profile.SelectedWasapiSendOutputs.Add(deviceId);
         profile.SelectedConnectedPeers.Add($"127.0.0.1:{port}");
 
+        // Never the real well-known port: with RemSound open that bind failed silently and the step still passed; with it
+        // closed, the test's service sat on 47830.
+        var previousPresencePort = ServiceSendHost.PresencePortForTest;
+        var ownPresencePort = FreeUdpPort();
+        ServiceSendHost.PresencePortForTest = ownPresencePort;
+        try
+        {
         using var host = new ServiceSendHost(() => profile);
 
         Check(host.ApplyProfile(profile), "ApplyProfile should start streaming");
         Check(host.IsSending, "host should report sending after ApplyProfile");
         Check(host.IsNetworkPresenceUpForTest, "the network presence must come up with streaming (discoverable + reachable)");
+        Check(host.IsNetworkListenerBoundForTest,
+            "and its listener must really be bound - 'up' alone is only 'Start ran', true even when the port was taken");
+        bool PortFree(int p) { try { using var probe = new System.Net.Sockets.UdpClient(new IPEndPoint(IPAddress.Any, p)); return true; } catch { return false; } }
+        Check(!PortFree(ownPresencePort), $"and bound on the test's own port {ownPresencePort}, never the well-known one");
         Thread.Sleep(500);
         var afterStart = receiver.PacketsReceived;
         Check(afterStart > 0, $"packets must flow from the service host (got {afterStart})");
+        Check(receiver.AudioBytesDecodedForTest > 0,
+            $"and they must carry AUDIO the receiver decodes, not format packets alone ({afterStart} packets, nothing decoded)");
 
         host.Suspend();
         Check(!host.IsSending, "host should report not sending after Suspend");
@@ -2130,9 +2370,13 @@ internal static partial class SelfTest
         Thread.Sleep(400);
         Check(receiver.PacketsReceived == atSuspend, "no packets must flow while suspended");
 
+        var decodedAtSuspend = receiver.AudioBytesDecodedForTest;
         Check(host.Resume(), "Resume should restart streaming");
         Thread.Sleep(500);
         Check(receiver.PacketsReceived > atSuspend, "packets must flow again after Resume");
+        var decodedAgain = false;
+        for (var w = 0; w < 60 && !decodedAgain; w++) { decodedAgain = receiver.AudioBytesDecodedForTest > decodedAtSuspend; if (!decodedAgain) Thread.Sleep(50); }
+        Check(decodedAgain, $"and audio must decode again after Resume (packets {atSuspend} -> {receiver.PacketsReceived}, sessions {receiver.LiveSessionCountForTest})");
 
         // Now the full RunLoop + presence token, with a unique token so a real app can't interfere.
         host.Suspend();
@@ -2140,7 +2384,9 @@ internal static partial class SelfTest
         var loopResult = RunLoopYieldCheck(host, receiver, tokenName);
         Check(loopResult is null, loopResult ?? "");
 
-        return $"streamed headless; start/suspend/resume verified; {afterStart} pkts; yield loop ok";
+        return $"streamed headless on a port of its own; audio decoded, not just packets; start/suspend/resume verified; {afterStart} pkts; yield loop ok";
+        }
+        finally { ServiceSendHost.PresencePortForTest = previousPresencePort; }
     }
 
     // Drives ServiceSendHost.RunLoop against a presence token (unique name via a tiny shim): with the
@@ -2180,7 +2426,7 @@ internal static partial class SelfTest
 
     /// <summary>The v5 machine-wide settings and per-peer shaping survive a JSON save/reload: new
     /// AppConfig defaults, the named-peers book, the main tab order, per-peer shaping with parametric
-    /// bands, and the new recording default. All in-memory — the real config/profiles aren't touched.</summary>
+    /// bands, and the new recording default. Through the real Save and Load, in the run's throwaway settings folder.</summary>
     private static string? V5ConfigRoundTrip()
     {
         var fresh = new AppConfig();
@@ -2215,10 +2461,11 @@ internal static partial class SelfTest
             LastAddress = "100.72.4.13",
             LastSeenUtc = new DateTime(2026, 7, 8, 12, 0, 0, DateTimeKind.Utc),
         };
-        var json = JsonSerializer.Serialize(cfg, new JsonSerializerOptions { WriteIndented = true });
-        var back = JsonSerializer.Deserialize<AppConfig>(json);
-        Check(back is not null, "config must deserialise");
-        Check(back!.ThemeMode == "dark" && !back.ShowDiscoveredPeers, "theme and list toggles must round-trip");
+        // Through the real Save and Load (the run's settings are throwaway), not a serialiser of the test's own: those
+        // are what a person's settings go through, and a Save or Load that dropped something would pass a bare round-trip.
+        cfg.Save();
+        var back = AppConfig.Load();
+        Check(back.ThemeMode == "dark" && !back.ShowDiscoveredPeers, "theme and list toggles must round-trip");
         Check(back.MainTabOrder is { Count: 4 } && back.MainTabOrder[0] == "audioio", "tab order must round-trip");
         Check(back.NamedPeers.TryGetValue("ANDRE-PC", out var np)
               && np.FriendlyName == "Andre's desktop" && np.LastAddress == "100.72.4.13",
@@ -2249,10 +2496,11 @@ internal static partial class SelfTest
             StartWithProfileTitle = "Studio link",
             ProfilesDirectory = @"X:\some\profiles\folder",
         };
-        var json = JsonSerializer.Serialize(original, new JsonSerializerOptions { WriteIndented = true });
-        var loaded = JsonSerializer.Deserialize<AppConfig>(json);
-        Check(loaded is not null, "config must deserialise");
-        Check(loaded!.LoggingEnabled == original.LoggingEnabled
+        // The real Save and Load, in the run's throwaway settings folder - the docstring always said so; the code used a
+        // serialiser of its own until 2026-09-24.
+        original.Save();
+        var loaded = AppConfig.Load();
+        Check(loaded.LoggingEnabled == original.LoggingEnabled
               && loaded.StartMinimised == original.StartMinimised
               && loaded.EnableStartupCue == original.EnableStartupCue
               && loaded.UpdateCheckFrequency == original.UpdateCheckFrequency
@@ -2473,12 +2721,10 @@ internal static partial class SelfTest
         internal override bool HasKeyboardFocus => true;
     }
 
-    /// <summary>Headless accessibility audit of the dialogs that can be built without hardware: every
-    /// actionable control announces a name to a screen reader, and the Alt-key mnemonic letters are
-    /// unique within a container so keyboard navigation is never ambiguous. The main window can't be
-    /// built headlessly (its constructor opens audio devices, registers hotkeys and binds sockets),
-    /// so it's out of scope here. A dialog that won't construct in this context is skipped, not
-    /// failed.</summary>
+    /// <summary>Headless accessibility audit of every dialog the gate can build: every actionable control announces a
+    /// name to a screen reader, and the Alt-key mnemonic letters are unique within a container so keyboard navigation is
+    /// never ambiguous. (The main window has its own audit, MainWindowCoverage.) A dialog that will not even construct
+    /// FAILS: until 2026-09-24 it was quietly skipped, so a dialog that crashed on opening passed its own audit.</summary>
     private static string? AccessibilityAudit()
     {
         // ---- THE LOAD-BEARING NVDA FIX ---------------------------------------------------------
@@ -2539,16 +2785,14 @@ internal static partial class SelfTest
         {
             Form? form = null;
             try { form = make(); }
-            catch (Exception ex) { skipped.Add($"{name} ({ex.GetType().Name})"); continue; }
+            catch (Exception ex) { skipped.Add($"{name} ({ex.GetType().Name}: {ex.Message})"); continue; }
             try { AuditForm(name, form, violations); audited.Add(name); }
             finally { try { form.Dispose(); } catch { /* ignore */ } }
         }
 
-        if (audited.Count == 0) return Skip("no dialog could be constructed in this context");
+        Check(skipped.Count == 0, $"a dialog that will not even open cannot pass an accessibility audit: {string.Join("; ", skipped)}");
         Check(violations.Count == 0, string.Join("; ", violations));
-        var detail = $"audited {audited.Count} ({string.Join(", ", audited)})";
-        if (skipped.Count > 0) detail += $"; skipped {skipped.Count}";
-        return detail;
+        return $"audited {audited.Count} ({string.Join(", ", audited)})";
     }
 
     /// <summary>Constructs the ENTIRE main window in headless mode (no audio backend, no hotkeys, no
@@ -2589,6 +2833,10 @@ internal static partial class SelfTest
 
         using (mf)
         {
+            // The server is a listener of this step's own on this computer: a documentation address sent real packets out
+            // through the router (found 2026-09-24).
+            using var serverSink = new System.Net.Sockets.UdpClient(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 0));
+            var serverAt = $"127.0.0.1:{((System.Net.IPEndPoint)serverSink.Client.LocalEndPoint!).Port}";
             var input = new Profile
             {
                 Title = "roundtrip",
@@ -2604,9 +2852,10 @@ internal static partial class SelfTest
             // The server half of a profile: where it was, that it was connected, and who was ticked there. An address
             // rather than a name, so no lookup is needed and the connect happens here rather than on another thread.
             var tickedThere = Guid.NewGuid();
-            input.RelayServer = "203.0.113.200";
+            input.RelayServer = serverAt;
             input.RelayConnectOnStart = true;
             input.RelayTickedIds = [tickedThere.ToString("D")];
+            input.RelayPairPartnerTicked = true;
 
             var back = mf.ApplyThenCaptureForTest(input);
 
@@ -2615,11 +2864,14 @@ internal static partial class SelfTest
             Check(back.ReceiveAudioOn && back.SendAudioOn, "send/receive toggles must round-trip");
             Check(back.EnableAllPeerShaping, "the peer-shaping master switch must round-trip");
 
-            Check(back.RelayServer == "203.0.113.200", $"the server a profile uses must round-trip ({back.RelayServer ?? "nothing"})");
+            Check(back.RelayServer == serverAt, $"the server a profile uses must round-trip ({back.RelayServer ?? "nothing"})");
             Check(back.RelayConnectOnStart,
                 "a profile saved while on a server must say so, or it would load without going back to it");
             Check(back.RelayTickedIds.Contains(tickedThere.ToString("D")),
                 $"and who was ticked there must round-trip ({back.RelayTickedIds.Count} ticked)");
+            Check(back.RelayPairPartnerTicked,
+                "and the phone-or-older-app row's tick must round-trip too - until 2026-09-24 it didn't, and that person was cut off after every restart");
+            Check(mf.RelayPairTickedForTest, "and be ticked in the window once the profile is loaded, not merely carried through");
             Check(mf.RelayGroupForTest.ConnectedRelay is not null,
                 "applying it must actually put us back on that server, not merely remember the address");
 
@@ -2795,6 +3047,10 @@ internal static partial class SelfTest
             new[] { "--connect", "10.0.0.5" },
             new[] { "--minimized" },
             new[] { "--config-dir", @"C:\temp\x" },
+            // The no-window start and the channel's client are ordinary launches too, never a service one (2026-09-24).
+            new[] { "--headless" },
+            new[] { "--headless", "--profile", "My Profile" },
+            new[] { "--control", "windows" },
         };
         foreach (var args in normal)
             Check(!Program.IsServiceInvocation(args),
@@ -3275,11 +3531,27 @@ internal static partial class SelfTest
         Check(!RemSoundUpdater.VerifyStagedRelease(zip, "https://x/z.sig", "not-valid-base64", null),
             "a garbage signature must be refused, not throw");
 
-        // A genuine signature by the embedded release key → accepted. Only producible with the
-        // on-disk private key (Ed's box / this session); elsewhere the accept branch is noted skipped.
+        // THE OTHER HALF, on every machine: the gate must ACCEPT a genuine signature, or an updater that refused every
+        // release would pass all of the above. Until 2026-09-24 this half only ran where the publisher key was on disk,
+        // and returned a pass without it. A throwaway key stands in for the release key through the same gate.
+        using (var stand = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256))
+        {
+            var standPublic = stand.ExportSubjectPublicKeyInfoPem();
+            bool StandVerifies(byte[] d, string s) => UpdateSignature.VerifyWithKey(d, s, standPublic);
+            var signed = UpdateSignature.SignWithKey(zip, stand.ExportECPrivateKeyPem());
+            Check(RemSoundUpdater.VerifyStagedRelease(zip, "https://x/RemSound-v9.9.zip.sig", signed, null, StandVerifies),
+                "a release genuinely signed by the trusted key must be ACCEPTED - an updater that refuses everything installs nothing");
+            var tampered = (byte[])zip.Clone();
+            tampered[^1] ^= 0x5A;
+            Check(!RemSoundUpdater.VerifyStagedRelease(tampered, "https://x/RemSound-v9.9.zip.sig", signed, null, StandVerifies),
+                "and the same signature over changed bytes must be refused");
+        }
+
+        // The embedded release key itself. Only producible with the on-disk private key (Ed's box / this session).
         var realKeyPath = Environment.GetEnvironmentVariable("REMSOUND_SIGNING_KEY");   // run-tests.ps1 passes it when the key is on this machine
         if (!File.Exists(realKeyPath))
-            return "no-sig + wrong-key + garbage all refused (genuine-accept branch needs the publisher key — noted)";
+            return "no-sig + wrong-key + garbage refused; a genuine signature accepted and a tampered one refused through the same gate "
+                 + "(proved with a stand-in key; the embedded release key itself needs the publisher key, not on this machine)";
         var good = UpdateSignature.SignWithKey(zip, File.ReadAllText(realKeyPath));
         Check(RemSoundUpdater.VerifyStagedRelease(zip, "https://x/RemSound-v9.9.zip.sig", good, null),
             "a release genuinely signed by the release key must be accepted");
@@ -3720,6 +3992,16 @@ internal static partial class SelfTest
         return "identity travels by argument and only real user SIDs are trusted; logs readable by every account, read-only";
     }
 
+    /// <summary>Every control under <paramref name="root"/>, however deep.</summary>
+    private static IEnumerable<Control> AllControls(Control root)
+    {
+        foreach (Control c in root.Controls)
+        {
+            yield return c;
+            foreach (var inner in AllControls(c)) yield return inner;
+        }
+    }
+
     /// <summary>The About box's release-notes text must stay small: the full history reached ~70 KB in
     /// one TextBox and reading a control value that size CRASHES some screen readers (reported
     /// 2026-08-11). The box shows only the newest five version blocks, with a pointer to the full
@@ -3739,8 +4021,16 @@ internal static partial class SelfTest
         Check(AboutDialog.TrimToLastVersions("RemSound v1.0\r\nOnly one.", 5) == "RemSound v1.0\r\nOnly one.",
             "notes with fewer blocks than the limit pass through unchanged");
 
-        // The REAL shipped text: exactly five versions shown, and small enough to be read safely.
-        var shown = AboutDialog.TrimToLastVersions(AboutDialog.ReleaseNotesForTest, 5);
+        // The REAL dialog's text box, as a screen reader reads it: exactly five versions shown, small enough to read safely.
+        // Read off the built dialog, not recomputed here - a dialog that put the raw notes in its box, or changed how many
+        // versions it shows, would pass a recomputation (found 2026-09-24).
+        string shown;
+        using (var about = new AboutDialog())
+        {
+            var box = AllControls(about).OfType<TextBox>().OrderByDescending(t => t.Text.Length).FirstOrDefault();
+            Check(box is not null, "the About box must have its notes in a text box a screen reader can read");
+            shown = box!.Text;
+        }
         var versions = shown.Split('\n').Count(l => l.TrimEnd('\r').StartsWith("RemSound v", StringComparison.Ordinal));
         Check(versions == 5, $"the shipped About text must show exactly 5 versions (got {versions})");
         Check(shown.Length < 10_000, $"the shipped About text must stay well under screen-reader-crashing size (got {shown.Length} chars)");
@@ -3861,18 +4151,20 @@ internal static partial class SelfTest
             }
 
             // --- ...and switching the tuner ON re-arms every lane, however it was left ------------
-            // Driven through the real enable path, not a shortcut: arming hangs off that path, and a
-            // test that armed them directly would not notice if the wiring came apart.
-            form.SetContinuousTuneForTest(false);
+            // Driven through the real enable path - the TICK BOX a person ticks - not a shortcut: arming hangs off that path, and
+            // a test that armed them directly would not notice if the wiring came apart. Until 2026-09-24 this said so and
+            // used a seam that set the field and started the timer itself, skipping the tick box's handler.
+            var tuneBox = Require(FieldOf<CheckBox>(form, "continuousTuneBox"), "MainForm.continuousTuneBox not found - point this at the auto-tune tick box");
+            tuneBox.Checked = false;
             foreach (var route in new[] { RenderRoute.WasapiLane, RenderRoute.AsioLane, RenderRoute.Mixed })
                 form.ClearLaneBaselineForTest(route);
-            form.SetContinuousTuneForTest(true);
+            tuneBox.Checked = true;
             foreach (var route in new[] { RenderRoute.WasapiLane, RenderRoute.AsioLane, RenderRoute.Mixed })
                 Check(form.LaneNeedsBaselineForTest(route),
                     $"{route}: switching auto-tune on must re-arm the baseline - the counter has been climbing the "
                   + "whole time it was off, and that backlog is not this tick's evidence");
 
-            form.SetContinuousTuneForTest(false);   // leave the form as it was found
+            tuneBox.Checked = false;   // leave the form as it was found
             return "each lane owns its evidence and its learned floor; a reset lane owes a baseline reading before it acts; "
                  + "switching the tuner on re-arms all three lanes through the real enable path";
         }
@@ -3920,8 +4212,39 @@ internal static partial class SelfTest
                     "a nonsense value must be clamped, not accepted - a zero-second interval would spin the tuner");
                 store.SaveContinuousAutoTuneIntervalSec(9999);
                 Check(store.LoadContinuousAutoTuneIntervalSec() <= 60, "and the same at the top end");
+
+                // THE REAL DROPDOWN, both ways. The list above is copied by hand; the dropdown's own row-to-seconds and
+                // seconds-to-row switches, where Ed's "jumps back to 5" bug lived, were never run (found 2026-09-24). So
+                // choose each row in a real main window, then build a fresh one from what was saved and read its row back.
+                List<string> rows;
+                MainForm first;
+                try { first = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+                catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+                using (first)
+                {
+                    var box = Require(FieldOf<ComboBox>(first, "continuousIntervalBox"), "MainForm.continuousIntervalBox not found - point this test at the auto-tune interval dropdown");
+                    rows = box.Items.Cast<object>().Select(o => o.ToString() ?? "").ToList();
+                }
+                Check(rows.Count >= 3, $"the dropdown must offer its intervals ({rows.Count} rows)");
+                // The interval is saved WITH THE PROFILE, as Ed saves it: so choose the row, save the profile through the window's
+                // own save body, and open that profile in a fresh window, as starting RemSound on it or switching to it does.
+                foreach (var row in rows)
+                {
+                    Profile saved;
+                    using (var chooser = new MainForm(null, Profile.NewBlank(), null, null, headless: true))
+                    {
+                        var box = FieldOf<ComboBox>(chooser, "continuousIntervalBox")!;
+                        box.SelectedIndex = box.Items.Cast<object>().Select(o => o.ToString()).ToList().IndexOf(row);
+                        saved = chooser.CaptureProfileForTest("interval " + row);
+                    }
+                    // Loading a profile builds a new main window with it - the same path as starting RemSound on that profile.
+                    using var reloaded = new MainForm(null, saved, saved.Title, null, headless: true);
+                    var shown = FieldOf<ComboBox>(reloaded, "continuousIntervalBox")!.SelectedItem?.ToString();
+                    Check(shown == row, $"choosing \"{row}\" in the real dropdown must still read \"{row}\" when RemSound starts again (it reads \"{shown}\")");
+                }
             }
-            return "all five offered intervals (3, 5, 10, 15, 30 seconds) survive a save and reload; the store's floor matches the dropdown's; nonsense is clamped";
+            return "all five offered intervals (3, 5, 10, 15, 30 seconds) survive a save and reload; the store's floor matches the dropdown's; nonsense is clamped; "
+                 + "and every row of the REAL dropdown, chosen in one main window, is the row a fresh one shows";
         }
         finally { try { if (Directory.Exists(scratch)) Directory.Delete(scratch, recursive: true); } catch { } }
     }
@@ -4745,8 +5068,10 @@ internal static partial class SelfTest
 
         try
         {
-            if (!Hooked())
-                return Skip("no default render endpoint on this machine, so the watcher legitimately hooked nothing");
+            // Skip on INDEPENDENT evidence that there is nothing to hook. Deciding it from Hooked() itself meant a watcher that
+            // silently failed to hook was reported as a skip, and the Check below it could never fail (found 2026-09-24).
+            if (AudioDefaultFollower.ResolveDefaultRenderId() is null)
+                return Skip("no default render endpoint on this machine, so there is nothing for the watcher to hook");
 
             // A silent hook failure is the whole failure mode: the app keeps running, and per-app
             // send just never catches anything at its start again.
@@ -4961,6 +5286,11 @@ internal static partial class SelfTest
                 () => (default(RouterMappingStatus), (IPEndPoint?)null, ""),
                 _ => { }, _ => { })),
             ("Relay server notice", () => RelayNoticeDialog.Build()),
+            // Where the DAW plugin goes, and Ed's message after a folder of the person's own (2026-09-25).
+            ("Plugin install place", () => PluginInstallPlaceDialog.Build()),
+            ("Plugin updates notice", () => PluginFolderNoticeDialog.Build()),
+            // F1's context help window (2026-09-25), with a real entry from the manual.
+            ("Context help window", () => ContextHelp.Build("Audio jitter buffer in milliseconds", "audio-profile.jitter-buffer")),
             ("Server", () => RelayConnectDialog.Build()),
             ("Service profile", () => new ServiceProfileDialog(RemSound.Core.Profile.NewBlank(), false)),
             ("About", () => new AboutDialog()),
@@ -4974,7 +5304,7 @@ internal static partial class SelfTest
             ("Quick profile switch", QuickProfileSwitchDialog.BuildForAudit),
             ("Change profile password", () => ProfilePasswordDialog.Build("Audit", "pw").Dialog),
             ("Profile passwords manager", () => ProfilePasswordManagerDialog.Build(new ProfileStore(
-                Path.Combine(Path.GetTempPath(), "remsound-selftest-pwmgr-" + Guid.NewGuid().ToString("N")))).Dialog),
+                Path.Combine(AppConfig.UserDataDirectory, "selftest-pwmgr-" + Guid.NewGuid().ToString("N")))).Dialog),
             ("Profile name prompt", () => ProfileSaveAsPrompt.Build("Audit").Dialog),
             ("Service additional options", () => ServiceProfileDialog.BuildAdditionalOptions(false).Dialog),
             // The keyboard-shortcuts window: built inline and shown in one step until 2026-08-15, so
@@ -4984,8 +5314,25 @@ internal static partial class SelfTest
                 () => { }, () => { }, () => { }, () => { }, () => { }, () => { }, () => { }, () => { },
                 () => { }, () => { }, () => { }, () => { }, () => { }, () => { }, () => { })
                 .BuildKeyboardShortcutsDialogForAudit()),
+            // The "press a key" window the Keyboard shortcuts window opens. In RemSound.Core, so the scan of window types
+            // never saw it until 2026-09-24.
+            ("Press a key", () => MainFormHotkeyController.NewHotkeyCaptureForm()),
             ("Profile selection", () => new ProfileSelectionDialog(new ProfileStore(
-                Path.Combine(Path.GetTempPath(), "remsound-selftest-picker-" + Guid.NewGuid().ToString("N"))))),
+                Path.Combine(AppConfig.UserDataDirectory, "selftest-picker-" + Guid.NewGuid().ToString("N"))))),
+            // The silent stand-in for a message box in a --headless copy (2026-09-24). Never in front of a person, but
+            // a window like any other to the audits.
+            ("Headless question", () => new HeadlessQuestionForm("Keep going?", "RemSound", MessageBoxButtons.YesNoCancel, MessageBoxDefaultButton.Button1)),
+            // Plain windows built and shown in one step until 2026-09-24, so no audit could reach them. The guard that
+            // every window is reachable only looked at window TYPES, and a plain Form is not a type of its own.
+            ("Install options", () => AppInstaller.BuildInstallOptionsDialog(@"C:\Audit\RemSound", updating: false, out _)),
+            ("Uninstall confirmation", () => AppInstaller.BuildUninstallConfirmDialog(null, @"C:\Audit\RemSound", pluginInstalled: true, serviceInstalled: true, out _)),
+            ("Manage named peers", () =>
+            {
+                var window = new MainForm(null, RemSound.Core.Profile.NewBlank(), null, null, headless: true);
+                var dialog = window.BuildManageNamedPeersDialog();
+                dialog.Disposed += (_, _) => window.Dispose();
+                return dialog;
+            }),
         };
 
     /// <summary>A throwaway ProfileStore containing one saved profile, so dialogs that reasonably
@@ -4993,7 +5340,7 @@ internal static partial class SelfTest
     /// instead of opening a modal at a test with nobody to answer it.</summary>
     internal static ProfileStore StoreWithOneProfileForTest()
     {
-        var dir = Path.Combine(Path.GetTempPath(), "remsound-selftest-profiles-" + Guid.NewGuid().ToString("N"));
+        var dir = Path.Combine(AppConfig.UserDataDirectory, "selftest-profiles-" + Guid.NewGuid().ToString("N"));
         var store = new ProfileStore(dir);
         try { var pr = RemSound.Core.Profile.NewBlank(); pr.Title = "Audit profile"; store.Save(pr); } catch { /* best-effort */ }
         return store;

@@ -146,6 +146,21 @@ the rule two people already have on a network, where each has to tick the other.
   check is turned out to make room for a newcomer, so that made-up addresses
   cannot keep real people out. Once you have echoed, you are not turned out
   (if your address changes, echo the new check the relay sends there).
+- **You must echo to be in a group at all (since server-v2.13).** Until you
+  have echoed, the relay sends you nothing but the address check: no member
+  list, no sound, and you are not in anybody's list. The moment you echo, the
+  lists go out again with you in them. A relay run with `--v2-watch-only`
+  still carries a client that cannot echo, but that is the operator's choice,
+  not the default.
+- **Moving address (since server-v2.13).** Once you have echoed, a packet with
+  your id from a new address does not move you there at once. The new address
+  is sent its own address check; you move when it has echoed that check and
+  nothing has come from your old address for 5 seconds. Until then the relay
+  ignores what the new address sends (sound, hellos, goodbyes). Keep sending
+  hellos every 2 seconds and echo the check, and a real move takes 5 to 7
+  seconds. Two copies sending with one id at once (say the app and the
+  lock-screen service) are not two addresses of one person: the one that
+  proved itself first keeps the place while it keeps talking.
 
 ## 7. Receiving, once in a group
 

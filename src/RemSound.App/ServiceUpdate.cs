@@ -35,6 +35,14 @@ internal static class ServiceUpdate
     /// service (i.e. an update landed there). Reads that exe's file version; never throws.</summary>
     public static bool UpdateLanded() => IsNewer(RunningVersion(), OnDiskVersion());
 
+    /// <summary>How long the service leaves its own restart to happen before asking again. The helper that does it may
+    /// decide not to - the app's folder never settled - and leave the service running; it used to ask once and never
+    /// again, so it stayed on the old build until the next reboot (2026-09-25 sweep).</summary>
+    internal static readonly TimeSpan RestartGiveUp = TimeSpan.FromMinutes(10);
+
+    /// <summary>Pure: is a restart asked for at <paramref name="askedUtc"/> still being waited on?</summary>
+    internal static bool StillWaitingOnRestart(DateTime? askedUtc, DateTime nowUtc) => askedUtc is { } at && nowUtc - at < RestartGiveUp;
+
     /// <summary>
     /// Pure and testable: is the app folder's build ready to be taken?
     ///
@@ -58,9 +66,13 @@ internal static class ServiceUpdate
         catch { return true; }
     }
 
-    /// <summary>Testable core of <see cref="SwapInProgress"/> for a given app folder.</summary>
+    /// <summary>Testable core of <see cref="SwapInProgress"/> for a given app folder. Also true while an update's rollback
+    /// could not put everything back (<see cref="UpdateApplier.IncompleteMarkerName"/>): that install is not a whole
+    /// version, and copying it would break the service too. It clears when an app update succeeds (review 2026-09-25).</summary>
     internal static bool SwapInProgressIn(string? appDir) =>
-        !string.IsNullOrEmpty(appDir) && Directory.Exists(Path.Combine(appDir, UpdateApplier.BackupFolderName));
+        !string.IsNullOrEmpty(appDir)
+        && (Directory.Exists(Path.Combine(appDir, UpdateApplier.BackupFolderName))
+            || File.Exists(Path.Combine(appDir, UpdateApplier.IncompleteMarkerName)));
 
     /// <summary>The version of RemSound.exe in the recorded APP-SOURCE folder (the app's install location,
     /// which its auto-updater swaps in place), or null if the folder is unknown/unreadable.</summary>

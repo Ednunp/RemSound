@@ -25,19 +25,22 @@ internal sealed class AboutDialog : Form
 
         RemSound now works inside your music software.
 
-        There is a plugin. Put it on a track and one person goes on that track: a track you are sending goes out to your peers, and a peer you are receiving arrives on a track of their own, where you can record them, shape them and mix them like anything else. Add it twice for two people and each gets their own track.
+        The DAW plugin. Put RemSound on a track in your music software, such as Reaper. The track can send its sound to your peers, or bring peers onto the track to record and mix. Install it from the new DAW plugin menu.
 
-        You install it from the new DAW plugin menu, which puts it in your own plugin folder — no administrator password, nothing outside your account touched. Keep RemSound open while you work; it holds the connection and the plugin asks it for audio, so your password, peers and audio settings stay where you already set them.
+        Context help. Press F1 on any control, menu item or tab to open that part of the manual. Shift+F1 opens the whole manual.
 
-        When a track takes somebody, they stop coming out of RemSound's own output, so you never hear anyone twice. Let the track go and they come straight back. A peer's volume, pan and EQ come through to the track as well; untick "Apply pan and EQ to plugin audio" in the DAW plugin menu if you would rather have the raw signal.
+        Accepting connections. When someone with your password connects to you first, RemSound can ask you, accept them automatically, or leave it to you. Choose on the new Connectivity tab in Preferences.
 
-        The plugin's window is built from ordinary Windows controls, so a screen reader reads it the way it reads RemSound itself. If your music software makes that window awkward to reach, the same three choices are also plugin parameters, which every DAW lists.
+        Servers for more than two. Connect to a server and everyone there with your password is listed. Tick who you want, and each person gets their own volume, pan, EQ and recording track.
 
-        One limit worth knowing: your music software cannot allow for the network delay, so a track recorded through the plugin sits a little late and needs nudging back.
+        Also new:
+        - A Total latency box shows the delay from their microphone to your ears.
+        - Auto-tune finds the right jitter buffer faster.
+        - Uninstalling can remove the plugin and the lock-screen service too.
+        - Double-click scripts install or remove the plugin and the service.
+        - With logging on, the log records every change you make.
 
-        If you do not use a DAW, nothing changes. RemSound listens for plugins on your own machine only, and "Let plugins connect to RemSound" in the DAW plugin menu turns even that off. Section 25 of the manual walks through all of it.
-
-        The rest of this release is a careful pass over sending, receiving and recording. Turning off Send my audio now stops the ASIO side too. With both kinds of output ticked, recordings keep every block, and a WAV recording stops cleanly at the 4 GB limit. The Total latency box reads the outputs you are actually using and no longer counts the jitter buffer twice. An output that Windows quietly stops comes back on its own within a few seconds, including after sleep, and waking the computer restarts the audio with the buffer sizes you had before. Several capture sources sent at once now stay in time with each other. Every Alt key has been checked against what the screen says, and with logging on, what you change is written to the log.
+        And lots of little fixes under the hood.
 
         RemSound v5.9
 
@@ -183,6 +186,8 @@ internal sealed class AboutDialog : Form
 
         AcceptButton = closeButton;
         CancelButton = closeButton;
+        ContextHelp.Mark(notesBox, "dialog.about.release-notes");
+        ContextHelp.Mark(closeButton, "dialog.about.close");
 
         KeyDown += (_, e) =>
         {

@@ -88,6 +88,18 @@ internal sealed class ServiceProfileDialog : Form
         CancelButton = cancelButton;
         saveButton.Click += (_, _) => SaveToProfile();
         additionalButton.Click += (_, _) => ShowAdditionalOptions();
+
+        // Context help (F1): each control's entry in the manual.
+        ContextHelp.Mark(peersList, "dialog.service-profile.peers");
+        ContextHelp.Mark(manualAddButton, "dialog.service-profile.add-peer");
+        ContextHelp.Mark(passwordButton, "dialog.service-profile.password");
+        ContextHelp.Mark(serverBox, "dialog.service-profile.server");
+        ContextHelp.Mark(sendModeList, "dialog.service-profile.send-mode");
+        ContextHelp.Mark(outputsList, "dialog.service-profile.outputs");
+        ContextHelp.Mark(appsList, "dialog.service-profile.applications");
+        ContextHelp.Mark(saveButton, "dialog.service-profile.save");
+        ContextHelp.Mark(cancelButton, "dialog.service-profile.cancel");
+        ContextHelp.Mark(additionalButton, "dialog.service-profile.additional-options");
     }
 
     // ---------------- layout ----------------
@@ -252,8 +264,9 @@ internal sealed class ServiceProfileDialog : Form
             foreach (var p in allPeers)
             {
                 var idx = peersList.Items.Add(p);
-                // Ticked = the service sends to it. If the profile carried no explicit selection, tick all.
-                if (selectedPeers.Count == 0 || selectedPeers.Contains(p)) peersList.SetItemChecked(idx, true);
+                // Ticked = the service sends to it, exactly as saved. Nobody ticked used to show everybody ticked, so a
+                // list unticked on purpose came back all ticked and was saved that way (review 2026-09-25).
+                if (selectedPeers.Contains(p)) peersList.SetItemChecked(idx, true);
             }
         }
         finally { suppressAppEvents = false; }
@@ -503,6 +516,15 @@ internal sealed class ServiceProfileDialog : Form
         dlg.Controls.Add(layout);
         dlg.AcceptButton = ok;
         dlg.CancelButton = cancel;
+
+        // Context help (F1): each control's entry in the manual.
+        ContextHelp.Mark(logging, "dialog.service-options.logging");
+        ContextHelp.Mark(acceptRelay, "dialog.service-options.accept-on-server");
+        ContextHelp.Mark(volEnabled, "dialog.service-options.set-volume");
+        ContextHelp.Mark(volPercent, "dialog.service-options.volume-percent");
+        ContextHelp.Mark(volWhen, "dialog.service-options.volume-when");
+        ContextHelp.Mark(ok, "dialog.service-options.ok");
+        ContextHelp.Mark(cancel, "dialog.service-options.cancel");
         return (dlg, logging, (volEnabled, volPercent, volWhen), acceptRelay);
     }
 

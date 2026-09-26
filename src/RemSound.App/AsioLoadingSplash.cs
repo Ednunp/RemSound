@@ -33,11 +33,20 @@ internal sealed class AsioLoadingSplash
     private readonly Thread thread;
     private readonly ManualResetEventSlim shown = new(false);
     private readonly string message;
+    private readonly bool quiet;
     private volatile Form? form;
+    // Asked to go. Kept, because the ask can come before the window exists: the constructor waits for it at most two
+    // seconds, and a quick start then dismissed a splash that had no window yet - the dismiss did nothing, and the splash
+    // came up a moment later and stayed on top for the rest of the session (2026-09-25 sweep).
+    private volatile bool dismissed;
 
-    private AsioLoadingSplash(string message)
+    /// <summary>Test seam: run on the splash's own thread just before its window is shown.</summary>
+    internal static Action? BeforeShowForTest;
+
+    private AsioLoadingSplash(string message, bool quiet = false)
     {
         this.message = message;
+        this.quiet = quiet;
         thread = new Thread(RunSplash)
         {
             IsBackground = true,
@@ -49,6 +58,18 @@ internal sealed class AsioLoadingSplash
         // begins the slow ASIO work — so the user sees the splash, not a blank moment. The
         // cap means a splash hiccup can never stall startup.
         shown.Wait(TimeSpan.FromSeconds(2));
+    }
+
+    /// <summary>Test seam: a splash with a message of the test's own, whatever the profile.</summary>
+    internal static AsioLoadingSplash StartForTest(string message) => new(message, quiet: true);
+
+    /// <summary>Test seam: the splash's thread has finished - its window closed, or never shown.</summary>
+    internal bool EndedForTest(TimeSpan wait) => thread.Join(wait);
+
+    /// <summary>Test seam: close a splash that did not close itself, so a failing check leaves nothing on screen.</summary>
+    internal void ForceCloseForTest()
+    {
+        try { if (form is { IsHandleCreated: true, IsDisposed: false } f) f.BeginInvoke(f.Close); } catch { /* gone */ }
     }
 
     /// <summary>
@@ -67,6 +88,9 @@ internal sealed class AsioLoadingSplash
     public static AsioLoadingSplash? StartIfAsioDriverName(string? asioDriverName, string? message = null)
     {
         if (string.IsNullOrWhiteSpace(asioDriverName)) return null;
+        // Never in a --headless copy. The splash runs on a thread of its own, which the hook that keeps a headless copy's
+        // windows out of sight does not watch: it came up on screen, always on top, after every wake (2026-09-25).
+        if (Windowless.Hiding) return null;
         try
         {
             return new AsioLoadingSplash(message ?? DefaultMessage);
@@ -83,7 +107,7 @@ internal sealed class AsioLoadingSplash
     {
         try
         {
-            using var splash = new Form
+            using var splash = new SplashWindow(quiet)
             {
                 Text = "RemSound",
                 FormBorderStyle = FormBorderStyle.FixedDialog,
@@ -96,6 +120,15 @@ internal sealed class AsioLoadingSplash
                 ClientSize = new Size(380, 96),
                 AccessibleName = "RemSound is starting",
             };
+            if (quiet)
+            {
+                // The self-test's: see-through, off the screen, never in front and never taking the keyboard, so even a
+                // failing check puts nothing in front of the person at the computer.
+                splash.TopMost = false;
+                splash.Opacity = 0;
+                splash.StartPosition = FormStartPosition.Manual;
+                splash.Location = new Point(-32000, -32000);
+            }
             splash.Controls.Add(new Label
             {
                 Dock = DockStyle.Fill,
@@ -103,8 +136,14 @@ internal sealed class AsioLoadingSplash
                 Text = message,
                 AccessibleName = message.TrimEnd('.', ' '),
             });
-            splash.Shown += (_, _) => shown.Set();
+            splash.Shown += (_, _) =>
+            {
+                shown.Set();
+                if (dismissed) splash.Close();   // dismissed while it was being built
+            };
             form = splash;
+            BeforeShowForTest?.Invoke();
+            if (dismissed) return;               // dismissed before it was ever shown
             Application.Run(splash);
         }
         catch
@@ -118,12 +157,19 @@ internal sealed class AsioLoadingSplash
         }
     }
 
+    /// <summary>The splash's window; the self-test's never takes the keyboard.</summary>
+    private sealed class SplashWindow(bool quiet) : Form
+    {
+        protected override bool ShowWithoutActivation => quiet;
+    }
+
     /// <summary>
     /// Closes the splash. Call from the main thread once <see cref="MainForm"/> has been
     /// constructed. Fire-and-forget — the splash's own background thread tears itself down.
     /// </summary>
     public void Dismiss()
     {
+        dismissed = true;
         try
         {
             shown.Set();

@@ -286,6 +286,20 @@ public static class ServiceControl
             ServiceStore.AppendServiceEvent($"harden: takeown on service dir returned {(own.Exited ? own.ExitCode : -1)}: {own.StdErr}");
         if (ApplyServiceDirAcl(dir, sid, ServiceStore.AppendServiceEvent))
             ServiceStore.AppendServiceEvent("harden: service folder ownership + ACL locked to SYSTEM/Administrators/installing user; files rebuilt as inherited; logs readable");
+
+        // The folder above it too: whoever owns ProgramData\RemSound can move the service folder aside and put a program of
+        // their own where the service runs from. See BuildParentDirAclArgs. Here too because this runs at install AND, as
+        // SYSTEM, on every service update, so existing installs pick it up.
+        if (RealParentOfServiceDirectory() is { } parent && Directory.Exists(parent))
+        {
+            var ownParent = RunProcessCaptured("takeown.exe", $"/f \"{parent}\" /a", 30000);
+            if (!ownParent.Started || !ownParent.Exited || ownParent.ExitCode != 0)
+                ServiceStore.AppendServiceEvent($"harden: takeown on the RemSound folder returned {(ownParent.Exited ? ownParent.ExitCode : -1)}: {ownParent.StdErr}");
+            var parentAcl = RunProcessCaptured("icacls.exe", BuildParentDirAclArgs(parent), 30000);
+            ServiceStore.AppendServiceEvent(parentAcl.Started && parentAcl.Exited && parentAcl.ExitCode == 0
+                ? "harden: the RemSound folder above the service's is owned by Administrators; everyone may read it and add a file, nobody may move the service folder"
+                : $"harden: icacls on the RemSound folder returned {(parentAcl.Exited ? parentAcl.ExitCode : -1)}: {parentAcl.StdErr}{parentAcl.StdOut}");
+        }
     }
 
     /// <summary>The complete lockdown sequence minus the takeown — factored out so the self-test can
@@ -396,6 +410,28 @@ public static class ServiceControl
     internal static string BuildServiceDirAclArgs(string dir, string installingUserSid) =>
         $"\"{dir}\" /inheritance:r /grant \"*S-1-5-18:(OI)(CI)F\" /grant \"*S-1-5-32-544:(OI)(CI)F\" /grant \"*{installingUserSid}:(OI)(CI)(M)\"";
 
+    /// <summary>Pure, testable: the icacls arguments that lock down ProgramData\RemSound, the folder ABOVE the service's.
+    ///
+    /// <para>Found 2026-09-24 checking the update from 5.9. 6.0 creates this folder on every start, without administrator
+    /// rights, for the computer's server id - so an ordinary account can own it, and ProgramData hands the creator full
+    /// control. An owner can rename the locked-down service folder out of the way and put a service\bin\RemSound.exe of
+    /// their own in its place, which Windows then runs as SYSTEM. So: SYSTEM and Administrators in full; every account may
+    /// read, and add a file (the server id is created by whichever RemSound starts first, as that person); whoever adds a
+    /// file may change that file. Nobody else may delete, rename or add a folder here, or change these permissions. The
+    /// service folder below keeps its own locked-down permissions (its inheritance is already cut), so nothing here reaches
+    /// it. Paired with a takeown to Administrators, since an owner can always rewrite the permissions back.</para></summary>
+    internal static string BuildParentDirAclArgs(string parentDir) =>
+        $"\"{parentDir}\" /inheritance:r /grant \"*S-1-5-18:(OI)(CI)F\" /grant \"*S-1-5-32-544:(OI)(CI)F\" "
+        + $"/grant \"*S-1-5-32-545:(OI)(CI)(RX)\" /grant \"*S-1-5-32-545:(WD)\" /grant \"*S-1-3-0:(OI)(IO)(M)\"";
+
+    /// <summary>ProgramData\RemSound, the real one, or null when the service store is somewhere else (a gate run).</summary>
+    internal static string? RealParentOfServiceDirectory()
+    {
+        var real = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "RemSound");
+        var parent = Path.GetDirectoryName(Path.GetFullPath(ServiceStore.Directory).TrimEnd('\\'));
+        return string.Equals(parent, real, StringComparison.OrdinalIgnoreCase) ? real : null;
+    }
+
     /// <summary>Pure, testable: the icacls arguments that rebuild every EXISTING child of the service
     /// folder as purely-inherited from the (just-hardened) folder ACL. /reset replaces each child's
     /// ACL with inherited ACEs only — files get real (not inherit-only) access again, and any explicit
@@ -431,22 +467,22 @@ public static class ServiceControl
                           Path.GetFullPath(destDir).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
             return;
 
-        var skipDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { "user settings and logs", "logs", "recordings", "profiles", "config" };
-
-        static void CopyDir(string src, string dst, HashSet<string> skip)
+        static void CopyDir(string src, string dst)
         {
             Directory.CreateDirectory(dst);
             foreach (var file in Directory.GetFiles(src))
+            {
+                if (IsSkippedProgramFile(Path.GetFileName(file))) continue;
                 File.Copy(file, Path.Combine(dst, Path.GetFileName(file)), overwrite: true);
+            }
             foreach (var dir in Directory.GetDirectories(src))
             {
                 var name = Path.GetFileName(dir);
-                if (skip.Contains(name)) continue;
-                CopyDir(dir, Path.Combine(dst, name), skip);
+                if (IsSkippedProgramFolder(name)) continue;
+                CopyDir(dir, Path.Combine(dst, name));
             }
         }
-        CopyDir(sourceDir, destDir, skipDirs);
+        CopyDir(sourceDir, destDir);
     }
 
     /// <summary>Adds an ACE granting the installing user start + stop + query on the service, so the
@@ -511,6 +547,120 @@ public static class ServiceControl
     /// <summary>How many times the self-update helper tries to start the service again after the copy, 5 s apart.</summary>
     internal const int SelfUpdateStartAttempts = 4;
 
+    /// <summary>How long the self-update waits for the app's own update to finish landing, and how often it looks.</summary>
+    internal static readonly TimeSpan SelfUpdateSettleLimit = TimeSpan.FromMinutes(3);
+    internal static readonly TimeSpan SelfUpdateSettleStep = TimeSpan.FromSeconds(3);
+
+    /// <summary>Folders of the app's that are never program files: user state, and the updater's own half-way copy.</summary>
+    internal static readonly HashSet<string> ProgramCopySkippedFolders = new(StringComparer.OrdinalIgnoreCase)
+        { "user settings and logs", "logs", "recordings", "profiles", "config", UpdateApplier.BackupFolderName };
+
+    /// <summary>A folder of the app's that is never program files: those above, and any old files the updater had to keep
+    /// after a rollback it could not finish (<see cref="UpdateApplier.KeptBackupPrefix"/>).</summary>
+    internal static bool IsSkippedProgramFolder(string name) =>
+        ProgramCopySkippedFolders.Contains(name) || name.StartsWith(UpdateApplier.KeptBackupPrefix, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A file in the app's folder that is never a program file: the updater's notes and log about that folder's own
+    /// last update.</summary>
+    internal static bool IsSkippedProgramFile(string name) =>
+        string.Equals(name, UpdateApplier.FailureMarkerName, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(name, UpdateApplier.IncompleteMarkerName, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(name, "updater.log", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The file version of the RemSound.exe in a folder, or null if there is none to read.</summary>
+    internal static string? ExeFileVersion(string folder)
+    {
+        try
+        {
+            var exe = Path.Combine(folder, "RemSound.exe");
+            return File.Exists(exe) ? FileVersionInfo.GetVersionInfo(exe).FileVersion : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Pure apart from the clock: wait until <paramref name="appDir"/> has settled - no update swap under way and
+    /// the same RemSound.exe version seen on two looks in a row - or <paramref name="limit"/> runs out. True when settled.</summary>
+    internal static bool WaitForSettledSource(string appDir, TimeSpan limit, TimeSpan step, Func<string, string?> versionOf, Action<string>? log = null)
+    {
+        var deadline = DateTime.UtcNow + limit;
+        string? seen = null;
+        var said = false;
+        while (true)
+        {
+            var swapping = ServiceUpdate.SwapInProgressIn(appDir);
+            var version = swapping ? null : versionOf(appDir);
+            if (version is not null && version == seen) return true;
+            if (swapping && !said) { log?.Invoke("the app's own update is still landing - waiting for it to finish before copying"); said = true; }
+            seen = version;
+            if (DateTime.UtcNow >= deadline) return false;
+            Thread.Sleep(step);
+        }
+    }
+
+    /// <summary>The program files (as <see cref="CopyProgramTo"/> copies them) that are missing from <paramref name="destDir"/>
+    /// or differ from <paramref name="sourceDir"/>'s, by relative path. Empty when the copy is complete and exact.</summary>
+    internal static List<string> ProgramCopyMismatches(string sourceDir, string destDir)
+    {
+        var differ = new List<string>();
+        void Walk(string src, string rel)
+        {
+            foreach (var file in Directory.GetFiles(src))
+            {
+                if (IsSkippedProgramFile(Path.GetFileName(file))) continue;
+                var relative = Path.Combine(rel, Path.GetFileName(file));
+                var copy = Path.Combine(destDir, relative);
+                try
+                {
+                    if (!File.Exists(copy) || new FileInfo(copy).Length != new FileInfo(file).Length
+                        || !System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(copy))
+                            .AsSpan().SequenceEqual(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(file))))
+                        differ.Add(relative);
+                }
+                catch { differ.Add(relative); }
+            }
+            foreach (var dir in Directory.GetDirectories(src))
+            {
+                var name = Path.GetFileName(dir);
+                if (!IsSkippedProgramFolder(name)) Walk(dir, Path.Combine(rel, name));
+            }
+        }
+        Walk(sourceDir, "");
+        return differ;
+    }
+
+    internal const int SelfUpdateCopyAttempts = 3;
+    internal static TimeSpan SelfUpdateCopyPause = TimeSpan.FromSeconds(3);   // shortened by the self-test
+
+    /// <summary>Copy the app's build into the service's folder and prove it - every file the same as the app's - trying
+    /// again, after a pause, when a copy throws or leaves files different. A copy that threw used to be given up at once
+    /// ("starting the existing build") with whatever it had half-written left in place, and nothing checked it
+    /// (2026-09-25 sweep). True when every file matches.</summary>
+    internal static bool CopyAndCheck(string appDir, string binDir, Action<string> log, Action<string, string>? copy = null)
+    {
+        copy ??= CopyProgramTo;
+        for (var attempt = 1; ; attempt++)
+        {
+            try { copy(appDir, binDir); }
+            catch (Exception ex) { log($"copy attempt {attempt} failed ({ex.GetType().Name}: {ex.Message})"); }
+            List<string> differ;
+            try { differ = ProgramCopyMismatches(appDir, binDir); }
+            catch (Exception ex) { differ = [$"(could not check: {ex.GetType().Name})"]; }
+            if (differ.Count == 0)
+            {
+                log(attempt == 1 ? "copied the new build into bin - every file matches the app's"
+                                 : $"copied the new build into bin on attempt {attempt} - every file matches the app's");
+                return true;
+            }
+            if (attempt >= SelfUpdateCopyAttempts)
+            {
+                log($"COPY INCOMPLETE after {attempt} attempts - {differ.Count} file(s) still differ ({string.Join(", ", differ.Take(5))})");
+                return false;
+            }
+            log($"after copy attempt {attempt}, {differ.Count} file(s) differ from the app's ({string.Join(", ", differ.Take(5))}) - trying again");
+            Thread.Sleep(SelfUpdateCopyPause);
+        }
+    }
+
     /// <summary>The self-update worker: stop the service, copy the recorded app-source build into the
     /// service's own bin, start the service again — all in managed code. Replaces the old PowerShell
     /// restart script: where execution policy is enforced by Group Policy, the script's -ExecutionPolicy
@@ -530,6 +680,25 @@ public static class ServiceControl
         }
         try
         {
+            var appDir = ServiceStore.LoadAppSourcePath();
+
+            // Wait for the app's own update to finish landing BEFORE stopping anything. A service older than 6.0 asks for
+            // this update the moment it sees the new RemSound.exe - and the app's updater copies the exe before the files
+            // after it (RemSound.Plugin.dll and RemSound.Ui.dll are new in 6.0), so copying now could take a mix of old
+            // and new builds into the service's folder, where nothing would ever put it right while the versions match.
+            // The service keeps running while this waits. Found 2026-09-24 checking the update from 5.9.
+            // And if it never settles - still changing, or an update there that could not be finished (update-incomplete.txt)
+            // - copy nothing and leave the service running the build it has. Copying "what is there" took a broken or
+            // half-written install into the service's folder, where nothing would put it right (2026-09-25 sweep). The
+            // service asks again later (ServiceUpdate.StillWaitingOnRestart).
+            if (!string.IsNullOrEmpty(appDir) && Directory.Exists(appDir)
+                && !WaitForSettledSource(appDir, SelfUpdateSettleLimit, SelfUpdateSettleStep, ExeFileVersion, Log))
+            {
+                Log($"the app folder had not settled after {SelfUpdateSettleLimit.TotalMinutes:0} minutes, or its last update "
+                    + "could not be finished - NOT copying; the service carries on with the build it has");
+                return 0;
+            }
+
             Log($"stopping {ServiceName}");
             try
             {
@@ -542,12 +711,11 @@ public static class ServiceControl
             }
             catch (Exception ex) { Log($"stop failed ({ex.GetType().Name}: {ex.Message}) — continuing"); }
 
-            var appDir = ServiceStore.LoadAppSourcePath();
             if (!string.IsNullOrEmpty(appDir) && Directory.Exists(appDir))
             {
-                // CopyProgramTo already excludes every user-state folder — same routine the installer uses.
-                try { CopyProgramTo(appDir, ServiceStore.BinDirectory); Log("copied the new build into bin"); }
-                catch (Exception ex) { Log($"COPY FAILED ({ex.GetType().Name}: {ex.Message}) — starting the existing build"); }
+                // CopyProgramTo already excludes every user-state folder — same routine the installer uses. Then prove the
+                // copy: every program file the same as the app's, or copy once more and say what still differs.
+                CopyAndCheck(appDir, ServiceStore.BinDirectory, Log);
                 // Re-assert the service-folder lockdown on every self-update (we're SYSTEM here, which
                 // can take ownership too). This is how installs that predate the 2026-07-26 hardening
                 // pick it up without a reinstall.

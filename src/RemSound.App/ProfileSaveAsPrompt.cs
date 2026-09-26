@@ -33,12 +33,12 @@ internal static class ProfileSaveAsPrompt
                 var name = textBox.Text.Trim();
                 if (string.IsNullOrWhiteSpace(name))
                 {
-                    MessageBox.Show(owner, "Please enter a profile name.", "RemSound", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    AppMessageBox.Show(owner, "Please enter a profile name.", "RemSound", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     continue;
                 }
                 if (store is not null && store.Exists(name))
                 {
-                    var overwrite = MessageBox.Show(owner,
+                    var overwrite = AppMessageBox.Show(owner,
                         $"A profile named \"{name}\" already exists. Overwrite?",
                         "Confirm overwrite", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
                     if (overwrite != DialogResult.Yes) continue;
@@ -104,6 +104,9 @@ internal static class ProfileSaveAsPrompt
         dialog.Controls.Add(panel);
         dialog.AcceptButton = okButton;
         dialog.CancelButton = cancelButton;
+        ContextHelp.Mark(textBox, "dialog.profile-name-prompt.name");
+        ContextHelp.Mark(okButton, "dialog.profile-name-prompt.ok");
+        ContextHelp.Mark(cancelButton, "dialog.profile-name-prompt.cancel");
         return (dialog, textBox);
     }
 }

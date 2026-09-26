@@ -46,6 +46,7 @@ public sealed partial class MainForm : Form
 
     /// <summary>Where this session's log went, for the gate to read back. Null when logging is off.</summary>
     internal string? LogPathForTest => logFile.Path;
+    internal MainFormTrayController TrayControllerForTest => trayController;
 
     /// <summary>Run the once-a-second plugin summary on demand, so the gate does not have to wait for
     /// a timer that a headless form never starts.</summary>
@@ -427,7 +428,10 @@ public sealed partial class MainForm : Form
     // single canonical port (RemPacket.DefaultPort = 47830). New manual peers without an
     // explicit ":port" suffix default to that, so users never have to type a port for any
     // common case — Tailscale, LAN, or a relay server.
-    private const int LocalAudioPort = RemPacket.DefaultPort;
+    private static int LocalAudioPort => LocalAudioPortForTest > 0 ? LocalAudioPortForTest : RemPacket.DefaultPort;
+    /// <summary>Gate seam: a step that connects the window listens here instead - never on the port the person's own
+    /// RemSound uses. 0 in every real run.</summary>
+    internal static int LocalAudioPortForTest;
     // The Enable-logs UI is in PreferencesDialog now. Runtime state is logFile.Enabled.
 
     // --- Continuous auto-tune state (the controls live on the Audio profile tab) ---
@@ -729,6 +733,34 @@ public sealed partial class MainForm : Form
     // ALL of these; the audio sender is armed with the subset that isn't long-unreachable — see
     // RefreshAudioReceivers. Stored so the per-tick re-filter doesn't re-resolve addresses.
     private IPEndPoint[] allSendEndpoints = [];
+
+    /// <summary>Whom a server's address check is answered for - see <see cref="AddrCheckEchoGate"/>.</summary>
+    private AddrCheckEchoGate addrCheckGate => addrCheckGateField ??= new AddrCheckEchoGate(line => logFile.Event(line));
+    private AddrCheckEchoGate? addrCheckGateField;
+
+    /// <summary>Is this copy talking to that address: a peer it pings (every ticked peer), or the server it is on.</summary>
+    private bool AddrCheckTalkingTo(IPAddress address) =>
+        heartbeatService?.Pings(address) == true
+        || relayGroup.ConnectedRelay is { } relay && relay.Address.Equals(address);
+
+    internal AddrCheckEchoGate AddrCheckGateForTest => addrCheckGate;
+    internal bool AddrCheckTalkingToForTest(IPAddress address) => AddrCheckTalkingTo(address);
+    internal void AddrCheckArrivedForTest(byte[] packet, IPEndPoint remote) => OnAddrCheckArrived(packet, packet.Length, remote);
+
+    /// <summary>A server's address check has arrived (receive thread).</summary>
+    private void OnAddrCheckArrived(byte[] packet, int length, IPEndPoint remote)
+    {
+        // Only to a server or peer we are talking to, at most once a second each: answering everybody let one
+        // forged packet bounce between two RemSound computers for ever (AddrCheckEchoGate).
+        if (!addrCheckGate.ShouldEcho(remote, AddrCheckTalkingTo, Environment.TickCount64)) return;
+        try { sender.SendVia(packet, length, remote); }
+        catch (Exception ex) { logFile.Event($"addr-check echo to {remote} failed: {ex.GetType().Name}: {ex.Message}"); }
+        // Only a relay sends one of these. If it came from somebody in the peer list, that "peer" is a relay:
+        // offer to connect to it as one (Ed, 2026-09-20).
+        relayGroup.NoteRelay(remote);
+        try { BeginInvoke(() => OfferRelayForPeerAddress(remote)); }
+        catch (InvalidOperationException) { /* window not up yet */ }
+    }
     // Cached "ip:port|ip:port" signature of the endpoints currently armed for AUDIO, so the
     // per-tick refresh only calls SetReceivers when the armed set actually changes. null forces
     // a re-push (set when the selected-peer set changes).
@@ -912,6 +944,8 @@ public sealed partial class MainForm : Form
     {
         this.profileStore = profileStore;
         this.headless = headless;
+        // Something the switch between windows needs in this window's log (Program's loop has no log of its own).
+        if (Interlocked.Exchange(ref LineForNextLog, null) is { } carried) logFile.Event(carried);
         // Before anything that could open the plugin link, so a plugin that says hello during startup
         // never finds a half-built send path.
         pluginTrackSource = new PluginTrackSource(sender, message => logFile.Event($"vst plugin: {message}"));
@@ -987,8 +1021,8 @@ public sealed partial class MainForm : Form
             ToggleSendFromHotkey,
             ToggleReceiveFromHotkey,
             ToggleTrayFromHotkey,
-            () => NudgeVolume(+5),
-            () => NudgeVolume(-5),
+            VolumeUpFromHotkey,
+            VolumeDownFromHotkey,
             // Global Start / Stop recording. Same ToggleRecording path the Record menu item
             // and the in-app Ctrl+R use — the hotkey just makes it work without RemSound
             // having keyboard focus.
@@ -1564,28 +1598,7 @@ public sealed partial class MainForm : Form
         ApplyUpdateCheckTimer();
 
         // --- Status / health ticker ---
-        statusTimer.Tick += (_, _) =>
-        {
-            // Belt-and-braces: this is a 1 Hz UI tick — a transient WinForms hiccup (e.g. a
-            // stale-index ItemArray throw during a churny peer-list rebuild) must never take
-            // the whole app down with a crash dialog. Log and ride it out; the next tick
-            // recovers. The individual Sync* methods are also hardened (see SafeSelectedItem).
-            try
-            {
-                EvaluatePriorityModeScope();
-                UpdateStatus();
-                SnapshotLogIfDue();
-                EnsureRequestedAudioRunning();
-                // Refresh the Connectivity tab's peer lists from the same 1 Hz tick — replaces
-                // the dialog's old 1.5 s dedicated refresh timer. Each Sync* helper short-circuits
-                // when its signature is unchanged so NVDA isn't spammed with re-announcements.
-                SyncAllPeerLists();
-            }
-            catch (Exception ex)
-            {
-                logFile.Event($"status tick: {ex.GetType().Name}: {ex.Message}");
-            }
-        };
+        statusTimer.Tick += (_, _) => StatusTick();
 
         // --- Hot-swap device watcher ---
         deviceRefreshTimer.Tick += (_, _) =>
@@ -1672,6 +1685,7 @@ public sealed partial class MainForm : Form
 
             hotkeyController.Dispose();
             ScreenReader.Shutdown();
+            UnhookNetworkChangeForLookups();
             trayController.Dispose();
             logFile.Dispose();
         };
@@ -1679,6 +1693,7 @@ public sealed partial class MainForm : Form
         Shown += (_, _) =>
         {
             if (!connected) Connect();
+            HookNetworkChangeForLookups();
             // Open (or don't open) the loopback port VST plugin instances talk to. After Connect,
             // so the receiver is already up and a plugin that was waiting gets audio on its first ask.
             ApplyPluginLinkSetting();
@@ -1789,7 +1804,12 @@ public sealed partial class MainForm : Form
             // background-poll path handles both silent install and the user-prompt flow.
             // Skipped on a --silent (automated/throwaway) launch: a test instance must never pop an
             // "update available" prompt or, worse, silently download/install + restart mid-test.
-            if (startupCfg.CheckForUpdatesOnStartup && !CuePlayer.GloballyMuted)
+            if (!StartupUpdateCheckAllowed(startupCfg.CheckForUpdatesOnStartup, coldStart))
+            {
+                if (startupCfg.CheckForUpdatesOnStartup && Windowless.Active) logFile.Event("updater: no startup check in a --headless run");
+                else if (startupCfg.CheckForUpdatesOnStartup && !coldStart) logFile.Event("updater: startup check already made when RemSound started - not again for a profile switch");
+            }
+            else
             {
                 // Defer a few seconds so the network stack, audio engine, and any device
                 // hot-swap has settled before we touch GitHub. The visible cue (silent-
@@ -1810,6 +1830,10 @@ public sealed partial class MainForm : Form
                 });
             }
 
+            // An installed service still watching a folder no update reaches (installed from the portable copy by 5.3 to
+            // 5.9) is pointed at this installed copy, so it takes the update too. Off the UI thread; no admin rights.
+            _ = Task.Run(() => ServiceSourceRepair.RunAtStartup(m => logFile.Event(m)));
+
             // Post-launch notices, shown ONE AT A TIME via a single BeginInvoke that runs them in
             // sequence — NOT one BeginInvoke per notice. Separate BeginInvokes NEST: the second
             // dialog opens inside the first's modal message loop, the two stack on top of each
@@ -1817,7 +1841,7 @@ public sealed partial class MainForm : Form
             // (the bug where the what's-new About box wouldn't close after the Realtek warning).
             // RunStartupNotices shows each notice, waits for the user to close it, THEN shows the
             // next — every one modal to the main window, never nested.
-            BeginInvoke(new Action(RunStartupNotices));
+            BeginInvoke(new Action(() => RunStartupNotices(coldStart)));
         };
 
         // Headless test build stops here: no timers, no OS device-change registration. Everything above
@@ -1857,10 +1881,12 @@ public sealed partial class MainForm : Form
     /// so the next never opens on top of a still-open one. Order: the what's-new About box (after an
     /// update), then the Realtek-ASIO compatibility warning.
     /// </summary>
-    private void RunStartupNotices()
+    private void RunStartupNotices(bool coldStart)
     {
         if (IsDisposed) return;
         MaybeShowWhatsNewAfterUpdate();
+        if (IsDisposed) return;
+        MaybeTellAboutFailedUpdate();
         if (IsDisposed) return;
         MaybeRunLogHousekeeping();
         if (IsDisposed) return;
@@ -1870,6 +1896,56 @@ public sealed partial class MainForm : Form
         MaybeWarnMicBlockedOnStartup();
         if (IsDisposed) return;
         MaybeOfferServiceFolderRepair();
+        if (IsDisposed) return;
+        MaybeShowF1HelpMessage(coldStart);
+    }
+
+    /// <summary>Whether the context help message shows (Ed's design, 2026-09-25): on until hidden, only in the window RemSound
+    /// starts with - never one built for a profile switch - and never with nobody to read it (--silent, --headless).</summary>
+    internal static bool ShouldShowF1HelpMessage(bool enabled, bool coldStart, bool nobodyToAsk) =>
+        enabled && coldStart && !nobodyToAsk;
+
+    /// <summary>The context help message, not shown. Ed's words for it: "hit f1 for context sensitive help for each control
+    /// and shift f1 for the browser, then an ok button and do not show me this message again checkbox".</summary>
+    internal static TaskDialogPage BuildF1HelpMessage(out TaskDialogVerificationCheckBox dontShowAgain)
+    {
+        dontShowAgain = new TaskDialogVerificationCheckBox("Do not show me this message again");
+        return new TaskDialogPage
+        {
+            Caption = AppName,
+            Heading = "Context help is now available",
+            Text = "Press F1 anywhere in RemSound for context help on the control you're on. Escape closes it and puts you "
+                 + "back where you were.\n\nPress Shift+F1 to open the whole manual in your default web browser.",
+            Icon = TaskDialogIcon.Information,
+            Verification = dontShowAgain,
+            Buttons = { TaskDialogButton.OK },
+            DefaultButton = TaskDialogButton.OK,
+            AllowCancel = true,
+        };
+    }
+
+    private void MaybeShowF1HelpMessage(bool coldStart)
+    {
+        if (!ShouldShowF1HelpMessage(AppConfig.Load().ShowF1HelpMessageAtStartup, coldStart, Windowless.NobodyToAsk)) return;
+        logFile.Event("context help: showing the start-up message");
+        var page = BuildF1HelpMessage(out var dontShowAgain);
+        ForegroundDialog.Show(owner => AppTaskDialog.ShowDialog(owner, page));
+        F1HelpMessageAnswered(dontShowAgain.Checked);
+    }
+
+    /// <summary>What closing the context help message does: with "Do not show me this message again" ticked, it is not shown
+    /// again until the Startup behaviour tab of Preferences turns it back on.</summary>
+    internal void F1HelpMessageAnswered(bool dontShowAgain)
+    {
+        if (!dontShowAgain) return;
+        var cfg = AppConfig.Load();
+        cfg.ShowF1HelpMessageAtStartup = false;
+        try
+        {
+            cfg.Save();
+            logFile.Event("context help: the start-up message is hidden from now on (Do not show me this message again)");
+        }
+        catch (Exception ex) { logFile.Event($"context help: could not save hiding the start-up message: {ex.GetType().Name}: {ex.Message}"); }
     }
 
     /// <summary>
@@ -1879,7 +1955,20 @@ public sealed partial class MainForm : Form
     /// </summary>
     private void RefreshInstalledPluginIfStale()
     {
-        if (CuePlayer.GloballyMuted) return;
+        if (Windowless.NobodyToAsk) return;
+        // In a folder only an administrator can change (the shared VST3 folder under Program Files, for music software
+        // that looks only there), the update needs Windows' permission, so it is asked for - once after each update.
+        string target;
+        try
+        {
+            target = PluginInstaller.InstallDirectory;
+            if (PluginInstaller.RefreshNeedsPermission(target, CommandLine.AppVersion))
+            {
+                OfferProtectedPluginRefresh(target);
+                return;
+            }
+        }
+        catch (Exception ex) { logFile.Event($"DAW plugin: the refresh check failed: {ex.GetType().Name}: {ex.Message}"); return; }
         Task.Run(() =>
         {
             try
@@ -1894,6 +1983,45 @@ public sealed partial class MainForm : Form
         });
     }
 
+    /// <summary>RemSound has been updated and the plugin is in a folder that needs Windows' permission to change: ask
+    /// whether to update it now (Ed agreed, 2026-09-25). No means not again until the next update; Reinstall plugin in the
+    /// DAW plugin menu does it any time.</summary>
+    internal void OfferProtectedPluginRefresh(string target)
+    {
+        var version = CommandLine.AppVersion;
+        var cfg = AppConfig.Load();
+        if (string.Equals(cfg.PluginRefreshDeclinedVersion, version, StringComparison.Ordinal))
+        {
+            logFile.Event($"DAW plugin: the plugin in {target} is out of date; updating it was declined for RemSound {version}, so not asked again");
+            return;
+        }
+        logFile.Event($"DAW plugin: the plugin in {target} is from {PluginInstaller.StampAt(target) ?? "an older build"}, and that folder needs Windows' permission - asking");
+        var page = new TaskDialogPage
+        {
+            Caption = AppName,
+            Heading = "Update the DAW plugin?",
+            Text = $"RemSound has been updated, and the DAW plugin in {target} needs updating to match. That folder "
+                 + "needs Windows' permission to change, so Windows will ask for administrator permission.\n\n"
+                 + "If you say not now, you won't be asked again until the next update. DAW plugin, Reinstall plugin "
+                 + "updates it at any time.",
+            Icon = TaskDialogIcon.Information,
+        };
+        var yes = new TaskDialogButton("&Update now");
+        var no = new TaskDialogButton("&Not now");
+        page.Buttons.Add(yes);
+        page.Buttons.Add(no);
+        page.DefaultButton = yes;
+        if (ForegroundDialog.Show(owner => AppTaskDialog.ShowDialog(owner, page)) != yes)
+        {
+            cfg = AppConfig.Load();
+            cfg.PluginRefreshDeclinedVersion = version;
+            try { cfg.Save(); } catch { /* asked again next start: a smaller wrong */ }
+            logFile.Event($"DAW plugin: updating the plugin in {target} declined (Not now) - not asked again until the next update");
+            return;
+        }
+        RunPluginInstallTo(target, "update");
+    }
+
     /// <summary>If the user has a service folder they can no longer write (the 5.6 wrong-owner bug, or
     /// any outside interference), offer the one-click elevated repair. Runs in the settled startup
     /// sequence so the dialog gets real focus for a screen reader; asks every launch while the folder
@@ -1901,11 +2029,26 @@ public sealed partial class MainForm : Form
     /// once healthy. Skipped for --silent (automated) launches like every other startup notice.</summary>
     private void MaybeOfferServiceFolderRepair()
     {
-        if (CuePlayer.GloballyMuted) return;
+        if (NobodyToAskForTest?.Invoke() ?? Windowless.NobodyToAsk) return;
         bool broken;
-        try { broken = System.IO.Directory.Exists(ServiceStore.Directory) && !ServiceControl.CurrentUserCanWriteServiceDir(); }
+        try { broken = System.IO.Directory.Exists(ServiceStore.Directory) && !(ServiceFolderWritableForTest?.Invoke() ?? ServiceControl.CurrentUserCanWriteServiceDir()); }
         catch { return; }
         if (!broken) return;
+        // Not this account's to repair. The folder belongs to the account that set the service up; another account was
+        // asked to "repair" it at every start, and doing so took it from the first, which was then asked at its next
+        // start - the two passing it back and forth (2026-09-25 sweep; Ed agreed). Said once, plainly, and left alone.
+        if (ServiceBelongsToAnotherAccount())
+        {
+            logFile.Event("service folder access check: the service belongs to another Windows account - not offering the repair");
+            var me = AppConfig.CurrentAccountSid() ?? "";
+            var config = AppConfig.Load();
+            if (config.ServiceOwnerNoticeShownFor.Contains(me, StringComparer.OrdinalIgnoreCase)) return;
+            ForegroundDialog.Show(owner => AppMessageBox.Show(owner, ServiceOwnedElsewhereText, AppName, MessageBoxButtons.OK, MessageBoxIcon.Information));
+            config = AppConfig.Load();
+            config.ServiceOwnerNoticeShownFor.Add(me);
+            try { config.Save(); } catch { /* said again next start */ }
+            return;
+        }
         logFile.Event("service folder access check: current user CANNOT write the service folder - offering repair");
         var page = new TaskDialogPage
         {
@@ -1923,7 +2066,7 @@ public sealed partial class MainForm : Form
         page.Buttons.Add(yes);
         page.Buttons.Add(no);
         page.DefaultButton = yes;
-        if (ForegroundDialog.Show(owner => TaskDialog.ShowDialog(owner, page)) == yes)
+        if (ForegroundDialog.Show(owner => AppTaskDialog.ShowDialog(owner, page)) == yes)
             RunServiceVerbAsync(ServiceControl.RepairVerb, "access repair");
         else
             logFile.Event("service folder repair declined at startup");
@@ -1955,6 +2098,8 @@ public sealed partial class MainForm : Form
             {
                 var mb = bytes / (1024.0 * 1024.0);
                 logFile.Event($"log housekeeping: logs folder {mb:0.#} MB exceeds {cfg.LogsFolderWarnThresholdMb} MB threshold — warning user");
+                // Nobody to warn in a --silent or --headless start: the line above is the whole of it (2026-09-25).
+                if (Windowless.NobodyToAsk) return;
                 var page = new TaskDialogPage
                 {
                     Caption = "RemSound",
@@ -1965,11 +2110,73 @@ public sealed partial class MainForm : Form
                     Buttons = { TaskDialogButton.OK },
                     AllowCancel = true,
                 };
-                try { ForegroundDialog.Show(owner => TaskDialog.ShowDialog(owner, page)); }
+                try { ForegroundDialog.Show(owner => AppTaskDialog.ShowDialog(owner, page)); }
                 catch (Exception ex) { logFile.Event($"log housekeeping: warn dialog failed: {ex.GetType().Name}: {ex.Message}"); }
             }
         }
     }
+
+    /// <summary>What to say at start-up about the last update, from the note the updater left in <paramref name="dir"/>:
+    /// the text, and whether it is said just once (a failed update that was put back exactly) or at every start (one whose
+    /// rollback could not put everything back). Null when there is nothing to say.</summary>
+    internal static (string Text, bool Once)? UpdateNoteToTell(string dir)
+    {
+        var incomplete = Path.Combine(dir, UpdateApplier.IncompleteMarkerName);
+        var failed = Path.Combine(dir, UpdateApplier.FailureMarkerName);
+        if (File.Exists(incomplete)) return (File.ReadAllText(incomplete).Trim(), false);
+        if (File.Exists(failed)) return (File.ReadAllText(failed).Trim(), true);
+        return null;
+    }
+
+    /// <summary>After a failed update, say so at start-up. The updater's note in the install folder used to be read by
+    /// nobody (review 2026-09-25): a rolled-back update came back without a word, and one that could not be rolled back
+    /// fully said its old version was back "exactly as it was". A note said just once is deleted once it has been said;
+    /// with nobody to tell (a headless or silent copy) it waits for the next start that has someone.</summary>
+    private void MaybeTellAboutFailedUpdate()
+    {
+        if (IsDisposed) return;
+        var dir = UpdateNoteDirForTest ?? AppContext.BaseDirectory;
+        // What an update left behind: a cut-off one said and held, a note cleared once the install is whole, old files
+        // kept from a rollback removed once nothing needs them. A self-test window only ever looks at its own folder.
+        if (!headless || UpdateNoteDirForTest is not null)
+            foreach (var line in InstallRepair.CheckAtStart(dir, System.Reflection.Assembly.GetExecutingAssembly().GetName().Version,
+                         InstallRepair.FileVersionOf, InstallRepair.UpdaterBusy))
+                logFile.Event(line);
+        (string Text, bool Once)? note;
+        try { note = UpdateNoteToTell(dir); }
+        catch (Exception ex) { logFile.Event($"update note: could not read it: {ex.GetType().Name}: {ex.Message}"); return; }
+        if (note is not { } n) return;
+        logFile.Event(n.Once
+            ? "update note: the last update failed and was put back exactly"
+            : "update note: the last update could not be put back fully - the install is not as it was");
+        if (NobodyToAskForTest?.Invoke() ?? Windowless.NobodyToAsk) { logFile.Event("update note: nobody to tell here; it waits for the next start"); return; }
+        if (n.Once)
+        {
+            ForegroundDialog.Show(owner => AppMessageBox.Show(owner, n.Text, "RemSound update", MessageBoxButtons.OK, MessageBoxIcon.Information));
+            try { File.Delete(Path.Combine(dir, UpdateApplier.FailureMarkerName)); }
+            catch (Exception ex) { logFile.Event($"update note: could not delete it, so it will be said again: {ex.Message}"); }
+            return;
+        }
+        // Said at every start until the install is put right - and there was no way to say it had been, short of finding
+        // and deleting the note by hand (2026-09-25 sweep). The answer defaults to No: only a deliberate Yes silences it.
+        var answer = ForegroundDialog.Show(owner => AppMessageBox.Show(owner,
+            n.Text + "\n\n" + UpdatePutRightQuestion, "RemSound update",
+            MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2));
+        if (answer != DialogResult.Yes) { logFile.Event("update note: not put right yet - it will be said again next start"); return; }
+        try
+        {
+            File.Delete(Path.Combine(dir, UpdateApplier.IncompleteMarkerName));
+            logFile.Event("update note: the person says the install has been put right - not said again");
+        }
+        catch (Exception ex) { logFile.Event($"update note: could not delete it, so it will be said again: {ex.Message}"); }
+    }
+
+    internal const string UpdatePutRightQuestion =
+        "Have you put it right, for example by installing RemSound again? Choose Yes and RemSound stops telling you. "
+        + "Choose No and it tells you again next time it starts.";
+
+    internal string? UpdateNoteDirForTest;
+    internal void TellAboutFailedUpdateForTest() => MaybeTellAboutFailedUpdate();
 
     /// <summary>Show the About box once after a SUCCESSFUL in-app update, if the user opted in. Driven by
     /// a one-shot marker the updater writes only on success (<see cref="RemSoundUpdater.WhatsNewMarkerName"/>
@@ -2069,7 +2276,63 @@ public sealed partial class MainForm : Form
         // The MenuStrip is added LAST so it claims the form's MainMenuStrip property. Without
         // this, the form may not auto-handle Alt-keystroke focus into the menu bar.
         MainMenuStrip = menu;
+        // Context help on every menu item (F1 with a menu open).
+        ContextHelp.MarkItemsByName(menu.Items, MenuHelpKeys);
+        ContextHelp.TrackMenu(menu);
     }
+
+    /// <summary>Each menu item's context help, by the name it is built with. Labels that change later (Start recording,
+    /// the Realtek and install items) are marked as built, so they keep their help whatever they say.</summary>
+    private static readonly Dictionary<string, string> MenuHelpKeys = new(StringComparer.Ordinal)
+    {
+        ["File menu"] = "menu.file",
+        ["New profile"] = "menu.file.new-profile",
+        ["Open profile"] = "menu.file.open",
+        ["Recent profiles"] = "menu.file.recent",
+        ["No recent profiles"] = "menu.file.recent",
+        ["Save profile"] = "menu.file.save",
+        ["Save profile as"] = "menu.file.save-as",
+        ["Rename current profile"] = "menu.file.rename",
+        ["Lock profile read-only"] = "menu.file.lock",
+        ["Change this profile's password"] = "menu.file.password",
+        ["Minimise to tray"] = "menu.file.minimise",
+        ["Exit RemSound"] = "menu.file.exit",
+        ["Record menu"] = "menu.record",
+        ["Start recording"] = "menu.record.start-stop",
+        ["Stop recording"] = "menu.record.start-stop",
+        ["Open current recordings folder"] = "menu.record.open-folder",
+        ["Change recordings folder"] = "menu.record.change-folder",
+        ["Service menu"] = "menu.service",
+        ["Service status"] = "menu.service.status",
+        ["Configure service profile"] = "menu.service.configure",
+        ["Install service"] = "menu.service.install",
+        ["Uninstall service"] = "menu.service.uninstall",
+        ["Start service"] = "menu.service.start",
+        ["Stop service"] = "menu.service.stop",
+        ["Repair service folder access"] = "menu.service.repair",
+        ["View service log"] = "menu.service.log",
+        ["View service update log"] = "menu.service.update-log",
+        ["DAW plugin menu"] = "menu.plugin",
+        ["Install plugin"] = "menu.plugin.install",
+        ["Reinstall plugin"] = "menu.plugin.install",
+        ["Remove plugin"] = "menu.plugin.remove",
+        ["Apply pan and EQ to plugin audio"] = "menu.plugin.apply-shaping",
+        ["Let plugins connect to RemSound"] = "menu.plugin.let-connect",
+        ["Options menu"] = "menu.options",
+        ["Recording settings"] = "menu.options.recording-settings",
+        ["Keyboard shortcuts"] = "menu.options.keyboard",
+        ["Profile passwords"] = "menu.options.passwords",
+        ["Manage named peers"] = "menu.options.named-peers",
+        ["Enable Realtek ASIO driver in RemSound"] = "menu.options.realtek",
+        ["Disable Realtek ASIO driver in RemSound"] = "menu.options.realtek",
+        ["Install RemSound on this PC"] = "menu.options.install",
+        ["Uninstall RemSound from this PC"] = "menu.options.install",
+        ["Preferences"] = "menu.options.preferences",
+        ["Help menu"] = "menu.help",
+        ["Open user manual"] = "menu.help.manual",
+        ["Check for updates"] = "menu.help.updates",
+        ["About RemSound"] = "menu.help.about",
+    };
 
     /// <summary>Build the menu bar (File, Record, Service, DAW plugin, Options, Help) and wire
     /// each item to its action. Single-press accelerators are set via ShortcutKeys on the menu
@@ -2271,7 +2534,8 @@ public sealed partial class MainForm : Form
             {
                 AccessibleName = "Uninstall RemSound from this PC",
             };
-            installItem.Click += (_, _) => AppInstaller.RunUninstallInProcess(this, msg => logFile.Event($"installer: {msg}"));
+            installItem.Click += (_, _) => AppInstaller.RunUninstallInProcess(this, msg => logFile.Event($"installer: {msg}"),
+                () => PrepareToLeaveForInstaller("uninstalling RemSound", "uninstall it"), () => LeaveForInstaller("finish uninstalling"));
         }
         else
         {
@@ -2279,7 +2543,8 @@ public sealed partial class MainForm : Form
             {
                 AccessibleName = "Install RemSound on this PC",
             };
-            installItem.Click += (_, _) => AppInstaller.RunInstall(this, msg => logFile.Event($"installer: {msg}"));
+            installItem.Click += (_, _) => AppInstaller.RunInstall(this, msg => logFile.Event($"installer: {msg}"),
+                () => PrepareToLeaveForInstaller("installing RemSound on this PC", "install it"), () => LeaveForInstaller("open the installed copy"));
         }
 
         var optionItems = new List<ToolStripItem>
@@ -2296,11 +2561,12 @@ public sealed partial class MainForm : Form
         optionsMenu.DropDownItems.AddRange(optionItems.ToArray());
 
         // Help menu — separate from File so users with their hand on Alt + arrow keys can
-        // walk straight to it. F1 is the global "open the manual" key; the menu mirrors it
-        // for users who prefer mouse / arrow navigation.
+        // walk straight to it. Shift+F1 is the global "open the manual" key (F1 is help for the
+        // control you're on, 2026-09-25); the menu mirrors it for users who prefer the menus.
+        // The key itself is caught app-wide by HelpKeyMessageFilter; this shows it on the item.
         var helpItem = new ToolStripMenuItem("&Help")
         {
-            ShortcutKeys = Keys.F1,
+            ShortcutKeys = Keys.Shift | Keys.F1,
             AccessibleName = "Open user manual",
         };
         helpItem.Click += (_, _) => HelpLauncher.OpenManual();
@@ -2361,6 +2627,10 @@ public sealed partial class MainForm : Form
     /// wiring being checked (the log hook, the claim register reaching the receiver) is precisely what
     /// a second implementation would fail to prove. A fixed port would also collide with the user's
     /// own running RemSound, which is how a gate ends up testing nothing.</summary>
+    internal RemSound.Sender.PluginTrackSource PluginTrackSourceForTest => pluginTrackSource;
+    /// <summary>Test seam: close the link the way switching it off does (same code path, whatever the setting says).</summary>
+    internal void ClosePluginLinkForTest() { var cfg = AppConfig.Load(); cfg.EnableDawPluginLink = false; cfg.Save(); ApplyPluginLinkSetting(0); }
+
     internal PluginBridgeHost? OpenPluginLinkForTest(int port)
     {
         pluginHost?.Dispose();
@@ -2393,6 +2663,7 @@ public sealed partial class MainForm : Form
         {
             pluginHost = new PluginBridgeHost(receiver.ReadClaimedPeer, port);
             pluginHost.PeerListSource = () => PeerListForPlugins();
+            pluginHost.AppReceivingSource = () => receiver.PlaybackEnabled;
             // THE SEND DIRECTION. This subscription is the whole of what was missing: the plugin has
             // been delivering its track all along, and the host counted the blocks and dropped them
             // for want of a subscriber, which is the "sending FROM a DAW track is not wired up in
@@ -2563,7 +2834,19 @@ public sealed partial class MainForm : Form
         // or anything else that locks the user out of their own profile/logs). Also offered automatically
         // at startup and on a failed profile save; kept in the menu so it's discoverable and repeatable.
         var repair = new ToolStripMenuItem("&Repair service folder access") { AccessibleName = "Repair service folder access" };
-        repair.Click += (_, _) => ServiceAction(ServiceControl.RepairVerb, "access repair", confirm: false);
+        repair.Click += (_, _) =>
+        {
+            // Asked for by hand from another account: it can still be done - the other account may be gone for good - but
+            // not without saying what it costs.
+            if (ServiceBelongsToAnotherAccount()
+                && AppMessageBox.Show(this, ServiceRepairFromAnotherAccountQuestion, AppName, MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+            {
+                logFile.Event("service: access repair from another account - declined");
+                return;
+            }
+            ServiceAction(ServiceControl.RepairVerb, "access repair", confirm: false);
+        };
 
         serviceMenu.DropDownItems.AddRange(new ToolStripItem[]
         {
@@ -2623,11 +2906,11 @@ public sealed partial class MainForm : Form
             var msg = ServiceStore.LoadLoggingEnabled()
                 ? "No service log yet. The service writes one once it starts with logging on — start (or restart) the service, then check back here. (The service events log appears here too once you install/start it.)"
                 : "No service log yet. Once you install or start the service, its events (and any failure reason) are recorded here automatically. For the fuller runtime log, also turn on logging: Service menu → Configure service profile → Logging tab.";
-            MessageBox.Show(this, msg, AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            AppMessageBox.Show(this, msg, AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
         try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true }); }
-        catch (Exception ex) { MessageBox.Show(this, $"Could not open the service log ({path}): {ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+        catch (Exception ex) { AppMessageBox.Show(this, $"Could not open the service log ({path}): {ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning); }
     }
 
     private void OpenServiceUpdateLog()
@@ -2635,11 +2918,11 @@ public sealed partial class MainForm : Form
         var path = ServiceStore.UpdateLogPath;
         if (!File.Exists(path))
         {
-            MessageBox.Show(this, "No service update log yet — it's written the first time the service updates itself. (For what the service is doing day to day, use \"View service log\" instead.)", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            AppMessageBox.Show(this, "No service update log yet — it's written the first time the service updates itself. (For what the service is doing day to day, use \"View service log\" instead.)", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
         try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true }); }
-        catch (Exception ex) { MessageBox.Show(this, $"Could not open the update log ({path}): {ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+        catch (Exception ex) { AppMessageBox.Show(this, $"Could not open the update log ({path}): {ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning); }
     }
 
     private static string DescribeAgo(DateTime utc)
@@ -2678,14 +2961,16 @@ public sealed partial class MainForm : Form
 
         using var dlg = new ServiceProfileDialog(current, ServiceStore.LoadLoggingEnabled());
         // Via ForegroundDialog so it opens front-and-centre with focus even when the main window is
-        // minimised in the tray — this dialog is now reachable from the weak-service-password nag,
-        // which can fire while RemSound is minimised (Ed, 2026-07-27: "clicked Yes but had to Alt-Tab
-        // to find it"). The nested "Set password" dialog inherits the foreground once its parent is up.
+        // minimised in the tray (the Service menu is on the tray menu too; Ed, 2026-07-27: "clicked Yes
+        // but had to Alt-Tab to find it"). The nested "Set password" dialog inherits the foreground once
+        // its parent is up.
         if (ForegroundDialog.Show(owner => dlg.ShowDialog(owner)) != DialogResult.OK) return;
         try
         {
             ServiceStore.SaveProfile(dlg.Result);
             ServiceStore.SaveLoggingEnabled(dlg.ServiceLoggingEnabled);
+            // The service is whoever set it up, on a server as anywhere: this account's id (one per Windows account).
+            ServiceStore.SaveRelayClientId(relayGroup.ClientId);
             logFile.Event($"service: profile saved (service logging {(dlg.ServiceLoggingEnabled ? "on" : "off")})");
             // Held by the dialog until now, so a cancelled service dialog keeps nothing. 2026-09-13 review.
             if (dlg.PendingStartupVolume is { } startupVolume)
@@ -2726,24 +3011,29 @@ public sealed partial class MainForm : Form
                     if (ok || IsDisposed) return;
                     try
                     {
-                        BeginInvoke(new Action(() => MessageBox.Show(this,
+                        BeginInvoke(new Action(() => AppMessageBox.Show(this,
                             "The service profile was saved, but the running service could not be restarted to pick it up. Use the Service menu to stop and start it.",
                             AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning)));
                     }
                     catch { /* window closing */ }
                 });
             }
-            MessageBox.Show(this,
+            AppMessageBox.Show(this,
                 restartNeeded
                     ? "Service profile saved. The running service is restarting to pick it up."
                     : "Service profile saved.",
                 AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
+        catch (UnauthorizedAccessException) when (ServiceBelongsToAnotherAccount())
+        {
+            logFile.Event("service: profile not saved - the service belongs to another Windows account");
+            AppMessageBox.Show(this, ServiceOwnedElsewhereOnSaveText, AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
         catch (UnauthorizedAccessException)
         {
             // The exact wall a locked-out user hits (support case 2026-08-06): don't just report the
             // denial — offer the fix on the spot. Same repair as the Service menu item.
-            var offer = MessageBox.Show(this,
+            var offer = AppMessageBox.Show(this,
                 "RemSound was not allowed to save the service profile — your account has lost access "
                 + "to the service settings folder. This can happen after a reinstall or an update.\n\n"
                 + "Repair the folder access now? Windows will ask for administrator permission. "
@@ -2753,7 +3043,7 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Could not save the service profile: {ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            AppMessageBox.Show(this, $"Could not save the service profile: {ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 
@@ -2762,25 +3052,123 @@ public sealed partial class MainForm : Form
     private Action? refreshDawPluginMenu;
     internal void RefreshDawPluginMenuForTest() => refreshDawPluginMenu?.Invoke();
 
-    /// <summary>Install or remove the VST plugin, and say plainly what happened. No elevation is
-    /// involved (per-user VST3 folder), so there is no UAC prompt and nothing to explain about
-    /// administrator rights.</summary>
+    /// <summary>Install or remove the VST plugin, and say plainly what happened. Install asks where first (Ed,
+    /// 2026-09-25): the standard per-user folder, or another the person picks. A folder only an administrator can change
+    /// has Windows ask for permission, which is why the work runs off the window's thread: the window stays alive while
+    /// Windows asks.</summary>
     private void RunPluginInstallAction(bool install)
     {
-        var (ok, message) = install ? PluginInstaller.Install() : PluginInstaller.Uninstall();
-        logFile.Event($"vst plugin {(install ? "install" : "remove")}: {(ok ? "ok" : "FAILED")} - {message}");
-        MessageBox.Show(this, message, AppName, MessageBoxButtons.OK,
-            ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+        if (pluginActionRunning) return;
+        if (!install)
+        {
+            RunPluginWork(PluginInstaller.Uninstall, "remove", null);
+            return;
+        }
+        var target = PluginInstallPlaceDialog.Ask(this);
+        if (target is null)
+        {
+            logFile.Event("vst plugin install: cancelled at the choice of folder");
+            return;
+        }
+        var standard = PluginInstaller.SameFolder(target, PluginInstaller.StandardDirectory);
+        logFile.Event($"vst plugin install: chose {target}{(standard ? " (the standard place)" : " (a folder of the person's own)")}");
+        RunPluginInstallTo(target, "install");
     }
+
+    /// <summary>Put the context help sounds chosen in Preferences beside the installed DAW plugin, on a worker, and log it
+    /// when a copy changed. A plugin in a folder that needs Windows' permission is left until its next install or update.</summary>
+    private void RefreshPluginHelpSounds()
+    {
+        // Not while the window is being built: installing or updating the plugin puts the sounds there itself.
+        if (!IsHandleCreated) return;
+        Task.Run(() =>
+        {
+            try
+            {
+                if (PluginInstaller.RefreshHelpSounds())
+                    logFile.Event($"DAW plugin: its context help sounds now follow Preferences ({PluginInstaller.InstallDirectory})");
+            }
+            catch (Exception ex)
+            {
+                try { logFile.Event($"DAW plugin: could not update its context help sounds: {ex.GetType().Name}: {ex.Message}"); } catch { /* closing */ }
+            }
+        });
+    }
+
+    /// <summary>A plugin install or remove under way, so a second can't start on top of it.</summary>
+    private bool pluginActionRunning;
+
+    /// <summary>Install into <paramref name="target"/>. Ed's message about where updates go follows a fresh install into a
+    /// folder of the person's own, not an update of one.</summary>
+    private void RunPluginInstallTo(string target, string label) =>
+        RunPluginWork(() => PluginInstaller.InstallTo(target), label, label == "install" ? target : null);
+
+    private async void RunPluginWork(Func<(bool Ok, string Message)> work, string label, string? installedTo)
+    {
+        pluginActionRunning = true;
+        (bool Ok, string Message) result;
+        try { result = await Task.Run(work); }
+        catch (Exception ex) { result = (false, $"The plugin could not be {(label == "remove" ? "removed" : "installed")}: {ex.Message}"); }
+        finally { pluginActionRunning = false; }
+        if (IsDisposed) return;
+        logFile.Event($"vst plugin {label}: {(result.Ok ? "ok" : "FAILED")} - {result.Message}");
+        // In front of everything: an update started from a start-up question may come back to a window in the tray, and
+        // Windows' permission prompt has just taken the foreground away.
+        ForegroundDialog.Show(owner => AppMessageBox.Show(owner, result.Message, AppName, MessageBoxButtons.OK,
+            result.Ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning));
+        if (result.Ok && installedTo is not null) MaybeShowPluginFolderNotice(installedTo);
+    }
+
+    /// <summary>Ed's message after the plugin goes somewhere other than the standard place (2026-09-25): updates go to
+    /// that folder, and only that folder. Until "Do not show me this message again" is ticked.</summary>
+    private void MaybeShowPluginFolderNotice(string target)
+    {
+        if (IsDisposed || PluginInstaller.SameFolder(target, PluginInstaller.StandardDirectory)) return;
+        if (AppConfig.Load().PluginFolderNoticeSuppressed)
+        {
+            logFile.Event("vst plugin: the plugin-updates message is hidden (Do not show me this message again), so not shown");
+            return;
+        }
+        logFile.Event($"vst plugin: showing the plugin-updates message for {target}");
+        if (!ForegroundDialog.Show(owner => PluginFolderNoticeDialog.ShowNotice(owner, target))) return;
+        var cfg = AppConfig.Load();
+        cfg.PluginFolderNoticeSuppressed = true;
+        try
+        {
+            cfg.Save();
+            logFile.Event("vst plugin: the plugin-updates message is hidden from now on (Do not show me this message again)");
+        }
+        catch (Exception ex) { logFile.Event($"vst plugin: could not save hiding the plugin-updates message: {ex.GetType().Name}: {ex.Message}"); }
+    }
+
+    /// <summary>Does the service belong to a Windows account other than this one? False when it cannot be told.</summary>
+    private static bool ServiceBelongsToAnotherAccount() =>
+        ServiceStore.LoadServiceOwnerSid() is { } owner && AppConfig.CurrentAccountSid() is { } me
+        && !string.Equals(owner, me, StringComparison.OrdinalIgnoreCase);
+
+    internal const string ServiceOwnedElsewhereText =
+        "The RemSound service on this computer was set up from another Windows account, so only that account can change "
+        + "its settings. Nothing is wrong, and the service carries on as it was set up. RemSound won't mention this again "
+        + "for this account.";
+
+    internal const string ServiceOwnedElsewhereOnSaveText =
+        "The RemSound service on this computer was set up from another Windows account, so only that account can change "
+        + "its settings. Nothing was saved.";
+
+    internal const string ServiceRepairFromAnotherAccountQuestion =
+        "The RemSound service on this computer was set up from another Windows account. Repairing its folder gives it to "
+        + "this account instead, and that account can no longer change the service's settings.\n\nRepair it anyway?";
+
+    internal static Func<bool>? ServiceFolderWritableForTest;
+    internal void OfferServiceFolderRepairForTest() => MaybeOfferServiceFolderRepair();
 
     private void ServiceAction(string verb, string label, bool confirm)
     {
         if (confirm)
         {
-            var msg = verb == ServiceControl.InstallVerb
-                ? "Install the RemSound send-only service? It will start automatically at boot and stream your service profile whenever you're not using RemSound normally.\n\nWindows will ask for administrator permission."
-                : "Uninstall the RemSound service?\n\nWindows will ask for administrator permission.";
-            if (MessageBox.Show(this, msg, AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            // Shared with RemSound --service and the scripts beside the exe, so both ask exactly this.
+            var msg = verb == ServiceControl.InstallVerb ? ServiceActionText.InstallQuestion : ServiceActionText.UninstallQuestion;
+            if (AppMessageBox.Show(this, msg, AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         }
         RunServiceVerbAsync(verb, label);
     }
@@ -2801,52 +3189,27 @@ public sealed partial class MainForm : Form
         });
     }
 
+    /// <summary>Gate seam: the result of an elevated service step, as it is reported.</summary>
+    internal void ReportServiceActionResultForTest(string label, int rc) => ReportServiceActionResult(label, rc);
+
     private void ReportServiceActionResult(string label, int rc)
     {
-        var outcome = rc == 0 ? "success"
-            : rc == -1 ? "cancelled/declined"
-            : rc == ServiceControl.ElevatedTimedOut ? "timed out"
-            : "failed";
+        // The wording is shared with RemSound --service and the scripts beside the exe (ServiceActionText), so the
+        // menu and a script can never say different things about the same outcome.
+        var (ok, outcome, message) = ServiceActionText.Describe(label, rc);
         logFile.Event($"service: {label} finished with code {rc} ({outcome})");
         ServiceStore.AppendServiceEvent($"{label} finished: code {rc} ({outcome})");
-        if (rc == 0)
+        // After a successful install, offer to start it now — it otherwise only starts at the next
+        // boot, so a first-time user would see nothing happen.
+        // In front of everything: the repair can be offered at start-up with the window in the tray, and Windows' permission
+        // prompt has just taken the foreground away - a box owned by the hidden window opened behind it (2026-09-25 sweep).
+        if (ok && label == "install")
         {
-            // After a successful install, offer to start it now — it otherwise only starts at the next
-            // boot, so a first-time user would see nothing happen.
-            if (label == "install")
-            {
-                var startNow = MessageBox.Show(this,
-                    "The RemSound service was installed. Do you want to start it now?\n\nIt will also start automatically at every boot.",
-                    AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-                if (startNow == DialogResult.Yes) RunServiceVerbAsync(ServiceControl.StartVerb, "start");
-                return;
-            }
-            MessageBox.Show(this,
-                label == "access repair"
-                    ? "Service folder access repaired. Your account owns the service folder again."
-                    : $"Service {label} succeeded.",
-                AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            var startNow = ForegroundDialog.Show(owner => AppMessageBox.Show(owner, ServiceActionText.StartNowQuestion, AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question));
+            if (startNow == DialogResult.Yes) RunServiceVerbAsync(ServiceControl.StartVerb, "start");
+            return;
         }
-        else if (rc == -1)
-            MessageBox.Show(this, $"Service {label} was cancelled, or administrator rights were declined.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        else if (rc == ServiceControl.ElevatedTimedOut)
-            MessageBox.Show(this, $"Service {label} is taking longer than expected and hasn't finished yet. It may still complete on its own — check the Service menu status in a moment.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        else
-        {
-            // Say what the code MEANS — "(code 1)" alone cost a support round-trip on 2026-08-06. The
-            // service events log always has the underlying exception now (View service log shows it).
-            var why = rc switch
-            {
-                ServiceControl.StartStopTimedOut => "The service did not respond within 15 seconds.",
-                ServiceControl.StartStopScmRefused => "Windows refused — the service may be missing or disabled.",
-                9 => "The repair commands ran but the folder still isn't writable.",
-                _ => "",
-            };
-            var hint = label is "start" or "install"
-                ? " The service log usually says why — Service menu, View service log. If this keeps happening, try 'Repair service folder access' in the Service menu."
-                : " The service log usually says why — Service menu, View service log.";
-            MessageBox.Show(this, $"Service {label} failed (code {rc}). {why}{hint}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
+        ForegroundDialog.Show(owner => AppMessageBox.Show(owner, message, AppName, MessageBoxButtons.OK, ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning));
     }
 
     /// <summary>Rebuild the Recent profiles submenu from <see cref="AppConfig.RecentProfiles"/>.
@@ -2874,13 +3237,13 @@ public sealed partial class MainForm : Form
             // just the profile name so NVDA reads the menu item naturally rather than
             // prefixing every entry with "Recent profile N:" (which was the original cut
             // and Ed flagged it as noisy / unwanted).
-            var item = new ToolStripMenuItem($"&{slot} {title}")
+            var item = ContextHelp.MarkItem(new ToolStripMenuItem($"&{slot} {title}")
             {
                 AccessibleName = title,
                 // Stash the path on the menu item so the click handler doesn't depend on
                 // closure capture of the loop variable.
                 Tag = path,
-            };
+            }, "menu.file.recent");
             item.Click += (s, _) =>
             {
                 var sender = (ToolStripMenuItem)s!;
@@ -2893,11 +3256,11 @@ public sealed partial class MainForm : Form
         }
         if (recentProfilesMenu.DropDownItems.Count == 0)
         {
-            recentProfilesMenu.DropDownItems.Add(new ToolStripMenuItem("(No recent profiles)")
+            recentProfilesMenu.DropDownItems.Add(ContextHelp.MarkItem(new ToolStripMenuItem("(No recent profiles)")
             {
                 Enabled = false,
                 AccessibleName = "No recent profiles",
-            });
+            }, "menu.file.recent"));
         }
     }
 
@@ -2928,9 +3291,11 @@ public sealed partial class MainForm : Form
         if (string.Equals(path, currentProfilePath, StringComparison.OrdinalIgnoreCase)) return; // already loaded
         if (!File.Exists(path))
         {
-            MessageBox.Show(this,
+            // Via ForegroundDialog: reachable from the tray's Profiles menu and the quick-switch hotkey, where a plain message
+            // box opens behind everything (review 2026-09-25).
+            ForegroundDialog.Show(owner => AppMessageBox.Show(owner,
                 $"Profile file no longer exists:\n\n{path}\n\nIt'll be removed from the Recent profiles list.",
-                "Recent profile", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                "Recent profile", MessageBoxButtons.OK, MessageBoxIcon.Information));
             // Trim the dead entry out of the recents list so the user doesn't keep seeing it.
             var cfg = AppConfig.Load();
             cfg.RecentProfiles.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
@@ -2939,6 +3304,9 @@ public sealed partial class MainForm : Form
         }
         var title = Path.GetFileNameWithoutExtension(path);
         if (string.IsNullOrEmpty(title)) return;
+        // Unsaved changes: ask first, as New profile and Exit do. The switch used to throw them away without a word
+        // (review 2026-09-25; Ed agreed the fix). Covers the quick-switch hotkey too, which comes through here.
+        if (!OfferToSaveBeforeLeaving($"switching to \"{title}\"", $"switch to \"{title}\"")) return;
         // Play the switch cue NOW, on click, for immediate feedback — CuePlayer.Play is fire-and-
         // forget on its own thread + device, so it survives the form rebuild that follows. Covers
         // BOTH the Recent-profiles menu and the quick-switch popup (both route through here). The
@@ -2968,6 +3336,16 @@ public sealed partial class MainForm : Form
     {
         try
         {
+            // Not while another RemSound window is waiting for an answer: the switch closes this window from inside that
+            // window's own wait, and whatever it was asking was lost. Said, so the key press is not met with silence
+            // (2026-09-25 sweep).
+            if (Application.OpenForms.Cast<Form>().FirstOrDefault(f => f != this && f.Modal && !f.IsDisposed) is { } open)
+            {
+                var name = string.IsNullOrWhiteSpace(open.Text) ? "open" : open.Text;
+                logFile.Event($"quick profile switch: not now - \"{name}\" is open");
+                ScreenReader.Speak($"Close the {name} window first, then switch profile.");
+                return;
+            }
             var store = profileStore;
             if (store is null) return;
             var titles = store.ListProfileTitles();
@@ -3001,6 +3379,43 @@ public sealed partial class MainForm : Form
         }
     }
 
+    /// <summary>
+    /// Before leaving this profile for another - New profile, a Recent profile, the quick-switch hotkey, File → Open -
+    /// with unsaved changes, ask whether to save them first. True = carry on (saved, or the person chose not to); false =
+    /// stay where you are, changes intact (Cancel, a cancelled name prompt, or a save that failed and said so). A
+    /// read-only profile never asks: its changes are throwaway by design, as at exit.
+    /// </summary>
+    /// <param name="beforeWhat">Completes "Save them before ...?", e.g. <c>switching to "Gig"</c>.</param>
+    /// <param name="thenWhat">Completes "save, then ...", e.g. <c>switch to "Gig"</c>.</param>
+    private bool OfferToSaveBeforeLeaving(string beforeWhat, string thenWhat)
+    {
+        if (!unsavedChanges || profileStore is null || currentProfileReadOnly) return true;
+        // Via ForegroundDialog: the quick-switch hotkey works with RemSound in the tray, where a plain message box opens
+        // behind everything and a blind user cannot reach it (Ed, 2026-07-27 dialog-focus sweep).
+        var result = ForegroundDialog.Show(owner => AppMessageBox.Show(owner,
+            $"You have unsaved changes to your current profile. Save them before {beforeWhat}?\n\n" +
+            $"Yes — save, then {thenWhat}.\nNo — discard the changes and {thenWhat}.\nCancel — stay where you are.",
+            "RemSound — unsaved changes",
+            MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button3));
+        if (result == DialogResult.Cancel) { logFile.Event($"unsaved changes: stayed rather than {beforeWhat}"); return false; }
+        if (result == DialogResult.Yes)
+        {
+            if (string.IsNullOrEmpty(currentProfileTitle))
+            {
+                // Current session is itself a blank template — needs a name before it can be saved. In front: this can be
+                // reached from the tray (a profile switch) as well as the window.
+                var saveTitle = ForegroundDialog.Show(owner => ProfileSaveAsPrompt.Show(owner, profileStore, null));
+                if (string.IsNullOrEmpty(saveTitle)) return false; // cancelled the name prompt → abort the whole thing
+                if (!SaveProfileTo(saveTitle, showConfirmation: false)) return false; // the save failed: stay, changes intact
+            }
+            else if (!SaveProfileTo(currentProfileTitle, showConfirmation: false)) return false;
+            logFile.Event($"unsaved changes: saved before {beforeWhat}");
+            return true;
+        }
+        logFile.Event($"unsaved changes: discarded before {beforeWhat}");
+        return true;
+    }
+
     /// <summary>File → New profile. Starts a fresh blank template as a new unsaved session — the way
     /// to create a profile from scratch even when "start with a specific profile" boots the user
     /// straight past the picker (issue #6). Offers to save the current profile first if it has
@@ -3008,30 +3423,7 @@ public sealed partial class MainForm : Form
     private void NewProfile()
     {
         // Don't silently lose unsaved work when abandoning the current session for a blank one.
-        if (unsavedChanges && profileStore is not null && !currentProfileReadOnly)
-        {
-            var result = MessageBox.Show(this,
-                "You have unsaved changes to your current profile. Save them before starting a new profile?\n\n" +
-                "Yes — save, then start a new profile.\nNo — discard the changes and start a new profile.\nCancel — stay where you are.",
-                "RemSound — unsaved changes",
-                MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button3);
-            if (result == DialogResult.Cancel) return;
-            if (result == DialogResult.Yes)
-            {
-                if (string.IsNullOrEmpty(currentProfileTitle))
-                {
-                    // Current session is itself a blank template — needs a name before it can be saved.
-                    var saveTitle = ProfileSaveAsPrompt.Show(this, profileStore, null);
-                    if (string.IsNullOrEmpty(saveTitle)) return; // cancelled the name prompt → abort the whole thing
-                    SaveProfileTo(saveTitle, showConfirmation: false);
-                }
-                else
-                {
-                    SaveProfileTo(currentProfileTitle, showConfirmation: false);
-                }
-            }
-            // No → fall through, discarding the unsaved changes.
-        }
+        if (!OfferToSaveBeforeLeaving("starting a new profile", "start a new profile")) return;
 
         // No profile-switch cue here — deliberately. Unlike Recent/Open (which play it on click),
         // opening a fresh blank template should be silent; the switch sound feels wrong for "start
@@ -3189,6 +3581,8 @@ public sealed partial class MainForm : Form
         var picked = Path.GetFileNameWithoutExtension(pickedPath);
         if (string.IsNullOrEmpty(picked)) return;
         if (string.Equals(pickedPath, currentProfilePath, StringComparison.OrdinalIgnoreCase)) return; // already loaded
+        // Unsaved changes: ask first, once the person has chosen where they are going (see SwitchToRecentProfile).
+        if (!OfferToSaveBeforeLeaving($"opening \"{picked}\"", $"open \"{picked}\"")) return;
         // Switch cue on click (same rationale as SwitchToRecentProfile).
         if (settings.LoadEnableProfileSwitchCue())
         {
@@ -3199,6 +3593,9 @@ public sealed partial class MainForm : Form
         NextProfilePathToLoad = pickedPath;
         NextProfileTitleToLoad = picked;
         logFile.Event($"profile open requested: \"{picked}\" from {pickedPath}");
+        // Stay in the tray if we were there, as the other profile switches do. Without it the next window was not put in
+        // the tray, so it had no icon, and in a --headless copy nobody at the keyboard could reach it (2026-09-25).
+        startNextInstanceMinimized = !Visible || WindowState == FormWindowState.Minimized;
         Close();
     }
 
@@ -3259,7 +3656,7 @@ public sealed partial class MainForm : Form
             DefaultButton = cancelButton,
             AllowCancel = true,
         };
-        var clicked = TaskDialog.ShowDialog(this, page);
+        var clicked = AppTaskDialog.ShowDialog(this, page);
         if (verification.Checked)
         {
             var cfg = AppConfig.Load();
@@ -3273,12 +3670,15 @@ public sealed partial class MainForm : Form
     /// <summary>Rename the currently-active profile JSON on disk. No-op on the blank
     /// template (nothing to rename). Renames update window title + active-profile state
     /// in place — no reload required.</summary>
+    /// <summary>A line for the next window's log, from the profile switch that built it.</summary>
+    internal static string? LineForNextLog;
+
     private void RenameCurrentProfile()
     {
         if (profileStore is null) return;
         if (string.IsNullOrEmpty(currentProfileTitle))
         {
-            MessageBox.Show(this, "There is no active profile to rename. Use File → Save as to save the current state under a name first.",
+            AppMessageBox.Show(this, "There is no active profile to rename. Use File → Save as to save the current state under a name first.",
                 AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -3293,6 +3693,16 @@ public sealed partial class MainForm : Form
             dialogTitle: "Rename profile",
             promptLabel: "Please enter a new name for your profile:");
         if (string.IsNullOrWhiteSpace(newTitle) || string.Equals(newTitle, oldTitle, StringComparison.Ordinal)) return;
+        RenameCurrentProfileTo(newTitle);
+    }
+
+    /// <summary>Gate seam: the rename after its question, as the menu item does it.</summary>
+    internal void RenameCurrentProfileToForTest(string newTitle) => RenameCurrentProfileTo(newTitle);
+
+    private void RenameCurrentProfileTo(string newTitle)
+    {
+        if (profileStore is null || string.IsNullOrEmpty(currentProfileTitle)) return;
+        var oldTitle = currentProfileTitle;
 
         // Rename in the directory the profile actually lives in, NOT in BaseDirectory. The
         // active profile may have been Save-As'd to an arbitrary path on a previous step,
@@ -3305,14 +3715,10 @@ public sealed partial class MainForm : Form
         var sanitisedNewName = Path.GetFileName(profileStore.PathFor(newTitle));
         var newPath = Path.Combine(directory, sanitisedNewName);
 
-        if (string.Equals(oldPath, newPath, StringComparison.OrdinalIgnoreCase))
+        var samePath = string.Equals(oldPath, newPath, StringComparison.OrdinalIgnoreCase);
+        if (!samePath && File.Exists(newPath))
         {
-            // Same filename after sanitisation — nothing to do.
-            return;
-        }
-        if (File.Exists(newPath))
-        {
-            MessageBox.Show(this,
+            AppMessageBox.Show(this,
                 $"A profile file named \"{sanitisedNewName}\" already exists in:\n\n{directory}\n\nChoose a different name.",
                 AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
@@ -3321,7 +3727,14 @@ public sealed partial class MainForm : Form
         {
             if (File.Exists(oldPath))
             {
-                File.Move(oldPath, newPath);
+                // The title INSIDE the file is what every list reads - the picker, quick switch, "Start with a specific
+                // profile", the passwords window. Moving the file alone left all of them naming the old title, a file that
+                // no longer existed (2026-09-25 sweep). Only the title changes: unsaved changes in the window stay unsaved.
+                var onDisk = System.Text.Json.JsonSerializer.Deserialize<Profile>(File.ReadAllText(oldPath))
+                             ?? throw new InvalidDataException("the profile file holds no profile");
+                onDisk.Title = newTitle;
+                ProfileStore.WriteProfileFile(newPath, onDisk);
+                if (!samePath) File.Delete(oldPath);
             }
             else
             {
@@ -3333,7 +3746,7 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Could not rename \"{oldTitle}\" to \"{newTitle}\":\n\n{ex.Message}",
+            AppMessageBox.Show(this, $"Could not rename \"{oldTitle}\" to \"{newTitle}\":\n\n{ex.Message}",
                 AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
@@ -3343,6 +3756,30 @@ public sealed partial class MainForm : Form
         Text = FormatWindowTitle(newTitle);
         AccessibleName = Text;
         logFile.Event($"renamed profile \"{oldTitle}\" → \"{newTitle}\" (path: {newPath})");
+
+        // Everything that names the profile by its old title or file follows it.
+        try
+        {
+            var cfg = AppConfig.Load();
+            var followed = new List<string>();
+            if (string.Equals(cfg.StartWithProfileTitle, oldTitle, StringComparison.OrdinalIgnoreCase))
+            {
+                cfg.StartWithProfileTitle = newTitle;
+                followed.Add("start with this profile");
+            }
+            for (var i = 0; i < cfg.RecentProfiles.Count; i++)
+            {
+                if (!string.Equals(cfg.RecentProfiles[i], oldPath, StringComparison.OrdinalIgnoreCase)) continue;
+                cfg.RecentProfiles[i] = newPath;
+                if (!followed.Contains("recent profiles")) followed.Add("recent profiles");
+            }
+            if (followed.Count > 0)
+            {
+                cfg.Save();
+                logFile.Event($"renamed profile: {string.Join(" and ", followed)} now name \"{newTitle}\"");
+            }
+        }
+        catch (Exception ex) { logFile.Event($"renamed profile: could not update the recent list or start-up choice: {ex.GetType().Name}: {ex.Message}"); }
     }
 
     /// <summary>Show the Preferences dialog. After it closes, mark the profile dirty if
@@ -3385,6 +3822,7 @@ public sealed partial class MainForm : Form
             {
                 settings.SaveRememberedPeers(Array.Empty<string>());
                 rememberedPeerInstanceIds.Clear();
+                ForgetTickedDevices();
                 RefreshKnownPeers();
                 logFile.Event("remembered peers list cleared (Preferences)");
             },
@@ -3453,7 +3891,7 @@ public sealed partial class MainForm : Form
         switch (result)
         {
             case UpToDate:
-                MessageBox.Show(this,
+                AppMessageBox.Show(this,
                     $"You are running the latest version (v{updater.CurrentVersion}).",
                     "Check for updates", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
@@ -3467,7 +3905,7 @@ public sealed partial class MainForm : Form
                 var summary = string.IsNullOrWhiteSpace(info.ReleaseNotes)
                     ? $"RemSound {info.Tag} is available. Install now?"
                     : $"RemSound {info.Tag} is available.\n\n{TruncateForDialog(info.ReleaseNotes)}\n\nInstall now?";
-                var choice = MessageBox.Show(this, summary, "Update available",
+                var choice = AppMessageBox.Show(this, summary, "Update available",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1);
                 if (choice != DialogResult.Yes) return;
                 await InstallUpdateAsync(info).ConfigureAwait(true);
@@ -3510,7 +3948,7 @@ public sealed partial class MainForm : Form
                 "RemSound's request to GitHub didn't get the response it expected, so it can't tell whether a newer version is available. Try Check for updates again later.\n\n"
                 + "If you'd rather install the latest version by hand: go to https://github.com/Ednunp/RemSound/releases/latest, download the zip, close RemSound, and extract the zip over your RemSound folder."),
         };
-        MessageBox.Show(this, body, heading, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        AppMessageBox.Show(this, body, heading, MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
     /// <summary>Background-poll path. Runs on a timer tick; surfaces nothing unless an update
@@ -3538,7 +3976,7 @@ public sealed partial class MainForm : Form
         var summary = string.IsNullOrWhiteSpace(info.ReleaseNotes)
             ? $"RemSound {info.Tag} is available. Install now?"
             : $"RemSound {info.Tag} is available.\n\n{TruncateForDialog(info.ReleaseNotes)}\n\nInstall now?";
-        var choice = ForegroundDialog.Show(owner => MessageBox.Show(owner, summary, "Update available",
+        var choice = ForegroundDialog.Show(owner => AppMessageBox.Show(owner, summary, "Update available",
             MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1));
         if (choice == DialogResult.Yes) await InstallUpdateAsync(info).ConfigureAwait(true);
     }
@@ -3616,7 +4054,7 @@ public sealed partial class MainForm : Form
         var summary = string.IsNullOrWhiteSpace(info.ReleaseNotes)
             ? $"RemSound {info.Tag} is available. Install now?"
             : $"RemSound {info.Tag} is available.\n\n{TruncateForDialog(info.ReleaseNotes)}\n\nInstall now?";
-        var pick = ForegroundDialog.Show(owner => MessageBox.Show(owner, summary, "Update available",
+        var pick = ForegroundDialog.Show(owner => AppMessageBox.Show(owner, summary, "Update available",
             MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1));
         if (pick == DialogResult.Yes) await InstallUpdateAsync(info).ConfigureAwait(true);
     }
@@ -3654,7 +4092,7 @@ public sealed partial class MainForm : Form
             // Nothing was staged — allow a later attempt rather than wedging the updater off
             // for the rest of the session.
             updateInstallStarted = false;
-            ForegroundDialog.Show(owner => MessageBox.Show(owner,
+            ForegroundDialog.Show(owner => AppMessageBox.Show(owner,
                 $"Could not download or stage the update. Try again later, or visit the release page in your browser:\n\n{info.ReleaseUrl}",
                 "Update failed", MessageBoxButtons.OK, MessageBoxIcon.Warning));
             return;
@@ -3732,9 +4170,26 @@ public sealed partial class MainForm : Form
             _ => 0,
         };
         if (intervalMs <= 0) return;
+        // A --headless copy is being driven by a script; an update that installed itself and restarted the app would
+        // pull it out from under whatever the script is doing. Help, Check for updates still works if asked.
+        if (Windowless.Active) { logFile.Event("updater: background checks are off in a --headless run"); return; }
+        // Nor in a --silent one: a throwaway test copy left running must never pop "Update available" or install
+        // (2026-09-25; the start-up check already kept out).
+        if (Windowless.SilentLaunch) { logFile.Event("updater: background checks are off in a --silent run"); return; }
         updateCheckTimer.Interval = intervalMs;
         updateCheckTimer.Start();
     }
+
+    /// <summary>Whether a window may run the startup update check. Never in a --silent run, and never in a --headless one
+    /// - asked on its own, not through the mute switch: a headless copy told "sounds on" to test a cue is still headless,
+    /// and until 2026-09-24 a profile switch after that built a window that went and checked for updates.</summary>
+    internal static bool StartupUpdateCheckAllowed(bool checkOnStartup) =>
+        checkOnStartup && !CuePlayer.GloballyMuted && !Windowless.Active;
+
+    /// <summary>The same, and only when RemSound itself has just started. A profile switch builds a new window, and every one
+    /// asked "Update available - install now?" again (review 2026-09-25); the background check carries on as before.</summary>
+    internal static bool StartupUpdateCheckAllowed(bool checkOnStartup, bool coldStart) =>
+        coldStart && StartupUpdateCheckAllowed(checkOnStartup);
 
     /// <summary>Gate seams: whether the background update poll is armed and how often, and a re-apply after the
     /// frequency setting changes.</summary>
@@ -4441,7 +4896,7 @@ public sealed partial class MainForm : Form
 
     /// <summary>Add the currently-ticked app names to the GLOBAL remembered-applications list (the shared
     /// "apps I send" address book) — so a tick in any profile remembers the app for all of them, mirroring
-    /// how remembered peers work. Cleared from Preferences → General.</summary>
+    /// how remembered peers work. Cleared from Preferences → Connectivity.</summary>
     private void RememberCheckedApps()
     {
         var names = CheckedSendApplicationNames();
@@ -4539,6 +4994,67 @@ public sealed partial class MainForm : Form
         outerPanel.Controls.Add(sendGroup, 0, 1);
         outerPanel.Controls.Add(receiveGroup, 0, 2);
         audioProfileTabPage.Controls.Add(outerPanel);
+        MarkContextHelp();
+    }
+
+    /// <summary>
+    /// Context help (F1, 2026-09-25): each control's help key, which is also the id of its entry in the manual
+    /// (<c>help-audio-profile.jitter-buffer</c> and so on). A tab's own key covers anything on it without one. The EQ's
+    /// band sliders are made as the mode changes, and marked where they are made.
+    /// </summary>
+    private void MarkContextHelp()
+    {
+        ContextHelp.Mark(connectedPeersList, "connectivity.connected-peers");
+        ContextHelp.Mark(peerDetailsBox, "connectivity.peer-details");
+        ContextHelp.Mark(renamePeerButton, "connectivity.rename-peer");
+        ContextHelp.Mark(discoveredPeersList, "connectivity.discovered-peers");
+        ContextHelp.Mark(relayPeersList, "connectivity.server-peers");
+        ContextHelp.Mark(rememberedPeersList, "connectivity.remembered-peers");
+        ContextHelp.Mark(relayConnectButton, "connectivity.connect-to-server");
+        ContextHelp.Mark(manualAddButton, "connectivity.add-peer-by-ip");
+        ContextHelp.Mark(lockPeerAddressesBox, "connectivity.lock-addresses");
+        ContextHelp.Mark(statusReadout, "connectivity.status");
+
+        ContextHelp.Mark(uncheckAllDevicesButton, "audio-io.uncheck-all");
+        ContextHelp.Mark(asioDriverBox, "audio-io.asio-driver");
+        ContextHelp.Mark(receiveAudioCheckbox, "audio-io.receive");
+        ContextHelp.Mark(receiveOutputDevicesList, "audio-io.wasapi-outputs");
+        ContextHelp.Mark(asioReceiveOutputDevicesList, "audio-io.asio-outputs");
+        ContextHelp.Mark(volumeBar, "audio-io.volume");
+        ContextHelp.Mark(sendMyAudioCheckbox, "audio-io.send");
+        ContextHelp.Mark(sendModeList, "audio-io.send-mode");
+        ContextHelp.Mark(sendOutputDevicesList, "audio-io.wasapi-send-outputs");
+        ContextHelp.Mark(sendAppsList, "audio-io.active-apps");
+        ContextHelp.Mark(rememberedAppsList, "audio-io.remembered-apps");
+        ContextHelp.Mark(sendInputDevicesList, "audio-io.wasapi-inputs");
+        ContextHelp.Mark(asioSendDevicesList, "audio-io.asio-inputs");
+
+        ContextHelp.Mark(enableAllPeerShapingBox, "pan-eq.enable");
+        ContextHelp.Mark(panEqPeerList, "pan-eq.peers");
+        ContextHelp.Mark(volumeSlider, "pan-eq.volume");
+        ContextHelp.Mark(panSlider, "pan-eq.pan");
+        ContextHelp.Mark(resetPeerEqButton, "pan-eq.reset-eq");
+        ContextHelp.Mark(eqModeList, "pan-eq.eq-mode");
+        ContextHelp.Mark(addBandButton, "pan-eq.add-band");
+        ContextHelp.Mark(parametricBandList, "pan-eq.band-list");
+        ContextHelp.Mark(deleteBandButton, "pan-eq.delete-band");
+
+        ContextHelp.Mark(connectivityTabPage, "connectivity");
+        ContextHelp.Mark(audioIOTabPage, "audio-io");
+        ContextHelp.Mark(audioProfileTabPage, "audio-profile");
+        ContextHelp.Mark(panEqTabPage, "pan-eq");
+
+        ContextHelp.Mark(priorityModeBox, "audio-profile.priority-mode");
+        ContextHelp.Mark(codecBox, "audio-profile.codec");
+        ContextHelp.Mark(sendRateBox, "audio-profile.packet-size");
+        ContextHelp.Mark(maxLatencyAsioBox, "audio-profile.asio-jitter-buffer");
+        ContextHelp.Mark(continuousTuneAsioBox, "audio-profile.asio-auto-tune");
+        ContextHelp.Mark(maxLatencyBox, "audio-profile.jitter-buffer");
+        ContextHelp.Mark(continuousTuneBox, "audio-profile.auto-tune");
+        ContextHelp.Mark(continuousIntervalBox, "audio-profile.auto-tune-interval");
+        ContextHelp.Mark(measuredLatencyReadout, "audio-profile.total-latency");
+        ContextHelp.Mark(smoothnessBox, "audio-profile.smoothness");
+        ContextHelp.Mark(artefactBox, "audio-profile.artefact");
     }
 
     /// <summary>An item in the Pan-and-EQ peer picker. Keyed by peer address string (the same key the
@@ -4629,21 +5145,52 @@ public sealed partial class MainForm : Form
         var cfg = AppConfig.Load();
         var order = NormalizeTabOrder(cfg.MainTabOrder);
         bool showEq = cfg.ShowPanEqTab;
+        var wanted = new List<TabPage>();
+        foreach (var key in order)
+        {
+            if (key == "paneq" && !showEq) continue;
+            if (TabPageForKey(key) is { } page) wanted.Add(page);
+        }
+        // Nothing to change: leave the tabs alone. This runs after every close of Preferences, and taking the tabs down
+        // and putting them back moved the keyboard off the control you were on - onto the tab strip, with its sound -
+        // whether or not anything on the Appearance tab had changed (2026-09-25 sweep).
+        if (mainTabControl.TabPages.Cast<TabPage>().SequenceEqual(wanted)) return;
         var selected = mainTabControl.SelectedTab;
+        var focused = DeepestActiveControl();
+        tabLayoutRebuilds++;
         mainTabControl.SuspendLayout();
         try
         {
             mainTabControl.TabPages.Clear();
-            foreach (var key in order)
-            {
-                if (key == "paneq" && !showEq) continue;
-                if (TabPageForKey(key) is { } page) mainTabControl.TabPages.Add(page);
-            }
+            foreach (var page in wanted) mainTabControl.TabPages.Add(page);
             if (selected is not null && mainTabControl.TabPages.Contains(selected))
                 mainTabControl.SelectedTab = selected;
         }
         finally { mainTabControl.ResumeLayout(); }
+        // A real change: put the keyboard back where it was, if that is still on a tab that is shown.
+        if (focused is not null && !focused.IsDisposed && focused.FindForm() == this && IsOnAShownTab(focused))
+            focused.Select();
     }
+
+    /// <summary>The control that has the keyboard in this window, however deep it sits.</summary>
+    private Control? DeepestActiveControl()
+    {
+        Control? at = ActiveControl;
+        while (at is ContainerControl { ActiveControl: { } inner }) at = inner;
+        return at;
+    }
+
+    private bool IsOnAShownTab(Control control)
+    {
+        for (var c = control; c is not null; c = c.Parent)
+            if (c is TabPage page) return mainTabControl.TabPages.Contains(page);
+        return true;   // not on a tab at all: the menu or the status line, always there
+    }
+
+    private int tabLayoutRebuilds;
+    internal int TabLayoutRebuildsForTest => tabLayoutRebuilds;
+    internal void ApplyMainTabLayoutForTest() => ApplyMainTabLayout();
+    internal Control? DeepestActiveControlForTest => DeepestActiveControl();
 
     /// <summary>Cleans a saved tab order: keep only known keys (in saved order, de-duplicated), then
     /// append any known keys the saved list was missing, so the result always has all four.</summary>
@@ -4895,6 +5442,7 @@ public sealed partial class MainForm : Form
                     Enabled = selectedShapingKey is not null,
                 };
                 UpdateBandAccessibleName(slider, bands[i].Label);
+                ContextHelp.Mark(slider, "pan-eq.eq-band");
                 slider.ValueChanged += (_, _) => OnBandChanged(slider);
                 var row = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
                 row.Controls.Add(new MnemonicLabel { Text = bands[i].Label, AutoSize = true, MnemonicTarget = slider });
@@ -5102,12 +5650,7 @@ public sealed partial class MainForm : Form
             // Speak the new gain through the screen reader as it moves — a UIA notification (NVDA reads
             // it natively; not an extra speech layer). A plain listbox item won't announce on its own.
             if (parametricBandList.SelectedItem is ParametricBandItem focused)
-            {
-                parametricBandList.AccessibilityObject.RaiseAutomationNotification(
-                    System.Windows.Forms.Automation.AutomationNotificationKind.ActionCompleted,
-                    System.Windows.Forms.Automation.AutomationNotificationProcessing.MostRecent,
-                    FormatGainDbPrecise(focused.Band.GainDb));
-            }
+                ScreenReader.Notify(parametricBandList, FormatGainDbPrecise(focused.Band.GainDb));
             e.Handled = true;
             e.SuppressKeyPress = true;
         }
@@ -5389,6 +5932,7 @@ public sealed partial class MainForm : Form
     /// state without needing its own dedicated timer.</summary>
     private void SyncAllPeerLists()
     {
+        peerListSyncs++;
         SyncConnectedList();
         SyncDiscoveredList();
         SyncRememberedList();
@@ -5623,8 +6167,13 @@ public sealed partial class MainForm : Form
                 // still connected. Discovery beacons are easy to miss for a second; the audio
                 // stream and heartbeat are the real signal. Only tag "(offline)" when it's gone
                 // by every measure. 2026-06-02 (Ed's "offline but still sending audio" report).
+                // Somebody on a server is reached through the server, so the server's heartbeat is theirs: their own made-up
+                // address is never pinged, and it tagged everybody on a server "(offline)" unless they were sending sound
+                // (review 2026-09-25).
                 var stillThere = receiver.IsAudioFlowingFrom(ep.Address, TimeSpan.FromSeconds(3))
-                    || IsEndpointHeartbeatHealthy(ep);
+                    || (relayGroup.RelayOf(ep) is not null
+                        ? heartbeatService?.MemberHealth(ep) is { State: PeerHealthState.Healthy }
+                        : IsEndpointHeartbeatHealthy(ep));
                 var suffix = stillThere ? "" : OfflineMarker;
                 var ghost = new PeerAnnouncement(id, $"{label}{suffix}", ep.Port, true, true, DateTime.UtcNow, ep.Address);
                 desired.Add((new PeerListItem(ghost), id));
@@ -5691,7 +6240,11 @@ public sealed partial class MainForm : Form
             // Somebody on a relay is reached through the relay, so the relay's own health is theirs: we ping the relay,
             // and their pong comes back through it.
             var relayForRow = relayGroup.RelayOf(new System.Net.IPEndPoint(item.Peer.Address, item.Peer.AudioPort));
-            var ph = healthByAddress.GetValueOrDefault(relayForRow?.Address.ToString() ?? addrKey);
+            // Somebody on a server by their own answers, not the server's: the server answering for anybody showed
+            // everybody on it as connected, even somebody who had not ticked you back (2026-09-25 sweep).
+            var ph = relayForRow is not null
+                ? heartbeatService?.MemberHealth(new System.Net.IPEndPoint(item.Peer.Address, item.Peer.AudioPort))
+                : healthByAddress.GetValueOrDefault(addrKey);
             // "Connected" by the same rule as the connect cue and the status readout — see PeerConnectionRule.
             var isHealthy = ph is not null && IsPeerConnectedNow(ph);
 
@@ -5817,10 +6370,17 @@ public sealed partial class MainForm : Form
     /// status box uses it on the server's own line: we ping the server for everybody on it, so that line is theirs.
     /// (Until 2026-09-23 it also labelled a ticked row that WAS the server, from the short-lived design where the
     /// server sat in your peer list; that went with it.)</summary>
-    private string? DescribeRelayGroup(System.Net.IPEndPoint relay) =>
-        RelayGroupMembers(relay) is not { } members ? null
-        : members.Count == 0 ? "a group, nobody else here yet"
-        : "a group with " + string.Join(", ", members.Select(MemberLabel));
+    private string? DescribeRelayGroup(System.Net.IPEndPoint relay)
+    {
+        if (RelayGroupMembers(relay) is not { } members) return null;
+        // A phone or older app the server has paired with us is somebody here too: the line said "nobody else here yet"
+        // with Ed's phone connected through it (2026-09-24).
+        var phone = relayGroup.IsV1Paired(relay);
+        if (members.Count == 0) return phone ? "a phone or older app paired with us" : "a group, nobody else here yet";
+        return "a group with " + string.Join(", ", members.Select(MemberLabel)) + (phone ? ", and a phone or older app paired with us" : "");
+    }
+
+    internal string? DescribeRelayGroupForTest(System.Net.IPEndPoint relay) => DescribeRelayGroup(relay);
 
     /// <summary>"2 devices on ASIO at 48 kHz, Opus" — built from the live receive streams (each stream is
     /// one capture device; its lane tells us WASAPI vs ASIO). Falls back gracefully when we're not
@@ -5914,7 +6474,15 @@ public sealed partial class MainForm : Form
     /// name and where/when last seen, and lets them rename (F2 / button) or delete (Del / button) any.</summary>
     private void ShowManageNamedPeersDialog()
     {
-        using var dialog = new Form
+        using var dialog = BuildManageNamedPeersDialog();
+        dialog.ShowDialog(this);
+    }
+
+    /// <summary>Builds the Manage named peers dialog without showing it, so the dialog audits can reach it (it was built
+    /// and shown in one step until 2026-09-24, out of their sight).</summary>
+    internal Form BuildManageNamedPeersDialog()
+    {
+        var dialog = new Form
         {
             Text = "Manage named peers",
             StartPosition = FormStartPosition.CenterParent,
@@ -5950,12 +6518,12 @@ public sealed partial class MainForm : Form
         var peersLabel = new Label { Text = "&Peers", AutoSize = true, Anchor = AnchorStyles.Left };
         root.Controls.Add(peersLabel, 0, 2);
 
-        var list = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false, AccessibleName = "Peers (Alt+P)", TabIndex = 0 };
+        var list = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false, AccessibleName = "Peers (Alt+P)" };   // its place in the tab order follows the &Peers label, so Alt+P lands here
         root.Controls.Add(list, 0, 3);
 
         var renameBtn = new Button { Text = "&Rename (Alt+R)", AutoSize = true, AccessibleName = "Rename", TabIndex = 1 };
         var deleteBtn = new Button { Text = "&Delete (Alt+D)", AutoSize = true, AccessibleName = "Delete", TabIndex = 2 };
-        var closeBtn = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.OK, TabIndex = 3 };
+        var closeBtn = new Button { Text = "&Close", AutoSize = true, AccessibleName = "Close", DialogResult = DialogResult.OK, TabIndex = 3 };
         var buttonRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, AutoSize = true, Padding = new Padding(0, 8, 0, 0) };
         buttonRow.Controls.Add(renameBtn);
         buttonRow.Controls.Add(deleteBtn);
@@ -5965,6 +6533,10 @@ public sealed partial class MainForm : Form
         dialog.Controls.Add(root);
         dialog.AcceptButton = closeBtn;
         dialog.CancelButton = closeBtn;
+        ContextHelp.Mark(list, "dialog.manage-named-peers.peers");
+        ContextHelp.Mark(renameBtn, "dialog.manage-named-peers.rename");
+        ContextHelp.Mark(deleteBtn, "dialog.manage-named-peers.delete");
+        ContextHelp.Mark(closeBtn, "dialog.manage-named-peers.close");
 
         void Refresh()
         {
@@ -6015,7 +6587,7 @@ public sealed partial class MainForm : Form
 
         Refresh();
         dialog.Load += (_, _) => list.Focus();
-        dialog.ShowDialog(this);
+        return dialog;
     }
 
     // One row in the Manage named peers list: "Andre's desktop — ANDRE-DESKTOP — last seen 8 Jul 2026, 100.72.4.13".
@@ -6170,7 +6742,10 @@ public sealed partial class MainForm : Form
         {
             heartbeatService = new HeartbeatService(msg => logFile.Event($"heartbeat: {msg}"));
             heartbeatService.SendTransport = sender.SendVia;
+            heartbeatService.OnPingFromUntracked = OnPingFromUntracked;
             heartbeatService.RelayOfMember = relayGroup.RelayOf;
+            // A server connected before the network was up (a profile that connects on start) is pinged from here on.
+            ApplyServerPing();
             receiver.OnHeartbeatReceived = (buffer, length, remote) =>
                 heartbeatService.HandleInjectedPacket(buffer, length, remote);
             // The relay group sends its own hellos and goodbyes straight onto the socket: they are group-framed already.
@@ -6189,20 +6764,13 @@ public sealed partial class MainForm : Form
                 catch (ObjectDisposedException) { /* closing */ }
                 catch (InvalidOperationException) { /* no handle yet */ }
             };
+            // Somebody who has ticked us, proving they hold the password, whatever they send or receive (2026-09-25).
+            receiver.OnTickProofReceived = OnTickProofArrived;
             // Relay address-proof (2026-07-27): echo the relay's cookie back verbatim so it can
             // verify this address really receives — the proof that keeps us forwardable once the
             // relay enforces. Echo-to-source is self-limiting (one small reply per challenge,
             // never larger than what arrived), so answering unconditionally is safe.
-            receiver.OnAddrCheckReceived = (packet, length, remote) =>
-            {
-                try { sender.SendVia(packet, length, remote); }
-                catch (Exception ex) { logFile.Event($"addr-check echo to {remote} failed: {ex.GetType().Name}: {ex.Message}"); }
-                // Only a relay sends one of these. If it came from somebody in the peer list, that "peer" is a relay:
-                // offer to connect to it as one (Ed, 2026-09-20).
-                relayGroup.NoteRelay(remote);
-                try { BeginInvoke(() => OfferRelayForPeerAddress(remote)); }
-                catch (InvalidOperationException) { /* window not up yet */ }
-            };
+            receiver.OnAddrCheckReceived = OnAddrCheckArrived;
             heartbeatService.Start();
         }
         catch (Exception ex)
@@ -6271,10 +6839,12 @@ public sealed partial class MainForm : Form
         ApplyAudioRuntime();
     }
 
-    /// <summary>Does anything want the sender up? "Send my audio", or a DAW plugin sending on its own — the user made that
-    /// decision on the track. Asked by the once-a-second check and by the set-up alike. The check used to ask only about
-    /// the checkbox, so a sender that stopped while only a plugin was sending was never started again. 2026-09-13 review.</summary>
-    private bool WantsToSend => IsSendEnabled || pluginTrackSource.AnyHostSending;
+    /// <summary>Does anything want the person's own capture running? "Send my audio", and nothing else. A DAW plugin that
+    /// is sending has a lane of its own, armed and fed by the plugin link whether or not the capture runs. It used to count
+    /// here too (2026-09-13), and that started - or kept - the capture with every ticked input in it: a plugin sending put
+    /// the microphone on the wire with "Send my audio" off, while the peer list said "not sending" (2026-09-25 sweep).
+    /// Asked by the once-a-second check and by the set-up alike.</summary>
+    private bool WantsToSend => IsSendEnabled;
 
     /// <summary>Pure and testable: are these two sets of send endpoints different peers? Order does not count.</summary>
     internal static bool SendEndpointsChanged(IPEndPoint[] before, IPEndPoint[] after) =>
@@ -6310,6 +6880,7 @@ public sealed partial class MainForm : Form
         // the audio NAT pinhole on the audio port — no separate socket, no +2 port. The
         // heartbeat tracks the FULL set so a recovered endpoint is detected and re-armed.
         heartbeatService?.SetTrackedPeers(endpoints);
+        ApplyServerPing();
         // Arm the audio sender with the full set initially (nothing is known-dead yet). The
         // 1 Hz tick (RefreshAudioReceivers) then drops any endpoint that stays unreachable,
         // so we don't blast the stream at a dead address.
@@ -6339,11 +6910,9 @@ public sealed partial class MainForm : Form
         // keeps the driver open with zero active channel pairs (callbacks fire harmlessly).
         // The sender only actually stops when the user toggles off "send my audio" itself.
         //
-        // A plugin in send mode counts as wanting to send, on its own. The user has already made that
-        // decision explicitly, on the track, and a second toggle over here is the "I forgot to tick
-        // it" failure mode - silence, with nothing to see. The app's OWN capture sources stay governed
-        // by the checkbox exactly as before; this only decides whether the sender stays up, and so
-        // whether Stop() stands the plugin lane down underneath a DAW that is still playing.
+        // A plugin in send mode sends its track whatever this checkbox says: the user decided that on the track, and its
+        // lane is armed by the plugin link, not by the capture. The app's OWN capture is governed by the checkbox alone -
+        // see WantsToSend - and when it goes off while a plugin is sending, only the capture stops (below).
         var wantSend = WantsToSend;
 
         try
@@ -6355,7 +6924,7 @@ public sealed partial class MainForm : Form
             // packets after enable have correct routing.
             if (wantReceive && !receiver.IsRunning)
             {
-                ApplyReceiveDevices();
+                ApplyReceiveDevices(starting: true);
                 PushAllowedReceiveSenders();
                 receiver.SetPlaybackEnabled(true);
                 logFile.Event("receiver playback enabled");
@@ -6389,8 +6958,17 @@ public sealed partial class MainForm : Form
             }
             else if (!wantSend && sender.IsRunning)
             {
-                sender.Stop();
-                logFile.Event("sender stopped");
+                if (pluginTrackSource.AnyHostSending)
+                {
+                    // Your own sources stop; the DAW track's lane is left exactly as it is - same stream, no gap.
+                    sender.StopCapture();
+                    logFile.Event("sender: your own capture stopped (\"Send my audio\" is off) - the DAW track goes on sending");
+                }
+                else
+                {
+                    sender.Stop();
+                    logFile.Event("sender stopped");
+                }
             }
         }
         catch (Exception ex)
@@ -6772,7 +7350,6 @@ public sealed partial class MainForm : Form
         asioTuneMemory.Creep.RestoreFloor(tune.AsioFloorMs);
     }
     internal void NewStreamSessionsForTest() => OnNewStreamSessions();
-    internal void InvalidateAutoTuneHistoryForTest() => InvalidateAutoTuneHistory();
     internal void NoteLaneAudibilityForTest(RenderRoute route, bool consuming) => NoteLaneAudibility(route, consuming);
     internal void EndWakeTuneWindowForTest() => wakeTuneUntilUtc = DateTime.UtcNow - TimeSpan.FromSeconds(1);
     internal void ContinuousTuneTickForTest() => ContinuousTuneTick();
@@ -6852,6 +7429,10 @@ public sealed partial class MainForm : Form
             // (AsioDeviceId.TryParse routes by id format, not by Kind). Use Input for symmetry.
             if (item.DeviceId is { } id) specs.Add(new CaptureSourceSpec(id, CaptureKind.Input, item.Name));
         }
+        // "Send my audio" off: none of the person's own sources, whatever is ticked. Every path that starts or re-applies the
+        // capture comes through here - the set-up, the device and default changes, the wake - so this is the one place it
+        // can't be missed (2026-09-25 sweep: a sending DAW plugin started the microphone).
+        if (!IsSendEnabled) specs.Clear();
         sender.Configure(specs);
 
         // ONLY invalidate when the capture set ACTUALLY changed.
@@ -6916,11 +7497,16 @@ public sealed partial class MainForm : Form
     {
         if (IsDisposed) return;
         logFile.Event("device-event: Windows reported an audio endpoint change (refresh queued)");
+        // The remote "system volume" commands keep the default output they found first, for speed while a key is held. A
+        // change - the default moving to another device included - must drop it, or they keep turning the old one
+        // (review 2026-09-25).
+        SystemVolumeHelper.ForgetDevice();
         try
         {
             BeginInvoke(new Action(() =>
             {
                 if (IsDisposed) return;
+                RetryFailedAsioProbeOnce();
                 deviceRefreshTimer.Stop();
                 deviceRefreshTimer.Start();
                 // The default render device may have changed — re-point the session-start watcher at it so
@@ -6997,9 +7583,11 @@ public sealed partial class MainForm : Form
             return;
         }
 
-        var sendOutputChanged = MaybeSyncList(sendOutputDevicesList, WithDefaultFollower(wasapiOutputs, DefaultLoopbackSendFollower), ref sendOutputDevicesSignature);
-        var sendInputChanged = MaybeSyncList(sendInputDevicesList, WithDefaultFollower(wasapiInputs, DefaultInputFollower), ref sendInputDevicesSignature);
-        var receiveOutputChanged = MaybeSyncList(receiveOutputDevicesList, WithDefaultFollower(wasapiOutputs, DefaultOutputFollower), ref receiveOutputDevicesSignature);
+        // A device unplugged now keeps its tick for the profile's next save (keepGoneTicks). The ASIO lists need no such
+        // care: a driver that fails leaves them as they are (below), and a new driver's channels are a new list.
+        var sendOutputChanged = MaybeSyncList(sendOutputDevicesList, WithDefaultFollower(wasapiOutputs, DefaultLoopbackSendFollower), ref sendOutputDevicesSignature, keepGoneTicks: true);
+        var sendInputChanged = MaybeSyncList(sendInputDevicesList, WithDefaultFollower(wasapiInputs, DefaultInputFollower), ref sendInputDevicesSignature, keepGoneTicks: true);
+        var receiveOutputChanged = MaybeSyncList(receiveOutputDevicesList, WithDefaultFollower(wasapiOutputs, DefaultOutputFollower), ref receiveOutputDevicesSignature, keepGoneTicks: true);
         bool asioSendChanged;
         bool asioReceiveChanged;
         if (asioProbeAttemptedAndFailed)
@@ -7015,6 +7603,8 @@ public sealed partial class MainForm : Form
         {
             asioSendChanged = MaybeSyncList(asioSendDevicesList, asioInputChoices, ref asioSendDevicesSignature);
             asioReceiveChanged = MaybeSyncList(asioReceiveOutputDevicesList, asioOutputChoices, ref asioReceiveOutputDevicesSignature);
+            if (asioSendChanged) ReapplyAbsentAsioTicks(asioSendDevicesList);
+            if (asioReceiveChanged) ReapplyAbsentAsioTicks(asioReceiveOutputDevicesList);
         }
 
         if (sendOutputChanged || sendInputChanged || asioSendChanged)
@@ -7022,7 +7612,8 @@ public sealed partial class MainForm : Form
             ApplyAudioRuntime();
         }
         if (receiveOutputChanged) ReapplyRememberedReceiveOutputs();
-        if (receiveOutputChanged || asioReceiveChanged)
+        // Only while receiving: with Receive audio off the outputs stay closed, and switching it on applies them anyway.
+        if ((receiveOutputChanged || asioReceiveChanged) && receiver.IsRunning)
         {
             ApplyReceiveDevices();
         }
@@ -7030,6 +7621,68 @@ public sealed partial class MainForm : Form
         // if we're following the Windows default, the target device just moved. Catch that and re-route.
         ReapplyIfFollowedDefaultChanged();
     }
+
+    /// <summary>
+    /// A driver whose probe failed - the interface switched off when RemSound started, most often - gets one more try when
+    /// Windows says a device came or went, which is what switching it on looks like. Until 2026-09-26 a failure was kept
+    /// until a driver change or a wake, so the ASIO lists stayed empty all session and the profile's ASIO ticks never came
+    /// (the sweep, Ed: yes). One try per device change, and not more than once every
+    /// <see cref="FailedProbeRetryInterval"/>: opening some drivers leaks (Andre's Realtek, see GetCachedAsioProbeInfo), so
+    /// never on a timer and never in a loop.
+    /// </summary>
+    private void RetryFailedAsioProbeOnce()
+    {
+        if (!cachedAsioProbeFailed) return;
+        var now = AsioRetryClockForTest?.Invoke() ?? DateTime.UtcNow;
+        if (now - lastFailedAsioProbeRetryUtc < FailedProbeRetryInterval)
+        {
+            logFile.Event("asio: a device changed, but the driver was tried again only moments ago - not yet");
+            return;
+        }
+        lastFailedAsioProbeRetryUtc = now;
+        logFile.Event($"asio: \"{cachedAsioProbeDriverName}\" could not be read before; a device changed, so it is tried once more");
+        ClearAsioProbeCache();
+    }
+
+    private DateTime lastFailedAsioProbeRetryUtc = DateTime.MinValue;
+    internal static readonly TimeSpan FailedProbeRetryInterval = TimeSpan.FromSeconds(30);
+    internal static Func<string, AsioDriverProbeResult>? AsioProbeForTest;
+    internal Func<DateTime>? AsioRetryClockForTest;
+    /// <summary>Test seam: Windows reporting an endpoint change, as the notifier reports it, then the posted work run.</summary>
+    internal void DeviceChangedForTest()
+    {
+        _ = Handle;
+        OnAudioEndpointsChanged();
+        Application.DoEvents();
+        deviceRefreshTimer.Stop();   // the refresh is the test's to run
+    }
+    internal void RefreshAudioDeviceListsForTest() => RefreshAudioDeviceLists();
+    internal CheckedListBox AsioSendDevicesListForTest => asioSendDevicesList;
+    internal void ClearAsioProbeCacheForTest() => ClearAsioProbeCache();
+
+    /// <summary>The profile's ticks for the ASIO channels that were not there when it loaded, put back once the driver can
+    /// be read - only for the driver the profile was loaded with (a driver the person chose since is a new choice).</summary>
+    private void ReapplyAbsentAsioTicks(CheckedListBox list)
+    {
+        if (!absentDeviceTicks.TryGetValue(list, out var wanted) || wanted.Count == 0) return;
+        if (!string.Equals(absentAsioDriver, settings.LoadAsioDriverName(), StringComparison.OrdinalIgnoreCase)) return;
+        var reticked = 0;
+        suppressDeviceCheckChange = true;
+        try
+        {
+            for (var i = 0; i < list.Items.Count; i++)
+            {
+                if (list.Items[i] is not AudioDeviceChoice { DeviceId: { } id } || !wanted.Contains(id) || list.GetItemChecked(i)) continue;
+                list.SetItemChecked(i, true);
+                wanted.Remove(id);
+                reticked++;
+            }
+        }
+        finally { suppressDeviceCheckChange = false; }
+        if (reticked > 0) logFile.Event($"asio: the interface can be read now - {reticked} channel(s) the profile ticked are ticked again ({list.AccessibleName})");
+    }
+
+    private string? absentAsioDriver;
 
     private void ClearAsioProbeCache()
     {
@@ -7057,7 +7710,7 @@ public sealed partial class MainForm : Form
         // needs stable channel metadata, so probe once per selected driver and reuse the result
         // until the driver changes or resume
         // forces a backend refresh.
-        var info = AsioDeviceProbe.ProbeDriverInfo(driverName);
+        var info = AsioProbeForTest?.Invoke(driverName) ?? AsioDeviceProbe.ProbeDriverInfo(driverName);
         cachedAsioProbeDriverName = driverName;
         if (info.InputChannelCount >= 0 && info.OutputChannelCount >= 0)
         {
@@ -7143,7 +7796,7 @@ public sealed partial class MainForm : Form
     /// when they tick a WASAPI mic on while the block is in place.</summary>
     private void WarnMicrophoneBlockedByWindowsPrivacy()
     {
-        ForegroundDialog.Show(owner => MessageBox.Show(owner,
+        ForegroundDialog.Show(owner => AppMessageBox.Show(owner,
             "Windows is currently blocking desktop apps from using your microphone, so RemSound can "
                 + "switch the mic on but will only send silence - the people you're connected to won't "
                 + "hear you.\n\n"
@@ -7173,7 +7826,7 @@ public sealed partial class MainForm : Form
         // we can see whether RemSound thought Windows was blocking the mic, not just whether it warned.
         logFile.Event($"mic-privacy: windows-blocks-desktop-mic={blocked} wasapiMicTicked={anyWasapiMicChecked}");
         // A --silent (automated/throwaway) launch logs the verdict but never pops the warning dialog.
-        if (blocked && anyWasapiMicChecked && !CuePlayer.GloballyMuted) WarnMicrophoneBlockedByWindowsPrivacy();
+        if (blocked && anyWasapiMicChecked && !Windowless.NobodyToAsk) WarnMicrophoneBlockedByWindowsPrivacy();
     }
 
     /// <summary>
@@ -7187,7 +7840,7 @@ public sealed partial class MainForm : Form
         // A --silent (automated/throwaway) launch must not pop this warning - its TaskDialog plays
         // the Windows warning ding even when nobody can see the dialog (it's on a minimized test
         // instance that's then auto-closed). The decision belongs to a real user at a real launch.
-        if (CuePlayer.GloballyMuted) return;
+        if (Windowless.NobodyToAsk) return;
         if (realtekAsioDriverNames.Count == 0) return;
         var cfg = AppConfig.Load();
         var changed = false;
@@ -7238,7 +7891,7 @@ public sealed partial class MainForm : Form
         page.Buttons.Add(yes);
         page.Buttons.Add(no);
         page.DefaultButton = yes;
-        return ForegroundDialog.Show(owner => TaskDialog.ShowDialog(owner, page)) == yes;
+        return ForegroundDialog.Show(owner => AppTaskDialog.ShowDialog(owner, page)) == yes;
     }
 
     /// <summary>Options-menu handler: flip every installed Realtek ASIO driver between disabled and
@@ -7376,11 +8029,11 @@ public sealed partial class MainForm : Form
     /// Sync wrapper around <see cref="SyncDeviceCheckedListBox"/> that compares against the
     /// stored signature and only rebuilds on change. Returns true when the list was rebuilt.
     /// </summary>
-    private bool MaybeSyncList(CheckedListBox list, IReadOnlyList<AudioDeviceChoice> devices, ref string lastSignature)
+    private bool MaybeSyncList(CheckedListBox list, IReadOnlyList<AudioDeviceChoice> devices, ref string lastSignature, bool keepGoneTicks = false)
     {
         var signature = ComputeDeviceSignature(devices);
         if (signature == lastSignature) return false;
-        SyncDeviceCheckedListBox(list, devices);
+        SyncDeviceCheckedListBox(list, devices, keepGoneTicks);
         lastSignature = signature;
         return true;
     }
@@ -7391,12 +8044,26 @@ public sealed partial class MainForm : Form
     /// of the device set so callers can stash it. Suppresses the per-item ItemCheck handler
     /// during the rebuild so existing handlers don't fire spuriously while we re-add items.
     /// </summary>
-    private string SyncDeviceCheckedListBox(CheckedListBox list, IReadOnlyList<AudioDeviceChoice> devices)
+    private string SyncDeviceCheckedListBox(CheckedListBox list, IReadOnlyList<AudioDeviceChoice> devices, bool keepGoneTicks = false)
     {
         var signature = ComputeDeviceSignature(devices);
         var checkedIds = new HashSet<string>(
             list.CheckedItems.OfType<AudioDeviceChoice>().Where(c => c.DeviceId is not null).Select(c => c.DeviceId!),
             StringComparer.OrdinalIgnoreCase);
+        if (keepGoneTicks)
+        {
+            // Ticked, and gone now - unplugged or switched off: kept for the profile's next save, so saving while it is away
+            // does not drop it (Ed, 2026-09-25: keep the ticks of devices away at save time). Back while RemSound runs, it
+            // shows as it comes back, and a save writes it as shown.
+            var present = devices.Where(d => d.DeviceId is not null).Select(d => d.DeviceId!).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var gone = checkedIds.Where(id => !present.Contains(id)).ToList();
+            if (gone.Count > 0)
+            {
+                if (!absentDeviceTicks.TryGetValue(list, out var kept)) absentDeviceTicks[list] = kept = new(StringComparer.OrdinalIgnoreCase);
+                foreach (var id in gone) kept.Add(id);
+                logFile.Event($"devices: {gone.Count} ticked device(s) gone from {list.AccessibleName} - their ticks kept for the next save");
+            }
+        }
         var selectedId = (list.SelectedItem as AudioDeviceChoice)?.DeviceId;
 
         suppressDeviceCheckChange = true;
@@ -7432,6 +8099,11 @@ public sealed partial class MainForm : Form
     internal static TimeSpan FaultedOutputRetryIntervalForTest => FaultedOutputRetryInterval;
     private DateTime lastFaultedOutputHealUtc = DateTime.MinValue;
     private string[] lastAppliedOutputIds = [];
+    /// <summary>Gate seams: every re-open attempt, counted (the log line is once per episode, so it cannot show the
+    /// retries); the retry clock moved back; and an output recorded as ticked, to reach the "ticked but never opened" path.</summary>
+    internal int OutputReopenAttemptsForTest { get; private set; }
+    internal void BackdateOutputReopenForTest(TimeSpan by) => lastFaultedOutputHealUtc -= by;
+    internal void SetTickedOutputIdsForTest(params string[] ids) => lastAppliedOutputIds = ids;
     // Logged on TRANSITION only. A device that is genuinely gone would otherwise write a line every
     // three seconds for as long as it stays unplugged, which buries the log it is meant to help.
     private bool healingAnOutput;
@@ -7449,6 +8121,15 @@ public sealed partial class MainForm : Form
         //     That is what a resume from hibernate leaves behind on a wireless device: Windows raises
         //     Resume, the backend re-init runs 1.5 s later, and a Bluetooth headset simply is not back
         //     yet. One attempt, failed, and nothing ever tried again.
+        //
+        // Neither applies while Receive audio is off: the outputs are closed ON PURPOSE then. Every ticked one read as
+        // "missing", so this re-opened them all within a second - the ASIO interface included, held while both send and
+        // receive were off - and nothing closed them again (found 2026-09-25). Switching receive on opens them itself.
+        if (!receiver.IsRunning)
+        {
+            healingAnOutput = false;
+            return;
+        }
         var faulted = receiver.HasFaultedOutput;
         var missing = MissingOutputIds();
         if (!faulted && missing.Length == 0)
@@ -7487,6 +8168,7 @@ public sealed partial class MainForm : Form
             LogUiChange(faulted ? "output invalidated by Windows — re-opening" : "ticked output is not open — re-opening",
                 missing.Length > 0 ? string.Join(", ", missing) : "faulted device");
         }
+        OutputReopenAttemptsForTest++;
         try { ApplyReceiveDevices(); }
         catch (Exception ex) { logFile.Event($"re-opening an output failed: {ex.GetType().Name}: {ex.Message}"); }
     }
@@ -7516,7 +8198,10 @@ public sealed partial class MainForm : Form
         return missing.ToArray();
     }
 
-    private void ApplyReceiveDevices()
+    private void ApplyReceiveDevices() => ApplyReceiveDevices(starting: false);
+
+    /// <param name="starting">Receiving is being switched on: open them now, as it starts.</param>
+    private void ApplyReceiveDevices(bool starting)
     {
         // Combine WASAPI device-ids and ASIO synthetic-ids into one list. The
         // CompositeRenderBackend splits them internally and feeds each child the right subset.
@@ -7541,7 +8226,12 @@ public sealed partial class MainForm : Form
         {
             if (!string.IsNullOrEmpty(c.DeviceId) && added.Add(c.DeviceId)) ids.Add(c.DeviceId);
         }
-        receiver.SetOutputDevices(ids);
+        // Only while receiving, or as receiving starts. With "Receive audio" off the outputs stay CLOSED - the ASIO interface
+        // included, which a music program then cannot open while RemSound holds it. Every other path that got here - a
+        // tick changed, a profile's ticks put back at start-up, the Windows default changed, a driver chosen, a wake,
+        // Uncheck all - opened and played them regardless, and nothing closed them again (2026-09-25 sweep). What is
+        // ticked is still remembered below, and switching receiving on applies it.
+        if (starting || receiver.IsRunning) receiver.SetOutputDevices(ids);
         // Remember what SHOULD be open, so the per-second heal can tell "the user unticked it" from
         // "it is ticked but did not open" — a device that came back too late to be caught, which is
         // the shape a resume from hibernate leaves behind.
@@ -8202,7 +8892,7 @@ public sealed partial class MainForm : Form
             {
                 if (wasReceiving && !receiver.IsRunning)
                 {
-                    ApplyReceiveDevices();
+                    ApplyReceiveDevices(starting: true);
                     PushAllowedReceiveSenders();
                     receiver.SetPlaybackEnabled(true);
                 }
@@ -8276,16 +8966,27 @@ public sealed partial class MainForm : Form
             AllowCancel = true,
         };
 
-        TaskDialog.ShowDialog(this, page);
+        AppTaskDialog.ShowDialog(this, page);
 
-        if (verification.Checked)
+        if (verification.Checked) RememberSaveConfirmationSuppressed();
+    }
+
+    /// <summary>"Don't show this again" on the save confirmation. The profile is already saved by now, and a failure here -
+    /// only the tick - used to reach the profile save's own catch and report "Could not save profile" for a save that had
+    /// worked (2026-09-25 sweep).</summary>
+    private void RememberSaveConfirmationSuppressed()
+    {
+        try
         {
             var cfg = AppConfig.Load();
             cfg.SaveProfileConfirmationSuppressed = true;
             cfg.Save();
             logFile.Event("save-profile confirmation suppressed by user (saved to remsound.config.json)");
         }
+        catch (Exception ex) { logFile.Event($"save-profile confirmation: could not remember \"don't show again\": {ex.GetType().Name}: {ex.Message}"); }
     }
+
+    internal void RememberSaveConfirmationSuppressedForTest() => RememberSaveConfirmationSuppressed();
 
     /// <summary>The measured end-to-end latency for ONE lane, or 0 when that lane isn't carrying
     /// audio. Shared terms (capture, encode, wire) plus that lane's OWN queue depth and output
@@ -8453,6 +9154,16 @@ public sealed partial class MainForm : Form
         // every 10 s, so it can stay in without becoming noise.
         NoteLatencyReadoutWrite(focused);
         WritePreservingReaderPosition(measuredLatencyReadout, text);
+    }
+
+    /// <summary>Gate seam: hand the real readout writer a measured figure for each lane, as the per-second tick does, and
+    /// return what the box then says - so the wobble filter is proved on the box, not only as a rule.</summary>
+    internal string FeedLatencyReadoutForTest(double wasapiAchievedMs, double asioAchievedMs)
+    {
+        achievedLatencyWasapiMs = wasapiAchievedMs;
+        achievedLatencyAsioMs = asioAchievedMs;
+        UpdateMeasuredLatencyReadout();
+        return measuredLatencyReadout.Text;
     }
 
     /// <summary>The Total latency box while the diagnostics switch is off — logging and both auto-tunes off. The jitter
@@ -8696,7 +9407,7 @@ public sealed partial class MainForm : Form
           + $"Reason: {reason}" + where;
         // ForegroundDialog, not a bare MessageBox: this can fire while RemSound is minimised to the
         // tray, and a warning that opens behind everything else is a warning nobody gets.
-        ForegroundDialog.Show(owner => MessageBox.Show(owner, failedText,
+        ForegroundDialog.Show(owner => AppMessageBox.Show(owner, failedText,
             "RemSound - recording stopped", MessageBoxButtons.OK, MessageBoxIcon.Warning));
     }
 
@@ -8715,7 +9426,7 @@ public sealed partial class MainForm : Form
           + "RemSound cannot write to the disk as fast as the sound is arriving, so parts of this recording "
           + "are being lost. A slower or busier drive is the usual cause." + Environment.NewLine + Environment.NewLine
           + "The recording is still running. You may want to stop it and record somewhere else.";
-        ForegroundDialog.Show(owner => MessageBox.Show(owner, losingText,
+        ForegroundDialog.Show(owner => AppMessageBox.Show(owner, losingText,
             "RemSound - recording", MessageBoxButtons.OK, MessageBoxIcon.Warning));
     }
 
@@ -8759,6 +9470,10 @@ public sealed partial class MainForm : Form
         // Drops long-unreachable endpoints from the high-rate send list (heartbeat keeps probing
         // them so they auto-recover). Cheap no-op when nothing changed. 1 Hz is plenty.
         RefreshAudioReceivers();
+        // Tell everybody we have ticked that we have, with proof of the password (every few seconds).
+        SendTickProofsIfDue();
+        // Names the profile gave that could not be looked up yet, and a server by name that may have moved.
+        RetryNameLookupsIfDue();
         // Refresh the tray icon's hover tooltip so it reflects the current peer count and
         // send / receive routing (WASAPI / ASIO / both). 1 Hz cadence is fine — the user is
         // hovering, not staring at a counter — and BuildTrayTooltip is allocation-cheap.
@@ -9649,6 +10364,14 @@ public sealed partial class MainForm : Form
             ApplyTicksToList(sendOutputDevicesList, p.SelectedWasapiSendOutputs);
             ApplyTicksToList(sendInputDevicesList, p.SelectedWasapiSendInputs);
             ApplyTicksToList(asioSendDevicesList, p.SelectedAsioSendInputs);
+            // And what the profile ticked that is not here now, kept for its next save (Ed, 2026-09-25).
+            absentDeviceTicks.Clear();
+            absentAsioDriver = settings.LoadAsioDriverName();
+            RememberAbsentTicks(receiveOutputDevicesList, p.SelectedWasapiReceiveOutputs);
+            RememberAbsentTicks(asioReceiveOutputDevicesList, p.SelectedAsioReceiveOutputs);
+            RememberAbsentTicks(sendOutputDevicesList, p.SelectedWasapiSendOutputs);
+            RememberAbsentTicks(sendInputDevicesList, p.SelectedWasapiSendInputs);
+            RememberAbsentTicks(asioSendDevicesList, p.SelectedAsioSendInputs);
             RestoreSendModeFromProfile(p);
 
             receiveAudioCheckbox.Checked = p.ReceiveAudioOn;
@@ -9737,7 +10460,7 @@ public sealed partial class MainForm : Form
     {
         if (profileStore is null)
         {
-            MessageBox.Show(this, "Profile system not active in this run.", "RemSound",
+            AppMessageBox.Show(this, "Profile system not active in this run.", "RemSound",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -9760,13 +10483,24 @@ public sealed partial class MainForm : Form
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
-        var path = dialog.FileName;
+        SaveProfileAsTo(dialog.FileName);
+    }
+
+    /// <summary>Gate seam: Save as, after its file picker.</summary>
+    internal void SaveProfileAsToForTest(string path) => SaveProfileAsTo(path);
+
+    private void SaveProfileAsTo(string path)
+    {
         var title = Path.GetFileNameWithoutExtension(path);
         if (string.IsNullOrWhiteSpace(title)) return;
 
         try
         {
             var profile = BuildCurrentProfile(title);
+            // The copy is editable, as the window says it is. Built while the window still held the locked profile, it was
+            // written locked, and locked profiles skip the "save your changes?" question - so later changes were lost
+            // without a word (2026-09-25 sweep).
+            profile.ReadOnly = false;
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
             ProfileStore.WriteProfileFile(path, profile);
@@ -9812,7 +10546,7 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Could not save profile: {ex.Message}", "RemSound",
+            AppMessageBox.Show(this, $"Could not save profile: {ex.Message}", "RemSound",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
@@ -9838,11 +10572,11 @@ public sealed partial class MainForm : Form
         profile.Muted = receiver.IsMuted;
         profile.ReceiveAudioOn = receiveAudioCheckbox.Checked;
         profile.SendAudioOn = sendMyAudioCheckbox.Checked;
-        profile.SelectedWasapiReceiveOutputs = ExtractCheckedDeviceIds(receiveOutputDevicesList);
-        profile.SelectedAsioReceiveOutputs = ExtractCheckedDeviceIds(asioReceiveOutputDevicesList);
-        profile.SelectedWasapiSendOutputs = ExtractCheckedDeviceIds(sendOutputDevicesList);
-        profile.SelectedWasapiSendInputs = ExtractCheckedDeviceIds(sendInputDevicesList);
-        profile.SelectedAsioSendInputs = ExtractCheckedDeviceIds(asioSendDevicesList);
+        profile.SelectedWasapiReceiveOutputs = SavedDeviceIds(receiveOutputDevicesList);
+        profile.SelectedAsioReceiveOutputs = SavedDeviceIds(asioReceiveOutputDevicesList);
+        profile.SelectedWasapiSendOutputs = SavedDeviceIds(sendOutputDevicesList);
+        profile.SelectedWasapiSendInputs = SavedDeviceIds(sendInputDevicesList);
+        profile.SelectedAsioSendInputs = SavedDeviceIds(asioSendDevicesList);
         // WASAPI send mode (whole devices vs specific applications) — persisted per profile.
         profile.WasapiSendMode = sendModeList.SelectedIndex == SendModeApplicationsIndex ? "applications" : "devices";
         // SendAllApplications is deliberately NOT written here — the main window no longer has that
@@ -9859,6 +10593,12 @@ public sealed partial class MainForm : Form
     /// <summary>Test-only: push a profile INTO the real controls and read it straight back OUT, so a
     /// self-test can prove every persisted control both loads and saves correctly. Headless forms only
     /// (a real form would try to reconnect peers etc.); pass a profile with no peers.</summary>
+    /// <summary>Test-only: the profile the window would save right now, through the real save body.</summary>
+    internal Profile CaptureProfileForTest(string title) => BuildCurrentProfile(title);
+
+    /// <summary>The profile as the window holds it now, for the control channel's settings command.</summary>
+    internal Profile CurrentProfileForControl() => BuildCurrentProfile(currentProfileTitle ?? "");
+
     internal Profile ApplyThenCaptureForTest(Profile input)
     {
         pendingProfile = input;
@@ -9874,13 +10614,15 @@ public sealed partial class MainForm : Form
     /// <summary>Common save body — gathers all current state into a Profile and writes it.
     /// On success, becomes the active profile (sets currentProfileTitle, updates window
     /// title, and shows a confirmation popup).</summary>
-    private void SaveProfileTo(string title) => SaveProfileTo(title, showConfirmation: true);
+    private bool SaveProfileTo(string title) => SaveProfileTo(title, showConfirmation: true);
 
-    private void SaveProfileTo(string title, bool showConfirmation) => SaveProfileTo(title, showConfirmation, playCue: true);
+    private bool SaveProfileTo(string title, bool showConfirmation) => SaveProfileTo(title, showConfirmation, playCue: true);
 
-    private void SaveProfileTo(string title, bool showConfirmation, bool playCue)
+    /// <returns>Whether it saved. Exit, New profile and auto-save act on it: a failed save carried on as if it had worked,
+    /// and "Yes, save and exit" exited, throwing the changes away (found 2026-09-25).</returns>
+    private bool SaveProfileTo(string title, bool showConfirmation, bool playCue)
     {
-        if (profileStore is null) return;
+        if (profileStore is null) return false;
         try
         {
             SaveCurrentStateToProfileFile(title);
@@ -9903,11 +10645,15 @@ public sealed partial class MainForm : Form
                 // confirmation flow (the user already confirmed save+exit; extra Enter = friction).
                 ShowSaveConfirmationDialog(title);
             }
+            return true;
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Could not save profile: {ex.Message}", "RemSound",
-                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            logFile.Event($"profile save FAILED: \"{title}\" - {ex.GetType().Name}: {ex.Message}");
+            // In front: auto-save and Exit from the tray reach here with the window hidden.
+            ForegroundDialog.Show(owner => AppMessageBox.Show(owner, $"Could not save profile: {ex.Message}", "RemSound",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning));
+            return false;
         }
     }
 
@@ -9939,8 +10685,8 @@ public sealed partial class MainForm : Form
             logFile.Event($"auto-save: nothing done — {why}");
             return;
         }
-        SaveProfileTo(currentProfileTitle!, showConfirmation: false, playCue: false);
-        logFile.Event($"auto-save: saved \"{currentProfileTitle}\"");
+        if (SaveProfileTo(currentProfileTitle!, showConfirmation: false, playCue: false))
+            logFile.Event($"auto-save: saved \"{currentProfileTitle}\"");
     }
 
     /// <summary>Why the periodic auto-save did nothing, or null when it should go ahead. In its own words, because the
@@ -9971,6 +10717,13 @@ public sealed partial class MainForm : Form
     internal void ToggleSendFromHotkey() => sendMyAudioCheckbox.Checked = !sendMyAudioCheckbox.Checked;
     /// <summary>The play-incoming-audio switch, flipped exactly as the global hotkey flips it.</summary>
     internal void ToggleReceiveFromHotkey() => receiveAudioCheckbox.Checked = !receiveAudioCheckbox.Checked;
+    /// <summary>Listening volume one step up or down, exactly as the global hotkeys do it; named for the same reason.</summary>
+    internal void VolumeUpFromHotkey() => NudgeVolume(+5);
+    internal void VolumeDownFromHotkey() => NudgeVolume(-5);
+    internal int ListeningVolumeForTest => volumeBar.Value;
+    internal string TrayTooltipForTest() => BuildTrayTooltip();
+    internal string PeerDetailsForTest(PeerListItem item) => BuildPeerDetailsText(item);
+    internal void AudioEndpointsChangedForTest() => OnAudioEndpointsChanged();
     internal bool UnsavedChangesForTest => unsavedChanges;
     internal void RunAutoSaveTickForTest() => AutoSaveCurrentProfileIfDue();
     internal void SetProfileReadOnlyForTest(bool readOnly) => OnLockProfileToggled(readOnly);
@@ -10125,7 +10878,7 @@ public sealed partial class MainForm : Form
     {
         if (string.IsNullOrEmpty(currentProfileTitle) || string.IsNullOrEmpty(currentProfilePath))
         {
-            MessageBox.Show(this,
+            AppMessageBox.Show(this,
                 "There's no saved profile to attach a password to yet. Save the current setup as a profile first (File → Save as), then set its password.",
                 AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
@@ -10252,7 +11005,7 @@ public sealed partial class MainForm : Form
         // Offer to remember it on the profile (if we're on a saved one).
         if (!string.IsNullOrEmpty(currentProfileTitle) && !string.IsNullOrEmpty(currentProfilePath))
         {
-            var save = ForegroundDialog.Show(owner => MessageBox.Show(owner,
+            var save = ForegroundDialog.Show(owner => AppMessageBox.Show(owner,
                 $"Save this password to profile \"{currentProfileTitle}\" so you don't have to type it next time?",
                 AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question));
             if (save == DialogResult.Yes) PersistPasswordOnly(currentProfilePassword);
@@ -10316,6 +11069,53 @@ public sealed partial class MainForm : Form
     /// <summary>Once a second, surface any password mismatch / out-of-date peer the receiver has
     /// detected from peers' advertised fingerprints — once per change, not every tick — so a
     /// silent encrypted stream is never an unexplained mystery.</summary>
+    /// <summary>The 1 Hz status tick.</summary>
+    private void StatusTick()
+    {
+        // Belt-and-braces: this is a 1 Hz UI tick — a transient WinForms hiccup (e.g. a
+        // stale-index ItemArray throw during a churny peer-list rebuild) must never take
+        // the whole app down with a crash dialog. Log and ride it out; the next tick
+        // recovers. The individual Sync* methods are also hardened (see SafeSelectedItem).
+        try
+        {
+            EvaluatePriorityModeScope();
+            // While the password warning is up, the status line and the peer lists wait: rebuilding them under it is
+            // what knocked it out of the foreground (Ed, 2026-06-11). Everything else in the tick carries on.
+            if (!securityWarningShowing) UpdateStatus();
+            SnapshotLogIfDue();
+            EnsureRequestedAudioRunning();
+            // Refresh the Connectivity tab's peer lists from the same 1 Hz tick — replaces
+            // the dialog's old 1.5 s dedicated refresh timer. Each Sync* helper short-circuits
+            // when its signature is unchanged so NVDA isn't spammed with re-announcements.
+            if (!securityWarningShowing) SyncAllPeerLists();
+        }
+        catch (Exception ex)
+        {
+            logFile.Event($"status tick: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>Is there nobody to answer a question or read a warning? A headless copy, and a --headless, --silent or
+    /// muted one (<see cref="Windowless.NobodyToAsk"/>). The accept question, the "that's a server" offer and the password
+    /// warning asked only the first, so a --silent copy that met a real peer rang a dialog up in front of Ed
+    /// (2026-09-25 sweep).</summary>
+    private bool NobodyToAnswer => (headless && !SomebodyToAnswerForTest) || (NobodyToAskForTest?.Invoke() ?? Windowless.NobodyToAsk);
+
+    /// <summary>Test seams: a headless form that asks as a windowed one would, and what <see cref="Windowless.NobodyToAsk"/>
+    /// says for it.</summary>
+    internal bool SomebodyToAnswerForTest;
+    internal Func<bool>? NobodyToAskForTest;
+    internal void StatusTickForTest() => StatusTick();
+    internal void CheckPeerSecurityForTest() => CheckPeerSecurity();
+    internal bool SecurityWarningShowingForTest => securityWarningShowing;
+    internal void StartStatusTimerForTest() => statusTimer.Start();
+    internal bool StatusTimerRunningForTest => statusTimer.Enabled;
+    internal DateTime LastSnapshotUtcForTest => lastSnapshotUtc;
+    internal bool NobodyToAnswerForTest => NobodyToAnswer;
+    internal void QuickProfileSwitchForTest() => ShowQuickProfileSwitch();
+    internal int PeerListSyncsForTest => peerListSyncs;
+    private int peerListSyncs;
+
     private void CheckPeerSecurity()
     {
         if (securityWarningShowing) return; // a warning is already up — don't re-enter or stack
@@ -10335,23 +11135,23 @@ public sealed partial class MainForm : Form
             var msg = status == PeerSecurityStatus.PasswordMismatch
                 ? $"You and {addr} have different passwords, so no audio will pass between you.\n\nMake sure you've both set the same password (File → Change this profile's password)."
                 : PeerSecurityNotice.NoFingerprintMessage(addr.ToString());
-            // Show it front-and-centre, and FREEZE the 1 Hz status tick while it's up. This dialog is
-            // raised FROM that tick; left running, the tick keeps firing into the modal loop and
-            // re-runs the peer-list rebuild (SyncAllPeerLists) UNDER the dialog, which knocks it out
-            // of the foreground — it "flashed away before I could click OK" (Ed, 2026-06-11). The
-            // timer-stop + re-entry guard make exactly one warning show and stay put until dismissed.
+            // Nobody to tell in a headless or silent copy: the line above is the record.
+            if (NobodyToAnswer) { logFile.Event($"security: nobody here to warn about {addr}"); continue; }
+            // Shown just after this tick, not inside it, and the tick keeps running while it is up. It used to stop the
+            // tick for as long as the warning waited - the output heal, the plugin sweep, the recording watch and the
+            // tuner with it, which with nobody at the computer was for good (2026-09-25 sweep). What knocked the warning
+            // out of the foreground - "flashed away before I could click OK" (Ed, 2026-06-11) - was the peer lists being
+            // rebuilt under it, and those wait while it is up (StatusTick). The guard keeps it to one warning at a time.
             securityWarningShowing = true;
-            statusTimer.Stop();
-            try
+            BeginInvoke(() =>
             {
-                ForegroundDialog.Show(owner =>
-                    MessageBox.Show(owner, msg, AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning));
-            }
-            finally
-            {
-                statusTimer.Start();
-                securityWarningShowing = false;
-            }
+                try
+                {
+                    ForegroundDialog.Show(owner =>
+                        AppMessageBox.Show(owner, msg, AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning));
+                }
+                finally { securityWarningShowing = false; }
+            });
             return; // one warning per tick; a second affected peer surfaces on the next tick
         }
     }
@@ -10366,7 +11166,7 @@ public sealed partial class MainForm : Form
     {
         if (profileStore is null)
         {
-            MessageBox.Show(this, "Profile system not active in this run.", AppName,
+            AppMessageBox.Show(this, "Profile system not active in this run.", AppName,
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -10384,6 +11184,41 @@ public sealed partial class MainForm : Form
             catch { /* benign — worst case the change applies on next load */ }
         }
     }
+
+    /// <summary>Devices the loaded profile ticked that were not here when it was loaded - unplugged, switched off, or an ASIO
+    /// interface whose driver would not open - per list. A save wrote only what was ticked on screen, so saving with a
+    /// device away dropped it from the profile for good, and the next start came up without it (2026-09-25 sweep; Ed:
+    /// keep them). A device that has come back is on screen, ticked or not as the person left it, and saved as it is.</summary>
+    private readonly Dictionary<CheckedListBox, HashSet<string>> absentDeviceTicks = new();
+
+    private void RememberAbsentTicks(CheckedListBox list, IReadOnlyList<string> wantedIds)
+    {
+        var present = DeviceIdsIn(list);
+        var absent = wantedIds.Where(id => !string.IsNullOrEmpty(id) && !present.Contains(id)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (absent.Count > 0)
+        {
+            absentDeviceTicks[list] = absent;
+            logFile.Event($"profile apply: {absent.Count} device(s) ticked in the profile are not here now ({list.AccessibleName}) - kept for the next save");
+        }
+    }
+
+    private static HashSet<string> DeviceIdsIn(CheckedListBox list) =>
+        list.Items.OfType<AudioDeviceChoice>().Where(c => !string.IsNullOrEmpty(c.DeviceId)).Select(c => c.DeviceId!).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>What a save writes for a device list: what is ticked on screen, and the profile's ticks for devices still
+    /// not here.</summary>
+    private List<string> SavedDeviceIds(CheckedListBox list)
+    {
+        var result = ExtractCheckedDeviceIds(list);
+        if (!absentDeviceTicks.TryGetValue(list, out var absent)) return result;
+        var present = DeviceIdsIn(list);
+        foreach (var id in absent)
+            if (!present.Contains(id) && !result.Contains(id, StringComparer.OrdinalIgnoreCase)) result.Add(id);
+        return result;
+    }
+
+    internal void SyncDeviceListForTest(CheckedListBox list, IReadOnlyList<AudioDeviceChoice> devices) => SyncDeviceCheckedListBox(list, devices, keepGoneTicks: true);
+    internal List<string> SavedDeviceIdsForTest(CheckedListBox list) => SavedDeviceIds(list);
 
     private static List<string> ExtractCheckedDeviceIds(CheckedListBox list)
     {
@@ -10433,6 +11268,10 @@ public sealed partial class MainForm : Form
             }
             if (!result.Contains(entry, StringComparer.OrdinalIgnoreCase)) result.Add(entry);
         }
+        // Names the profile gave that are still waiting to be looked up: the profile's choice, kept. Left out, the next
+        // save dropped them and the next start did not even try (2026-09-25 sweep).
+        foreach (var pending in pendingPeerNames)
+            if (!result.Contains(pending, StringComparer.OrdinalIgnoreCase)) result.Add(pending);
         return result;
     }
 
@@ -10472,15 +11311,19 @@ public sealed partial class MainForm : Form
             }
             else
             {
-                var address = await ResolvePeerAddressAsync(entry);
+                var address = await LookUpPeer(entry);
                 if (address is null)
                 {
-                    logFile.Event($"profile reconnect: could not resolve \"{entry}\"; skipping");
+                    // Kept, and looked up again every 30 s and when the network changes (MainForm.NameLookups). Said once.
+                    if (pendingPeerNames.Add(entry.Trim()))
+                        logFile.Event($"profile reconnect: could not resolve \"{entry}\" - trying again every {NameRetryInterval.TotalSeconds:0} s and when the network changes");
                     return;
                 }
+                if (pendingPeerNames.Remove(entry.Trim())) logFile.Event($"profile reconnect: \"{entry}\" found at last");
                 peer = CreateManualPeer(entry, address);
                 manualPeers[peer.InstanceId] = peer;
             }
+            pendingPeerNames.Remove(entry.Trim());
             var rememberedEntries = settings.LoadRememberedPeers()
                 .Select(static value => value.Trim())
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -10521,16 +11364,14 @@ public sealed partial class MainForm : Form
     /// </summary>
     private string BuildTrayTooltip()
     {
-        // Healthy-peer count. Heartbeats define "connected" — a peer ticked in the list but
-        // never reachable doesn't count, because the user cares about who they can actually
-        // talk to right now, not who they intend to.
+        // Healthy-peer count: a peer ticked in the list but never reachable doesn't count, because the user cares about
+        // who they can actually talk to right now, not who they intend to. PEOPLE, as the connected list shows them. It counted heartbeats, and everybody on a server shares the server's one
+        // heartbeat, so three people on a server read "1 peer" (review 2026-09-25). A row's Connected is the same rule the
+        // list and the connect cue use, the server's health standing for everybody on it.
         var healthyPeers = 0;
-        if (heartbeatService is not null)
+        foreach (var entry in connectedPeersList.Items)
         {
-            foreach (var ph in heartbeatService.GetAllPeerHealth())
-            {
-                if (ph.State == PeerHealthState.Healthy) healthyPeers++;
-            }
+            if (entry is PeerListItem { Status.Connected: true }) healthyPeers++;
         }
         // Recording status — a plain "recording" flag while a capture is running, with no
         // elapsed timer. A live timer would have to rewrite the tooltip every second, which
@@ -10635,6 +11476,9 @@ public sealed partial class MainForm : Form
         // Played whenever the user switches tabs anywhere in the app (TabSwitchSoundService,
         // fired from QuietTabControl). The shipped WAVs are "tab switch 1.wav" etc.
         public const string TabSwitch = "tab-switch";
+        // Played as F1 help opens and as it closes (HelpSoundService, 2026-09-25). "help open 1.wav" etc.
+        public const string HelpOpen = "help-open";
+        public const string HelpClose = "help-close";
     }
 
     /// <summary>Load one cue sound. Resolution order:
@@ -10718,6 +11562,10 @@ public sealed partial class MainForm : Form
         // them in step.
         CheckSoundService.Reload();
         TabSwitchSoundService.Reload();
+        HelpSoundService.Reload();
+        // The DAW plugin plays the same context help sounds, from copies beside it: keep them in step (a file copy, so off
+        // the window's thread; only when a sound actually changed).
+        RefreshPluginHelpSounds();
         // After a reload (e.g. the user changed a cue in Preferences), warn about any cue that's
         // switched on but whose sound file is missing. Skipped during construction (no window yet);
         // OnShown does the first-launch pass.
@@ -10774,11 +11622,11 @@ public sealed partial class MainForm : Form
         if (!reportedMissingCues.Add(name)) return;
         logFile.Event($"cue sound '{name}': enabled but file missing — cue turned off, informing the user");
         // A --silent (automated) launch turns the cue off quietly and never pops a dialog at the user.
-        if (CuePlayer.GloballyMuted) return;
+        if (Windowless.NobodyToAsk) return;
         BeginInvoke(() =>
         {
             try { RestoreFromTray(); } catch { /* surfacing is best-effort */ }
-            MessageBox.Show(this,
+            AppMessageBox.Show(this,
                 $"RemSound was unable to find the {name} sound file used when {when}. " +
                 "RemSound has set this particular audio cue to not play for now, until a new sound file is specified.",
                 "RemSound — missing sound file", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -10806,6 +11654,19 @@ public sealed partial class MainForm : Form
 
     private static string PeerStateKey(PeerHealth ph) => $"{ph.AudioEndpoint.Address}:{ph.AudioEndpoint.Port}";
 
+    internal void DetectPeerHealthTransitionsForTest() => DetectAndAnnouncePeerHealthTransitions();
+
+    /// <summary>The server's own entry, standing for everybody on it: not a person, so no cue of its own - each person on
+    /// it has theirs. Unless a phone or older app is paired through it: then that entry IS that person.</summary>
+    private bool IsServerStandingForItsPeople(PeerHealth ph) =>
+        relayGroup.ConnectedRelay is { } server && ph.AudioEndpoint.Equals(server) && !relayPairTicked;
+
+    /// <summary>A peer for the connect and disconnect lines: somebody on a server by name, anybody else by address.</summary>
+    private string DescribeForCue(IPEndPoint ep) =>
+        relayGroup.RelayOf(ep) is { } server && relayGroup.Members.FirstOrDefault(m => m.Address.Equals(ep)) is { } member
+            ? $"{member.Name} on the server at {server}"
+            : ep.ToString();
+
     /// <summary>Is this peer connected right now, by <see cref="PeerConnectionRule"/>, remembering what the cue logic
     /// last decided for it.</summary>
     private bool IsPeerConnectedNow(PeerHealth ph) => PeerConnectionRule(
@@ -10819,7 +11680,11 @@ public sealed partial class MainForm : Form
         var current = heartbeatService.GetAllPeerHealth();
 
         var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var ph in current)
+        // Everybody on a server, each by their own answers: ticking somebody there played no cue, and nor did their leaving
+        // - the cues followed the server, which answers for anybody (2026-09-25 sweep; Ed: per person).
+        var onServer = selectedPeerEndpoints.Values.Where(ep => relayGroup.RelayOf(ep) is not null).ToList();
+        var people = current.Where(ph => !IsServerStandingForItsPeople(ph)).Concat(onServer.Select(heartbeatService.MemberHealth));
+        foreach (var ph in people)
         {
             var key = PeerStateKey(ph);
             seenKeys.Add(key);
@@ -10834,14 +11699,14 @@ public sealed partial class MainForm : Form
             {
                 var enabled = settings.LoadEnableConnectCue();
                 if (enabled) connectSound?.Play();
-                logFile.Event($"peer connected: {ph.AudioEndpoint} (audio={audioFlowing}, heartbeat={ph.State}) — connect cue {CueOutcome(enabled, connectSound)}");
+                logFile.Event($"peer connected: {DescribeForCue(ph.AudioEndpoint)} (audio={audioFlowing}, heartbeat={ph.State}) — connect cue {CueOutcome(enabled, connectSound)}");
                 peerConnectedState[key] = true;
             }
             else if (isLost && wasConnected)
             {
                 var enabled = settings.LoadEnableDisconnectCue();
                 if (enabled) disconnectSound?.Play();
-                logFile.Event($"peer disconnected: {ph.AudioEndpoint} (audio stopped, heartbeat={ph.State}) — disconnect cue {CueOutcome(enabled, disconnectSound)}");
+                logFile.Event($"peer disconnected: {DescribeForCue(ph.AudioEndpoint)} (audio stopped, heartbeat={ph.State}) — disconnect cue {CueOutcome(enabled, disconnectSound)}");
                 peerConnectedState[key] = false;
             }
             else if (!peerConnectedState.ContainsKey(key))
@@ -10869,8 +11734,10 @@ public sealed partial class MainForm : Form
     /// <summary>Describes what actually happened to a cue, for honest logging: "played", "muted
     /// in settings", or "enabled but sound not loaded" — so the log never claims a cue rang when
     /// no sound came out. 2026-06-02.</summary>
-    private static string CueOutcome(bool enabled, CuePlayer? sound) =>
-        !enabled ? "muted in settings" : sound is null ? "enabled but sound not loaded" : "played";
+    internal static string CueOutcome(bool enabled, CuePlayer? sound) =>
+        // A silent run (--silent, --headless) plays nothing at all, and said "played" all the same (2026-09-24).
+        CuePlayer.GloballyMuted ? "silenced (a silent or headless run)"
+        : !enabled ? "muted in settings" : sound is null ? "enabled but sound not loaded" : "played";
 
     /// <summary>
     /// Append each configurable global hotkey to the accessible description of the control or menu
@@ -10910,6 +11777,10 @@ public sealed partial class MainForm : Form
             if (newValue == volumeBar.Value) return;
             volumeBar.Value = newValue;
             receiver.Volume = volumeBar.Value / 100f;
+            // What the slider's own handler does: setting Value does not raise Scroll, so a volume changed by hotkey was
+            // neither offered for saving nor written to the log (review 2026-09-25).
+            MarkProfileDirty();
+            LogUiChange("listening volume (hotkey)", $"{volumeBar.Value}%");
         });
     }
 
@@ -11899,6 +12770,42 @@ public sealed partial class MainForm : Form
     }
 
     private volatile bool closingFromCommandLine;
+    private bool closingForInstaller;
+
+    /// <summary>Install on this PC and Uninstall, once the person has chosen to go ahead and before anything is copied or
+    /// removed: their unsaved changes offered for saving (Cancel stops it all), and a recording finished, so what is
+    /// copied is the saved profile and a whole file. Both used to end the process outright, losing the changes and
+    /// cutting the recording off (2026-09-25 sweep).</summary>
+    private bool PrepareToLeaveForInstaller(string beforeWhat, string thenWhat)
+    {
+        if (!OfferToSaveBeforeLeaving(beforeWhat, thenWhat)) return false;
+        if (recordingController.IsRecording)
+        {
+            logFile.Event($"installer: finishing the recording before {beforeWhat}");
+            try { recordingController.Stop(); }
+            catch (Exception ex) { logFile.Event($"installer: finishing the recording failed: {ex.GetType().Name}: {ex.Message}"); }
+        }
+        return true;
+    }
+
+    /// <summary>The installer's last step: close the normal way - plugins told, everything shut down in order - without
+    /// asking again about changes, which were offered already. The next step (the installed copy starting, or the remover)
+    /// waits for this process to end, so a close that hangs is ended after <see cref="InstallerCloseLimit"/>.</summary>
+    private void LeaveForInstaller(string why)
+    {
+        closingForInstaller = true;
+        logFile.Event($"installer: closing the normal way to {why}");
+        if (LeaveForInstallerForTest is { } seam) { seam(); return; }
+        _ = Task.Delay(InstallerCloseLimit).ContinueWith(_ => Environment.Exit(0), TaskScheduler.Default);
+        Application.Exit();
+    }
+
+    internal static readonly TimeSpan InstallerCloseLimit = TimeSpan.FromSeconds(20);
+    internal static Action? LeaveForInstallerForTest;
+    internal bool PrepareToLeaveForInstallerForTest(string beforeWhat, string thenWhat) => PrepareToLeaveForInstaller(beforeWhat, thenWhat);
+    internal void LeaveForInstallerRunForTest(string why) => LeaveForInstaller(why);
+    internal bool ClosingForInstallerForTest => closingForInstaller;
+    internal void MarkProfileDirtyForTest() => MarkProfileDirty();
 
     /// <summary>
     /// <c>RemSound --close</c>: close everything the way File, Exit does, open dialogs included, but without the
@@ -11939,7 +12846,7 @@ public sealed partial class MainForm : Form
         // is what unblocks NVDA-less or remote-session-dropped shutdowns from deadlocking
         // on a dialog the user can't reach.
         var skipPrompt = !string.IsNullOrEmpty(NextProfileTitleToLoad)
-            || LoadBlankTemplateNext || currentProfileReadOnly || updatingInProgress || closingFromCommandLine;
+            || LoadBlankTemplateNext || currentProfileReadOnly || updatingInProgress || closingFromCommandLine || closingForInstaller;
 
         if (!skipPrompt && profileStore is not null && unsavedChanges)
         {
@@ -11954,7 +12861,7 @@ public sealed partial class MainForm : Form
                 // Via ForegroundDialog: OnFormClosing fires from tray → Exit (RemSound minimised) and
                 // OS shutdown, so a plain MessageBox(this) would open behind everything and a blind
                 // user couldn't reach it to answer (Ed, 2026-07-27 dialog-focus sweep).
-                var result = ForegroundDialog.Show(owner => MessageBox.Show(owner,
+                var result = ForegroundDialog.Show(owner => AppMessageBox.Show(owner,
                     "You have unsaved changes to your profile. Save them before exiting?\n\n" +
                     "Yes — save and exit.\nNo — exit without saving.\nCancel — keep RemSound open.",
                     "RemSound — unsaved changes",
@@ -11973,17 +12880,20 @@ public sealed partial class MainForm : Form
                     {
                         // Blank template — need a name. Save-as prompt; if the user cancels
                         // the prompt, treat that as "I changed my mind, don't exit either".
-                        var title = ProfileSaveAsPrompt.Show(this, profileStore, null);
+                        // In front: Exit from the tray gets here with the window hidden.
+                        var title = ForegroundDialog.Show(owner => ProfileSaveAsPrompt.Show(owner, profileStore, null));
                         if (string.IsNullOrEmpty(title))
                         {
                             e.Cancel = true;
                             return;
                         }
-                        SaveProfileTo(title, showConfirmation: false);
+                        if (!SaveProfileTo(title, showConfirmation: false)) { e.Cancel = true; return; }
                     }
-                    else
+                    else if (!SaveProfileTo(currentProfileTitle, showConfirmation: false))
                     {
-                        SaveProfileTo(currentProfileTitle, showConfirmation: false);
+                        // The save failed and said why: stay open with the changes, rather than exit and lose them.
+                        e.Cancel = true;
+                        return;
                     }
                 }
                 // result == No falls through to a normal close.

@@ -21,17 +21,29 @@ internal static partial class SelfTest
         Check(lines.Length > 0 && lines[0].StartsWith("RemSound v", StringComparison.Ordinal), "the About notes must start with a release heading");
         var next = Array.FindIndex(lines, 1, l => l.StartsWith("RemSound v", StringComparison.Ordinal));
         var newest = string.Join("\n", next < 0 ? lines : lines[..next]);
-        foreach (var phrase in new[] { "Apply pan and EQ to plugin audio", "Let plugins connect to RemSound", "network delay", "The rest of this release" })
+        // The v6.0 notes as Ed approved them on 2026-09-26: features only, the plugin first, then context help, accepting
+        // connections and servers, and one line for the fixes.
+        foreach (var phrase in new[] { "The DAW plugin.", "Context help.", "Accepting connections.", "Servers for more than two.", "little fixes under the hood" })
             Check(newest.Contains(phrase, StringComparison.Ordinal),
                 $"the newest About notes must say what the release notes say — \"{phrase}\" is missing");
+        var releaseNotesFile = FindSourceRoot() is { } notesRoot ? Path.Combine(notesRoot, "RELEASE_NOTES.md") : null;
+        if (releaseNotesFile is not null && File.Exists(releaseNotesFile))
+        {
+            var releaseNotes = File.ReadAllText(releaseNotesFile);
+            foreach (var phrase in new[] { "The DAW plugin.", "Context help.", "Accepting connections.", "Servers for more than two." })
+                Check(releaseNotes.Contains(phrase, StringComparison.Ordinal),
+                    $"the release notes on GitHub and the About box must say the same - \"{phrase}\" is missing from RELEASE_NOTES.md");
+        }
 
         var root = FindSourceRoot();
         if (root is null) return Skip("the notes cover the release, but the source tree is not reachable to check the menu names (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
         var main = File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "MainForm.cs"));
-        foreach (var name in new[] { "Apply pan and EQ to plugin audio", "Let plugins connect to RemSound" })
-            Check(main.Contains($"AccessibleName = \"{name}\"", StringComparison.Ordinal),
-                $"the About notes name \"{name}\", so the DAW plugin menu item must still be called that");
-        return $"{lines[0]} covers the plugin, its switch, pan and EQ, the delay limit and the other fixes; both menu names it quotes exist";
+        Check(main.Contains("AccessibleName = \"DAW plugin menu\"", StringComparison.Ordinal),
+            "the About notes send people to the DAW plugin menu, so it must still be called that");
+        var prefs = File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "PreferencesDialog.cs"));
+        Check(prefs.Contains("MakeTab(\"Connectivity\"", StringComparison.Ordinal),
+            "the About notes send people to the Connectivity tab in Preferences, so it must still be called that");
+        return $"{lines[0]} covers the plugin, context help, accepting connections, servers and the fixes, as the release notes do; the menu and tab it names exist";
     }
 
     /// <summary>

@@ -73,6 +73,10 @@ public sealed class PeerDiscoveryService : IDisposable
     public PeerDiscoveryService(string? displayName = null)
         => this.displayName = string.IsNullOrWhiteSpace(displayName) ? Environment.MachineName : displayName.Trim();
 
+    /// <summary>This copy's own identity, as its announcements carry it - and its tick proofs (<see cref="TickProof"/>), so
+    /// the peer receiving one knows which device it came from, not just which name.</summary>
+    public Guid InstanceId => instanceId;
+
     public IReadOnlyList<PeerAnnouncement> Peers
     {
         get
@@ -85,12 +89,21 @@ public sealed class PeerDiscoveryService : IDisposable
         }
     }
 
+    /// <summary>Gate seam: a gate run never announces this computer on the network, nor listens for others - the app's
+    /// and the service's discovery both come here. Start records the settings and opens no socket.</summary>
+    internal static bool NoNetworkForTest;
+
+    /// <summary>Gate guard: how many times discovery really opened its sockets.</summary>
+    internal static int RealStartsForTest;
+
     public void Start(int selectedAudioPort, bool sendEnabled, bool receiveEnabled)
     {
         Stop();
         audioPort = selectedAudioPort;
         canSend = sendEnabled;
         canReceive = receiveEnabled;
+        if (NoNetworkForTest) return;
+        Interlocked.Increment(ref RealStartsForTest);
         cts = new CancellationTokenSource();
 
         listener = new UdpClient(AddressFamily.InterNetwork);
@@ -270,9 +283,6 @@ public sealed class PeerDiscoveryService : IDisposable
         return wentAway;
     }
 
-    /// <summary>Test seam: the same expiry the announce loop does, without the 1.5 second wait or a socket.</summary>
-    internal bool ExpireQuietPeersForTest() => ExpireQuietPeers();
-
     /// <summary>Test seam: put a peer's last-seen back, so silence can be exercised without sitting through eight
     /// seconds of it. A timestamp going stale is the only thing a real silence does.</summary>
     internal void BackdateForTest(Guid instanceId, TimeSpan by)
@@ -287,30 +297,63 @@ public sealed class PeerDiscoveryService : IDisposable
         }
     }
 
-    private void AddUnicastTarget(IPAddress address)
+    /// <summary>Addresses heard announcing, with when - announced back to while they keep announcing. Kept apart from the
+    /// app's own hints (<see cref="unicastTargets"/>), capped, and let go once quiet: every announcing source used to be
+    /// added for good, so a spoofed flood of announcements grew the list, and the traffic, without limit (2026-09-25 sweep).</summary>
+    private readonly Dictionary<IPAddress, DateTime> heardFrom = new();
+    internal const int MaxHeardFrom = 64;
+    internal static readonly TimeSpan HeardFromExpiry = TimeSpan.FromSeconds(30);
+
+    private void AddUnicastTarget(IPAddress address) => NoteHeardFrom(address, DateTime.UtcNow);
+
+    private void NoteHeardFrom(IPAddress address, DateTime nowUtc)
     {
-        // Idempotent — only swap the snapshot if this IP isn't already there. Avoids churning
-        // the list on every received announcement (which is every 1.5 s per peer).
-        var current = unicastTargets;
-        if (current.Any(a => a.Equals(address))) return;
-        var updated = current.ToList();
-        updated.Add(address);
-        unicastTargets = updated;
+        lock (gate)
+        {
+            heardFrom[address] = nowUtc;
+            if (heardFrom.Count <= MaxHeardFrom) return;
+            // Full: the one heard from longest ago goes.
+            var oldest = heardFrom.MinBy(kv => kv.Value).Key;
+            heardFrom.Remove(oldest);
+        }
     }
+
+    /// <summary>Everyone an announcement goes to directly: the app's hints, and whoever has announced to us lately.</summary>
+    private List<IPAddress> AnnounceTargets(DateTime nowUtc)
+    {
+        var targets = unicastTargets.ToList();
+        lock (gate)
+        {
+            foreach (var gone in heardFrom.Where(kv => nowUtc - kv.Value > HeardFromExpiry).Select(kv => kv.Key).ToList()) heardFrom.Remove(gone);
+            foreach (var address in heardFrom.Keys) if (!targets.Contains(address)) targets.Add(address);
+        }
+        return targets;
+    }
+
+    internal void HeardFromForTest(IPAddress address, DateTime nowUtc) => NoteHeardFrom(address, nowUtc);
+    internal List<IPAddress> AnnounceTargetsForTest(DateTime nowUtc) => AnnounceTargets(nowUtc);
 
     private async Task AnnounceLoop(CancellationToken token)
     {
         while (!token.IsCancellationRequested)
         {
-            SendAnnouncement();
-            // Expiry has to be driven by a clock, not by traffic. Everywhere else it is done on the way past while
-            // handling somebody's announcement — which is no use at all for the case that matters, because the peer
-            // who has gone is by definition not sending anything, and on a two-machine network nobody else is either.
-            ExpireQuietPeers();
+            AnnounceTick();
             try { await Task.Delay(AnnounceInterval, token).ConfigureAwait(false); }
             catch (OperationCanceledException) { break; }
         }
     }
+
+    /// <summary>One turn of the announce loop, on its own so the gate can drive it without the network.</summary>
+    private void AnnounceTick()
+    {
+        SendAnnouncement();
+        // Expiry has to be driven by a clock, not by traffic. Everywhere else it is done on the way past while
+        // handling somebody's announcement — which is no use at all for the case that matters, because the peer
+        // who has gone is by definition not sending anything, and on a two-machine network nobody else is either.
+        ExpireQuietPeers();
+    }
+
+    internal void AnnounceTickForTest() => AnnounceTick();
 
     private void SendAnnouncement()
     {
@@ -336,7 +379,7 @@ public sealed class PeerDiscoveryService : IDisposable
 
         // Unicast to known peer IPs — covers Tailscale / VPN / WAN where broadcast doesn't
         // traverse the tunnel. Sending to an offline peer is silent fire-and-forget.
-        foreach (var unicast in unicastTargets)
+        foreach (var unicast in AnnounceTargets(DateTime.UtcNow))
         {
             try
             {

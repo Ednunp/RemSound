@@ -54,6 +54,14 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     // apartment thread and the open and close - the same single pumped STA thread that stopped the
     // native crash on close; this backend attaches a callback and lets go. See SharedAsioDevice.
     private SharedAsioDevice? device;
+
+    /// <summary>What this lane was asked to capture, whether or not the driver opened: <see cref="HealSources"/> tries a
+    /// failed open again. It was tried once, and a wake before the interface was back, or a music program holding it,
+    /// left ASIO sending silent until re-ticked; the WASAPI lane heals every few seconds (2026-09-25 sweep).</summary>
+    private IReadOnlyList<CaptureSourceSpec> wantedSpecs = [];
+    private DateTime lastFailedOpenUtc = DateTime.MinValue;
+    internal static TimeSpan ReopenBackoff = TimeSpan.FromSeconds(10);
+    internal int OpenAttemptsForTest;
     // VOLATILE, not lock-guarded, and that is load-bearing. The ASIO audio callback reads this list on
     // the driver's real-time thread. It used to take `gate` to do so — but StopInternal holds `gate` for
     // the WHOLE close, so a callback already in flight when a close began could not return until the
@@ -206,6 +214,7 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
         lock (gate)
         {
             if (IsRunning) StopInternal(CloseTimeoutMs);
+            wantedSpecs = specs.ToList();
             if (specs.Count == 0) return;
 
             activeChannelPairIndices = ParseChannelPairIndices(specs);
@@ -221,6 +230,7 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
                 // this driver open; either way there is one instance, opened full duplex on the
                 // device's apartment thread with the same breadcrumbs as before. A failure to open
                 // becomes a throw, so the catch below runs the same StopInternal cleanup.
+                OpenAttemptsForTest++;
                 var shared = SharedAsioDevice.Acquire(driverName, onDiagnostic);
                 device = shared;
                 try
@@ -255,13 +265,28 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
                 }
                 uptime.Restart();
                 onDiagnostic?.Invoke($"asio capture started \"{driverName}\" {captureFormat}; pairs={string.Join(",", activeChannelPairIndices)}");
+                lastFailedOpenUtc = DateTime.MinValue;
             }
             catch (Exception ex)
             {
                 lastError = SharedAsioDevice.Explain(ex);
-                onDiagnostic?.Invoke($"asio capture start failed: {ex.GetType().Name}: {lastError}");
+                onDiagnostic?.Invoke($"asio capture start failed: {ex.GetType().Name}: {lastError} - tried again in {ReopenBackoff.TotalSeconds:0} s");
+                lastFailedOpenUtc = DateTime.UtcNow;
                 StopInternal(CloseTimeoutMs);
             }
+        }
+    }
+
+    /// <summary>A driver that failed to open while channels are wanted is tried again - no sooner than
+    /// <see cref="ReopenBackoff"/> after the last failure. Nothing is touched while the driver is open.</summary>
+    public void HealSources()
+    {
+        lock (gate)
+        {
+            if (IsRunning || wantedSpecs.Count == 0) return;
+            if (DateTime.UtcNow - lastFailedOpenUtc < ReopenBackoff) return;
+            onDiagnostic?.Invoke("asio capture: channels are wanted but the driver is not open - trying it again");
+            Start(wantedSpecs);
         }
     }
 
@@ -269,6 +294,7 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     {
         lock (gate)
         {
+            wantedSpecs = specs.ToList();
             if (!IsRunning)
             {
                 Start(specs);
@@ -322,7 +348,11 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
 
     public void Stop()
     {
-        lock (gate) StopInternal(CloseTimeoutMs);
+        lock (gate)
+        {
+            wantedSpecs = [];   // stopped on purpose: nothing left for the heal to open
+            StopInternal(CloseTimeoutMs);
+        }
     }
 
     private void StopInternal(int closeTimeoutMs)

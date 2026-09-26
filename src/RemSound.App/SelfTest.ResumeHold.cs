@@ -169,6 +169,9 @@ internal static partial class SelfTest
             form.LogForTest.EventTapForTest = line => { lock (lines) lines.Add(line); };
             try
             {
+                // Receiving, as in a real session: with Receive audio off the heal - and the hold that comes with it -
+                // rightly does nothing, since the outputs are closed on purpose (2026-09-25). No output is ticked here.
+                form.ReceiverForTest.SetPlaybackEnabled(true);
                 form.ReceiverForTest.ForceFaultedOutputForTest = false;
                 form.SeedTuneEvidenceForTest(RenderRoute.WasapiLane, renderGapMs: 12, floorMs: 0);
                 form.SeedTuneEvidenceForTest(RenderRoute.Mixed, renderGapMs: 12, floorMs: 0);
@@ -225,6 +228,7 @@ internal static partial class SelfTest
             {
                 form.LogForTest.EventTapForTest = null;
                 form.ReceiverForTest.ForceFaultedOutputForTest = false;
+                form.ReceiverForTest.SetPlaybackEnabled(false);
             }
         }
 

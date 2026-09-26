@@ -58,6 +58,9 @@ internal static class ManualPeerPrompt
         dialog.Controls.Add(panel);
         dialog.AcceptButton = okButton;
         dialog.CancelButton = cancelButton;
+        ContextHelp.Mark(textBox, "dialog.manual-peer-prompt.address");
+        ContextHelp.Mark(okButton, "dialog.manual-peer-prompt.ok");
+        ContextHelp.Mark(cancelButton, "dialog.manual-peer-prompt.cancel");
         return (dialog, textBox);
     }
 }

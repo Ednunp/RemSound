@@ -35,9 +35,9 @@ public delegate int PeerAudioReader(IPAddress peer, Span<float> destination, int
 /// </summary>
 public sealed class PluginBridgeHost : IDisposable
 {
-    /// <summary>Largest block we will serve in one message, in frames. Well past any sane DAW buffer;
-    /// a request bigger than this is answered short rather than trusted.</summary>
-    public const int MaxFramesPerRequest = 4096;
+    /// <summary>Largest block we will serve for one ask, in frames, sent in as many parts as it takes. Well past any sane
+    /// DAW buffer; a request bigger than this is answered short rather than trusted.</summary>
+    public const int MaxFramesPerRequest = PluginBridgeProtocol.MaxBlockFrames;
 
     private sealed class Instance
     {
@@ -83,7 +83,7 @@ public sealed class PluginBridgeHost : IDisposable
     // Where the set is summed before it goes out. Separate from readScratch because each peer is read
     // into that one and then added into this.
     private readonly float[] mixScratch = new float[MaxFramesPerRequest * 2];
-    private readonly byte[] sendScratch = new byte[MaxFramesPerRequest * 2 * sizeof(float) + PluginBridgeProtocol.AudioRoundHeaderSize];
+    private readonly byte[] sendScratch = new byte[PluginBridgeProtocol.MaxAudioBytes];
 
     /// <summary>The port plugins should talk to. Normally <see cref="PluginBridgeProtocol.DefaultPort"/>;
     /// the gate uses an OS-assigned one so a running RemSound is never disturbed by a test.</summary>
@@ -103,6 +103,10 @@ public sealed class PluginBridgeHost : IDisposable
     /// <summary>Where the peer list comes from when a plugin asks who it can receive. Set by the app;
     /// null means "no peers yet", which the plugin shows plainly rather than looking broken.</summary>
     public Func<IReadOnlyList<(IPAddress Address, string Name)>>? PeerListSource { get; set; }
+
+    /// <summary>Whether RemSound's "Receive audio" is on. With it off there are no peers' streams to hand a track, so the
+    /// plugin is told, with the peer list, and says so itself - rather than blaming "audio arriving short" (2026-09-25).</summary>
+    public Func<bool>? AppReceivingSource { get; set; }
 
     /// <summary>Raised when something worth writing down happens on the link. Fired on the bridge
     /// thread; the app turns these into log lines. Deliberately plain English — whoever reads this file
@@ -290,17 +294,24 @@ public sealed class PluginBridgeHost : IDisposable
                 return;
             }
             if (produced < frames) Interlocked.Increment(ref shortReads);
-            var bytes = produced * 2 * sizeof(float);
+            var totalFloats = produced * 2;
             // No peer named on the reply: it is a mix of the set, not any one person's audio, and
             // naming one of them in the header would be a lie the next reader has to work out. The
-            // block number and the plugin's ask number go in front of the samples.
-            PluginBridgeProtocol.WriteAudioRoundHeader(sendScratch, block, askNumber);
-            Buffer.BlockCopy(mixScratch, 0, sendScratch, PluginBridgeProtocol.AudioRoundHeaderSize, bytes);
-            var sent = link.Send(from, PluginBridgeMessage.PeerAudioRound, hash, null, sendScratch.AsSpan(0, PluginBridgeProtocol.AudioRoundHeaderSize + bytes));
+            // block number, the plugin's ask number and where this part sits go in front of the samples.
+            // As many parts as the block needs: one for any ordinary buffer, several for 4096 and up.
+            var sent = true;
+            for (var offset = 0; offset < totalFloats && sent; offset += PluginBridgeProtocol.AudioRoundPartFloats)
+            {
+                var partFloats = Math.Min(PluginBridgeProtocol.AudioRoundPartFloats, totalFloats - offset);
+                PluginBridgeProtocol.WriteAudioRoundHeader(sendScratch, block, askNumber, offset, totalFloats);
+                Buffer.BlockCopy(mixScratch, offset * sizeof(float), sendScratch, PluginBridgeProtocol.AudioRoundHeaderSize, partFloats * sizeof(float));
+                sent = link.Send(from, PluginBridgeMessage.PeerAudioRound, hash, null,
+                    sendScratch.AsSpan(0, PluginBridgeProtocol.AudioRoundHeaderSize + partFloats * sizeof(float)));
+            }
             if (sent)
             {
                 Interlocked.Increment(ref blocksServed);
-                Interlocked.Add(ref bytesServed, bytes);
+                Interlocked.Add(ref bytesServed, totalFloats * sizeof(float));
             }
         }
     }
@@ -606,6 +617,8 @@ public sealed class PluginBridgeHost : IDisposable
     {
         var peers = PeerListSource?.Invoke() ?? [];
         var text = string.Join("\n", peers.Select(p => $"{p.Address}\t{p.Name}"));
+        // A line no address parses from, so a reader that knows nothing of it skips it.
+        if (AppReceivingSource?.Invoke() == false) text = PluginBridgeProtocol.ReceiveOffLine + (text.Length > 0 ? "\n" + text : "");
         var bytes = Encoding.UTF8.GetBytes(text);
         if (bytes.Length > PluginBridgeProtocol.MaxAudioBytes) bytes = bytes[..PluginBridgeProtocol.MaxAudioBytes];
         link.Send(to, PluginBridgeMessage.PeerList, hash, null, bytes);

@@ -3,11 +3,10 @@ using System.Diagnostics;
 namespace RemSound.App;
 
 /// <summary>
-/// Opens the bundled <c>readme.html</c> manual in the user's default browser. Wired to F1
-/// app-wide via <see cref="HelpKeyMessageFilter"/>, which is installed once at startup and
-/// catches F1 (without modifiers) before the message reaches any control. Works in every
-/// modal dialog and on the very first form the user sees (the profile picker), because the
-/// filter is registered before the first <c>ShowDialog</c>/<c>Application.Run</c> call.
+/// The manual and F1 help. F1 shows help for the control you are on, in the manual's own words (<see cref="ContextHelp"/>);
+/// Shift+F1 opens the whole manual in the browser (Ed, 2026-09-25). Until then F1 opened the whole manual from anywhere.
+/// Both keys are caught app-wide by <see cref="HelpKeyMessageFilter"/>, installed once at startup before the first
+/// window, so they work in every window and dialog, the profile picker included.
 ///
 /// File location: <c>&lt;exe&gt;\readme.html</c> (resolved via <see cref="AppContext.BaseDirectory"/>).
 /// The .csproj copies it from the project root via a Content/Link rule so a fresh
@@ -15,31 +14,45 @@ namespace RemSound.App;
 /// </summary>
 internal static class HelpLauncher
 {
-    /// <summary>Open the manual via Windows' shell association (default browser). Shows a
-    /// MessageBox if the file is missing or shell-execute fails — better to surface an
-    /// explanation than silently swallow the F1.</summary>
-    public static void OpenManual()
+    private static string ManualPath => Path.Combine(AppContext.BaseDirectory, "readme.html");
+
+    /// <summary>Gate seam: where the browser would have gone, instead of opening one.</summary>
+    internal static Action<string>? BrowserForTest;
+
+    /// <summary>The whole manual, from the top, in the default browser (Shift+F1, and Help, Open user manual).</summary>
+    public static void OpenManual() => OpenManualAt(null);
+
+    /// <summary>The manual in the default browser, at a help key's entry, or at the top for null. Shows a message if the
+    /// file is missing or the browser can't be started - better to say why than silently swallow the key.</summary>
+    public static void OpenManualAt(string? key)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "readme.html");
+        var path = ManualPath;
         if (!File.Exists(path))
         {
-            MessageBox.Show(
+            AppMessageBox.Show(
                 $"Manual not found at:\n\n{path}\n\nThe readme.html file should sit next to RemSound.exe. Unzipping RemSound again, or reinstalling it, will put it back.",
                 "Manual not found",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
             return;
         }
+        var target = new Uri(path).AbsoluteUri + (key is null ? "" : "#" + HelpManual.AnchorFor(key));
+        RemSoundLog.Current?.Event(key is null ? "manual: opening the whole manual in the browser" : $"context help: opening the manual in the browser at {key}");
+        if (BrowserForTest is { } seam) { seam(target); return; }
+        if (Windowless.Active)
+        {
+            RemSoundLog.Current?.Event($"manual: a headless copy opens no browser; it would have opened {target}");
+            return;
+        }
         try
         {
-            // UseShellExecute=true is the load-bearing flag — it lets the OS pick the .html
-            // handler (Edge / Chrome / Firefox / whatever the user defaulted). Without it
-            // Process.Start would treat the .html as an executable and fail.
-            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+            // Shell-executed, so Windows picks the .html handler (Edge / Chrome / Firefox / whatever the user defaulted);
+            // a place in the manual goes through a one-line page (shared with the plugin, in HelpManual).
+            HelpManual.OpenInBrowser(path, key);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(
+            AppMessageBox.Show(
                 $"Could not open the manual:\n\n{ex.Message}",
                 "Manual open failed",
                 MessageBoxButtons.OK,
@@ -47,9 +60,51 @@ internal static class HelpLauncher
         }
     }
 
-    /// <summary>Install the F1-catches-help message filter on the current thread's message
-    /// loop. Call once from <c>Program.Main</c> before any form is shown. Idempotent — calling
-    /// it twice would register two filters which is wasteful but not harmful.</summary>
+    /// <summary>F1 with the keyboard on <paramref name="hwnd"/>: that control's help, or the whole manual where there is
+    /// none. Shown after the key has been dealt with rather than inside the message filter, so its window runs its own
+    /// message loop at the top level.</summary>
+    internal static void F1(IntPtr hwnd)
+    {
+        // A menu open - the main menus or the tray menu - means the menu item the keyboard is on.
+        if (ContextHelp.OpenMenuItem() is { Owner: { } menu } item)
+        {
+            menu.BeginInvoke(() =>
+            {
+                if (!ContextHelp.ShowForItem(item))
+                {
+                    RemSoundLog.Current?.Event($"context help: F1 on the menu item \"{ContextHelp.NameOfItem(item)}\", which has no context help - opened the whole manual");
+                    OpenManual();
+                }
+            });
+            return;
+        }
+        var control = Control.FromChildHandle(hwnd);
+        if (control?.FindForm() is ContextHelpWindow) return;   // F1 inside the help window itself
+        if (control is not null && !control.IsDisposed && ContextHelp.Find(control) is not null)
+        {
+            control.BeginInvoke(() => { if (!control.IsDisposed) ContextHelp.Show(control); });
+            return;
+        }
+        RemSoundLog.Current?.Event($"context help: F1 on {(control is null ? "a window that is not RemSound's own" : $"\"{ContextHelp.NameOf(control)}\"")}, which has no context help - opened the whole manual");
+        OpenManual();
+    }
+
+    /// <summary>Give the help window, which lives in the shared library, the app's sounds, log and browser. Called at
+    /// startup, and by the checks, so they drive exactly what a person gets.</summary>
+    internal static void WireContextHelp()
+    {
+        ContextHelp.PlayOpenSound = HelpSoundService.PlayOpen;
+        ContextHelp.PlayCloseSound = HelpSoundService.PlayClose;
+        ContextHelp.Log = line => RemSoundLog.Current?.Event(line);
+        ContextHelp.OpenManualInBrowser = OpenManualAt;
+        // From the tray menu the main window may be hidden: help goes in front of everything, as every dialog that can
+        // appear from the tray does.
+        ContextHelp.ShowInFront = window => ForegroundDialog.Show(owner => window.ShowDialog(owner));
+    }
+
+    /// <summary>Install the F1 message filter on the current thread's message loop. Call once from <c>Program.Main</c>
+    /// before any form is shown. Idempotent — calling it twice would register two filters which is wasteful but not
+    /// harmful.</summary>
     public static void Install()
     {
         Application.AddMessageFilter(new HelpKeyMessageFilter());
@@ -57,10 +112,9 @@ internal static class HelpLauncher
 }
 
 /// <summary>
-/// Catches F1 keypresses anywhere in the application before they reach the focused control.
-/// Modifier-aware: bare F1 only — Ctrl+F1, Shift+F1, Alt+F1 fall through unchanged so we
-/// don't steal future combos. Single-instance state is fine because the filter chain is
-/// per-thread and RemSound is a single-threaded WinForms app.
+/// Catches F1 and Shift+F1 anywhere in the application before they reach the focused control. Ctrl+F1 and Alt+F1 fall
+/// through unchanged. Single-instance state is fine because the filter chain is per-thread and RemSound is a
+/// single-threaded WinForms app.
 /// </summary>
 internal sealed class HelpKeyMessageFilter : IMessageFilter
 {
@@ -68,14 +122,22 @@ internal sealed class HelpKeyMessageFilter : IMessageFilter
     private const int WM_SYSKEYDOWN = 0x0104;
     private const int VK_F1 = 0x70;
 
+    /// <summary>Gate seam: the modifier keys held, instead of asking the keyboard.</summary>
+    internal static Func<Keys>? ModifiersForTest;
+
     public bool PreFilterMessage(ref Message m)
     {
         if (m.Msg != WM_KEYDOWN && m.Msg != WM_SYSKEYDOWN) return false;
         if (m.WParam.ToInt32() != VK_F1) return false;
-        // Bare F1 only — modifier combos are passed through. Lets a future "Shift+F1" do
-        // something else (context help, etc.) without colliding with us.
-        if ((Control.ModifierKeys & (Keys.Control | Keys.Shift | Keys.Alt)) != Keys.None) return false;
-        HelpLauncher.OpenManual();
+        var held = (ModifiersForTest?.Invoke() ?? Control.ModifierKeys) & (Keys.Control | Keys.Shift | Keys.Alt);
+        if (held == Keys.Shift)
+        {
+            RemSoundLog.Current?.Event("manual: Shift+F1 - the whole manual");
+            HelpLauncher.OpenManual();
+            return true;
+        }
+        if (held != Keys.None) return false;
+        HelpLauncher.F1(m.HWnd);
         return true; // consumed — no further dispatch
     }
 }

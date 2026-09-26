@@ -85,6 +85,10 @@ internal sealed class RenamePeerDialog : Form
         Controls.Add(grid);
         AcceptButton = okButton;
         CancelButton = cancelButton;
+        ContextHelp.Mark(nameBox, "dialog.rename-peer.friendly-name");
+        ContextHelp.Mark(clearButton, "dialog.rename-peer.clear");
+        ContextHelp.Mark(okButton, "dialog.rename-peer.ok");
+        ContextHelp.Mark(cancelButton, "dialog.rename-peer.cancel");
 
         Shown += (_, _) => { nameBox.Focus(); nameBox.SelectAll(); };
     }

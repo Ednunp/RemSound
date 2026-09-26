@@ -104,6 +104,8 @@ internal sealed class QuickProfileSwitchDialog
 
         dialog.Controls.Add(root);
         dialog.CancelButton = closeButton;
+        ContextHelp.Mark(list, "dialog.quick-profile-switch.profiles");
+        ContextHelp.Mark(closeButton, "dialog.quick-profile-switch.close");
 
         string? chosenPath = null;
         void Commit()

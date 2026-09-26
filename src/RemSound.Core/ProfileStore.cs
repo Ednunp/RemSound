@@ -150,6 +150,9 @@ public sealed class ProfileStore
         WriteFileAtomic(path, JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true }));
     }
 
+    /// <summary>Gate seam: runs between the temporary file and the move, so a check can crash a write half way.</summary>
+    internal static Action? MidWriteForTest;
+
     /// <summary>Write text crash-safely: write a sibling temp file, then atomically move it over the
     /// target. A crash, power-loss, or the updater force-closing mid-write then leaves either the old
     /// file or the complete new one — never a truncated file that the catch-all loaders would
@@ -160,6 +163,7 @@ public sealed class ProfileStore
         try
         {
             File.WriteAllText(tmp, contents);
+            MidWriteForTest?.Invoke();
             File.Move(tmp, path, overwrite: true);
         }
         catch

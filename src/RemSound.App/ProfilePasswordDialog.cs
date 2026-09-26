@@ -89,7 +89,7 @@ internal static class ProfilePasswordDialog
                     DefaultButton = TaskDialogButton.OK,
                     AllowCancel = true,
                 };
-                TaskDialog.ShowDialog(dialog, page);
+                AppTaskDialog.ShowDialog(dialog, page);
                 textBox.Focus();
                 textBox.SelectAll();
                 return;
@@ -122,6 +122,9 @@ internal static class ProfilePasswordDialog
         dialog.Controls.Add(panel);
         dialog.AcceptButton = okButton;
         dialog.CancelButton = cancelButton;
+        ContextHelp.Mark(textBox, "dialog.change-profile-password.password");
+        ContextHelp.Mark(okButton, "dialog.change-profile-password.ok");
+        ContextHelp.Mark(cancelButton, "dialog.change-profile-password.cancel");
         return (dialog, textBox);
     }
 }

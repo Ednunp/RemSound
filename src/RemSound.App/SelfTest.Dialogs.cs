@@ -32,8 +32,15 @@ internal static partial class SelfTest
         "clear", "remove", "add", "delete", "rename", "save", "apply", "install", "later", "yes", "no",
     ];
 
-    private static string DialogControlName(Control c) =>
-        (!string.IsNullOrWhiteSpace(c.AccessibleName) ? c.AccessibleName : c.Text ?? "").Trim();
+    /// <summary>What a screen reader announces the control as. A caption (a button's, a tick box's) is a name; a list's,
+    /// number box's or text box's Text is its VALUE, and until 2026-09-24 that value stood in for a missing name - a combo
+    /// with no name passed because an item was chosen. For those, what Windows itself reports is asked instead.</summary>
+    private static string DialogControlName(Control c)
+    {
+        if (!string.IsNullOrWhiteSpace(c.AccessibleName)) return c.AccessibleName.Trim();
+        if (c is ButtonBase or Label) return (c.Text ?? "").Trim();
+        try { return (c.AccessibilityObject.Name ?? "").Trim(); } catch { return ""; }
+    }
 
     private static bool IsDeclaredInert(Control c)
     {
@@ -109,7 +116,11 @@ internal static partial class SelfTest
                         if (!IsThemeApprovedColour(c.BackColor))
                             problems.Add($"{name} / '{DialogControlName(c)}': hardcoded BackColor {c.BackColor} - fights light/dark");
 
-                        var interactive = c is CheckBox or ComboBox or NumericUpDown or TrackBar or ListBox or CheckedListBox;
+                        // The text box inside a number box is the number box's own; it is audited as that.
+                        if (c.Parent is UpDownBase) continue;
+                        // Text boxes and radio buttons too: they were never audited here (2026-09-24).
+                        var interactive = c is CheckBox or RadioButton or ComboBox or NumericUpDown or TrackBar or ListBox or CheckedListBox
+                            or TextBoxBase;
                         if (!interactive) continue;
                         controlsAudited++;
 
@@ -205,6 +216,8 @@ internal static partial class SelfTest
         switch (c)
         {
             case CheckBox cb: cb.Checked = !cb.Checked; break;
+            case RadioButton rb: rb.Checked = !rb.Checked; break;
+            case TextBoxBase tb when !tb.ReadOnly: tb.Text += "1"; break;
             case NumericUpDown n: n.Value = n.Value < n.Maximum ? n.Value + 1 : n.Minimum; break;
             case TrackBar t: DragSlider(t, t.Value < t.Maximum ? 1 : -1); break;
             case CheckedListBox clb when clb.Items.Count > 0: clb.SetItemChecked(0, !clb.GetItemChecked(0)); break;
@@ -218,9 +231,13 @@ internal static partial class SelfTest
     /// to be covered by the shared factory list.</summary>
     private static string? EveryDialogIsAudited()
     {
-        var formTypes = typeof(MainForm).Assembly.GetTypes()
+        // The app AND the shared library it shows windows from: the "press a key" window for shortcuts lives in RemSound.Core,
+        // and a scan of the app alone never saw it (2026-09-24).
+        var formTypes = new[] { typeof(MainForm).Assembly, typeof(HotkeyCaptureForm).Assembly }
+            .SelectMany(a => a.GetTypes())
             .Where(t => typeof(Form).IsAssignableFrom(t) && !t.IsAbstract && t != typeof(MainForm))
             .Select(t => t.Name)
+            .Distinct()
             .ToList();
 
         var covered = new HashSet<string>(StringComparer.Ordinal);
@@ -237,9 +254,65 @@ internal static partial class SelfTest
 
         // A window type is covered when some factory produces it — CmdKeyForm is the shared host for
         // every closure-built dialog, so it is reached through those, not by a factory of its own.
-        var missing = formTypes.Where(t => !covered.Contains(t)).ToList();
+        // Window types that are not dialogs, each with why - reviewable rather than silent, as the plain windows below.
+        var notDialogTypes = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["SplashWindow"] = "the audio-driver splash (AsioLoadingSplash): text only, no controls, and it closes itself",
+        };
+        var missing = formTypes.Where(t => !covered.Contains(t) && !notDialogTypes.ContainsKey(t)).ToList();
         Check(missing.Count == 0,
             $"these windows are shown to users but no audit can reach them - give each a headless Build seam: {string.Join(", ", missing)}");
-        return $"{formTypes.Count} window types in the app, all reachable by the audits";
+
+        // PLAIN WINDOWS. A dialog built as `new Form { ... }` inside a method is not a type of its own, so the check above
+        // cannot see it - "Manage named peers" and the install options were shown to users with no audit reaching them
+        // (found 2026-09-24). Every place the app builds one must be a Build method the factory list uses, or say why not.
+        var root = FindSourceRoot();
+        if (root is null) return Skip("the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
+        var factoryNames = DialogFactories().Select(f => f.Name).ToHashSet(StringComparer.Ordinal);
+        var reachedBy = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["AppInstaller.BuildInstallOptionsDialog"] = "Install options",
+            ["AppInstaller.BuildUninstallConfirmDialog"] = "Uninstall confirmation",
+            ["MainForm.BuildManageNamedPeersDialog"] = "Manage named peers",
+            ["MainFormHotkeyController.BuildKeyboardShortcutsDialog"] = "Keyboard shortcuts",
+            ["ManualPeerPrompt.Build"] = "Manual peer prompt",
+            ["ProfilePasswordDialog.Build"] = "Change profile password",
+            ["ProfilePasswordManagerDialog.Build"] = "Profile passwords manager",
+            ["ProfileSaveAsPrompt.Build"] = "Profile name prompt",
+            ["QuickProfileSwitchDialog.Build"] = "Quick profile switch",
+            ["ServiceProfileDialog.BuildAdditionalOptions"] = "Service additional options",
+        };
+        var notDialogs = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["AppInstaller.RunElevatedResponsive"] = "a 'working' window with one line of text and no controls, up only while an elevated step runs",
+            ["AsioLoadingSplash.RunSplash"] = "the start-up splash: text only, no controls, and it closes itself",
+            ["ForegroundDialog.Show"] = "an invisible owner that brings a message box to the front - never seen itself",
+        };
+        foreach (var (site, factory) in reachedBy)
+            Check(factoryNames.Contains(factory), $"{site} is declared reached by the \"{factory}\" factory, which is not in the list - so nothing reaches it");
+
+        var sites = new List<string>();
+        var unreached = new List<string>();
+        var methodStart = new System.Text.RegularExpressions.Regex(@"(?m)^[ \t]*(?:public|private|internal|protected)\b[^{;=]*?\b(\w+)(?:<\w+>)?\(");
+        foreach (var file in Directory.EnumerateFiles(Path.Combine(root, "src", "RemSound.App"), "*.cs"))
+        {
+            var name = Path.GetFileNameWithoutExtension(file);
+            if (name.StartsWith("SelfTest", StringComparison.Ordinal)) continue;
+            var text = File.ReadAllText(file);
+            foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(text, @"\bnew (?:Form|CmdKeyForm)\b(?!\w)"))
+            {
+                var method = methodStart.Matches(text[..m.Index]).LastOrDefault()?.Groups[1].Value ?? "?";
+                // A partial class's other files (MainForm.Relay.cs) belong to the class, not the file.
+                var site = $"{name.Split('.')[0]}.{method}";
+                sites.Add(site);
+                if (!reachedBy.ContainsKey(site) && !notDialogs.ContainsKey(site)) unreached.Add(site);
+            }
+        }
+        Check(sites.Count >= reachedBy.Count, $"the scan must find the plain windows it knows about, or it is watching nothing (found {sites.Count})");
+        Check(unreached.Count == 0,
+            $"these build a window in place and show it, so no audit can reach them - give each a Build method in the factory list, "
+            + $"or declare why it is not a dialog: {string.Join(", ", unreached)}");
+        return $"{formTypes.Count} window types and {sites.Count} plain windows in the app, all reachable by the audits "
+             + $"({notDialogs.Count} declared not dialogs)";
     }
 }

@@ -60,6 +60,8 @@ internal static partial class SelfTest
         Pin("type Audio", (byte)RemPacketType.Audio, 2, "every peer's dispatch");
         Pin("type KeepAlive", (byte)RemPacketType.KeepAlive, 3, "older peers that still send it");
         Pin("type Heartbeat", (byte)RemPacketType.Heartbeat, 4, "peer discovery and reachability on every port");
+        Pin("type TickProof", (byte)RemPacketType.TickProof, 11, "accepting a peer that only listens - the iPhone and Android apps send and read it by this number");
+        Pin("tick proof sealed payload", TickProof.SealedPayloadBytes, 53, "the phone apps build and check it at this size");
 
         // --- Payload shapes. The far end reads these by fixed offset. ------------------------------
         Pin("format payload", RemPacket.FormatPayloadSize, 32, "peers negotiating stream format");
@@ -174,12 +176,13 @@ internal static partial class SelfTest
         Pin("server hello interval ms", (int)RelayGroupClient.HelloInterval.TotalMilliseconds, 2000,
             "nothing on the wire, but the relay forgets a member after 60 s of silence and the notes tell other ports this figure");
 
-        // --- The app↔plugin bridge. The VST3 is named above as a port in the wild, and it is one in
-        // the most literal sense: it is INSTALLED separately, into the user's own VST3 folder, and it
-        // stays there across app updates — Anthony has a build sitting in Reaper right now. Change any
-        // of these in the app and that installed copy does not report an error: it finds nobody, goes
-        // silent, and tells him the app is not running. None of it was pinned until 2026-08-24, when
-        // moving the port broke nothing in the gate at all. ----------------------------------------
+        // --- The app↔plugin bridge. Pinned so none of it changes by ACCIDENT: moving the port on
+        // 2026-08-24 broke nothing in the gate at all. The plugin has never been released (Ed,
+        // 2026-09-25: "no one has this plugin ... this is its 1st release"), so the app and the plugin
+        // always come from the same build and there is no older plugin to stay compatible with. A
+        // deliberate change is made in both halves together - as the reply's parts were on 2026-09-25,
+        // which changed the reply's own layout and none of these. A tester's older test build simply
+        // gets the new one. ------------------------------------------------------------------------
         Pin("plugin bridge magic", System.Text.Encoding.ASCII.GetString(PluginBridgeProtocol.Magic), "RSBR",
             "any already-installed VST3 — every message it sends would be discarded as foreign");
         Pin("plugin bridge version", PluginBridgeProtocol.Version, 1,

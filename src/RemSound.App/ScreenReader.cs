@@ -39,7 +39,25 @@ internal static class ScreenReader
 
     /// <summary>Speak text through the active screen reader (best-effort; silent if none is running).
     /// Returns true if it reached a screen reader.</summary>
-    public static bool Speak(string text, bool interrupt = true) => !Suppressed && Backend.Speak(text, interrupt);
+    public static bool Speak(string text, bool interrupt = true)
+    {
+        // A headless copy says nothing, but whoever drives it can read what it would have said (the speech command).
+        HeadlessRecords.Note(HeadlessRecords.Speech, text);
+        return !Suppressed && Backend.Speak(text, interrupt);
+    }
+
+    /// <summary>Have the screen reader read <paramref name="text"/> for a control, through Windows' own notification
+    /// (NVDA reads it natively - not an extra speech layer). Behind the same switch as <see cref="Speak"/>: this was
+    /// raised directly from the pan and EQ tab, where a run driving the window would have spoken it (2026-09-24).</summary>
+    public static void Notify(System.Windows.Forms.Control control, string text)
+    {
+        HeadlessRecords.Note(HeadlessRecords.Speech, text);
+        if (Suppressed || Windowless.Hiding) return;
+        control.AccessibilityObject.RaiseAutomationNotification(
+            System.Windows.Forms.Automation.AutomationNotificationKind.ActionCompleted,
+            System.Windows.Forms.Automation.AutomationNotificationProcessing.MostRecent,
+            text);
+    }
 
     /// <summary>Release the backend on app shutdown. Safe to call when nothing was ever spoken.</summary>
     public static void Shutdown()

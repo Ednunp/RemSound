@@ -154,18 +154,54 @@ internal static partial class SelfTest
                 $"the report must carry the real reason so the user is told what happened (got: {failureReason})");
             Check(failedPath is not null, "...and which file was partly written, so whatever was salvaged can be found");
 
-            // Only once, however many tracks fall over - a split recording must not produce a warning
-            // per peer.
-            var reportCount = 0;
-            controller.RecordingFailed += (_, _) => reportCount++;
-            controller.FailNextWriteForTest();
-            for (var i = 0; i < 10; i++) { sender.OnSentSamples?.Invoke(block.AsMemory(), RenderRoute.Mixed); Thread.Sleep(10); }
-            Check(reportCount == 0, "the failure must be reported ONCE per recording, not once per track that falls over");
-
             controller.Stop();
             Check(!controller.IsRecording, "and stopping afterwards must leave the app honest about its state");
 
-            return $"a dying writer reports itself with the reason and the partial file, exactly once per recording";
+            // Only once, however many tracks fall over - asked of a SPLIT recording, where it matters: one writer per
+            // person plus your own, all falling over together (a full disk takes every track at once). This used to
+            // re-arm the single-file writer that had already died, which can never report twice (found 2026-09-24).
+            var splitFolder = Path.Combine(temp, "split");
+            Directory.CreateDirectory(splitFolder);
+            var andre = new IPEndPoint(IPAddress.Parse("192.168.1.61"), 47830);
+            var chris = new IPEndPoint(IPAddress.Parse("192.168.1.62"), 47830);
+            var split = new RecordingController(sender, receiver, new RemSoundSettingsStore("RemSound"), _ => { })
+            {
+                SettingsSourceForTest = () => new RecordingSettings
+                {
+                    SplitTracks = true,
+                    Source = RecordingSource.Both,
+                    FileFormat = RecordingFileFormat.Wav,
+                    Folder = splitFolder,
+                },
+                ConnectedPeersProvider = () => new[] { (andre.Address, "Andre"), (chris.Address, "Chris") },
+            };
+            var splitReports = 0;
+            string? splitReason = null;
+            split.RecordingFailed += (reason, _) => { Interlocked.Increment(ref splitReports); splitReason = reason; };
+            split.Start();
+            Check(split.IsRecording, "the split recording must be running before it can be killed");
+            split.FailNextWriteForTest();
+            var peerTap = receiver.PeerRecordTapForTest;
+            var blockDone = receiver.OnRecordBlockComplete;
+            for (var i = 0; i < 80 && split.FaultedRecordersForTest < 3; i++)
+            {
+                peerTap?.Invoke(andre, block.AsMemory());
+                peerTap?.Invoke(chris, block.AsMemory());
+                blockDone?.Invoke(block.Length);
+                sender.OnSentSamples?.Invoke(block.AsMemory(), RenderRoute.Mixed);
+                Thread.Sleep(10);
+            }
+            var died = split.FaultedRecordersForTest;
+            Thread.Sleep(100);   // a late second report lands before the count is read
+            Check(died >= 2, $"the split half must have more than one writer fall over, or it asks nothing (only {died} died)");
+            Check(splitReports == 1,
+                $"a split recording whose {died} tracks all fell over must tell the person ONCE, not once per track (told {splitReports} times)");
+            Check(splitReason?.Contains("simulated disk failure") == true, $"and with the real reason (got: {splitReason})");
+            split.Stop();
+            Check(!split.IsRecording, "and stopping the split recording afterwards must leave the app honest about its state");
+
+            return "a dying writer reports itself with the reason and the partial file, exactly once per recording - "
+                 + $"including a split recording where all {died} tracks died at once";
         }
         finally { try { Directory.Delete(temp, recursive: true); } catch { } }
     }
@@ -192,9 +228,11 @@ internal static partial class SelfTest
             var receivedNone = RecordTone(temp, Path.Combine(temp, "received-none.wav"),
                 new RecordingSettings { FileFormat = RecordingFileFormat.Wav, Source = RecordingSource.ReceivedOnly },
                 feedReceived: false, feedSent: true);
-            Check(received > 200, $"a ReceivedOnly recorder fed received audio must capture it ({received} bytes)");
-            Check(receivedNone < received / 2,
-                $"a ReceivedOnly recorder fed ONLY your own send must stay near empty ({receivedNone} bytes against {received})");
+            // Judged by what the files HOLD, not their size: a kept side written as silence of the right length passed the
+            // size checks (found 2026-09-24).
+            CheckHoldsTheTestTone(Path.Combine(temp, "received.wav"), "a ReceivedOnly recording fed received audio");
+            Check(RmsOfRecording(Path.Combine(temp, "received-none.wav")) < 0.01,
+                $"a ReceivedOnly recorder fed ONLY your own send must hold silence ({received} vs {receivedNone} bytes; RMS {RmsOfRecording(Path.Combine(temp, "received-none.wav")):0.000})");
             findings.Add("ReceivedOnly keeps received and drops sent");
 
             var sent = RecordTone(temp, Path.Combine(temp, "sent.wav"),
@@ -203,14 +241,15 @@ internal static partial class SelfTest
             var sentNone = RecordTone(temp, Path.Combine(temp, "sent-none.wav"),
                 new RecordingSettings { FileFormat = RecordingFileFormat.Wav, Source = RecordingSource.SentOnly },
                 feedReceived: true, feedSent: false);
-            Check(sent > 200, $"a SentOnly recorder fed your send must capture it ({sent} bytes)");
-            Check(sentNone < sent / 2, $"a SentOnly recorder fed ONLY received audio must stay near empty ({sentNone} bytes against {sent})");
+            CheckHoldsTheTestTone(Path.Combine(temp, "sent.wav"), "a SentOnly recording fed your send");
+            Check(RmsOfRecording(Path.Combine(temp, "sent-none.wav")) < 0.01,
+                $"a SentOnly recorder fed ONLY received audio must hold silence ({sent} vs {sentNone} bytes; RMS {RmsOfRecording(Path.Combine(temp, "sent-none.wav")):0.000})");
             findings.Add("SentOnly keeps sent and drops received");
 
             var both = RecordTone(temp, Path.Combine(temp, "both.wav"),
                 new RecordingSettings { FileFormat = RecordingFileFormat.Wav, Source = RecordingSource.Both },
                 feedReceived: true, feedSent: true);
-            Check(both > 200, $"a Both recorder must capture the exchange ({both} bytes)");
+            CheckHoldsTheTestTone(Path.Combine(temp, "both.wav"), "a Both recording of the exchange");
             // Both must carry EITHER side on its own - a mix that silently needs both present would
             // record nothing during the stretches when only one person is talking.
             var bothReceivedOnly = RecordTone(temp, Path.Combine(temp, "both-r.wav"),
@@ -219,8 +258,8 @@ internal static partial class SelfTest
             var bothSentOnly = RecordTone(temp, Path.Combine(temp, "both-s.wav"),
                 new RecordingSettings { FileFormat = RecordingFileFormat.Wav, Source = RecordingSource.Both },
                 feedReceived: false, feedSent: true);
-            Check(bothReceivedOnly > 200 && bothSentOnly > 200,
-                $"Both must record either side alone, not only when they overlap (received-only {bothReceivedOnly}B, sent-only {bothSentOnly}B)");
+            CheckHoldsTheTestTone(Path.Combine(temp, "both-r.wav"), $"Both, with only received audio ({bothReceivedOnly}B)");
+            CheckHoldsTheTestTone(Path.Combine(temp, "both-s.wav"), $"Both, with only your send ({bothSentOnly}B)");
             findings.Add("Both takes either side alone");
 
             // --- Channel modes, checked in the WAV header rather than by size ------------------------
@@ -248,6 +287,9 @@ internal static partial class SelfTest
                 var ext = AudioRecorder.ExtensionFor(fmt);
                 var made = SplitRecordCount(temp, fmt, ext);
                 Check(made >= 2, $"split recording in {fmt} must produce a track per peer plus your own, named .{ext} (got {made})");
+                foreach (var track in Directory.GetFiles(Path.Combine(temp, "split-" + ext), "*." + ext, SearchOption.AllDirectories))
+                    Check(RmsOfRecording(track) > 0.05,
+                        $"every split track in {fmt} must hold the audio fed to it, not just be bigger than 200 bytes ({Path.GetFileName(track)}: RMS {RmsOfRecording(track):0.000})");
             }
             // EVERY extension, not only the surprising one. The loop above asks the recorder what
             // extension it uses and then looks for exactly that, so it stays self-consistent whatever

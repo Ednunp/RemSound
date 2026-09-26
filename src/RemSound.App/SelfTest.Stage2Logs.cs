@@ -208,25 +208,70 @@ internal static partial class SelfTest
             Check(ServiceStore.LoadProfile() is { Title: "Service" }, "the service profile must read back whole");
             Check(ServiceStore.LoadStartupVolume() == (true, 60, false), "the service settings must read back whole, with the latest values");
             Check(!Directory.EnumerateFiles(ServiceStore.Directory, "*.tmp").Any(), "a finished service write must leave no temporary file behind");
+
+            // THE CRASH ITSELF, half way through a write. Both writes above pass just as well written straight over the file,
+            // which is the fault this exists for (found 2026-09-24): so each write is now killed between its temporary file
+            // and the move, and the file on disk must still be the whole old one.
+            var crashes = 0;
+            ProfileStore.MidWriteForTest = () => { crashes++; throw new IOException("gate: the power went, half way through"); };
+            try { ProfileStore.WriteProfileFile(path, new Profile { Title = "Studio", Volume = 91 }); } catch (IOException) { }
+            ProfileStore.MidWriteForTest = null;
+            Check(crashes == 1, "the profile write must go through a temporary file - the crash point between it and the move was never reached");
+            var survived = System.Text.Json.JsonSerializer.Deserialize<Profile>(File.ReadAllText(path));
+            Check(survived is { Volume: 64 }, $"a profile write killed half way must leave the whole OLD profile on disk (volume {survived?.Volume.ToString() ?? "unreadable"}, was 64)");
+            Check(!Directory.EnumerateFiles(dir, "*.tmp").Any(), "and must not leave its temporary file lying about");
+
+            ServiceStore.MidWriteForTest = () => { crashes++; throw new IOException("gate: the power went, half way through"); };
+            try { ServiceStore.SaveStartupVolume(true, 12, bootOnly: true); } catch (IOException) { }
+            ServiceStore.MidWriteForTest = null;
+            Check(crashes == 2, "the service write must go through a temporary file - the crash point between it and the move was never reached");
+            Check(ServiceStore.LoadStartupVolume() == (true, 60, false),
+                $"a service write killed half way must leave the whole OLD settings on disk (read {ServiceStore.LoadStartupVolume()})");
         }
         finally
         {
+            ProfileStore.MidWriteForTest = null;
+            ServiceStore.MidWriteForTest = null;
             ServiceStore.TestDirectoryOverride = savedOverride;
             try { Directory.Delete(dir, recursive: true); } catch { /* temp */ }
         }
 
+        // Nothing else writes a whole profile or service file round the two writers above. Every other whole-file write in
+        // the app is declared here with what it is; a new one fails until it is. This read two files until 2026-09-24.
         var root = FindSourceRoot();
-        if (root is null) return Skip("the writes are whole, but the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
-        foreach (var file in new[] { "MainForm.cs", "ProfilePasswordManagerDialog.cs" })
+        if (root is null) return Skip("the writes survive a crash, but the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
+        var declared = new Dictionary<string, (int Count, string What)>(StringComparer.Ordinal)
         {
-            var text = File.ReadAllText(Path.Combine(root, "src", "RemSound.App", file));
-            Check(!text.Contains("File.WriteAllText(", StringComparison.Ordinal),
-                $"{file} must write profiles through ProfileStore's crash-safe write, not File.WriteAllText");
-        }
-        var store = File.ReadAllText(Path.Combine(root, "src", "RemSound.Core", "ServiceStore.cs"));
-        Check(CountOccurrences(store, "File.WriteAllText(") == 1,
-            "every whole file the service keeps must go through its crash-safe write — File.WriteAllText may appear only inside it");
-        return "profile and service files are written to a temporary file and moved into place";
+            ["RemSound.Core/ProfileStore.cs"] = (1, "the crash-safe profile writer's temporary file"),
+            ["RemSound.Core/ServiceStore.cs"] = (1, "the crash-safe service writer's temporary file"),
+            ["RemSound.Core/AppConfig.cs"] = (3, "the settings file's own temporary file, the one-line plugin pointer, and a Windows account's own one-line server id"),
+            ["RemSound.App/AppInstaller.cs"] = (2, "the install marker and the uninstall script"),
+            ["RemSound.App/CommandLine.cs"] = (3, "release signatures and the diagnostics report"),
+            // The shared library the DAW plugin also loads (scanned since 2026-09-25, when this write moved into it).
+            ["RemSound.Ui/HelpManual.cs"] = (1, "the one-line page that opens the manual at a control's entry"),
+            ["RemSound.App/PluginInstaller.cs"] = (2, "the plugin's version stamp and file list"),
+            ["RemSound.App/Program.cs"] = (1, "the crash report"),
+            ["RemSound.App/UpdateApplier.cs"] = (4, "the profile to resume after an update, the failed-update note, the note for an update that could not be put back, and the note for one found cut off"),
+            ["RemSound.App/WhatsNewMarker.cs"] = (1, "the what's-new marker"),
+        };
+        var found = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var project in new[] { "RemSound.App", "RemSound.Core", "RemSound.Sender", "RemSound.Receiver", "RemSound.Ui" })
+            foreach (var file in Directory.EnumerateFiles(Path.Combine(root, "src", project), "*.cs", SearchOption.AllDirectories))
+            {
+                if (file.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.Ordinal)) continue;
+                if (Path.GetFileName(file).StartsWith("SelfTest", StringComparison.Ordinal)) continue;
+                var text = File.ReadAllText(file);
+                var n = CountOccurrences(text, "File.WriteAllText(") + CountOccurrences(text, "File.WriteAllLines(") + CountOccurrences(text, "File.WriteAllBytes(");
+                if (n > 0) found[$"{project}/{Path.GetRelativePath(Path.Combine(root, "src", project), file).Replace('\\', '/')}"] = n;
+            }
+        var undeclared = found.Where(f => !declared.TryGetValue(f.Key, out var d) || d.Count != f.Value)
+            .Select(f => $"{f.Key} ({f.Value})").ToList();
+        Check(undeclared.Count == 0,
+            $"these write whole files in ways nobody has declared - a profile or service file must go through the crash-safe writers, "
+            + $"and anything else must be added to the list with what it is: {string.Join(", ", undeclared)}");
+        Check(found.Count >= 2, $"the scan must find the two crash-safe writers at least, or it is looking in the wrong place (found {found.Count})");
+        return "profile and service files are written to a temporary file and moved into place, and a write killed half way leaves "
+             + $"the whole old file; all {found.Values.Sum()} whole-file writes in the app are declared";
     }
 
     /// <summary>

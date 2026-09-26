@@ -223,6 +223,9 @@ internal sealed class CaptureSource : IDisposable
     /// always thrown away rather than revived.</summary>
     public bool Faulted { get; private set; }
 
+    /// <summary>Gate seam: die as a device does when it faults in place.</summary>
+    internal void MarkFaultedForTest() => Faulted = true;
+
     /// <summary>How long audio waits inside THIS source's device, as the device reports it. Zero for
     /// a per-application capture, which has no device of its own — Windows mixes it for us and there
     /// is nothing to ask. See <see cref="ICaptureBackend.ReportedInputLatencyMs"/>. 2026-08-24.</summary>

@@ -310,6 +310,7 @@ internal static partial class SelfTest
         // A box given the window it was opened from as its owner is already in front of that window. A box with NO
         // owner is the shape that opens behind everything, so it must come through ForegroundDialog.
         var behind = boxes.Where(l => !l.Text.Contains("ForegroundDialog.Show(owner => MessageBox.Show(")
+                                      && !l.Text.Contains("ForegroundDialog.Show(owner => AppMessageBox.Show(")
                                       && !l.Text.Contains("MessageBox.Show(owner,")
                                       && !l.Text.Contains("MessageBox.Show(this,")).ToList();
         Check(behind.Count == 0,

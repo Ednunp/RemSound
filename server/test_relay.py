@@ -14,6 +14,7 @@ import importlib.util
 import logging
 import logging.handlers
 import os
+import shutil
 import struct
 import sys
 import time
@@ -57,8 +58,9 @@ def v2_packet(pkt_type: int, client_id: bytes, payload: bytes = b"", stream_id: 
             + struct.pack("<I", seq) + client_id + payload)
 
 
-def make_relay(require_addr_check: bool = False, max_clients: int = 10):
-    return relay.Relay(FakeSocket(), _LOG, max_clients, require_addr_check=require_addr_check)
+def make_relay(require_addr_check: bool = False, max_clients: int = 10, v2_watch_only: bool = False):
+    return relay.Relay(FakeSocket(), _LOG, max_clients, require_addr_check=require_addr_check,
+                       v2_watch_only=v2_watch_only)
 
 
 def cookie_sent_to(sock: FakeSocket, addr) -> bytes | None:
@@ -72,6 +74,13 @@ def cookie_sent_to(sock: FakeSocket, addr) -> bytes | None:
 def forwarded_to(sock: FakeSocket, addr, payload: bytes) -> bool:
     """True if a packet carrying payload was forwarded to addr (ignores the cookie challenges)."""
     return any(to == addr and payload in data and data[5] != relay.TYPE_ADDR_CHECK for data, to in sock.sent)
+
+
+def prove(r, addr) -> None:
+    """Answer the address check the relay sent to addr, as a real app does."""
+    cookie = cookie_sent_to(r.sock, addr)
+    assert cookie is not None, f"no address check was sent to {addr}"
+    r.handle_packet(v1_packet(relay.TYPE_ADDR_CHECK, cookie), addr)
 
 
 class AddrCheckV1(unittest.TestCase):
@@ -123,7 +132,10 @@ class AddrCheckV1(unittest.TestCase):
 
 
 class AddrCheckV2(unittest.TestCase):
-    def test_rebind_resets_verification(self):
+    def test_a_proved_client_is_not_moved_by_one_packet_from_a_new_address(self):
+        # Until the pre-release sweep of 2026-09-25 this was test_rebind_resets_verification: the entry MOVED to the new
+        # address on the spot and dropped its proof. Moving at once is the takeover (NoTakeover, below); a proved client
+        # now stays where it proved itself until the new address has proved itself too and the old one has gone quiet.
         r = make_relay()
         addr1, addr2 = ("10.0.0.9", 6001), ("10.0.0.9", 6002)
         r.handle_packet(hello(CID, "a", G1), addr1)  # a client joins with a hello
@@ -131,9 +143,11 @@ class AddrCheckV2(unittest.TestCase):
         self.assertIsNotNone(cookie)
         r.handle_packet(v1_packet(relay.TYPE_ADDR_CHECK, cookie), addr1)  # echo comes back v1-framed
         self.assertTrue(r.v2_clients[uuid.UUID(bytes=CID)].verified, "a correct echo must verify the v2 client")
-        # The same client_id appearing from a NEW address must drop verification (spoof-takeover guard).
         r.handle_packet(v2_packet(relay.TYPE_AUDIO, CID, b"a"), addr2)
-        self.assertFalse(r.v2_clients[uuid.UUID(bytes=CID)].verified, "an endpoint rebind must clear verified")
+        entry = r.v2_clients[uuid.UUID(bytes=CID)]
+        self.assertEqual((entry.addr, entry.verified), (addr1, True),
+                         "one packet with a proved client's id from a new address must not move it or clear its proof")
+        self.assertIsNotNone(cookie_sent_to(r.sock, addr2), "the new address is sent an address check of its own")
 
     def test_forged_bye_from_other_address_rejected(self):
         r = make_relay()
@@ -194,6 +208,14 @@ def hello(client_id: bytes, name: str, group: bytes | None, ticked: list[bytes] 
     return v2_packet(relay.TYPE_LOBBY_HELLO, client_id, payload)
 
 
+def join(r, client_id: bytes, name: str, group: bytes | None, addr, ticked: list[bytes] | None = None) -> None:
+    """A client joining as every real app does: its hello, then its answer to the address check the relay sends back.
+    Since the pre-release sweep of 2026-09-25 a group client that has not answered is sent nothing else and listed
+    nowhere, so a test of what members hear or see must have its members answer, as they do in life."""
+    r.handle_packet(hello(client_id, name, group, ticked), addr)
+    prove(r, addr)
+
+
 def format_payload(fingerprint: bytes) -> bytes:
     """A Format payload long enough to carry its password fingerprint at offset 36, as a sending app's does."""
     return bytes(relay.FORMAT_FINGERPRINT_OFFSET) + fingerprint
@@ -242,7 +264,7 @@ class Groups(unittest.TestCase):
         for n in range(6):
             addr = (f"10.1.0.{n + 1}", 7000 + n)
             group = G1 if n < 3 else G2
-            r.handle_packet(hello(cid(n + 1), f"person{n + 1}", group), addr)
+            join(r, cid(n + 1), f"person{n + 1}", group, addr)
             members.append((cid(n + 1), addr, group))
         return r, members
 
@@ -274,9 +296,9 @@ class Groups(unittest.TestCase):
     def test_a_hello_from_before_groups_still_reaches_its_kind(self):
         r = make_relay()
         a, b, c = ("10.2.0.1", 7100), ("10.2.0.2", 7101), ("10.2.0.3", 7102)
-        r.handle_packet(hello(cid(1), "old-a", None), a)
-        r.handle_packet(hello(cid(2), "old-b", None), b)
-        r.handle_packet(hello(cid(3), "grouped", G1), c)
+        join(r, cid(1), "old-a", None, a)
+        join(r, cid(2), "old-b", None, b)
+        join(r, cid(3), "grouped", G1, c)
         r.sock.sent.clear()
         r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"NO-TAG"), a)
         self.assertTrue(forwarded_to(r.sock, b, b"NO-TAG"), "two clients whose hello carries no group tag still hear each other")
@@ -291,8 +313,8 @@ class Ticks(unittest.TestCase):
     def test_a_client_that_sends_no_list_reaches_its_whole_group(self):
         r = make_relay()
         a, b = ("10.6.0.1", 8000), ("10.6.0.2", 8001)
-        r.handle_packet(hello(cid(1), "a", G1), a)
-        r.handle_packet(hello(cid(2), "b", G1), b)
+        join(r, cid(1), "a", G1, a)
+        join(r, cid(2), "b", G1, b)
         r.sock.sent.clear()
         r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"NO-LIST"), a)
         self.assertTrue(forwarded_to(r.sock, b, b"NO-LIST"),
@@ -301,8 +323,8 @@ class Ticks(unittest.TestCase):
     def test_both_must_tick_each_other(self):
         r = make_relay()
         a, b = ("10.6.1.1", 8100), ("10.6.1.2", 8101)
-        r.handle_packet(hello(cid(1), "a", G1, ticked=[cid(2)]), a)
-        r.handle_packet(hello(cid(2), "b", G1, ticked=[]), b)
+        join(r, cid(1), "a", G1, a, ticked=[cid(2)])
+        join(r, cid(2), "b", G1, b, ticked=[])
         r.sock.sent.clear()
         r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"ONE-WAY"), a)
         self.assertFalse(forwarded_to(r.sock, b, b"ONE-WAY"),
@@ -318,8 +340,8 @@ class Ticks(unittest.TestCase):
     def test_unticking_stops_it_in_both_directions(self):
         r = make_relay()
         a, b = ("10.6.2.1", 8200), ("10.6.2.2", 8201)
-        r.handle_packet(hello(cid(1), "a", G1, ticked=[cid(2)]), a)
-        r.handle_packet(hello(cid(2), "b", G1, ticked=[cid(1)]), b)
+        join(r, cid(1), "a", G1, a, ticked=[cid(2)])
+        join(r, cid(2), "b", G1, b, ticked=[cid(1)])
         r.handle_packet(hello(cid(1), "a", G1, ticked=[]), a)   # a unticks b
         r.sock.sent.clear()
         r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"GONE-OUT"), a)
@@ -330,9 +352,9 @@ class Ticks(unittest.TestCase):
     def test_someone_they_have_not_ticked_is_not_sent_it(self):
         r = make_relay()
         a, b, c = ("10.6.3.1", 8300), ("10.6.3.2", 8301), ("10.6.3.3", 8302)
-        r.handle_packet(hello(cid(1), "a", G1, ticked=[cid(2)]), a)
-        r.handle_packet(hello(cid(2), "b", G1, ticked=[cid(1)]), b)
-        r.handle_packet(hello(cid(3), "c", G1, ticked=[cid(1), cid(2)]), c)
+        join(r, cid(1), "a", G1, a, ticked=[cid(2)])
+        join(r, cid(2), "b", G1, b, ticked=[cid(1)])
+        join(r, cid(3), "c", G1, c, ticked=[cid(1), cid(2)])
         r.sock.sent.clear()
         r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"FOR-B-ONLY"), a)
         self.assertTrue(forwarded_to(r.sock, b, b"FOR-B-ONLY"), "b ticked a and a ticked b")
@@ -348,9 +370,9 @@ class TicksYouFlag(unittest.TestCase):
     def test_the_roster_says_who_has_ticked_you(self):
         r = make_relay()
         a, b, c = ("10.7.0.1", 9000), ("10.7.0.2", 9001), ("10.7.0.3", 9002)
-        r.handle_packet(hello(cid(1), "a", G1, ticked=[]), a)
-        r.handle_packet(hello(cid(2), "b", G1, ticked=[cid(1)]), b)
-        r.handle_packet(hello(cid(3), "c", G1, ticked=[]), c)
+        join(r, cid(1), "a", G1, a, ticked=[])
+        join(r, cid(2), "b", G1, b, ticked=[cid(1)])
+        join(r, cid(3), "c", G1, c, ticked=[])
         r.sock.sent.clear()
         r.v2_roster_dirty = True
         r._v2_broadcast_roster()
@@ -362,8 +384,8 @@ class TicksYouFlag(unittest.TestCase):
     def test_ticking_sends_the_list_again_at_once(self):
         r = make_relay()
         a, b = ("10.7.1.1", 9100), ("10.7.1.2", 9101)
-        r.handle_packet(hello(cid(1), "a", G1, ticked=[]), a)
-        r.handle_packet(hello(cid(2), "b", G1, ticked=[]), b)
+        join(r, cid(1), "a", G1, a, ticked=[])
+        join(r, cid(2), "b", G1, b, ticked=[])
         r._v2_broadcast_roster()          # settle: the list is up to date and nothing is outstanding
         self.assertFalse(r.v2_roster_dirty)
         r.sock.sent.clear()
@@ -375,8 +397,8 @@ class TicksYouFlag(unittest.TestCase):
     def test_a_client_that_ticks_everyone_counts_as_ticking_you(self):
         r = make_relay()
         a, b = ("10.7.2.1", 9200), ("10.7.2.2", 9201)
-        r.handle_packet(hello(cid(1), "a", G1, ticked=[]), a)
-        r.handle_packet(hello(cid(2), "b", G1, ticked=None), b)   # an app that knows nothing about ticking
+        join(r, cid(1), "a", G1, a, ticked=[])
+        join(r, cid(2), "b", G1, b, ticked=None)   # an app that knows nothing about ticking
         r.sock.sent.clear()
         r.v2_roster_dirty = True
         r._v2_broadcast_roster()
@@ -386,8 +408,8 @@ class TicksYouFlag(unittest.TestCase):
     def test_another_group_is_never_named(self):
         r = make_relay()
         a, d = ("10.7.3.1", 9300), ("10.7.3.2", 9301)
-        r.handle_packet(hello(cid(1), "a", G1, ticked=[]), a)
-        r.handle_packet(hello(cid(4), "d", G2, ticked=[cid(1)]), d)
+        join(r, cid(1), "a", G1, a, ticked=[])
+        join(r, cid(4), "d", G2, d, ticked=[cid(1)])
         r.sock.sent.clear()
         r.v2_roster_dirty = True
         r._v2_broadcast_roster()
@@ -426,7 +448,7 @@ class PhonesStillPair(unittest.TestCase):
     def test_a_member_partners_a_waiting_phone(self):
         r = make_relay()
         phone, win = ("10.4.0.1", 7300), ("10.4.0.2", 7301)
-        r.handle_packet(hello(cid(1), "windows", G1), win)
+        join(r, cid(1), "windows", G1, win)
         r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), win)
         self.assertEqual(len(r.v1_peers), 0, "a group member must not wait alone in a pair slot")
         r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), phone)
@@ -618,14 +640,19 @@ class CountsThatMatter(unittest.TestCase):
         self.assertEqual(r.stats.rejected_ip_cap, 0, "and nothing was refused")
 
     def test_would_block_counts_devices_as_well_as_packets(self):
-        r = make_relay()   # watch-only
-        a, b = ("10.8.2.1", 8400), ("10.8.2.2", 8401)
-        r.handle_packet(hello(cid(90), "a", G1), a)
-        r.handle_packet(hello(cid(91), "b", G1), b)
-        for _ in range(25):
-            r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(90), b"x"), a)   # a to b, and b has not proved its address
-        self.assertGreaterEqual(r.stats.would_block_unverified, 25, "the packet count still counts packets")
-        self.assertEqual(len(r.stats.would_block_devices), 1, "but it is ONE device that would have been cut off")
+        # The groups are enforced by default since the pre-release sweep of 2026-09-25, so "would block" is a group's
+        # figure only under --v2-watch-only; enforced, the same packets are blocked, and counted the same way.
+        for watch_only, would, blocked in ((True, "would_block_unverified", "would_block_devices"),
+                                           (False, "blocked_unverified", "blocked_devices")):
+            with self.subTest(v2_watch_only=watch_only):
+                r = make_relay(v2_watch_only=watch_only)   # v1 watch-only
+                a, b = ("10.8.2.1", 8400), ("10.8.2.2", 8401)
+                join(r, cid(90), "a", G1, a)
+                r.handle_packet(hello(cid(91), "b", G1), b)
+                for _ in range(25):
+                    r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(90), b"x"), a)   # a to b, and b has not proved its address
+                self.assertGreaterEqual(getattr(r.stats, would), 25, "the packet count still counts packets")
+                self.assertEqual(len(getattr(r.stats, blocked)), 1, "but it is ONE device that would have been cut off")
 
     def test_the_device_counts_are_written_and_start_again(self):
         log = logging.getLogger(f"remsound-relay-test-devices-{uuid.uuid4()}")
@@ -667,12 +694,6 @@ class TwoWeeksOfLog(unittest.TestCase):
                 h.close()
 
 
-
-def prove(r, addr) -> None:
-    """Answer the address check the relay sent to addr, as a real app does."""
-    cookie = cookie_sent_to(r.sock, addr)
-    assert cookie is not None, f"no address check was sent to {addr}"
-    r.handle_packet(v1_packet(relay.TYPE_ADDR_CHECK, cookie), addr)
 
 
 def _relay_with_captured_log(max_clients: int = 10):
@@ -874,6 +895,399 @@ class MadeUpAddressesGiveWay(unittest.TestCase):
         for n in range(6):   # none of them has answered yet
             r.handle_packet(hello(cid(n + 1), f"p{n}", G1), (f"10.35.0.{n + 1}", 9800))
         self.assertEqual(len(r.v2_clients), 6, "with room to spare, nobody is turned out for not answering yet")
+
+
+def _all_to(sock: FakeSocket, addr) -> list[bytes]:
+    """Every packet the relay sent to addr."""
+    return [data for data, to in sock.sent if to == addr]
+
+
+class NothingForTheUnproven(unittest.TestCase):
+    """Pre-release sweep 2026-09-25, agreed by Ed: in watch-only mode anybody could send hellos from made-up addresses, in
+    a group they made up or a real one. Each made-up address was sent the member list every second for a minute, and the
+    made-up people were LISTED, so real members saw them and, accepting automatically, had their sound sent to them: 56
+    made-up entries drew about 155 KB a second out of the relay. A group client is now sent nothing but its address check
+    until it answers it - unless --v2-watch-only puts the groups back as they were."""
+
+    def _two_members_and_fakes(self, r, fakes: int = 5):
+        a, b = ("10.40.0.1", 9000), ("10.40.0.2", 9001)
+        join(r, cid(1), "a", G1, a)   # both accept automatically: neither sends a tick list, so each has ticked everyone
+        join(r, cid(2), "b", G1, b)
+        fake_addrs = [(f"10.41.{i}.1", 9100 + i) for i in range(fakes)]
+        for i, f in enumerate(fake_addrs):
+            r.handle_packet(hello(cid(100 + i), f"fake{i}", G1), f)   # made up: they never answer
+        return a, b, fake_addrs
+
+    def test_a_made_up_member_is_sent_only_its_address_check_and_is_listed_nowhere(self):
+        r = make_relay()
+        a, b, fakes = self._two_members_and_fakes(r)
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"A-SPEAKS"), a)
+        start = time.monotonic()
+        for i in range(30):   # half a minute of heartbeat lists
+            r.tick(start + i * 1.5)
+        for f in fakes:
+            self.assertEqual({data[5] for data in _all_to(r.sock, f)}, {relay.TYPE_ADDR_CHECK},
+                             f"{f} never answered: it must be sent its address check and nothing else")
+        self.assertTrue(forwarded_to(r.sock, b, b"A-SPEAKS"), "the real members still hear each other")
+        for addr in (a, b):
+            self.assertEqual(rosters_to(r.sock, addr)[-1][0], {cid(1), cid(2)},
+                             "made-up people must not be shown to real members, who would tick them")
+        self.assertEqual(r.stats.rosters_withheld_unverified, 30 * len(fakes))
+
+    def test_once_it_answers_it_is_a_member_at_once(self):
+        r = make_relay()
+        a, b, _ = self._two_members_and_fakes(r, fakes=0)
+        c = ("10.40.0.3", 9002)
+        r.handle_packet(hello(cid(3), "c", G1), c)
+        start = time.monotonic()
+        r._v2_broadcast_roster(start)
+        self.assertEqual(rosters_to(r.sock, c), [], "not answered yet: no list")
+        self.assertNotIn(cid(3), rosters_to(r.sock, a)[-1][0], "and not listed")
+        prove(r, c)
+        self.assertTrue(r.v2_roster_dirty, "answering must send the lists out again at once, not on the next heartbeat")
+        r.sock.sent.clear()
+        r.tick(start + 0.5)
+        self.assertEqual(rosters_to(r.sock, c)[-1][0], {cid(1), cid(2), cid(3)}, "it is sent the list")
+        self.assertIn(cid(3), rosters_to(r.sock, a)[-1][0], "and is in everybody else's")
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"NOW-C-HEARS"), a)
+        self.assertTrue(forwarded_to(r.sock, c, b"NOW-C-HEARS"), "and hears them")
+
+    def test_the_withholding_is_logged_once_per_client_and_counted(self):
+        r, captured = _relay_with_captured_log()
+        a, fake = ("10.40.1.1", 9000), ("10.40.1.2", 9001)
+        join(r, cid(1), "a", G1, a)
+        r.handle_packet(hello(cid(2), "fake", G1), fake)
+        start = time.monotonic()
+        for i in range(10):
+            r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"x"), a)
+            r.tick(start + i * 1.5)
+        self.assertEqual(len(_lines(captured, "withheld_unverified")), 1, "one line for the client, not one per list or packet")
+        self.assertEqual((r.stats.rosters_withheld_unverified, len(r.stats.blocked_devices)), (10, 1))
+        r.maybe_log_stats(r.last_stats_log + relay.STATS_INTERVAL_SECONDS + 1)
+        fields = _key_values(_lines(captured, "addr_check_stats")[0])
+        self.assertEqual((fields.get("addr_check"), fields.get("v2_addr_check"), fields.get("rosters_withheld")),
+                         ("watch-only", "ENFORCED", "10"), "the minute's figures say what was withheld, and why")
+
+    def test_v2_watch_only_puts_the_groups_back_as_they_were(self):
+        r = make_relay(v2_watch_only=True)
+        a, b, fakes = self._two_members_and_fakes(r, fakes=2)
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"TO-EVERYONE"), a)
+        r._v2_broadcast_roster(time.monotonic())
+        for f in fakes:
+            self.assertTrue(forwarded_to(r.sock, f, b"TO-EVERYONE"), "watch-only: an unproven member is still sent sound")
+            self.assertTrue(rosters_to(r.sock, f), "and the list")
+        self.assertEqual(rosters_to(r.sock, a)[-1][0], {cid(1), cid(2), cid(100), cid(101)}, "and is listed")
+        self.assertEqual(r.stats.blocked_unverified, 0)
+        self.assertGreater(r.stats.would_block_unverified, 0, "but it is still counted as one that would be blocked")
+
+    def test_require_addr_check_still_enforces_the_groups(self):
+        r = make_relay(require_addr_check=True, v2_watch_only=True)
+        a, _, fakes = self._two_members_and_fakes(r, fakes=1)
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"ENFORCED"), a)
+        r._v2_broadcast_roster(time.monotonic())
+        self.assertFalse(forwarded_to(r.sock, fakes[0], b"ENFORCED"))
+        self.assertEqual(rosters_to(r.sock, fakes[0]), [])
+        self.assertEqual(rosters_to(r.sock, a)[-1][0], {cid(1), cid(2)}, "and, enforced, the unproven are not listed")
+
+    def test_phones_and_older_apps_on_v1_are_untouched(self):
+        r = make_relay()   # the defaults: v1 pairs watch-only, groups enforced
+        phone1, phone2, unproven = ("10.40.2.1", 9000), ("10.40.2.2", 9001), ("10.40.2.3", 9002)
+        r.handle_packet(v1_packet(relay.TYPE_AUDIO, b"x"), phone1)
+        r.handle_packet(v1_packet(relay.TYPE_AUDIO, b"x"), phone2)
+        r.handle_packet(hello(cid(5), "a group client that has not answered", G1), unproven)
+        r.sock.sent.clear()
+        r.handle_packet(v1_packet(relay.TYPE_AUDIO, b"PHONE-AUDIO"), phone1)
+        self.assertTrue(forwarded_to(r.sock, phone2, b"PHONE-AUDIO"),
+                        "a v1 pair that never answers its address check still reaches each other, exactly as before")
+        self.assertGreater(r.stats.would_block_unverified, 0, "and is only watched, as before")
+        self.assertEqual(r.stats.blocked_unverified, 0)
+
+
+class ListsAreRateLimited(unittest.TestCase):
+    """Pre-release sweep 2026-09-25, agreed by Ed: a changed member list went out on the very next packet, every time.
+    One 68-byte hello with a new name made the relay send the list to every member at once - about 155 KB for 56
+    members, some 2300 times what it was sent. A changed list now waits until ROSTER_DIRTY_MIN_INTERVAL_SECONDS after the
+    last; the heartbeat list still goes every second."""
+
+    def _group(self):
+        r = make_relay(max_clients=64)
+        addrs = [(f"10.42.0.{i + 1}", 9000 + i) for i in range(4)]
+        for i, addr in enumerate(addrs):
+            join(r, cid(i + 1), f"p{i}", G1, addr)
+        return r, addrs
+
+    def test_a_burst_of_changes_goes_out_as_one_list(self):
+        r, addrs = self._group()
+        start = time.monotonic()
+        r.tick(start)   # the lists go out; the window starts
+        r.sock.sent.clear()
+        for i in range(50):   # fifty new names inside a fifth of a second, the loop ticking after each packet
+            r.handle_packet(hello(cid(2), f"name{i}", G1), addrs[1])
+            r.tick(start + 0.004 * i)
+        self.assertEqual(len(rosters_to(r.sock, addrs[0])), 0, "no list sooner than the window after the last")
+        self.assertTrue(r.v2_roster_dirty, "the change is still owed")
+        r.tick(start + relay.ROSTER_DIRTY_MIN_INTERVAL_SECONDS + 0.01)
+        self.assertEqual(len(rosters_to(r.sock, addrs[0])), 1, "and goes out as ONE list when the window allows")
+        self.assertFalse(r.v2_roster_dirty)
+        r.sock.sent.clear()
+        r.tick(start + 0.9)
+        self.assertEqual(len(rosters_to(r.sock, addrs[0])), 0, "nothing changed: nothing until the heartbeat")
+        r.tick(start + relay.ROSTER_DIRTY_MIN_INTERVAL_SECONDS + relay.ROSTER_HEARTBEAT_SECONDS + 0.02)
+        self.assertEqual(len(rosters_to(r.sock, addrs[0])), 1, "and the heartbeat list still goes every second")
+
+    def test_a_stream_of_changes_is_held_to_a_few_lists_a_second(self):
+        r, addrs = self._group()
+        start = time.monotonic()
+        r.tick(start)
+        r.sock.sent.clear()
+        for i in range(200):   # a new name every 10 ms for two seconds
+            r.handle_packet(hello(cid(2), f"n{i}", G1), addrs[1])
+            r.tick(start + 0.01 * (i + 1))
+        sent = len(rosters_to(r.sock, addrs[0]))
+        self.assertLessEqual(sent, int(2 / relay.ROSTER_DIRTY_MIN_INTERVAL_SECONDS),
+                             f"two seconds of changes sent {sent} lists to each member")
+        self.assertGreaterEqual(sent, 6, "but a change still goes out several times a second, not only on the heartbeat")
+
+
+class NoTakeover(unittest.TestCase):
+    """Pre-release sweep 2026-09-25, agreed by Ed: any packet bearing a member's client id, from any address, moved that
+    member to the address it came from. Every member of a group knows every other member's id - it is in the list - so
+    one keepalive sent somebody else's sound to whoever sent it: to hear them, speak as them or cut them off. A member who
+    has proved its address now moves only when the new address has proved itself too AND the old one has gone quiet."""
+
+    def _pair(self):
+        r, captured = _relay_with_captured_log()
+        a, b = ("10.50.0.1", 9000), ("10.50.0.2", 9001)
+        join(r, cid(1), "alice", G1, a)
+        join(r, cid(2), "bob", G1, b)
+        return r, captured, a, b, r.v2_clients[uuid.UUID(bytes=cid(1))]
+
+    def test_somebody_else_using_a_members_id_does_not_take_her_place(self):
+        r, captured, a, b, alice = self._pair()
+        thief = ("10.50.9.9", 9999)   # a member of the group, who knows alice's id from the list
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_KEEPALIVE, cid(1), b"k"), thief)
+        r.handle_packet(hello(cid(1), "not alice", G2, ticked=[]), thief)
+        prove(r, thief)   # the thief's own address is real, so it can answer the check it is sent
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"SPOKEN-AS-ALICE"), thief)
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(2), b"BOB-TO-ALICE"), b)
+        r.handle_packet(v2_packet(relay.TYPE_LOBBY_BYE, cid(1)), thief)
+        self.assertIn(uuid.UUID(bytes=cid(1)), r.v2_clients, "a BYE from the thief must not remove alice")
+        self.assertEqual((alice.addr, alice.verified), (a, True), "alice stays where she proved herself")
+        self.assertEqual((alice.display_name, alice.group, alice.ticked), ("alice", G1, None),
+                         "the thief's hello is not taken as hers")
+        self.assertTrue(forwarded_to(r.sock, a, b"BOB-TO-ALICE"), "bob's sound still goes to alice")
+        self.assertFalse(forwarded_to(r.sock, thief, b"BOB-TO-ALICE"), "and never to the thief")
+        self.assertFalse(forwarded_to(r.sock, b, b"SPOKEN-AS-ALICE"), "nobody hears the thief speaking as alice")
+        # Alice keeps talking. Once the thief has waited REBIND_SILENCE_SECONDS it is still refused, and that is logged once.
+        alice.move.since -= relay.REBIND_SILENCE_SECONDS + 1
+        for _ in range(5):
+            r.handle_packet(v2_packet(relay.TYPE_KEEPALIVE, cid(1), b"k"), a)
+            r.handle_packet(v2_packet(relay.TYPE_KEEPALIVE, cid(1), b"k"), thief)
+        self.assertEqual(alice.addr, a)
+        self.assertEqual(len(_lines(captured, "client_endpoint_move_refused")), 1, "refused, and said once")
+
+    def test_the_thiefs_packets_do_not_keep_her_place_alive(self):
+        r, _, a, b, alice = self._pair()
+        alice.last_seen -= 3   # alice has been quiet for three seconds
+        before = alice.last_seen
+        for _ in range(10):
+            r.handle_packet(v2_packet(relay.TYPE_KEEPALIVE, cid(1), b"k"), ("10.50.9.9", 9999))
+        self.assertEqual(alice.last_seen, before,
+                         "only alice's own address may say when she was last heard, or her going quiet could be hidden")
+
+    def test_a_real_move_goes_through_once_the_old_address_is_quiet(self):
+        r, captured, a, b, alice = self._pair()
+        a2 = ("10.50.0.1", 9500)   # her router gave her a new port; nothing more comes from the old one
+        r.handle_packet(hello(cid(1), "alice", G1), a2)
+        self.assertEqual(alice.addr, a, "not before the new address has answered its own check")
+        prove(r, a2)
+        self.assertEqual(alice.addr, a, "nor while the old address was heard from less than REBIND_SILENCE_SECONDS ago")
+        alice.last_seen -= relay.REBIND_SILENCE_SECONDS + 0.1   # time passes, and the old address stays silent
+        r.handle_packet(hello(cid(1), "alice", G1), a2)   # her next hello
+        self.assertEqual((alice.addr, alice.verified), (a2, True), "then she moves, already proved")
+        self.assertIsNone(alice.move)
+        self.assertTrue(r.v2_roster_dirty, "and her list follows her at once")
+        self.assertEqual(len(_lines(captured, "client_endpoint_moved")), 1)
+        self.assertEqual(len(_lines(captured, "client_endpoint_move_refused")), 0, "a real move is never logged as refused")
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(2), b"BOB-TO-NEW"), b)
+        self.assertTrue(forwarded_to(r.sock, a2, b"BOB-TO-NEW"), "bob's sound reaches her new address")
+        self.assertFalse(forwarded_to(r.sock, a, b"BOB-TO-NEW"), "and not the old one")
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"ALICE-FROM-NEW"), a2)
+        self.assertTrue(forwarded_to(r.sock, b, b"ALICE-FROM-NEW"), "and hers reaches bob")
+
+    def test_the_answer_itself_completes_a_move_when_the_old_address_is_already_quiet(self):
+        r, _, a, b, alice = self._pair()
+        a2 = ("10.50.0.7", 9000)   # moved from Wi-Fi to a cable a while ago
+        alice.last_seen -= relay.REBIND_SILENCE_SECONDS + 1
+        r.handle_packet(v2_packet(relay.TYPE_KEEPALIVE, cid(1), b"k"), a2)
+        self.assertEqual(alice.addr, a, "the old address is quiet, but the new one has not answered yet")
+        prove(r, a2)
+        self.assertEqual((alice.addr, alice.verified), (a2, True), "its answer is the move")
+
+    def test_a_member_that_never_proved_its_address_moves_at_once_as_before(self):
+        r = make_relay()
+        a, a2 = ("10.50.1.1", 9000), ("10.50.1.1", 9001)
+        r.handle_packet(hello(cid(1), "c", G1), a)   # has not answered yet: it has nothing anybody could steal
+        r.handle_packet(hello(cid(1), "c", G1), a2)
+        entry = r.v2_clients[uuid.UUID(bytes=cid(1))]
+        self.assertEqual((entry.addr, entry.verified), (a2, False), "an unproven client still moves at once")
+        self.assertIsNotNone(cookie_sent_to(r.sock, a2), "and is sent an address check at its new address")
+        prove(r, a2)
+        self.assertTrue(entry.verified)
+
+
+def _find_bash() -> str | None:
+    """Git for Windows' bash on Windows - never System32's bash.exe, which is WSL's and sees none of these paths - and the
+    system's bash anywhere else."""
+    if os.name == "nt":
+        for candidate in (os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin", "bash.exe"),
+                          r"C:\Program Files\Git\bin\bash.exe"):
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+    return shutil.which("bash")
+
+
+def _slashes(path: str) -> str:
+    return path.replace("\\", "/")
+
+
+# The updater's own main(), sourced and run in bash, with only what reaches outside the machine stood in for: the network
+# (curl serves the release list and the files from $D), the service manager, the backup and the install itself (it
+# records what it would have installed), and the signature check (a .sig reading "good-signature" is good). python3 is
+# this Python, with the carriage returns Windows adds taken off, as Linux never adds them.
+_UPDATER_HARNESS = r'''
+source "$UPDATER"
+set +e
+LOG_FILE="$D/update.log"; VERSION_FILE="$D/version"; HEALTH_WAIT_SECONDS=0
+require_root() { :; }; ensure_dirs() { :; }; snapshot_backup() { :; }; restore_backup() { :; }
+openssl() { :; }; systemctl() { return 0; }
+python3() { "$PY" "$@" | tr -d '\r'; }
+verify_release_signature() { grep -qx 'good-signature' "$2"; }
+install_from_staging() { echo "installed $(tr -d '[:space:]' < "$1/VERSION")" >> "$D/calls"; }
+curl() {
+    local out="" url="" src
+    while [[ $# -gt 0 ]]; do
+        case "$1" in -o) out="$2"; shift 2 ;; -H|--max-time) shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac
+    done
+    echo "fetched $url" >> "$D/calls"
+    case "$url" in *api.github.com*) src="$D/releases.json" ;; *) src="$D/files/${url##*/}" ;; esac
+    [[ -f "$src" ]] || return 22
+    if [[ -n "$out" ]]; then cp "$src" "$out"; else cat "$src"; fi
+}
+if [[ "${1:-}" == "list" ]]; then get_latest_release | tr -d '\r'; echo "rc=$?"; exit 0; fi
+( set -e; trap cleanup_work_dir EXIT; main ) 2>/dev/null
+echo "rc=$?"
+'''
+
+
+class UpdaterWalksPastARefusedRelease(unittest.TestCase):
+    """Pre-release sweep 2026-09-25, agreed by Ed: the updater only ever tried the highest-numbered server release. If
+    that one was refused - no signature, a bad one, a VERSION that does not match its tag, a mistyped tag - the relay was
+    refused it again every hour for ever and never looked at the good release behind it. It now walks down the releases
+    newer than its own, newest first, installs the first that passes every check, and logs each one it refuses."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bash = _find_bash()
+        if cls.bash is None:
+            raise unittest.SkipTest("no bash here (Git for Windows) to run the updater with")
+
+    def _run(self, releases: list[dict], installed: str, mode: str = "main") -> tuple[str, str, str, str]:
+        """Run the updater over these releases, each {tag, version?, sig: "good"|"bad"|None, draft?}. Returns (what bash
+        printed, its log, the stand-ins' record of what was fetched and installed, the version file afterwards)."""
+        import json, tarfile, tempfile
+        d = tempfile.mkdtemp(prefix="remsound-updater-walk-")
+        self.addCleanup(shutil.rmtree, d, True)
+        files = os.path.join(d, "files")
+        os.makedirs(files)
+        listing = [{"tag_name": "v6.1.0", "draft": False, "prerelease": False,   # the app's releases share the list
+                    "assets": [{"name": "RemSound.zip", "browser_download_url": "https://example.invalid/RemSound.zip"}]}]
+        for rel in releases:
+            tag = rel["tag"]
+            name = f"remsound-{tag}.tar.gz"
+            folder = os.path.join(d, "build", f"remsound-{tag}")
+            os.makedirs(folder)
+            with open(os.path.join(folder, "VERSION"), "w", newline="\n") as f:
+                f.write(rel.get("version", tag) + "\n")
+            with open(os.path.join(folder, "remsound-relay.py"), "w", newline="\n") as f:
+                f.write("# relay\n")
+            with tarfile.open(os.path.join(files, name), "w:gz") as t:
+                t.add(folder, arcname=f"remsound-{tag}")
+            assets = [{"name": name, "browser_download_url": f"https://example.invalid/{name}"}]
+            if rel.get("sig") is not None:
+                with open(os.path.join(files, name + ".sig"), "w", newline="\n") as f:
+                    f.write("good-signature\n" if rel["sig"] == "good" else "signed with some other key\n")
+                assets.append({"name": name + ".sig", "browser_download_url": f"https://example.invalid/{name}.sig"})
+            listing.append({"tag_name": tag, "draft": rel.get("draft", False), "prerelease": False, "assets": assets})
+        with open(os.path.join(d, "releases.json"), "w", newline="\n") as f:
+            json.dump(listing, f)
+        with open(os.path.join(d, "version"), "w", newline="\n") as f:
+            f.write(installed + "\n")
+        env = dict(os.environ, D=_slashes(d), PY=_slashes(sys.executable),
+                   UPDATER=_slashes(os.path.join(_HERE, "remsound-relay-update.sh")))
+        import subprocess
+        p = subprocess.run([self.bash, "-c", _UPDATER_HARNESS, "harness", mode], env=env, capture_output=True,
+                           text=True, timeout=120)
+
+        def read(name):
+            path = os.path.join(d, name)
+            if not os.path.exists(path):
+                return ""
+            with open(path, encoding="utf-8") as f:
+                return f.read()
+        return p.stdout.replace("\r", ""), read("update.log"), read("calls"), read("version").strip()
+
+    # Newest first once sorted, though GitHub lists them in any order; server-v2.12 is what is installed.
+    RELEASES = [
+        {"tag": "server-v2.13", "sig": "good"},                              # good: the one to install
+        {"tag": "server-v2.16", "sig": None},                                # no signature at all
+        {"tag": "server-v2.99", "sig": "good", "draft": True},               # a draft: never considered
+        {"tag": "server-v2.15", "sig": "bad"},                               # signed with some other key
+        {"tag": "server-v2.14", "sig": "good", "version": "server-v2.11"},   # an old release under a new name
+        {"tag": "server-v2.12", "sig": "good"},                              # installed already
+        {"tag": "server-v2.11", "sig": "good"},                              # older still: never even fetched
+    ]
+
+    def test_a_refused_release_no_longer_blocks_the_good_one_behind_it(self):
+        out, log, calls, version = self._run(self.RELEASES, "server-v2.12")
+        self.assertIn("rc=0", out, f"the updater must succeed (log:\n{log})")
+        self.assertEqual(version, "server-v2.13", "the newest release that passes every check is installed")
+        self.assertEqual([c for c in calls.splitlines() if c.startswith("installed")], ["installed server-v2.13"])
+        for tag, why in (("server-v2.16", "has no signature"), ("server-v2.15", "is not signed by the RemSound release key"),
+                         ("server-v2.14", "says it is 'server-v2.11', not server-v2.14")):
+            lines = [l for l in log.splitlines() if f"REFUSED {tag}:" in l]
+            self.assertEqual(len(lines), 1, f"{tag} must be refused, and said once (log:\n{log})")
+            self.assertIn(why, lines[0])
+        self.assertNotIn("server-v2.11.tar.gz", calls, "a release older than the one installed is never fetched")
+        self.assertNotIn("server-v2.99", calls + log, "nor is a draft")
+
+    def test_when_every_newer_release_is_refused_nothing_is_touched(self):
+        out, log, calls, version = self._run(self.RELEASES, "server-v2.13")
+        self.assertIn("rc=1", out, "the run fails, so the service shows it")
+        self.assertEqual(version, "server-v2.13", "and the relay stays as it was")
+        self.assertNotIn("installed", calls)
+        self.assertIn("none of the 3 newer release(s) passed its checks", log)
+
+    def test_an_up_to_date_relay_fetches_nothing(self):
+        out, log, calls, version = self._run(self.RELEASES, "server-v2.16")
+        self.assertIn("rc=0", out)
+        self.assertIn("up to date (installed server-v2.16 >= available server-v2.16)", log)
+        self.assertEqual([c for c in calls.splitlines() if ".tar.gz" in c], [], "nothing is downloaded")
+
+    def test_the_list_still_starts_with_the_newest_release(self):
+        # The app's self-test (SelfTest.RelayUpdater.cs) reads the first line of get_latest_release as the newest server
+        # release, and looks for its signature: listing every release must not change that.
+        out, _, _, _ = self._run(self.RELEASES, "server-v2.12", mode="list")
+        lines = out.split("\n")
+        self.assertIn("rc=0", out)
+        self.assertEqual(lines[0:4], ["server-v2.16", "https://example.invalid/remsound-server-v2.16.tar.gz",
+                                      "remsound-server-v2.16.tar.gz", ""], "the newest first, with its (missing) signature")
+        self.assertEqual([lines[i] for i in range(0, 24, 4)],
+                         ["server-v2.16", "server-v2.15", "server-v2.14", "server-v2.13", "server-v2.12", "server-v2.11"],
+                         "then every other server release, newest first")
 
 
 if __name__ == "__main__":

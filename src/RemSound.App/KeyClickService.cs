@@ -28,48 +28,98 @@ internal static class KeyClickService
 
     private static KeyClickPlayer? player;
     private static MessageFilter? filter;
+    private static bool enabled;
+    private static long lastBuildTick = long.MinValue;
+    private static int builds;
 
-    /// <summary>Live on/off, read by the message filter on every keystroke. Set from Preferences.</summary>
-    public static bool Enabled { get; set; }
+    /// <summary>A player that has died (its output device went away) is built again on the next key press, but no more
+    /// often than this, so a device that will not open is not tried on every key.</summary>
+    internal const long RebuildBackoffMs = 5000;
 
-    /// <summary>Preload the click sounds, open the output, and install the app-wide key hook. Call
-    /// once on the GUI thread after the message loop's owner exists. Best-effort - any failure
-    /// leaves the service inert (no clicks), never throwing into startup.</summary>
+    /// <summary>Live on/off, read by the message filter on every keystroke. Set from Preferences. The output is open only
+    /// while this is on: it used to be opened at start whether or not clicks were wanted, and kept a Windows audio
+    /// stream open on the default device all session - and if that device went away, the clicks were gone until
+    /// RemSound was restarted (2026-09-25 sweep).</summary>
+    public static bool Enabled
+    {
+        get => enabled;
+        set
+        {
+            enabled = value;
+            if (value) EnsurePlayer(force: true);
+            else ClosePlayer();
+        }
+    }
+
+    /// <summary>Install the app-wide key hook, and open the output if clicks are on. Call once on the GUI thread after
+    /// the message loop's owner exists. Best-effort - any failure leaves the service inert (no clicks), never throwing
+    /// into startup.</summary>
     public static void Initialize(bool enabled)
     {
-        Enabled = enabled;
         try
         {
-            player = new KeyClickPlayer(AppConfig.SoundsDirectory);
             filter = new MessageFilter();
             System.Windows.Forms.Application.AddMessageFilter(filter);
         }
-        catch
-        {
-            player = null;
-            filter = null;
-        }
+        catch { filter = null; }
+        Enabled = enabled;
     }
 
     public static void Shutdown()
     {
         try { if (filter is not null) System.Windows.Forms.Application.RemoveMessageFilter(filter); } catch { /* ignore */ }
-        try { player?.Dispose(); } catch { /* ignore */ }
         filter = null;
+        ClosePlayer();
+    }
+
+    /// <summary>A working player, built if there is none or the one there has died - at once when clicks are switched
+    /// on, otherwise at most once every <see cref="RebuildBackoffMs"/>.</summary>
+    private static void EnsurePlayer(bool force)
+    {
+        if (player is { Alive: true }) return;
+        var now = Environment.TickCount64;
+        if (!force && lastBuildTick != long.MinValue && now - lastBuildTick < RebuildBackoffMs) return;
+        lastBuildTick = now;
+        ClosePlayer();
+        try
+        {
+            player = PlayerFactoryForTest?.Invoke() ?? new KeyClickPlayer(AppConfig.SoundsDirectory);
+            Interlocked.Increment(ref builds);
+        }
+        catch { player = null; }
+    }
+
+    private static void ClosePlayer()
+    {
+        try { player?.Dispose(); } catch { /* ignore */ }
         player = null;
     }
 
     private static void OnChar(IntPtr hwnd)
     {
-        if (!Enabled || player is null) return;
+        if (!Enabled) return;
         // The WM_CHAR target window is the focused control. Click only when it's an edit field.
         if (System.Windows.Forms.Control.FromHandle(hwnd) is not System.Windows.Forms.TextBoxBase edit) return;
-        // A password field is marked by its Tag (RemSound's boxes aren't PasswordChar-masked), with
-        // a fallback to the standard masking flags for any conventionally-masked box.
-        var isPassword = (edit.Tag as string) == PasswordFieldTag
-            || (edit is System.Windows.Forms.TextBox tb && (tb.UseSystemPasswordChar || tb.PasswordChar != '\0'));
-        player.PlayClick(isPassword);
+        EnsurePlayer(force: false);
+        player?.PlayClick(IsPasswordField(edit));
     }
+
+    // ---- gate seams ---------------------------------------------------------------------------------------------------
+    internal static Func<KeyClickPlayer>? PlayerFactoryForTest;
+    internal static bool PlayerOpenForTest => player is not null;
+    internal static int PlayerBuildsForTest => builds;
+    internal static void KillPlayerForTest() => player?.KillForTest();
+    internal static void KeyPressedForTest(IntPtr hwnd) => OnChar(hwnd);
+    internal static void ForgetBackoffForTest() => lastBuildTick = long.MinValue;
+    internal static KeyClickPlayer SilentPlayerForTest() => new(null);
+
+    /// <summary>Is this box a password? RemSound's own are marked by their Tag (they aren't PasswordChar-masked), with
+    /// the standard masking flags as a fallback for any conventionally-masked box. The one rule for it: the key clicks
+    /// and the remote control's refusal to read a password back must never disagree (2026-09-24: the control channel
+    /// checked only the masking flags, so it read RemSound's real password boxes out).</summary>
+    internal static bool IsPasswordField(System.Windows.Forms.TextBoxBase edit) =>
+        (edit.Tag as string) == PasswordFieldTag
+        || (edit is System.Windows.Forms.TextBox tb && (tb.UseSystemPasswordChar || tb.PasswordChar != '\0'));
 
     private sealed class MessageFilter : System.Windows.Forms.IMessageFilter
     {
@@ -127,20 +177,29 @@ internal static class KeyClickService
         }
     }
 
-    private sealed class KeyClickPlayer : IDisposable
+    internal sealed class KeyClickPlayer : IDisposable
     {
         private readonly WaveOutEvent output;
         private readonly MixingSampleProvider mixer;
         private readonly List<CachedSound> keyClips = new();
         private readonly CachedSound? passkeyClip;
         private readonly bool ready;
+        private volatile bool stopped;
 
-        public KeyClickPlayer(string soundsDir)
+        /// <summary>Playing, and not stopped by its device going away. The mixer reads forever, so playback only ever stops
+        /// on its own when Windows takes the output away.</summary>
+        public bool Alive => (ready || soundsDirMissingForTest) && !stopped;
+        private readonly bool soundsDirMissingForTest;
+
+        /// <param name="soundsDir">Where the click sounds are; null (the self-test) builds a player that opens no device.</param>
+        public KeyClickPlayer(string? soundsDir)
         {
             var format = WaveFormat.CreateIeeeFloatWaveFormat(48000, 2);
             mixer = new MixingSampleProvider(format) { ReadFully = true };
             // A modest buffer keeps the click snappy without risking dropouts under load.
             output = new WaveOutEvent { DesiredLatency = 80, NumberOfBuffers = 3 };
+            output.PlaybackStopped += (_, _) => stopped = true;
+            if (soundsDir is null) { soundsDirMissingForTest = true; return; }
             try
             {
                 for (var i = 1; i <= 8; i++) // discover "key 1.wav" upward; ships with 4 but don't hard-code
@@ -173,8 +232,11 @@ internal static class KeyClickService
             catch { /* a key click must never disturb anything */ }
         }
 
+        internal void KillForTest() => stopped = true;
+
         public void Dispose()
         {
+            stopped = true;
             try { output.Stop(); } catch { /* ignore */ }
             try { output.Dispose(); } catch { /* ignore */ }
         }

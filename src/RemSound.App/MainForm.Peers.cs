@@ -135,17 +135,22 @@ public sealed partial class MainForm
         // moves to the discovered address only if the typed one has never answered a heartbeat: a
         // typed address that works is the user's choice and stays put. Two discovered peers of one
         // name is ambiguous, and nothing is merged.
+        //
+        // Only ever a name somebody TYPED. A device discovery itself hears has an identity of its own and is never a name to
+        // be matched: treating one as a name is how an accepted iPhone was joined to the other iPhone on the network
+        // (2026-09-25). And the devices of that name are counted among everything discovery hears, so two iPhones on their
+        // default names are always "ambiguous" - the typed entry's own device can no longer drop out of the count.
         var nowUtc = DateTime.UtcNow;
         var pinsMoved = false;
         foreach (var manual in manualPeers.Values.ToList())
         {
+            if (DiscoveryHears(manual.InstanceId)) continue;
             var (manualHost, _) = TrySplitHostPort(manual.Name);
             if (string.IsNullOrWhiteSpace(manualHost) || IPAddress.TryParse(manualHost, out _)) continue;
-            var namesakes = byEndpoint.Values
-                .Where(p => !manualPeers.ContainsKey(p.InstanceId)
-                         && string.Equals(p.Name, manualHost, StringComparison.OrdinalIgnoreCase))
+            var namesakes = discovery.Peers
+                .Where(p => string.Equals(p.Name, manualHost, StringComparison.OrdinalIgnoreCase))
                 .ToList();
-            if (namesakes.Count != 1) continue;
+            if (namesakes.Count != 1 || manualPeers.ContainsKey(namesakes[0].InstanceId)) continue;
             var found = namesakes[0];
 
             var manualKey = $"{manual.Address}:{manual.AudioPort}";
@@ -465,6 +470,9 @@ public sealed partial class MainForm
 
     internal static (string host, int? port) TrySplitHostPort(string text) => PeerAddress.Split(text);
 
+    /// <summary>Whether discovery hears this device right now - a device with an identity of its own, not a typed entry.</summary>
+    private bool DiscoveryHears(Guid instanceId) => discovery.Peers.Any(p => p.InstanceId == instanceId);
+
     private PeerAnnouncement CreateManualPeer(string entry, IPAddress address)
     {
         var (_, parsedPort) = TrySplitHostPort(entry);
@@ -483,14 +491,14 @@ public sealed partial class MainForm
     {
         if (string.IsNullOrWhiteSpace(text))
         {
-            MessageBox.Show(this, "Enter an IP address or hostname for the other computer.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            AppMessageBox.Show(this, "Enter an IP address or hostname for the other computer.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
         var address = await ResolvePeerAddressAsync(text);
         if (address is null)
         {
-            MessageBox.Show(this, "Could not resolve that IP address or hostname.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            AppMessageBox.Show(this, "Could not resolve that IP address or hostname.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
@@ -521,7 +529,12 @@ public sealed partial class MainForm
     /// </summary>
     private void EnsurePeerRemembered(PeerAnnouncement peer)
     {
-        var entry = string.IsNullOrWhiteSpace(peer.Name) || peer.Name == peer.Address.ToString()
+        RememberTickedDevice(peer);
+        // Remembered by name, a device is found again by name - so a name another device on the network also has ("iPhone",
+        // every iPhone's until somebody changes it) is remembered by address instead: by name it would find either phone.
+        var nameShared = knownPeers.Values.Concat(discovery.Peers)
+            .Any(p => p.InstanceId != peer.InstanceId && string.Equals(p.Name, peer.Name, StringComparison.OrdinalIgnoreCase));
+        var entry = string.IsNullOrWhiteSpace(peer.Name) || peer.Name == peer.Address.ToString() || nameShared
             ? peer.Address.ToString()
             : peer.Name;
         var existing = settings.LoadRememberedPeers().ToList();

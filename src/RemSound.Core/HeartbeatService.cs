@@ -60,6 +60,7 @@ public sealed class HeartbeatService : IDisposable
     private CancellationTokenSource? cts;
     private Task? sendTask;
     private uint sequence;
+    private readonly Dictionary<string, IPEndPoint> pingOnly = new(StringComparer.OrdinalIgnoreCase);
     // Reusable outbound packet buffer for the once-per-second ping fan-out. Pre-2026-05-23
     // SendPings did `var bytes = packet.ToArray()` on every call (a 21-byte allocation +
     // GC header). Trivial in absolute terms — ~3 small allocations/sec/peer — but the
@@ -119,6 +120,40 @@ public sealed class HeartbeatService : IDisposable
     /// targets the same port (single-port model). Removing a peer wipes its tracked state
     /// immediately; adding a new one starts in the Unknown state until the first Pong arrives.
     /// </summary>
+    /// <summary>Addresses pinged every second like a peer, but not peers: no health is kept for them and they are never
+    /// in <see cref="GetAllPeerHealth"/>, so nothing that reacts to a peer coming or going ever sees them.
+    ///
+    /// <para>For the relay (2026-09-24). A phone or older app waits at the relay in one of its two ordinary pair slots,
+    /// and our ordinary heartbeat is what claims the slot beside it. Until 2026-09-20 the relay sat in our peer list, so
+    /// it was always pinged; when it became a place of its own it was pinged only while somebody on it was ticked, and
+    /// a PC alone on a server could never be paired with a waiting phone - the phone said "unreachable" for ever. The
+    /// lock-screen service had kept the ping all along.</para></summary>
+    /// <summary>Whether this service pings that address - a tracked peer, or a ping-only target such as the server we are
+    /// on. Who we are talking to, for <see cref="AddrCheckEchoGate"/>.</summary>
+    /// <summary>A ping from an address this copy is not pinging. Raised on the receive thread.</summary>
+    public Action<IPEndPoint>? OnPingFromUntracked { get; set; }
+
+    public bool Pings(IPAddress address)
+    {
+        lock (gate)
+            return peers.Values.Any(p => p.AudioEndpoint.Address.Equals(address)) || pingOnly.Values.Any(p => p.Address.Equals(address));
+    }
+
+    public void SetPingOnlyTargets(IEnumerable<IPEndPoint> endpoints)
+    {
+        lock (gate)
+        {
+            pingOnly.Clear();
+            foreach (var ep in endpoints) pingOnly[KeyFor(ep)] = ep;
+        }
+    }
+
+    /// <summary>What <see cref="SetPingOnlyTargets"/> last set.</summary>
+    public IReadOnlyList<IPEndPoint> PingOnlyTargets
+    {
+        get { lock (gate) return pingOnly.Values.ToList(); }
+    }
+
     public void SetTrackedPeers(IEnumerable<IPEndPoint> audioEndpoints)
     {
         lock (gate)
@@ -147,6 +182,38 @@ public sealed class HeartbeatService : IDisposable
                     p.AudioEndpoint = ep;
                 }
             }
+        }
+    }
+
+    // Per person on a server: when each one's own pong last came, and its round trip (2026-09-25 sweep; Ed: per-person
+    // cues). The server's own entry still counts them all together, which is what decides whether to send to it.
+    private readonly Dictionary<IPAddress, (DateTime At, int RttMs)> memberPongs = new();
+    private const int MaxMemberPongs = 1024;
+
+    private void NoteMemberPongLocked(IPAddress member, DateTime nowUtc, int rttMs)
+    {
+        memberPongs[member] = (nowUtc, memberPongs.TryGetValue(member, out var was) ? (int)(was.RttMs * 0.7 + rttMs * 0.3) : rttMs);
+        if (memberPongs.Count <= MaxMemberPongs) return;
+        foreach (var old in memberPongs.Where(kv => nowUtc - kv.Value.At > UnreachableWindow).Select(kv => kv.Key).ToList()) memberPongs.Remove(old);
+        if (memberPongs.Count > MaxMemberPongs) memberPongs.Clear();
+    }
+
+    /// <summary>The health of one person on a server, from their own pongs, by the same windows as everybody else's.
+    /// Unreachable once the server has been pinged for a while and they have not answered. Safe from any thread.</summary>
+    public PeerHealth MemberHealth(IPEndPoint member)
+    {
+        var relay = RelayOfMember?.Invoke(member);
+        lock (gate)
+        {
+            var firstPing = relay is null ? null : peers.Values.FirstOrDefault(p => p.AudioEndpoint.Address.Equals(relay.Address))?.FirstPingSentUtc;
+            var heard = memberPongs.TryGetValue(member.Address, out var pong);
+            return SnapshotHealthLocked(new PeerState
+            {
+                AudioEndpoint = member,
+                FirstPingSentUtc = firstPing,
+                LastPongUtc = heard ? pong.At : null,
+                RttEwmaMs = heard ? pong.RttMs : null,
+            }, DateTime.UtcNow);
         }
     }
 
@@ -238,11 +305,14 @@ public sealed class HeartbeatService : IDisposable
         if (transport is null) return;
 
         List<PeerState> targets;
+        List<IPEndPoint> extra;
         lock (gate)
         {
             targets = peers.Values.ToList();
             var nowUtc = DateTime.UtcNow;
             foreach (var p in targets) p.FirstPingSentUtc ??= nowUtc;
+            // Pinged too, once, unless it is a peer already (the relay, once the person on it is ticked).
+            extra = pingOnly.Where(kv => !peers.ContainsKey(kv.Key)).Select(kv => kv.Value).ToList();
         }
 
         // Build packet directly into the reusable outboundPingBuffer instead of stack-
@@ -261,7 +331,7 @@ public sealed class HeartbeatService : IDisposable
         RemPacket.WriteHeader(packetSpan, RemPacketType.Heartbeat, 0xFFFF, seq);
         RemPacket.WriteHeartbeatPayload(packetSpan[RemPacket.HeaderSize..], HeartbeatKind.Ping, tickMs);
 
-        foreach (var p in targets)
+        foreach (var p in targets.Select(t => t.AudioEndpoint).Concat(extra).Select(ep => new PeerState { AudioEndpoint = ep }))
         {
             try
             {
@@ -307,6 +377,12 @@ public sealed class HeartbeatService : IDisposable
 
         if (kind == HeartbeatKind.Ping)
         {
+            // Somebody pinging whom this copy does not ping: said to the app, which may know them (a device ticked before,
+            // back to listen). Answered below either way, as every ping is.
+            if (OnPingFromUntracked is { } untracked && !Pings(remote.Address))
+            {
+                try { untracked(remote); } catch { /* the app's to handle; the pong still goes */ }
+            }
             // Echo the originator's timestamp back to them as a Pong. Reply target is the
             // remote source endpoint (whatever socket the ping came in on, that's where to
             // send the pong) — this works for both LAN-direct (peer's audio port) and
@@ -330,13 +406,17 @@ public sealed class HeartbeatService : IDisposable
         {
             if (Array.IndexOf(recentPingTicks, originatorTickMs) < 0) return;   // answers someone else's ping
         }
-        var matchAddress = RelayOfMember?.Invoke(remote)?.Address ?? remote.Address;
+        var relayOfMember = RelayOfMember?.Invoke(remote);
+        var matchAddress = relayOfMember?.Address ?? remote.Address;
         var nowMs = monotonic.ElapsedMilliseconds;
         var rttMs = (int)Math.Max(0, nowMs - originatorTickMs);
         var nowUtc = DateTime.UtcNow;
         var matchedCount = 0;
         lock (gate)
         {
+            // And for that person on the server, their own: a member's pong reaches us only while each of us has ticked
+            // the other, so it says whether THEY are there - where the server's entry says whether anybody is.
+            if (relayOfMember is not null) NoteMemberPongLocked(remote.Address, nowUtc, rttMs);
             foreach (var p in peers.Values)
             {
                 if (!p.AudioEndpoint.Address.Equals(matchAddress)) continue;

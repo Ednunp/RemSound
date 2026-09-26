@@ -476,6 +476,9 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
     /// <summary>Test seam: one turn of the clock, without waiting a second for it.</summary>
     internal void TickForTest() => Tick();
 
+    /// <summary>Test seam: the hello as it would go out now.</summary>
+    internal byte[] HelloForTest() { lock (gate) return BuildHelloLocked(); }
+
     /// <summary>Test seam: put a relay's last-heard-from back, so a server going quiet can be exercised without
     /// sitting through five seconds of silence. The timestamp is the only thing the silence itself changes.</summary>
     internal void BackdateRosterForTest(TimeSpan by)
@@ -536,7 +539,11 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
     /// nothing about ticking sends; ours always says exactly who, even when that is nobody.</summary>
     private byte[] BuildHelloLocked()
     {
-        var ids = ticked.Take(MaxTickedIds).ToArray();
+        // Somebody ticked who is ON the server now goes first: the set keeps people who are away, and taking the first 64
+        // of it in no order could leave out somebody here - the relay then treats them as unticked, and they are silent
+        // while their row shows ticked (2026-09-25 sweep).
+        var present = snapshot.Members.Select(m => m.Id).ToHashSet();
+        var ids = ticked.OrderByDescending(present.Contains).Take(MaxTickedIds).ToArray();
         var packet = new byte[GroupHeaderSize + NameBytes + GroupTagBytes + 1 + ids.Length * ClientIdSize];
         RemPacket.WriteHeader(packet, (RemPacketType)TypeHello, 0, 0);
         packet[4] = GroupVersion;

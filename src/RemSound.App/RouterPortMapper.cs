@@ -45,7 +45,10 @@ internal enum RouterMappingStatus
 ///   * <see cref="Start"/> kicks off discovery on a background task. When (or if) a router
 ///     replies, the mapping is added and <see cref="StatusChanged"/> fires with
 ///     <see cref="RouterMappingStatus.Mapped"/>.
-///   * Renewal happens automatically — Mono.Nat extends the lease before it expires.
+///   * While mapped, the mapping is asked for again every <see cref="RenewInterval"/> (15 minutes; the lease is an
+///     hour). Nothing did this before 2026-09-25: this comment said Mono.Nat renewed it, and Mono.Nat has no renewal
+///     at all, so routers that honour the lease closed the port after an hour while Preferences still said it was
+///     open. A renewal the router refuses says so in Preferences, and the router is looked for again.
 ///   * <see cref="Refresh"/> can be called after a sleep / resume cycle to make sure the
 ///     router didn't drop the mapping while the machine was off; this re-runs discovery.
 ///   * <see cref="Stop"/> politely removes the mapping and stops discovery.
@@ -61,11 +64,19 @@ internal sealed class RouterPortMapper : IDisposable
     /// <summary>The UDP port RemSound uses for audio + heartbeat.</summary>
     public const int AudioPort = 47830;
 
-    /// <summary>Lease duration on the port mapping, in seconds. The router (and Mono.Nat's
-    /// internal renewal) will refresh this before it expires; we set a deliberately
-    /// short-ish lease so a long sleep on the machine doesn't leave a stale forwarded port
-    /// pointing at us forever.</summary>
+    /// <summary>Lease duration on the port mapping, in seconds. <see cref="RenewInterval"/> asks for it again well
+    /// before it runs out; a deliberately short-ish lease means a machine that sleeps or crashes doesn't leave a stale
+    /// forwarded port pointing at it for long.</summary>
     private const int MappingLeaseSeconds = 3600;
+
+    /// <summary>How often the mapping is asked for again while it should be open (Ed, 2026-09-25: every 15 minutes,
+    /// against the hour's lease). With no mapping in place - the router didn't answer, or refused - the router is
+    /// looked for again on the same beat.</summary>
+    internal static TimeSpan RenewInterval = TimeSpan.FromMinutes(15);   // shortened by the self-test
+
+    /// <summary>The self-test's switch: look for no real router on the network. Its stand-in router comes in through
+    /// <see cref="DeviceFoundForTest"/> instead.</summary>
+    internal static bool NoNetworkForTest;
 
     private readonly Action<string>? log;
     private readonly object gate = new();
@@ -76,6 +87,9 @@ internal sealed class RouterPortMapper : IDisposable
     private RouterMappingStatus status = RouterMappingStatus.Disabled;
     private bool searching;
     private bool disposed;
+    private bool wanted;            // Start was called and Stop was not: the person asked for the router to be opened
+    private System.Threading.Timer? renewTimer;
+    private int renewing;           // 1 while a renewal is out, so a slow router never has two stacked up
 
     /// <summary>Raised whenever <see cref="Status"/> changes. Always fires on a thread-pool
     /// thread — the caller is responsible for marshaling onto the UI thread if it touches
@@ -117,17 +131,26 @@ internal sealed class RouterPortMapper : IDisposable
 
     /// <summary>Start (or restart) the UPnP discovery + mapping cycle. Safe to call multiple
     /// times; redundant calls are coalesced.</summary>
-    public void Start()
+    public void Start() => Start(onlyIfStillWanted: false);
+
+    /// <param name="onlyIfStillWanted">The renewal looking for the router again: only while UPnP is still wanted. It used to
+    /// call Start outright, which set "wanted" back on - so unticking UPnP while a renewal was in flight was undone, and
+    /// the router opened again for the rest of the session (2026-09-25 sweep).</param>
+    private void Start(bool onlyIfStillWanted)
     {
         lock (gate)
         {
             if (disposed) return;
+            if (onlyIfStillWanted && !wanted) return;
+            wanted = true;
+            renewTimer ??= new System.Threading.Timer(_ => RenewTick(), null, RenewInterval, RenewInterval);
             if (searching) return;
             searching = true;
             status = RouterMappingStatus.Searching;
             lastError = "";
         }
         RaiseChanged();
+        if (NoNetworkForTest) return;
         try
         {
             // Subscribe-once: Refresh() (fired on every sleep/wake) calls Start() again without a
@@ -207,6 +230,12 @@ internal sealed class RouterPortMapper : IDisposable
         lock (gate)
         {
             if (disposed) return;
+        }
+        lock (gate)
+        {
+            wanted = false;
+            renewTimer?.Dispose();
+            renewTimer = null;
         }
         RemoveMappingBestEffort();
         log?.Invoke("UPnP: stopping discovery...");
@@ -299,6 +328,71 @@ internal sealed class RouterPortMapper : IDisposable
         }
         RaiseChanged();
     }
+
+    /// <summary>Every <see cref="RenewInterval"/> while the router should be open: ask for the mapping again, so the
+    /// router's lease never runs out. A router that refuses, or has gone, is shown as such in Preferences and looked for
+    /// again; with no mapping in place, the router is looked for again.</summary>
+    private void RenewTick()
+    {
+        if (Interlocked.CompareExchange(ref renewing, 1, 0) != 0) return;
+        try
+        {
+            INatDevice? d;
+            Mapping? m;
+            lock (gate)
+            {
+                if (disposed || !wanted || searching) return;
+                d = device;
+                m = mapping;
+            }
+            if (d is null || m is null)
+            {
+                log?.Invoke("UPnP: no mapping in place - looking for the router again");
+                Start(onlyIfStillWanted: true);
+                return;
+            }
+            try
+            {
+                var renewed = new Mapping(Protocol.Udp, AudioPort, AudioPort, MappingLeaseSeconds, "RemSound audio");
+                d.CreatePortMap(renewed);
+                // A router can take tens of seconds to answer. If UPnP was switched off meanwhile, Stop has already removed
+                // the mapping - and this renewal has just put it back. Take it away again: off means the router is closed.
+                bool stillWanted;
+                lock (gate) stillWanted = wanted && !disposed;
+                if (!stillWanted)
+                {
+                    try { d.DeletePortMap(renewed); } catch { /* best effort, as Stop's own removal */ }
+                    log?.Invoke("UPnP: switched off while a renewal was under way - the renewed mapping has been removed again");
+                    return;
+                }
+                bool changed;
+                lock (gate)
+                {
+                    changed = status == RouterMappingStatus.MappingFailed;
+                    if (changed) { status = externalAddress is not null && IsCgnatAddress(externalAddress) ? RouterMappingStatus.CgnatDetected : RouterMappingStatus.Mapped; lastError = ""; }
+                }
+                log?.Invoke($"UPnP mapping renewed for another {MappingLeaseSeconds / 60} minutes (port {AudioPort})");
+                if (changed) RaiseChanged();
+            }
+            catch (Exception ex)
+            {
+                lock (gate)
+                {
+                    device = null;
+                    mapping = null;
+                    externalAddress = null;
+                }
+                log?.Invoke($"UPnP renewal failed: {ex.GetType().Name}: {ex.Message} - looking for the router again");
+                // Preferences then says it is searching, and after that mapped again or no router found: never "mapped" on
+                // a port the router may already have closed. Only while UPnP is still wanted.
+                Start(onlyIfStillWanted: true);
+            }
+        }
+        finally { Interlocked.Exchange(ref renewing, 0); }
+    }
+
+    internal void DeviceFoundForTest(INatDevice found) => OnDeviceFound(null, new DeviceEventArgs(found));
+    internal void RenewNowForTest() => RenewTick();
 
     private void RemoveMappingBestEffort()
     {

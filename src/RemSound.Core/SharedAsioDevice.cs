@@ -304,6 +304,14 @@ public sealed class SharedAsioDevice
     }
 
     /// <summary>What the driver reads for its outputs: the attached playback provider, or silence.</summary>
+    /// <summary>Test seam: one read through the shared device's output, as the driver's callback makes it.</summary>
+    internal static void ReadThroughTapForTest(IWaveProvider provider, byte[] buffer)
+    {
+        var tap = new OutputTap();
+        tap.Attach(provider);
+        tap.Read(buffer, 0, buffer.Length);
+    }
+
     private sealed class OutputTap : IWaveProvider
     {
         private volatile IWaveProvider? attached;
@@ -314,6 +322,10 @@ public sealed class SharedAsioDevice
 
         public void Attach(IWaveProvider? provider) => attached = provider;
 
+        private long readFaults;
+        /// <summary>How many blocks were silenced because reading them threw.</summary>
+        public long ReadFaults => Interlocked.Read(ref readFaults);
+
         public int Read(byte[] buffer, int offset, int count)
         {
             var provider = attached;
@@ -322,7 +334,11 @@ public sealed class SharedAsioDevice
                 Array.Clear(buffer, offset, count);
                 return count;
             }
-            var read = provider.Read(buffer, offset, count);
+            // Nothing may be thrown from here: this runs in the ASIO driver's own callback, and an exception there goes
+            // into native code. Silence for the block instead (2026-09-25 sweep; hardening, nothing known to throw).
+            int read;
+            try { read = provider.Read(buffer, offset, count); }
+            catch (Exception) { Interlocked.Increment(ref readFaults); read = 0; }
             if (read < count) Array.Clear(buffer, offset + read, count - read);
             return count;
         }

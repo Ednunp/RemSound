@@ -40,10 +40,11 @@ internal static partial class SelfTest
                 Require(typeof(MainForm).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic),
                     $"MainForm.{name} not found - this test would be driving nothing");
 
-            if (((RemSoundSettingsStore)Field("settings")).LoadLockPeerAddresses())
-            {
-                return Skip("this machine has 'lock peer addresses' on, which switches off the very merge under test");
-            }
+            // The merge under test only runs with "lock peer addresses" off, so set it off rather than skip when a default
+            // happens to be on: a skip decided by a default goes silent the day the default flips (2026-09-24).
+            var peerSettings = (RemSoundSettingsStore)Field("settings");
+            peerSettings.SaveLockPeerAddresses(false);
+            Check(!peerSettings.LoadLockPeerAddresses(), "lock peer addresses must be off for the merge under test to run");
 
             var manualPeers = (Dictionary<Guid, PeerAnnouncement>)Field("manualPeers");
             var pinned = (Dictionary<Guid, IPEndPoint>)Field("selectedPeerEndpoints");

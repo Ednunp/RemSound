@@ -117,6 +117,11 @@ internal sealed class ProfileSelectionDialog : Form
         Controls.Add(instructions);
 
         AcceptButton = okButton; // makes Enter work in the form context too
+        ContextHelp.Mark(listBox, "dialog.profile-selection.profiles");
+        ContextHelp.Mark(okButton, "dialog.profile-selection.ok");
+        ContextHelp.Mark(deleteButton, "dialog.profile-selection.delete");
+        ContextHelp.Mark(browseButton, "dialog.profile-selection.browse");
+        ContextHelp.Mark(resetFolderButton, "dialog.profile-selection.reset-folder");
 
         Load += (_, _) =>
         {
@@ -223,7 +228,7 @@ internal sealed class ProfileSelectionDialog : Form
             SelectedProfile = store.Load(selected);
             if (SelectedProfile is null)
             {
-                MessageBox.Show(this,
+                AppMessageBox.Show(this,
                     $"Could not read profile \"{selected}\". Starting a new profile instead.",
                     "RemSound", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 SelectedTitle = null;
@@ -239,13 +244,13 @@ internal sealed class ProfileSelectionDialog : Form
         if (item is null or NewProfileMarker) return; // can't delete the "New profile" entry
         var selected = TitleOfItem(item);
         if (string.IsNullOrEmpty(selected)) return;
-        var result = MessageBox.Show(this,
+        var result = AppMessageBox.Show(this,
             $"Delete profile \"{selected}\"? This cannot be undone.",
             "Confirm delete", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
         if (result != DialogResult.Yes) return;
         if (!store.Delete(selected))
         {
-            MessageBox.Show(this,
+            AppMessageBox.Show(this,
                 $"Could not delete \"{selected}\".",
                 "RemSound", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
@@ -279,7 +284,7 @@ internal sealed class ProfileSelectionDialog : Form
         try { cfg.Save(); }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Could not save app config: {ex.Message}",
+            AppMessageBox.Show(this, $"Could not save app config: {ex.Message}",
                 "RemSound", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
@@ -295,7 +300,7 @@ internal sealed class ProfileSelectionDialog : Form
         try { cfg.Save(); }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Could not save app config: {ex.Message}",
+            AppMessageBox.Show(this, $"Could not save app config: {ex.Message}",
                 "RemSound", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }

@@ -25,7 +25,9 @@ It works with a simple shared password. You and the person you're connecting to 
 * **Mix everyone as you go.** With several people connected, set each person's volume, lean them left or right, and shape their tone with a built-in equaliser (simple 3-band, 12-band graphic, or a full 16-band parametric) — all live, and it's captured in your recordings.
 * **Send a finished mix to a producer or client** in real time, without uploading a file and waiting.
 * **Record what comes through the connection** to WAV, MP3, OGG-Opus, or FLAC — the whole mix, or **each person on their own separate track** to mix afterwards.
-* **Work inside your music software.** RemSound ships a VST3 plugin that puts one person on one track — a track you send goes out to your peers, a peer you receive arrives on a track of their own, ready to record, shape and mix. Install it from the DAW plugin menu; no administrator password needed. See [The DAW plugin](MANUAL.md#25-the-daw-plugin) in the manual.
+* **Work inside your music software.** RemSound ships a VST3 plugin: a track you send goes out to your peers, and the peers you choose arrive on a track - one person, several, or everyone - ready to record, shape and mix. Install it from the DAW plugin menu, in your own plugin folder (no administrator password) or a folder you choose. See [The DAW plugin](MANUAL.md#25-the-daw-plugin) in the manual.
+* **Meet on a server.** Run your own RemSound server and everyone on it with your password can find each other - more than two of you at once, each with their own volume, pan, EQ and recording track.
+* **Help wherever you are.** Press F1 on any control, menu item or tab and that part of the manual opens for your screen reader to read.
 * **Give the people you connect to names that stick**, and see who's connected and what they're sending at a glance.
 * **Drive it from the command line.** As well as its normal window, RemSound takes command-line options — list your audio devices, run a self-test of the whole capture-to-playback path, write a diagnostics report to send for help, or start straight into a profile from a shortcut or script. See [Command-line options](MANUAL.md#23-command-line-options) in the manual.
 
@@ -44,7 +46,7 @@ Inside RemSound there's just one main decision: which quality and delay you want
 3. Extract the zip into a folder of your choice.
 4. Double-click `RemSound.exe` and away you go.
 
-RemSound runs on Microsoft's free .NET 10 Desktop Runtime. Most up-to-date Windows machines already have it. If Windows says .NET is missing when you start RemSound, open the `Install Scripts` folder next to `RemSound.exe` and double-click `Install .NET for RemSound.cmd`. It installs the runtime for you, and then RemSound will start.
+RemSound runs on Microsoft's free .NET 10 Desktop Runtime. Most up-to-date Windows machines already have it. If Windows says .NET is missing when you start RemSound, open the `Install and Uninstall Scripts` folder next to `RemSound.exe` and double-click `Install .NET for RemSound.cmd`. It installs the runtime for you, and then RemSound will start.
 
 After that, RemSound updates itself. Help → Check for updates pulls the next version, or you can tick a box in Preferences and let it install updates quietly in the background.
 

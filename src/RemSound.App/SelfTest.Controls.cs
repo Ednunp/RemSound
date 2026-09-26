@@ -134,13 +134,13 @@ internal static partial class SelfTest
         new("uncheckAllDevicesButton", "clears every ticked device at once", GovernsNothing: true),
 
         // ---- Volume, pan and EQ -----------------------------------------------------------------
-        new("volumeSlider", "the selected peer's volume - EFFECT PROVEN by 'Volume and pan actually move the sound', which measures the level", GovernsNothing: true),
+        new("volumeSlider", "the selected peer's volume - EFFECT PROVEN by 'The pan and EQ tab's real controls reach the live sound', which moves this slider and measures the level", GovernsNothing: true),
         new("volumeBar", "the master volume actually applied to received audio",
             (f, c) => DragSlider(c, -25),
             f => f.ReceiverForTest.Volume,
             LogContains: "listening volume"),
-        new("panSlider", "the selected peer's pan position - EFFECT PROVEN by 'Volume and pan actually move the sound', which measures each channel", GovernsNothing: true),
-        new("panEqPeerList", "which peer the pan/EQ controls apply to, and their per-peer bypass tick - the bypass is PROVEN via ShapingActiveForTest", GovernsNothing: true),
+        new("panSlider", "the selected peer's pan position - EFFECT PROVEN by 'The pan and EQ tab's real controls reach the live sound', which moves this slider and measures each channel", GovernsNothing: true),
+        new("panEqPeerList", "which peer the pan/EQ controls apply to, and their per-peer bypass tick - PROVEN by 'The pan and EQ tab's real controls reach the live sound', which unticks and reticks it", GovernsNothing: true),
         new("enableAllPeerShapingBox", "whether per-peer pan/EQ shaping is applied at all",
             (f, c) => ((CheckBox)c).Checked = !((CheckBox)c).Checked,
             f => f.AllPeerShapingEnabledForTest,
@@ -219,7 +219,7 @@ internal static partial class SelfTest
             f => f.ReceiverForTest.ConcealmentArtifactValue,
             LogContains: "concealment artifact"),
         new("asioDriverBox", "the ASIO driver choice — which also decides one-slider vs two-slider mode", GovernsNothing: true),
-        new("eqModeList", "which of the three EQ modes is active - EFFECT PROVEN by 'All three EQ modes actually change the sound', which measures that the same slider gives a different curve per mode", GovernsNothing: true),
+        new("eqModeList", "which of the three EQ modes is active - its effect on the sound is measured by 'All three EQ modes'; that choosing one reaches the live chain by 'The pan and EQ tab's real controls reach the live sound'", GovernsNothing: true),
         new("parametricBandList", "which parametric band is being edited - each band's effect is PROVEN by 'All three EQ modes' (two bands must both apply)", GovernsNothing: true),
         new(Decorative: true, Field: "eqBandsPanel", Governs: "container for the EQ band controls", GovernsNothing: true),
         new(Decorative: true, Field: "eqCurve", Governs: "the drawn EQ curve (read-only visual)", GovernsNothing: true),
@@ -364,9 +364,9 @@ internal static partial class SelfTest
                 uiChecked++;
 
                 // (1) UI + (2) accessibility: it must announce something a screen reader can read.
-                var announced = !string.IsNullOrWhiteSpace(control.AccessibleName)
-                                || !string.IsNullOrWhiteSpace(control.Text)
-                                || control is TabControl or TextBox or TrackBar or CheckedListBox or ListBox or ComboBox or NumericUpDown;
+                // What a screen reader really gets: its own name, a caption, or the name Windows gives it from its label. A list,
+                // box or slider counted as announced by its TYPE until 2026-09-24, so one with no name at all passed.
+                var announced = control is TabControl || !string.IsNullOrWhiteSpace(DialogControlName(control));
                 if (!announced && !spec.Decorative)
                     problems.Add($"{spec.Field}: nothing for a screen reader to announce");
 
@@ -506,6 +506,13 @@ internal static partial class SelfTest
         }
     }
 
+    /// <summary>Controls on the main window held in a LIST field rather than one field each - built afresh as the window
+    /// changes - with what they are and which step drives them.</summary>
+    private static readonly Dictionary<string, string> MainWindowControlLists = new(StringComparer.Ordinal)
+    {
+        ["eqBandSliders"] = "the EQ band sliders, built for whichever EQ mode is chosen; the pan and EQ step moves the Bass slider and measures it",
+    };
+
     /// <summary>The structural guard: every interactive control on the real window must appear in the
     /// spec table. Add a control without saying what it governs and how to prove it, and this fails —
     /// which is what stops the suite quietly falling behind the UI the way the old tests did.</summary>
@@ -540,8 +547,33 @@ internal static partial class SelfTest
             var stale = specified.Where(s => !fields.Contains(s)).ToList();
             Check(stale.Count == 0, $"the control suite names controls that no longer exist: {string.Join(", ", stale)}");
 
+            // AND WHAT IS REALLY ON THE WINDOW. A control built as a local and added to a panel is on screen and in the tab
+            // order but is no field, so the list above never saw it (found 2026-09-24). Walk the live window: every control a
+            // person can operate must be one of the specified fields, or held in a list field named in MainWindowControlLists.
+            var fieldValues = new HashSet<Control>(ReferenceEqualityComparer.Instance);
+            foreach (var f in typeof(MainForm).GetFields(BindingFlags.Instance | BindingFlags.NonPublic).Where(f => typeof(Control).IsAssignableFrom(f.FieldType)))
+                if (f.GetValue(form) is Control c) fieldValues.Add(c);
+            foreach (var (listField, _) in MainWindowControlLists)
+            {
+                var list = typeof(MainForm).GetField(listField, BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(form) as System.Collections.IEnumerable;
+                Check(list is not null, $"MainWindowControlLists names {listField}, which is not a list field on the window any more");
+                foreach (var item in list!) if (item is Control c) fieldValues.Add(c);
+            }
+            var onWindow = new List<Control>();
+            void Walk(Control parent) { foreach (Control c in parent.Controls) { onWindow.Add(c); Walk(c); } }
+            Walk(form);
+            var unnamed = onWindow
+                .Where(c => c is ButtonBase or ListControl or NumericUpDown or TrackBar or TextBoxBase && c.Parent is not UpDownBase)
+                .Where(c => !fieldValues.Contains(c))
+                .Select(c => $"{c.GetType().Name} \"{(string.IsNullOrWhiteSpace(c.AccessibleName) ? c.Text : c.AccessibleName)}\"")
+                .ToList();
+            Check(unnamed.Count == 0,
+                $"these controls are on the window but are not fields, so the control suite cannot drive them - make each a field with "
+                + $"an entry, or keep them in a list field named in MainWindowControlLists with what drives them: {string.Join(", ", unnamed)}");
+
             var governing = BuildControlSpecs().Count(s => !s.GovernsNothing);
-            return $"{fields.Count} controls on the window, all specified; {governing} carry a proven effect, the rest declared as governing nothing";
+            return $"{fields.Count} controls on the window, all specified; {governing} carry a proven effect, the rest declared as governing nothing; "
+                 + $"{onWindow.Count} controls walked on the live window, none unaccounted for";
         }
         finally { try { form?.Dispose(); } catch { } }
     }

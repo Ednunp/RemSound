@@ -72,6 +72,10 @@ internal static class PerformanceMode
     private static IntPtr powerRequestHandle = IntPtr.Zero;
     private static ProcessPriorityClass? priorityBeforeBoost;
 
+    /// <summary>Gate seam: set for a whole self-test run. Priority mode is recorded and logged but not applied - a step that
+    /// started the service host raised the gate's own priority, kept the machine awake and asked for a 1 ms timer (2026-09-24).</summary>
+    internal static bool NoEffectForTest;
+
     /// <summary>Apply or reverse Full-CPU-speed mode. <paramref name="log"/> receives a
     /// short status line so the activation is visible in the diagnostic log file.
     /// Failures on individual mechanisms (e.g. an OEM image rejecting one of the Win32
@@ -83,6 +87,14 @@ internal static class PerformanceMode
             if (enable == currentlyEnabled)
             {
                 log?.Invoke($"performance mode: already {(enable ? "on" : "off")}, no change");
+                return;
+            }
+
+            // A gate run keeps the bookkeeping and the log line, and changes nothing about the process or the machine.
+            if (NoEffectForTest)
+            {
+                currentlyEnabled = enable;
+                log?.Invoke($"priority mode: {(enable ? "ON" : "OFF")} (a test run: nothing about the process or the machine was changed)");
                 return;
             }
 

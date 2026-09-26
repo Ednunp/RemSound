@@ -6,7 +6,9 @@ public sealed class HotkeyCaptureForm : Form
 {
     private readonly Label instructionLabel = new() { AutoSize = true };
     private readonly TextBox hotkeyTextBox = new() { ReadOnly = true, Width = 360 };
-    private readonly Button cancelButton = new() { Text = "Cancel", AutoSize = true };
+    // No Alt key, on purpose: this window exists to capture key combinations, and Alt+C here must be a shortcut being
+    // chosen, not the Cancel button. Tab reaches it.
+    private readonly Button cancelButton = new() { Text = "Cancel", AutoSize = true, UseMnemonic = false };
     private HotkeyInfo? pendingHotkey;
     private bool capturingCombination;
 
@@ -26,6 +28,8 @@ public sealed class HotkeyCaptureForm : Form
         hotkeyTextBox.KeyUp += CaptureKeyUp;
 
         cancelButton.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };
+        // Escape on the button, as in any window; in the box Escape is taken first, as before.
+        CancelButton = cancelButton;
 
         var panel = new FlowLayoutPanel
         {
@@ -44,6 +48,15 @@ public sealed class HotkeyCaptureForm : Form
 
     public HotkeyInfo? CapturedHotkey { get; private set; }
 
+    /// <summary>Test seam: a key-down as Windows delivers it to the window, and whether the window took it.</summary>
+    internal bool KeyDownForTest(Keys keyData)
+    {
+        var msg = Message.Create(Handle, 0x0100, (IntPtr)(int)(keyData & Keys.KeyCode), IntPtr.Zero);
+        return ProcessCmdKey(ref msg, keyData);
+    }
+    internal TextBox BoxForTest => hotkeyTextBox;
+    internal Button CancelForTest => cancelButton;
+
     /// <summary>True if the user pressed a modifier key (Ctrl / Shift / Alt) at any point
     /// during this capture session. Used in conjunction with <see cref="SawAnyNonModifier"/>
     /// to detect "user tried to bind a combo but the non-modifier key was swallowed by a
@@ -61,6 +74,10 @@ public sealed class HotkeyCaptureForm : Form
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        // Keys are a shortcut being chosen only in the box. Tab and Shift+Tab move, as anywhere: every key-down was taken
+        // as a shortcut, so the Cancel button the comment above promises could not be reached, nor pressed once it was
+        // (2026-09-25 sweep). Tab alone is no global shortcut, so nothing is lost.
+        if (ActiveControl != hotkeyTextBox || keyData is Keys.Tab or (Keys.Tab | Keys.Shift)) return base.ProcessCmdKey(ref msg, keyData);
         if (msg.Msg is 0x0100 or 0x0104) { CaptureKeyData(keyData); return true; }
         if (msg.Msg is 0x0101 or 0x0105) { HandleKeyRelease(); return true; }
         return base.ProcessCmdKey(ref msg, keyData);

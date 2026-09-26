@@ -221,10 +221,10 @@ public sealed class PluginTrackSource : IDisposable
     /// Forget hosts that have gone quiet, and disarm the lane when the last one goes. Called once a
     /// second by the app.
     ///
-    /// <para>This is the path a crashed DAW takes. A plugin unloading cleanly says goodbye and the
-    /// bridge forgets its instance, but a DAW that is killed says nothing at all, and a lane left
-    /// armed forever would keep "Send my audio" switched on from the app's point of view with no
-    /// way for the user to see why.</para>
+    /// <para>This is the only way a DAW leaves: whether it unloaded cleanly or was killed, it simply stops
+    /// delivering blocks. (A plugin's goodbye makes the bridge forget its instance, but the lane here belongs
+    /// to the DAW, not to one instance of the plugin.) A lane left armed forever would keep "Send my audio"
+    /// switched on from the app's point of view with no way for the user to see why.</para>
     /// </summary>
     public void Sweep()
     {
@@ -256,26 +256,6 @@ public sealed class PluginTrackSource : IDisposable
         }
         // Outside the lock: SetPluginSendActive takes the sender's own configGate, and holding two
         // locks in one order here and the other order anywhere else is how deadlocks are built.
-        if (disarm) sender.SetPluginSendActive(false);
-    }
-
-    /// <summary>A plugin instance said goodbye, or the bridge dropped it. Same handling as a timeout,
-    /// just immediate.</summary>
-    public void Forget(Guid hostId)
-    {
-        var disarm = false;
-        lock (gate)
-        {
-            if (!hosts.Remove(hostId, out var host)) return;
-            host.Lane?.Dispose();
-            diagnostic?.Invoke($"plugin send: DAW {Short(hostId)} closed");
-            ElectDriverLocked();
-            if (hosts.Count == 0 && armed)
-            {
-                armed = false;
-                disarm = true;
-            }
-        }
         if (disarm) sender.SetPluginSendActive(false);
     }
 

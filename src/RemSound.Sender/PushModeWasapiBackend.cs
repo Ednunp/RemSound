@@ -119,6 +119,30 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
     // See item 2 of RemSoundefficiency.md. 2026-05-22.
     private long cumulativeCaptureTicks;
 
+    // What this lane was asked to capture, whether or not it opened: HealSources re-opens it.
+    private CaptureSourceSpec? desiredSpec;
+    private int failedTries;
+    private bool healing;
+
+    /// <summary>See <see cref="ICaptureBackend.HealSources"/>: the one source, re-opened if it failed to open or died.</summary>
+    public void HealSources()
+    {
+        if (desiredSpec is not { } spec) return;
+        if (capture is not null && !faulted) return;
+        healing = true;
+        try { Start([spec]); }
+        finally { healing = false; }
+        if (capture is not null && !faulted)
+        {
+            onDiagnostic?.Invoke($"push-wasapi: \"{spec.Name}\" is capturing again (re-opened on try {failedTries + 1})");
+            failedTries = 0;
+        }
+        else if (++failedTries == 1 || failedTries % 20 == 0)
+        {
+            onDiagnostic?.Invoke($"push-wasapi: \"{spec.Name}\" still cannot be opened ({failedTries} tries) — trying again every few seconds");
+        }
+    }
+
     public void Start(IReadOnlyList<CaptureSourceSpec> specs)
     {
         if (specs.Count == 0)
@@ -126,6 +150,7 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
             onDiagnostic?.Invoke("push-wasapi: start called with no specs — staying stopped");
             return;
         }
+        if (specs.Count == 1) desiredSpec = specs[0];
         if (specs.Count > 1)
         {
             // Surface this loudly. The caller should have routed multi-source to MixingEngine.
@@ -147,6 +172,7 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
             var spec = specs[0];
             try
             {
+                if (MixingEngine.RefuseOpenForTest?.Invoke(spec) == true) throw new InvalidOperationException("refused by the self-test");
                 using var enumerator = new MMDeviceEnumerator();
                 var device = enumerator.GetDevice(spec.DeviceId);
                 captureDevice = device; // hold it for disposal in StopInternal — see field comment
@@ -228,7 +254,7 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
                 // churn. Match MixingEngine/AsioCaptureBackend — log, stay stopped, let the caller carry on
                 // (the device-change watcher / capture self-heal re-open when a good device appears).
                 lastError = ex.Message;
-                onDiagnostic?.Invoke($"push-wasapi start failed for \"{spec.Name}\": {ex.GetType().Name}: {ex.Message} — staying stopped (will re-open when the device is available)");
+                if (!healing) onDiagnostic?.Invoke($"push-wasapi start failed for \"{spec.Name}\": {ex.GetType().Name}: {ex.Message} — tried again every few seconds");
                 StopInternal();
             }
         }
@@ -253,8 +279,13 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
 
     public void Stop()
     {
+        desiredSpec = null;   // stopped on purpose: nothing for the heal to re-open
+        failedTries = 0;
         lock (gate) StopInternal();
     }
+
+    /// <summary>Gate seam: die as a device does when it faults in place.</summary>
+    internal void FaultForTest() => faulted = true;
 
     private void StopInternal()
     {

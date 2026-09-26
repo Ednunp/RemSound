@@ -16,14 +16,27 @@ namespace RemSound.App;
 internal sealed class TolkScreenReaderOutput : IScreenReaderOutput
 {
     private readonly object sync = new();
-    private bool loadAttempted;
-    private bool loaded;
+    private bool loaded;            // Tolk loaded AND a screen reader speaking
+    private bool tolkLoaded;        // Tolk itself loaded, screen reader or not
+    private bool dllMissing;        // Tolk.dll is not there: nothing will ever speak, so stop looking
+    private long lastAttemptMs = long.MinValue;
+
+    /// <summary>How long after finding no screen reader RemSound looks again, the next time it has something to say.</summary>
+    internal static readonly TimeSpan RetryAfter = TimeSpan.FromSeconds(5);
+
+    /// <summary>Gate seams: stand-ins for Tolk's calls and for the clock, so the looking again can be driven with no
+    /// screen reader and no DLL. <see cref="AttemptsForTest"/> counts the looks.</summary>
+    internal Func<bool>? LoadForTest;
+    internal Func<bool>? HasSpeechForTest;
+    internal Func<string, bool>? OutputForTest;
+    internal Func<long>? ClockForTest;
+    internal int AttemptsForTest;
 
     public bool Speak(string text, bool interrupt = true)
     {
         if (string.IsNullOrWhiteSpace(text)) return false;
         if (!EnsureLoaded()) return false;
-        try { return Tolk_Output(text, interrupt); }
+        try { return OutputForTest?.Invoke(text) ?? Tolk_Output(text, interrupt); }
         catch { return false; }
     }
 
@@ -31,23 +44,36 @@ internal sealed class TolkScreenReaderOutput : IScreenReaderOutput
     {
         lock (sync)
         {
-            if (!loaded) return;
-            try { Tolk_Unload(); } catch { /* best-effort */ }
+            if (tolkLoaded && LoadForTest is null)
+            {
+                try { Tolk_Unload(); } catch { /* best-effort */ }
+            }
+            tolkLoaded = false;
             loaded = false;
-            loadAttempted = false;
+            lastAttemptMs = long.MinValue;
         }
     }
 
-    /// <summary>Load Tolk once. Succeeds only if Tolk loads AND reports a working speech channel, so a
-    /// machine with the DLLs present but no screen reader running stays silent instead of half-init'd.</summary>
+    /// <summary>Is a screen reader there to speak? Tolk is loaded once; the screen reader is looked for again when it was
+    /// not there, at most every <see cref="RetryAfter"/>. It used to be looked for once: if RemSound first spoke while NVDA
+    /// was not running - RemSound starting at sign-in before NVDA, or NVDA restarting after the audio service took its
+    /// speech - everything RemSound says stayed silent for the rest of the session (2026-09-25 sweep).</summary>
     private bool EnsureLoaded()
     {
         lock (sync)
         {
             if (loaded) return true;
-            if (loadAttempted) return false;   // already tried and failed — don't spam load attempts
-            loadAttempted = true;
-            try { loaded = Tolk_Load() && Tolk_HasSpeech(); }
+            if (dllMissing) return false;
+            var now = ClockForTest?.Invoke() ?? Environment.TickCount64;
+            if (lastAttemptMs != long.MinValue && now - lastAttemptMs < (long)RetryAfter.TotalMilliseconds) return false;
+            lastAttemptMs = now;
+            AttemptsForTest++;
+            try
+            {
+                if (!tolkLoaded) tolkLoaded = LoadForTest?.Invoke() ?? Tolk_Load();
+                loaded = tolkLoaded && (HasSpeechForTest?.Invoke() ?? Tolk_HasSpeech());
+            }
+            catch (DllNotFoundException) { dllMissing = true; loaded = false; }
             catch { loaded = false; }
             return loaded;
         }

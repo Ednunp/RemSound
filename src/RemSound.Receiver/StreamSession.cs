@@ -12,8 +12,9 @@ namespace RemSound.Receiver;
 /// rather than being thrown away mid-playback; a stream id the sender has rotated away from on
 /// the same lane is superseded and closed.
 ///
-/// All work runs on the network listener's thread. No locks; the only cross-thread interaction
-/// is writing decoded float frames to the SPSC <see cref="AudioRingBuffer"/>.
+/// Packets arrive on two threads - the network listener's, and the sender socket's for audio from a server - and the
+/// session can be closed from a third. A packet being handled and a close take their turn under one small lock (see
+/// HandleAudioPayload); decoded frames go to the SPSC <see cref="AudioRingBuffer"/>.
 /// </summary>
 internal sealed class StreamSession : IDisposable
 {
@@ -42,6 +43,7 @@ internal sealed class StreamSession : IDisposable
     /// the session forever — a reconnecting peer never reuses its old (endpoint, streamId)
     /// key, so its previous session is always an orphan that must be reaped by idle age.</summary>
     public DateTime LastWriteUtc => sessionPlayout.LastWriteUtc;
+    internal long AudioBytesWrittenForTest => sessionPlayout.AudioBytesWrittenForTest;
 
     /// <summary>For PCM streams: number of incoming packets the assembler rejected outright.</summary>
     public long PcmFrameRejections => pcmAssembler.RejectionCount;
@@ -114,7 +116,27 @@ internal sealed class StreamSession : IDisposable
         && Format.Channels == format.Channels
         && Format.FrameSamplesPerChannel == format.FrameSamplesPerChannel;
 
+    /// <summary>A packet being handled and <see cref="Dispose"/> take turns. The network thread handles packets outside
+    /// the receiver's lock while another thread can close the session - someone unticked, receiving switched off, a
+    /// stream replaced - and closing freed the Opus decoder, which holds native memory, possibly in the middle of a decode
+    /// (found 2026-09-25).</summary>
+    private readonly object handlingGate = new();
+    private bool disposed;
+
+    /// <summary>Gate seam: runs while a packet is being handled, inside the turn it holds.</summary>
+    internal Action? WhileHandlingForTest { get; set; }
+
     public bool HandleAudioPayload(uint sequence, ReadOnlySpan<byte> payload)
+    {
+        lock (handlingGate)
+        {
+            if (disposed) return false;
+            WhileHandlingForTest?.Invoke();
+            return HandleAudioPayloadLocked(sequence, payload);
+        }
+    }
+
+    private bool HandleAudioPayloadLocked(uint sequence, ReadOnlySpan<byte> payload)
     {
         // Already had it on the peer's other path. Handled, not failed: counting it as a drop would
         // make a healthy merged session look like a lossy one. See AlreadyDelivered.
@@ -250,8 +272,13 @@ internal sealed class StreamSession : IDisposable
         // set climb (83 MB → 3.5 GB). The cast-to-IDisposable handles both the native and
         // the pure-managed path transparently — if the concrete type doesn't implement
         // IDisposable, the as-cast yields null and the null-conditional is a no-op.
-        (opusDecoder as IDisposable)?.Dispose();
-        opusDecoder = null;
+        lock (handlingGate)
+        {
+            if (disposed) return;
+            disposed = true;
+            (opusDecoder as IDisposable)?.Dispose();
+            opusDecoder = null;
+        }
     }
 
     // === PCM ===

@@ -592,7 +592,9 @@ internal static partial class SelfTest
             Check(removeItem.Enabled == installed,
                 $"Remove must be enabled only when a plugin is actually installed (installed={installed}, enabled={removeItem.Enabled})");
             var installText = installItem.Text ?? "";
-            Check(installText.Contains(installed ? "Reinstall" : "Install", StringComparison.OrdinalIgnoreCase),
+            // The mnemonic sits inside the word ("Re&install"), so compare what is read, not what is typed. Until
+            // 2026-09-24 no gate run had a plugin installed, and this compared the raw text.
+            Check(installText.Replace("&", "").Contains(installed ? "Reinstall" : "Install", StringComparison.OrdinalIgnoreCase),
                 $"Install must rename itself to Reinstall when one is present (installed={installed}, got '{installText}')");
 
             // The setting behind the tick must persist, in an isolated config — never the real one.
@@ -803,6 +805,11 @@ internal static partial class SelfTest
             using var plugin = new PluginBridgeClient(host.Port);
             plugin.Hello();
             Check(WaitUntil(() => host.InstanceCount == 1), "the plugin must register with the app before the tick is tested");
+            // And a DAW track arriving, so the send side's sweep has something to forget too.
+            var track = new float[256 * PluginBridgeProtocol.WireChannels];
+            for (var i = 0; i < track.Length; i++) track[i] = 0.25f;
+            for (var i = 0; i < 20; i++) { plugin.SendTrackBlock(track); Thread.Sleep(2); }
+            Check(WaitUntil(() => form.PluginTrackSourceForTest.AnyHostSending), "the DAW track must reach the send lane before the tick is tested");
 
             // Everything off: no logging, no auto-tune. This is a perfectly ordinary way to run the
             // app, and it is the state in which the sweep silently stopped happening.
@@ -819,7 +826,29 @@ internal static partial class SelfTest
                 "with logging OFF, the per-second tick must STILL sweep a plugin instance that has gone quiet. It sat "
                 + "below the diagnostics early-return, so a user who turned the log file off lost the fix for a DAW "
                 + "that was killed — the peer it had claimed stays silent in RemSound with nothing to explain it");
-            return "with the log switch off and auto-tune off, the per-second tick still reaps a plugin whose DAW died";
+            // The send side's sweep, beside it: a killed DAW's track lane left armed keeps the sender running on nothing.
+            // Only the receive side's sweep was driven until 2026-09-24.
+            Check(!form.PluginTrackSourceForTest.AnyHostSending,
+                "with logging OFF, the per-second tick must STILL forget a DAW that stopped sending its track - "
+                + "an armed lane with nothing feeding it keeps the sender running");
+
+            // The recording warning can't be driven here: it opens a message box, and a disk too slow to keep up can't
+            // be made on demand. Its place in the tick is pinned instead - above the log switch's return, with the sweeps.
+            var root = FindSourceRoot();
+            if (root is not null)
+            {
+                var tick = SourceMethodBody(File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "MainForm.cs")), "private void SnapshotLogIfDue()");
+                // The code line, not the comment near the top of the method that quotes it.
+                var gateLine = System.Text.RegularExpressions.Regex.Match(tick, @"^\s*if \(!DiagnosticsGate\.Enabled\)\s*$",
+                    System.Text.RegularExpressions.RegexOptions.Multiline);
+                var gate = gateLine.Success ? gateLine.Index : -1;
+                var warn = tick.IndexOf("WarnIfRecordingIsLosingAudio();", StringComparison.Ordinal);
+                Check(gate > 0 && warn > 0 && warn < gate,
+                    "the recording-losing-audio warning must sit ABOVE the log switch's return in the per-second tick, or a user "
+                    + "with logging off loses audio in silence");
+            }
+            return "with the log switch off and auto-tune off, the per-second tick still reaps a plugin whose DAW died and forgets "
+                 + "its track; the recording warning sits above the switch" + (root is null ? " (not checked: no source tree)" : "");
         }
         finally { DiagnosticsGate.Enabled = restoreGate; }
     }
@@ -832,7 +861,9 @@ internal static partial class SelfTest
     {
         // The target must live in the USER's profile. A path under Program Files would need
         // elevation, which defeats the point of a portable copy.
-        var dir = PluginInstaller.InstallDirectory;
+        // The REAL folder: in this run InstallDirectory is the throwaway one, which sits under %TEMP% and so passed the
+        // per-user check by accident (2026-09-24).
+        var dir = PluginInstaller.RealInstallDirectory;
         var localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         Check(dir.StartsWith(localApp, StringComparison.OrdinalIgnoreCase),
             $"the plugin must install per-user (no admin), not machine-wide (got {dir})");

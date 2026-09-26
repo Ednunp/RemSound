@@ -223,6 +223,11 @@ public sealed class Profile
     /// who arrives with a new id (a fresh set-up, a new machine) arrives unticked.</summary>
     public List<string> RelayTickedIds { get; set; } = [];
 
+    /// <summary>The "phone or older app" row on the relay was ticked: the one person the relay pairs beside us who can't
+    /// say who they are (a phone, or somebody on RemSound 5.9 or older). Saved like the other ticks - until 2026-09-24 it
+    /// wasn't, so after every restart that person was cut off until somebody ticked the row again.</summary>
+    public bool RelayPairPartnerTicked { get; set; }
+
     /// <summary>When true, this profile is LOCKED to the exact peer addresses set above. RemSound uses
     /// only those addresses, never matches the other computer by the name it advertises on the network,
     /// and never switches to a different address it discovers — even if the set address stops working

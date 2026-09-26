@@ -54,9 +54,23 @@ public sealed class PluginBridgeClient : IDisposable
     {
         public long Round;
         public int Floats;
-        public readonly float[] Data = new float[PluginBridgeProtocol.MaxAudioBytes / sizeof(float)];
+        /// <summary>Grown on the bridge thread, never the audio thread, when a DAW's buffer is bigger than one message;
+        /// only ever while the slot is not yet published, so the audio thread never sees it change.</summary>
+        public float[] Data = new float[PluginBridgeProtocol.MaxAudioBytes / sizeof(float)];
     }
     private readonly Slot[] slots = new Slot[SlotCount];
+
+    /// <summary>
+    /// What a reply brought beyond the block being played, kept for the next one - audio thread only, sized once here so
+    /// that thread never allocates. The reply played now was asked for <c>lead</c> calls ago, sized for THAT call; a host
+    /// at 44.1 kHz asks a frame or two more or less each call (the resampler's carry), and a host may change its block
+    /// size whenever it likes. Cutting each reply to the size of the block being played threw the rest away - about 21
+    /// small splices a second at 44.1 kHz, and a block too short left a gap - and a short block was counted as starved,
+    /// so the status blamed "audio arriving short" (2026-09-25 sweep, measured). Every frame asked for is now played, in
+    /// order; a block is short only when nothing is left to give.
+    /// </summary>
+    private readonly float[] carry = new float[PluginBridgeProtocol.MaxBlockFrames * PluginBridgeProtocol.WireChannels * 2];
+    private int carryFloats;
     private int head;   // audio thread advances
     private int tail;   // bridge thread advances
 
@@ -90,6 +104,15 @@ public sealed class PluginBridgeClient : IDisposable
     internal static void ResetLeadForTest() { lock (leadGate) { leadBlocks = DefaultLeadBlocks; leadWindowWorstLateness = 0; leadRaisedAtTicks = 0; leadWindowStartTicks = 0; } }
 
     private readonly byte[] sendScratch = new byte[PluginBridgeProtocol.MaxAudioBytes];
+
+    // A block arriving in parts (bridge thread only): which round, and how much of it has come. The parts go straight into
+    // the slot at `tail`, which is published only once the block is whole.
+    private long assemblingRound = long.MinValue;
+    private int assembledFloats;
+    private long partsAbandoned;
+
+    /// <summary>Blocks that arrived in parts and never completed (a part lost or out of order) and were dropped whole.</summary>
+    public long AbandonedBlocks => Interlocked.Read(ref partsAbandoned);
     private readonly byte[] requestScratch = new byte[PluginBridgeProtocol.ClaimSetSizeWithAsk(PluginBridgeProtocol.MaxClaimedPeers)];
 
     // The people this instance is receiving. An ARRAY, swapped whole: the audio thread reads the
@@ -106,6 +129,9 @@ public sealed class PluginBridgeClient : IDisposable
     /// app answers — which is also how "RemSound isn't running" shows up, stated plainly rather than
     /// as an empty box that looks broken.</summary>
     public IReadOnlyList<(IPAddress Address, string Name)> KnownPeers { get; private set; } = [];
+
+    /// <summary>Whether RemSound's "Receive audio" is on, as its last peer list said. Assumed on until it says otherwise.</summary>
+    public bool AppReceiving { get; private set; } = true;
 
     /// <summary>Has the app answered us at all? Drives the plugin's status line.</summary>
     public bool Connected { get; private set; }
@@ -276,6 +302,7 @@ public sealed class PluginBridgeClient : IDisposable
             dropQueued = false;
             Volatile.Write(ref head, Volatile.Read(ref tail));
             Volatile.Write(ref blockOffset, long.MinValue);
+            carryFloats = 0;
         }
 
         var ask = ++askNumber;
@@ -299,7 +326,7 @@ public sealed class PluginBridgeClient : IDisposable
                 }
                 if (slot.Round == target)
                 {
-                    filled = Take(slot, destination, wantedFloats);
+                    Keep(slot);
                     h++;
                 }
                 break;
@@ -308,10 +335,11 @@ public sealed class PluginBridgeClient : IDisposable
         else if (h != t)
         {
             // Numbering not known yet - nothing has been answered since the start: play in arrival order.
-            filled = Take(slots[h & (SlotCount - 1)], destination, wantedFloats);
+            Keep(slots[h & (SlotCount - 1)]);
             h++;
         }
         Volatile.Write(ref head, h);
+        filled = Give(destination, wantedFloats);
 
         if (filled < wanted) Interlocked.Increment(ref blocksStarved);
         else Interlocked.Increment(ref blocksServed);
@@ -328,10 +356,30 @@ public sealed class PluginBridgeClient : IDisposable
         return filled;
     }
 
-    private static int Take(Slot slot, Span<float> destination, int wantedFloats)
+    /// <summary>Everything a reply brought, onto the end of what is kept. Full (a host that stopped reading for a long
+    /// while): the oldest goes, so what plays is the newest.</summary>
+    private void Keep(Slot slot)
     {
-        var floats = Math.Min(slot.Floats, wantedFloats);
-        slot.Data.AsSpan(0, floats).CopyTo(destination);
+        var incoming = Math.Min(slot.Floats, carry.Length);
+        var overflow = carryFloats + incoming - carry.Length;
+        if (overflow > 0)
+        {
+            overflow += overflow % PluginBridgeProtocol.WireChannels;
+            Array.Copy(carry, overflow, carry, 0, carryFloats - overflow);
+            carryFloats -= overflow;
+            Interlocked.Add(ref framesSkipped, overflow / PluginBridgeProtocol.WireChannels);
+        }
+        slot.Data.AsSpan(0, incoming).CopyTo(carry.AsSpan(carryFloats));
+        carryFloats += incoming;
+    }
+
+    /// <summary>Exactly the block being played, from what is kept; the rest waits for the next block.</summary>
+    private int Give(Span<float> destination, int wantedFloats)
+    {
+        var floats = Math.Min(carryFloats, wantedFloats);
+        carry.AsSpan(0, floats).CopyTo(destination);
+        carryFloats -= floats;
+        if (carryFloats > 0) Array.Copy(carry, floats, carry, 0, carryFloats);
         return floats / PluginBridgeProtocol.WireChannels;
     }
 
@@ -339,17 +387,25 @@ public sealed class PluginBridgeClient : IDisposable
     /// block to the app, which puts it on the wire through the connection it already owns.</summary>
     public bool SendTrackBlock(ReadOnlySpan<float> samples)
     {
-        var bytes = samples.Length * sizeof(float);
-        if (bytes == 0 || bytes > PluginBridgeProtocol.MaxAudioBytes) return false;
-        // One memcpy, not a per-sample call. This ran once per float on the DAW's audio thread — a
-        // thousand calls for a 512-frame stereo block — to produce the identical bytes a straight copy
-        // gives on any little-endian machine. WriteRing on the receive side already states that
-        // assumption in as many words and reads the ring back as floats verbatim, so the two halves
-        // of the same link were making opposite trades. 2026-08-24.
-        System.Runtime.InteropServices.MemoryMarshal.AsBytes(samples).CopyTo(sendScratch);
-        if (!link.Send(app, PluginBridgeMessage.TrackAudio, instanceHash, null, sendScratch.AsSpan(0, bytes))) return false;
+        if (samples.Length == 0 || samples.Length > PluginBridgeProtocol.MaxBlockFrames * PluginBridgeProtocol.WireChannels) return false;
+        // A block bigger than one message goes as several in a row: the app reads a plugin's track as one stream, so
+        // consecutive pieces are exactly the same audio. It used to be refused outright, so a DAW buffer of 4096 at
+        // 44.1 kHz (4460 frames once it is 48 kHz) never reached anybody (review 2026-09-25).
+        const int ChunkFloats = PluginBridgeProtocol.MaxAudioBytes / sizeof(float);   // whole frames: an even number
+        for (var offset = 0; offset < samples.Length; offset += ChunkFloats)
+        {
+            var piece = samples.Slice(offset, Math.Min(ChunkFloats, samples.Length - offset));
+            var bytes = piece.Length * sizeof(float);
+            // One memcpy, not a per-sample call. This ran once per float on the DAW's audio thread — a
+            // thousand calls for a 512-frame stereo block — to produce the identical bytes a straight copy
+            // gives on any little-endian machine. WriteRing on the receive side already states that
+            // assumption in as many words and reads the ring back as floats verbatim, so the two halves
+            // of the same link were making opposite trades. 2026-08-24.
+            System.Runtime.InteropServices.MemoryMarshal.AsBytes(piece).CopyTo(sendScratch);
+            if (!link.Send(app, PluginBridgeMessage.TrackAudio, instanceHash, null, sendScratch.AsSpan(0, bytes))) return false;
+            Interlocked.Add(ref bytesSent, bytes);
+        }
         Interlocked.Increment(ref blocksSent);
-        Interlocked.Add(ref bytesSent, bytes);
         return true;
     }
 
@@ -365,10 +421,16 @@ public sealed class PluginBridgeClient : IDisposable
         {
             case PluginBridgeMessage.PeerAudioRound:
                 Interlocked.Add(ref bytesReceived, payload.Length);
-                if (PluginBridgeProtocol.TryReadAudioRoundHeader(payload.Span, out var round, out var answered))
-                    Enqueue(payload.Span[PluginBridgeProtocol.AudioRoundHeaderSize..], round, answered);
+                if (PluginBridgeProtocol.TryReadAudioRoundHeader(payload.Span, out var round, out var answered, out var offset, out var total))
+                    Enqueue(payload.Span[PluginBridgeProtocol.AudioRoundHeaderSize..], round, answered, offset, total);
                 break;
             case PluginBridgeMessage.PeerList:
+                var receivingNow = !Encoding.UTF8.GetString(payload.Span).Split('\n').Contains(PluginBridgeProtocol.ReceiveOffLine);
+                if (receivingNow != AppReceiving)
+                {
+                    AppReceiving = receivingNow;
+                    Notable?.Invoke(receivingNow ? "RemSound's Receive audio is on again" : "RemSound's Receive audio is off - nobody to receive onto the track");
+                }
                 var updated = ParsePeerList(payload.Span);
                 // Compare WHO, not how many. Counting alone missed the swap — somebody leaving as
                 // somebody else joins keeps the count identical, so the log would say nothing at the
@@ -389,16 +451,38 @@ public sealed class PluginBridgeClient : IDisposable
     /// (win-x64), so the bytes go into the slot verbatim and come back out as floats. That is the
     /// same assumption the receive path's ring already makes between the network and render
     /// threads.</para></summary>
-    private void Enqueue(ReadOnlySpan<byte> payload, long round, int askNumber)
+    private void Enqueue(ReadOnlySpan<byte> payload, long round, int askNumber, int offsetFloats, int totalFloats)
     {
         var floats = payload.Length / sizeof(float);
         floats -= floats % PluginBridgeProtocol.WireChannels;   // whole frames, or every later sample swaps channels
-        if (floats <= 0) return;
+        totalFloats -= totalFloats % PluginBridgeProtocol.WireChannels;
+        if (floats <= 0 || totalFloats <= 0) return;
         var t = tail;
-        if (t - Volatile.Read(ref head) >= SlotCount) return;
+        if (t - Volatile.Read(ref head) >= SlotCount) { assemblingRound = long.MinValue; return; }
         var slot = slots[t & (SlotCount - 1)];
-        System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(payload[..(floats * sizeof(float))]).CopyTo(slot.Data);
-        slot.Floats = floats;
+
+        // Put the block together in the unpublished slot. Parts come in order; anything else - a part of another round
+        // before this one finished, or a gap - abandons the block rather than play it with a hole in it.
+        if (offsetFloats == 0)
+        {
+            if (assemblingRound != long.MinValue) Interlocked.Increment(ref partsAbandoned);
+            assemblingRound = round;
+            assembledFloats = 0;
+            if (slot.Data.Length < totalFloats) slot.Data = new float[totalFloats];   // bridge thread, unpublished slot
+        }
+        else if (round != assemblingRound || offsetFloats != assembledFloats)
+        {
+            if (assemblingRound != long.MinValue) Interlocked.Increment(ref partsAbandoned);
+            assemblingRound = long.MinValue;
+            return;
+        }
+        floats = Math.Min(floats, totalFloats - offsetFloats);
+        System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(payload[..(floats * sizeof(float))]).CopyTo(slot.Data.AsSpan(offsetFloats));
+        assembledFloats = offsetFloats + floats;
+        if (assembledFloats < totalFloats) return;   // more parts to come
+        assemblingRound = long.MinValue;
+
+        slot.Floats = totalFloats;
         slot.Round = round;
         Volatile.Write(ref tail, t + 1);
 
@@ -467,6 +551,14 @@ public sealed class PluginBridgeClient : IDisposable
             list.Add((address, tab < 0 ? addressText : line[(tab + 1)..]));
         }
         return list;
+    }
+
+    /// <summary>Tell the app this instance has stopped taking part, so it forgets it at once. Said when the host deactivates
+    /// the instance - which is also the last call a plugin removed from its track gets - and undone by the next
+    /// <see cref="Hello"/>.</summary>
+    public void Goodbye()
+    {
+        try { link.Send(app, PluginBridgeMessage.Goodbye, instanceHash, null, []); } catch { /* the app may be gone already */ }
     }
 
     public void Dispose()

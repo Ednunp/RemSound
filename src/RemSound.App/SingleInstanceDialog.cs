@@ -54,7 +54,7 @@ internal static class SingleInstanceDialog
         // auto-updater — a foreground-refused process would otherwise open this behind everything,
         // dinging away where a screen-reader user can't find it. ForegroundDialog supplies its own
         // momentary owner, so this works before any main window exists.
-        var clicked = ForegroundDialog.Show(owner => TaskDialog.ShowDialog(owner, page));
+        var clicked = ForegroundDialog.Show(owner => AppTaskDialog.ShowDialog(owner, page));
         if (clicked == forceButton) return SingleInstanceDecision.ForceClose;
         if (clicked == switchButton) return SingleInstanceDecision.SwitchToRunning;
         return SingleInstanceDecision.Cancel;

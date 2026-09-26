@@ -22,10 +22,17 @@ internal static class AudioLoopback
         bool Ran, string Codec,
         long PacketsSent, long PacketsReceived, long BytesReceived,
         long Underruns, long Drops, int BufferMs, int TargetLatencyMs,
-        string? SkipReason)
+        string? SkipReason, bool AudioDecoded = false)
     {
-        public bool Flowed => Ran && PacketsSent > 0 && PacketsReceived > 0;
+        /// <summary>Audio really made it: packets went both ways AND the receiver decoded audio into a playout buffer.
+        /// Packets alone prove nothing - until 2026-09-24 this loopback set no password, a sender with no key sends only
+        /// its format packets, and "flowed" was true on those alone while not one sample of audio crossed.</summary>
+        public bool Flowed => Ran && PacketsSent > 0 && PacketsReceived > 0 && AudioDecoded;
     }
+
+    /// <summary>The loopback's own password. Encryption is mandatory: with no key a sender sends nothing but format
+    /// packets and a receiver drops everything, so a keyless loopback proves only that the format packets arrive.</summary>
+    private const string LoopbackPassword = "remsound-loopback-check";
 
     private static Result Skipped(string codec, string why) =>
         new(false, codec, 0, 0, 0, 0, 0, 0, 0, why);
@@ -51,6 +58,12 @@ internal static class AudioLoopback
             try { receiver.Start(port); }
             catch (Exception ex) { return Skipped(codec, $"could not bind test port {port}: {ex.Message}"); }
             receiver.SetOutputDevices(Array.Empty<string>()); // decode only - never make sound
+            receiver.SetPlaybackEnabled(true);  // what "Receive audio" does: without it nothing is decoded at all
+            var (key, fingerprint) = RemSoundCrypto.ForPlainPassword(LoopbackPassword);
+            sender.AudioKey = key;
+            sender.AudioFingerprint = fingerprint;
+            receiver.AudioKey = key;
+            receiver.AudioFingerprint = fingerprint;
             sender.ConfigureCodec(opus ? AudioTransportCodec.Opus : AudioTransportCodec.Pcm);
             sender.Configure(new[] { new CaptureSourceSpec(deviceId, CaptureKind.Loopback, dev.Name) });
             sender.SetReceivers(new[] { new IPEndPoint(IPAddress.Loopback, port) });
@@ -67,7 +80,8 @@ internal static class AudioLoopback
                 Drops: receiver.Drops,
                 BufferMs: receiver.CurrentBufferMs,
                 TargetLatencyMs: receiver.TargetLatencyMs,
-                SkipReason: null);
+                SkipReason: null,
+                AudioDecoded: receiver.AudioBytesDecodedForTest > 0);
         }
         finally
         {

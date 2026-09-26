@@ -53,8 +53,21 @@ public class RemSoundPlugin : AudioPluginBase
     private PluginBridgeClient? bridge;
     private HostCaptureBackend? capture;
     private PeerRenderBridge? render;
-    private int preparedBlockSize;
+    private int preparedBlockSize;          // the most frames a block may have before the buffers must grow
     private double preparedSampleRate;
+    private bool audioStartedLogged;
+
+    /// <summary>Size every buffer the audio thread uses for blocks of up to <paramref name="maxFrames"/> at
+    /// <paramref name="rate"/>. Called by Start with the host's announced maximum, off the audio thread; the audio thread
+    /// calls it only if a host breaks that announcement.</summary>
+    private void PrepareBuffers(int maxFrames, double rate)
+    {
+        maxFrames = Math.Max(1, maxFrames);
+        preparedBlockSize = maxFrames;
+        preparedSampleRate = rate;
+        capture?.PrepareForBlockSize(maxFrames, rate);
+        render?.PrepareForBlockSize(maxFrames, rate);
+    }
 
     /// <summary>This instance's own id, so several plugins in one DAW are told apart in the log.</summary>
     private readonly Guid instanceId = Guid.NewGuid();
@@ -196,6 +209,11 @@ public class RemSoundPlugin : AudioPluginBase
     /// window and parameter paths could only be tested in halves.</summary>
     internal static int BridgePortForTest;
 
+    /// <summary>Gate guard: how many instances started talking to the REAL RemSound port. A gate run points every
+    /// instance somewhere of its own; until 2026-09-24 several steps forgot, and while the person's RemSound was open
+    /// (the usual case) their plugins said hello to it - one switched sending on and pushed two loud blocks at it.</summary>
+    internal static int RealPortInitialisationsForTest;
+
     // Gate seams: drive the real job change and the real parameter write, and read back what was
     // persisted, rather than a parallel copy of either.
 
@@ -299,6 +317,16 @@ public class RemSoundPlugin : AudioPluginBase
     /// is a fallback for.</summary>
     internal void ApplyParameters()
     {
+        lock (applyGate)
+        {
+            ApplyParametersCore();
+            // Whatever was just applied (and anything applying wrote back) is now the baseline the watch compares with.
+            if (!pushingParameters) appliedParameterValues = CurrentParameterValues();
+        }
+    }
+
+    private void ApplyParametersCore()
+    {
         if (bridge is null) return;
         // The push is only mirroring a decision the caller has ALREADY applied through SetJob. Reading
         // it back mid-write can only produce a worse answer than the one we started with.
@@ -341,7 +369,7 @@ public class RemSoundPlugin : AudioPluginBase
             var member = cursorAddress is not null && savedPeerAddresses.Contains(cursorAddress.ToString());
             lastIncludeValue = member;
             pushingParameters = true;
-            try { SetParameter(peerIncludeParameter, member ? 1 : 0); }
+            try { PublishReadout(peerIncludeParameter, member ? 1 : 0); }
             finally { pushingParameters = false; }
         }
         else if (include != lastIncludeValue)
@@ -441,7 +469,43 @@ public class RemSoundPlugin : AudioPluginBase
     /// <summary>Keep the parameters in step when the WINDOW is what changed. Without this, opening the
     /// host's parameter list after using the window would show stale values and one nudge would undo
     /// the user's choice.</summary>
-    private void PushJobToParameters(bool send, bool receive, IReadOnlyList<System.Net.IPAddress> peers, bool all)
+    /// <summary>What the window opens showing: the CHOICES (directions, who, all peers, levels) as the parameters hold them,
+    /// and Active. With Active off the directions are off in effect, but the window shows what switching Active back on
+    /// will give, as the DAW's own parameter list does.</summary>
+    internal (bool Send, bool Receive, IReadOnlyList<string> Peers, bool AllPeers, bool Active, float SendLevelDb, float ReceiveLevelDb) WindowInitialState() =>
+        (sendParameter is null ? SendEnabled : sendParameter.EditValue >= 0.5,
+         receiveParameter is null ? ReceiveEnabled : receiveParameter.EditValue >= 0.5,
+         savedPeerAddresses, allPeers,
+         activeParameter is null || activeParameter.EditValue >= 0.5,
+         (float)sendLevelDb, (float)receiveLevelDb);
+
+    /// <summary>What the window reports, applied. The person's CHOICES - who, which directions, all peers, the levels - are
+    /// kept whatever Active says, and Active decides whether any of it runs, exactly as Active from the DAW's own parameter
+    /// list always did. The window used to report "nobody, neither direction" while Active was off, and that was kept as
+    /// the choice: untick Active, close the window, and who was on the track, and Send and Receive, were gone for good
+    /// while Active later showed ticked (review 2026-09-25).</summary>
+    internal void ApplyWindowJob(bool active, bool send, bool receive, IReadOnlyList<string> peerTexts, bool all, float sendDb, float receiveDb)
+    {
+        sendLevelDb = sendDb;
+        receiveLevelDb = receiveDb;
+        sendGain = GainFromDb(sendDb);
+        receiveGain = GainFromDb(receiveDb);
+
+        // The window can only show people who are CONNECTED, so what it reports back is the ticked
+        // set plus anybody we were remembering who is not currently in the list. Taking the window's
+        // answer verbatim would quietly forget a peer the moment they dropped off, and the track
+        // would not pick them up again when they returned.
+        var present = SortedKnownPeers().Select(p => p.Address.ToString()).ToHashSet(StringComparer.Ordinal);
+        var kept = savedPeerAddresses.Where(a => !present.Contains(a));
+        savedPeerAddresses = [.. peerTexts.Concat(kept).Distinct(StringComparer.Ordinal)];
+        allPeers = all;
+
+        var peers = EffectivePeers(all, SortedKnownPeers());
+        SetJob(active && send, active && receive, peers, all);
+        PushJobToParameters(send, receive, peers, all, active);
+    }
+
+    private void PushJobToParameters(bool send, bool receive, IReadOnlyList<System.Net.IPAddress> peers, bool all, bool active = true)
     {
         // BOTH values, not just EditValue. The host saves ProcessValue, so a window that wrote only
         // EditValue left every parameter sitting at its default — which is why the plugin reverted to
@@ -452,13 +516,15 @@ public class RemSoundPlugin : AudioPluginBase
         // then index, then the address last — and every one of those writes re-entered
         // ApplyParameters, which resolves by address in preference to index. So it kept reading the
         // address of the person the user had just left. See `pushingParameters`.
-        lastPushSend = send;
-        lastPushReceive = receive;
-        lastPushPeerText = receive ? Join(peers) : "";
+        // What ApplyParameters will make of these values once they are read back: the directions only run while Active.
+        lastPushSend = active && send;
+        lastPushReceive = active && receive;
+        lastPushPeerText = active && receive ? Join(peers) : "";
         lastPushTicks = Environment.TickCount64;
         pushingParameters = true;
         try
         {
+            SetParameter(activeParameter, active ? 1 : 0);
             SetParameter(allPeersParameter, all ? 1 : 0);
             // The cursor stays where the user left it; only the TICK is republished, so it describes
             // whoever the cursor is on now that the set has changed.
@@ -497,6 +563,12 @@ public class RemSoundPlugin : AudioPluginBase
         Company = "RemSound";
         Website = "https://github.com/Ednunp/RemSound";
         PluginName = "RemSound";
+        // AN EFFECT. Several hosts will not put an instrument on an audio track (Live, Cubase, Studio One, Reason,
+        // Samplitude), and Audition does not load instruments at all, so as an instrument a track's audio could not be
+        // sent from them. It was briefly an instrument (2026-09-24) to cure listen-only tracks dropping out in REAPER;
+        // measured the same day, that dropout was REAPER's "Close audio device when stopped and application is
+        // inactive", and it hit an instrument exactly as hard. Receiving on an empty track is looked after by the
+        // loader reporting an infinite tail instead (third-party\AudioPlugSharpVst).
         PluginCategory = "Fx|Network";
         PluginVersion = "6.0.0";
         // Stable identity: a DAW keys saved sessions off this, so it must never change once shipped
@@ -568,10 +640,23 @@ public class RemSoundPlugin : AudioPluginBase
             BlocksIn: b?.ServedBlocks ?? 0,
             ShortBlocks: b?.StarvedBlocks ?? 0,
             RingFrames: b?.RingFrames ?? 0,
+            HostCalls: Interlocked.Read(ref hostCalls),
+            LastFrames: lastHostFrames,
+            Submitted: capture?.Callbacks ?? 0,
+            BusFlushed: PluginSendBus.BlocksFlushed,
+            BusSenders: PluginSendBus.SendingInstanceCount,
+            InputPeakDb: TakeInputPeakDb(),
             BytesOut: b?.BytesSent ?? 0,
             BytesIn: b?.BytesReceived ?? 0,
             KnownPeers: b?.KnownPeers.Count ?? 0);
     }
+
+    /// <summary>The once-a-second line's numbers, for the gate. Taking it resets the input peak, as the log's own read does.</summary>
+    internal PluginLogSnapshot DescribeForLogForTest() => DescribeForLog();
+
+    /// <summary>The log's own source for its once-a-second line, for the gate: the numbers are only worth checking if this is
+    /// what the log really reads.</summary>
+    internal Func<PluginLogSnapshot>? LogSnapshotSourceForTest => log?.SnapshotSource;
 
     /// <summary>The host telling us its largest block. Recorded as well as applied: if anything ever
     /// replaces a port after this has been called, the replacement would otherwise carry unallocated
@@ -599,7 +684,9 @@ public class RemSoundPlugin : AudioPluginBase
         // The app owns the one connection; this is our end of the link to it. Opened here rather than
         // in the constructor because a DAW constructs plugins to inspect them without ever running
         // them, and a scan of the plugin folder should not open sockets.
-        bridge = new PluginBridgeClient(BridgePortForTest > 0 ? BridgePortForTest : PluginBridgeProtocol.DefaultPort, id: instanceId);
+        var appPort = BridgePortForTest > 0 ? BridgePortForTest : PluginBridgeProtocol.DefaultPort;
+        if (BridgePortForTest <= 0) Interlocked.Increment(ref RealPortInitialisationsForTest);
+        bridge = new PluginBridgeClient(appPort, id: instanceId);
         bridge.Notable += message => log?.Event($"link: {message}");
         // Through the per-process bus, not straight at the link: every SENDING instance in this DAW
         // adds into one block on the same sample boundaries and one of them carries it across, so
@@ -609,7 +696,7 @@ public class RemSoundPlugin : AudioPluginBase
         render = new PeerRenderBridge(bridge);
         bridge.Hello();
         log?.Event($"initialised - host says {Host?.SampleRate ?? 0:0} Hz, up to {Host?.MaxAudioBufferSize ?? 0} frames per block; "
-                 + $"said hello to RemSound on 127.0.0.1:{PluginBridgeProtocol.DefaultPort}");
+                 + $"said hello to RemSound on 127.0.0.1:{appPort}");
 
         // THE SCREEN-READER FALLBACK. The window is the intended way to work this plugin, and it is
         // ordinary WinForms precisely so NVDA can read it. But keyboard focus across a host's plugin
@@ -626,7 +713,7 @@ public class RemSoundPlugin : AudioPluginBase
         // with the session for free.
         // TWO SWITCHES, NOT A MODE. Independent, so an instance can do both at once, and both OFF by
         // default so a freshly-inserted plugin never starts broadcasting a track on its own.
-        AddParameter(sendParameter = new AudioPluginParameter
+        AddParameter(sendParameter = new SwitchParameter
         {
             ID = "send",
             Name = "Send this track to your peers",
@@ -635,7 +722,7 @@ public class RemSoundPlugin : AudioPluginBase
             MaxValue = 1,
             DefaultValue = 0,
         });
-        AddParameter(receiveParameter = new AudioPluginParameter
+        AddParameter(receiveParameter = new SwitchParameter
         {
             ID = "receive",
             Name = "Receive a peer onto this track",
@@ -650,7 +737,8 @@ public class RemSoundPlugin : AudioPluginBase
         // one track (MaxClaimedPeers, the cursor's top value). Move the cursor to name somebody, then
         // tick to put them on the track. The tick READS BACK the person under the cursor, so it also
         // answers "is this one on?" without opening the window.
-        AddParameter(peerParameter = new AudioPluginParameter
+        AddParameter(peerParameter = new PeerCursorParameter(position =>
+            SortedKnownPeers() is var sorted && position >= 1 && position <= sorted.Count ? sorted[position - 1].Name : null)
         {
             ID = "peer",
             // One-based when spoken: "peer 1" is the first person in the list, which is what somebody
@@ -661,7 +749,7 @@ public class RemSoundPlugin : AudioPluginBase
             MaxValue = PluginBridgeProtocol.MaxClaimedPeers,
             DefaultValue = 0,
         });
-        AddParameter(peerIncludeParameter = new AudioPluginParameter
+        AddParameter(peerIncludeParameter = new SwitchParameter
         {
             ID = "peerinclude",
             Name = "Receive the peer in list",
@@ -670,7 +758,7 @@ public class RemSoundPlugin : AudioPluginBase
             MaxValue = 1,
             DefaultValue = 0,
         });
-        AddParameter(allPeersParameter = new AudioPluginParameter
+        AddParameter(allPeersParameter = new SwitchParameter
         {
             ID = "allpeers",
             Name = "Receive all peers",
@@ -706,7 +794,7 @@ public class RemSoundPlugin : AudioPluginBase
             MaxValue = MaxLevelDb,
             DefaultValue = 0,
         });
-        AddParameter(activeParameter = new AudioPluginParameter
+        AddParameter(activeParameter = new SwitchParameter
         {
             ID = "active",
             Name = "Active",
@@ -728,6 +816,11 @@ public class RemSoundPlugin : AudioPluginBase
         receiveLevelParameter.PropertyChanged += (_, _) => ApplyParameters();
         activeParameter.PropertyChanged += (_, _) => ApplyParameters();
 
+        // The baseline for the watch below: what the parameters say NOW. Without it the first tick counted every default as
+        // a change and applied them - switching off a job set directly (a restored project, the gate) before any
+        // parameter had moved (2026-09-24).
+        appliedParameterValues = CurrentParameterValues();
+
         // ASK AGAIN, ON OUR OWN. The peer list used to arrive only in reply to a Hello, and a Hello was
         // only sent when the instance loaded, started, or its window opened — so with no window open
         // the list was whatever it had been at load. "Receive all peers" would never have noticed
@@ -738,13 +831,108 @@ public class RemSoundPlugin : AudioPluginBase
         {
             try
             {
+                if (deactivated) return;   // Stop said goodbye; a hello now would bring it straight back
                 bridge?.Hello();
                 RefreshPeerSet();
                 ReportSkippedFrames();
             }
             catch { /* a timer tick must never take the DAW down */ }
         }, null, PeerRefreshMs, PeerRefreshMs);
+
+        // WATCH THE PARAMETERS. A change made in our own window raises PropertyChanged above. A change made by the HOST
+        // does not: AudioPlugSharp's controller writes it through NormalizedEditValue, which sets the value and tells
+        // nobody. So "Send this track" switched on from Reaper's parameter list - with OSARA, from a script, from
+        // automation - left the plugin idle while Reaper showed it on (2026-09-24, the first scripted test in Reaper;
+        // Anthony had only ever used the window, so it never showed). Four times a second, off the audio thread, any
+        // value that moved without a word is applied exactly as if the window had moved it.
+        parameterWatch = new System.Threading.Timer(_ =>
+        {
+            if (deactivated) return;
+            // Marked, so that nothing applied from this thread calls the host: VST3 allows its edit calls only on the
+            // host's UI thread (see PublishReadout).
+            onWatchThread = true;
+            try { ApplyIfTheHostMovedAParameter(); }
+            catch { /* a timer tick must never take the DAW down */ }
+            finally { onWatchThread = false; }
+        }, null, ParameterWatchMs, ParameterWatchMs);
     }
+
+    private const int ParameterWatchMs = 250;
+    private System.Threading.Timer? parameterWatch;
+
+    /// <summary>Between the host's Stop and its next Start. The timers stand down and the instance has said goodbye.</summary>
+    private volatile bool deactivated;
+
+    /// <summary>True on the parameter watch's own timer thread while it applies what the host moved.</summary>
+    [ThreadStatic] private static bool onWatchThread;
+
+    /// <summary>Gate seam: run the watch as its timer does, on this thread marked as the watch's.</summary>
+    internal void WatchParametersAsTheTimerForTest()
+    {
+        onWatchThread = true;
+        try { ApplyIfTheHostMovedAParameter(); }
+        finally { onWatchThread = false; }
+    }
+
+    /// <summary>Republish a readout - the tick under the peer cursor - without calling the host from the wrong thread.
+    ///
+    /// <para>Moving the cursor from the DAW's parameter list, OSARA or automation is picked up by the parameter watch, on
+    /// its own timer thread, and republishing the tick went through EditValue, which calls the host's BeginEdit,
+    /// PerformEdit and EndEdit on the calling thread. VST3 allows those only on the host's UI thread: most hosts let it
+    /// pass, a strict one could fall over (review 2026-09-25). From the watch the value is now set without a word to the
+    /// host - which reads it when it next shows the parameter - and, if our window is open, told on the window's own
+    /// thread.</para></summary>
+    private void PublishReadout(AudioPluginParameter? parameter, double value)
+    {
+        if (parameter is null) return;
+        if (!onWatchThread) { SetParameter(parameter, value); return; }
+        parameter.NormalizedEditValue = parameter.GetValueNormalized(value);
+        parameter.ProcessValue = value;
+        if (editorForm is { IsHandleCreated: true, IsDisposed: false } form)
+        {
+            try
+            {
+                form.BeginInvoke(() =>
+                {
+                    var host = parameter.Editor?.Host;
+                    if (host is null) return;
+                    host.BeginEdit(parameter.ParameterIndex);
+                    host.PerformEdit(parameter.ParameterIndex, parameter.NormalizedEditValue);
+                    host.EndEdit(parameter.ParameterIndex);
+                });
+            }
+            catch (InvalidOperationException) { /* the window went away underneath it */ }
+        }
+    }
+
+    /// <summary>The values <see cref="ApplyParameters"/> last acted on, to tell when something moved behind its back.</summary>
+    private double[]? appliedParameterValues;
+
+    /// <summary>Serialises <see cref="ApplyParameters"/> between the host's thread, our window's and the watch timer.
+    /// Re-entrant on one thread, which it needs: applying can write a parameter back (the tick under the cursor), and
+    /// that write raises PropertyChanged, which applies again.</summary>
+    private readonly object applyGate = new();
+
+    private double[] CurrentParameterValues() =>
+    [
+        sendParameter?.EditValue ?? 0, receiveParameter?.EditValue ?? 0, peerParameter?.EditValue ?? 0,
+        peerIncludeParameter?.EditValue ?? 0, allPeersParameter?.EditValue ?? 0, sendLevelParameter?.EditValue ?? 0,
+        receiveLevelParameter?.EditValue ?? 0, activeParameter?.EditValue ?? 0,
+    ];
+
+    private void ApplyIfTheHostMovedAParameter()
+    {
+        lock (applyGate)
+        {
+            var now = CurrentParameterValues();
+            if (appliedParameterValues is { } before && before.SequenceEqual(now)) return;
+            log?.Event("parameters: changed by the host, not the window - applying them");
+            ApplyParameters();
+        }
+    }
+
+    /// <summary>Gate seam: run the watch now instead of waiting for its timer.</summary>
+    internal void WatchParametersForTest() => ApplyIfTheHostMovedAParameter();
 
     /// <summary>Stale replies the bridge client dropped since the last tick, as one line. A few hundred
     /// frames at start are the app's first replies coming back later than a DAW block; a count that
@@ -764,9 +952,21 @@ public class RemSoundPlugin : AudioPluginBase
     private const int PeerRefreshMs = 2000;
     private System.Threading.Timer? refreshTimer;
 
+    private long hostCalls;
+    private volatile int lastHostFrames;
+    private float inputPeak;
+
+    /// <summary>The loudest input sample since the last log line, in dBFS, and start again.</summary>
+    private double TakeInputPeakDb()
+    {
+        var peak = Interlocked.Exchange(ref inputPeak, 0f);
+        return peak > 0 ? 20 * Math.Log10(peak) : -200;
+    }
+
     public override void Process()
     {
         base.Process();
+        Interlocked.Increment(ref hostCalls);
 
         // The DAW's block for this track, and the buffer we owe it back. Spans are stack-only, so
         // they are taken one at a time rather than gathered into an array — a restriction that is
@@ -775,35 +975,38 @@ public class RemSoundPlugin : AudioPluginBase
         var outLeft = peerOut.GetAudioBuffer(0);
         var outRight = peerOut.GetAudioBuffer(1);
 
-        // The host can change its block size or rate between blocks. Growing buffers here would
-        // allocate on the audio thread — the one thing that must never happen, because .NET stops
-        // every thread in the process to collect, which inside a DAW means every plugin in the
-        // session. So we resize only when it actually changed, and output silence for that one block.
+        // The buffers are sized for the LARGEST block the host announced, by Start, off this thread. A host may hand us a
+        // different size on every call (VST3 allows it, and several do), and a smaller block needs nothing at all. Only a
+        // block bigger than announced, or a new sample rate, gets here - and that block is then PLAYED. It used to be
+        // silenced, the track's own sound included: a click at every change of size, crackle in a host that changes it all
+        // the time, and the first fifth of a second cut from anything Audacity applied the plugin to (review 2026-09-25).
         var blockSize = outLeft.Length;
         var rate = Host?.SampleRate ?? WireSampleRate;
-        if (blockSize != preparedBlockSize || Math.Abs(rate - preparedSampleRate) > 0.5)
+        if (blockSize > preparedBlockSize || Math.Abs(rate - preparedSampleRate) > 0.5)
         {
-            var first = preparedBlockSize == 0;
+            // Growing here allocates on the audio thread, which Start exists to avoid; it can only happen when the host
+            // breaks its own announcement, and the log says so.
             var previousBlock = preparedBlockSize;
             var previousRate = preparedSampleRate;
-            preparedBlockSize = blockSize;
-            preparedSampleRate = rate;
-            capture?.PrepareForBlockSize(blockSize, rate);
-            render?.PrepareForBlockSize(blockSize, rate);
-            // Buffers are resized OFF the audio thread's steady path, and only on a real change, so
-            // this line is rare. If it ever appears repeatedly in a log, that is the finding: the host
-            // is changing its block size every callback and we are allocating in its audio thread.
-            log?.Event(first
-                ? $"audio started: {rate:0} Hz, {blockSize} frames per block"
-                  + (Math.Abs(rate - WireSampleRate) > 0.5 ? $" - resampling to and from {WireSampleRate} Hz" : " - no resampling needed")
-                : $"host changed format: {previousRate:0} Hz/{previousBlock} frames -> {rate:0} Hz/{blockSize} frames (one block of silence while buffers resize)");
-            outLeft.Clear();
-            outRight.Clear();
-            return;
+            PrepareBuffers(Math.Max(blockSize, (int)hostMaxSamples), rate);
+            if (previousBlock > 0)
+                log?.Event($"host changed format: {previousRate:0} Hz/up to {previousBlock} frames -> {rate:0} Hz/{blockSize} frames (buffers regrown; the block still plays)");
+        }
+        if (!audioStartedLogged)
+        {
+            audioStartedLogged = true;
+            log?.Event($"audio started: {rate:0} Hz, {blockSize} frames per block"
+                + (Math.Abs(rate - WireSampleRate) > 0.5 ? $" - resampling to and from {WireSampleRate} Hz" : " - no resampling needed"));
         }
 
         var inLeft = monitorIn.GetAudioBuffer(0);
         var inRight = monitorIn.GetAudioBuffer(1);
+        lastHostFrames = blockSize;
+        // For the log line only: the loudest sample coming in. A plain loop, no allocation.
+        var loudest = inputPeak;
+        for (var i = 0; i < inLeft.Length; i++) { var v = (float)Math.Abs(inLeft[i]); if (v > loudest) loudest = v; }
+        for (var i = 0; i < inRight.Length; i++) { var v = (float)Math.Abs(inRight[i]); if (v > loudest) loudest = v; }
+        inputPeak = loudest;
 
         // ---- SEND THE INPUT, AND SEND IT FIRST ------------------------------------------------
         //
@@ -851,6 +1054,37 @@ public class RemSoundPlugin : AudioPluginBase
     private Form? editorForm;
     private PluginEditorPanel? editorPanel;
 
+    /// <summary>Whether this plugin is running inside RemSound itself (<c>RemSound --plugin-window</c> shows its window with
+    /// no music program) rather than a DAW, where there is no entry assembly at all.</summary>
+    internal static bool InsideRemSound => InsideRemSoundForTest
+        ?? string.Equals(System.Reflection.Assembly.GetEntryAssembly()?.GetName().Name, "RemSound", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Gate seams: be a plugin inside a music program, with its files in this folder.</summary>
+    internal static bool? InsideRemSoundForTest;
+    internal static string? FolderForTest;
+
+    /// <summary>
+    /// Context help inside a music program: the plugin's OWN copy of the manual - inside a DAW, AppContext.BaseDirectory
+    /// is the DAW's folder - and the sounds, both of which RemSound puts beside the plugin, and this instance's log.
+    /// Inside RemSound itself, RemSound has already set all of these - its own sounds from Preferences, its log, its
+    /// browser - and the plugin must not take them over: they are the same settings, shared by the one copy of
+    /// RemSound.Ui both load.
+    /// </summary>
+    internal void WireContextHelp()
+    {
+        if (InsideRemSound) return;
+        var pluginFolder = FolderForTest ?? Path.GetDirectoryName(typeof(RemSoundPlugin).Assembly.Location) ?? AppContext.BaseDirectory;
+        ContextHelp.ManualPath = () => Path.Combine(pluginFolder, "readme.html");
+        ContextHelp.OpenManualInBrowser = key =>
+        {
+            try { HelpManual.OpenInBrowser(ContextHelp.ManualPath(), key); }
+            catch (Exception ex) { log?.Event($"context help: could not open the manual: {ex.GetType().Name}: {ex.Message}"); }
+        };
+        ContextHelp.Log = line => log?.Event(line);
+        ContextHelp.PlayOpenSound = () => PluginHelpSounds.Play(pluginFolder, PluginHelpSounds.OpenName);
+        ContextHelp.PlayCloseSound = () => PluginHelpSounds.Play(pluginFolder, PluginHelpSounds.CloseName);
+    }
+
     public override void InitializeEditor()
     {
         base.InitializeEditor();
@@ -861,6 +1095,7 @@ public class RemSoundPlugin : AudioPluginBase
     public override void ShowEditor(IntPtr parentWindow)
     {
         base.ShowEditor(parentWindow);
+        WireContextHelp();
         editorPanel = new PluginEditorPanel { Dock = DockStyle.Fill };
 
         // Everything the panel shows comes from the app over the link — the peer list it offers and
@@ -873,30 +1108,8 @@ public class RemSoundPlugin : AudioPluginBase
         // announces them, which released the peer and flipped the job to send every time the user
         // opened the window (2026-08-28). The panel is a view of this instance, not a fresh decision
         // about it.
-        editorPanel.InitialStateSource = () =>
-            (SendEnabled, ReceiveEnabled, (IReadOnlyList<string>)savedPeerAddresses, allPeers,
-             activeParameter is null || activeParameter.EditValue >= 0.5,
-             (float)sendLevelDb, (float)receiveLevelDb);
-        editorPanel.JobChanged += (send, receive, peerTexts, all, sendDb, receiveDb) =>
-        {
-            sendLevelDb = sendDb;
-            receiveLevelDb = receiveDb;
-            sendGain = GainFromDb(sendDb);
-            receiveGain = GainFromDb(receiveDb);
-
-            // The window can only show people who are CONNECTED, so what it reports back is the ticked
-            // set plus anybody we were remembering who is not currently in the list. Taking the window's
-            // answer verbatim would quietly forget a peer the moment they dropped off, and the track
-            // would not pick them up again when they returned.
-            var present = SortedKnownPeers().Select(p => p.Address.ToString()).ToHashSet(StringComparer.Ordinal);
-            var kept = savedPeerAddresses.Where(a => !present.Contains(a));
-            savedPeerAddresses = [.. peerTexts.Concat(kept).Distinct(StringComparer.Ordinal)];
-            allPeers = all;
-
-            var peers = EffectivePeers(all, SortedKnownPeers());
-            SetJob(send, receive, peers, all);
-            PushJobToParameters(send, receive, peers, all);
-        };
+        editorPanel.InitialStateSource = WindowInitialState;
+        editorPanel.JobChanged += ApplyWindowJob;
 
         editorForm = new Form
         {
@@ -946,6 +1159,12 @@ public class RemSoundPlugin : AudioPluginBase
         if (!SendEnabled && !ReceiveEnabled)
             return "Connected to RemSound." + Environment.NewLine
                  + "Doing nothing yet - tick Send, or Receive and choose a peer.";
+        // Said plainly, before anything about the audio: with it off RemSound has nobody's audio to give, and the track's
+        // silence used to be put down to "audio arriving short" (2026-09-25 sweep).
+        if (ReceiveEnabled && !bridge.AppReceiving)
+            return "Receive audio is off in RemSound." + Environment.NewLine
+                 + "Tick Receive audio in RemSound to hear your peers on this track"
+                 + (SendEnabled ? "; this track is still being sent." : ".");
         if (!ReceiveEnabled)
             return "Sending this track to your peers." + Environment.NewLine
                  + $"{bridge.KnownPeers.Count} peer(s) connected in RemSound.";
@@ -1001,8 +1220,15 @@ public class RemSoundPlugin : AudioPluginBase
         // block each time for somebody who is never coming.
         PluginSendBus.Unregister(instanceId);
         bridge?.SetReceivedPeers([]);
-        log?.Event($"deactivated by the host - peer released. Totals: {bridge?.ServedBlocks ?? 0} blocks in, "
+        // A plugin REMOVED from its track gets no call after this one (the loader does not pass the host's terminate on),
+        // so this is where it stops taking part. Its timers kept saying hello every two seconds, and RemSound listed it -
+        // and its log wrote a line a second - until the DAW closed (review 2026-09-25). Now they stand down and it says
+        // goodbye, so RemSound forgets it at once. A host that only deactivated it calls Start, which puts it all back.
+        deactivated = true;
+        bridge?.Goodbye();
+        log?.Event($"deactivated by the host - peer released, said goodbye to RemSound. Totals: {bridge?.ServedBlocks ?? 0} blocks in, "
                  + $"{bridge?.SentBlocks ?? 0} out, {bridge?.StarvedBlocks ?? 0} short");
+        log?.Pause();
     }
 
     /// <summary>Save this instance with the host, and add the peer's ADDRESS to what the base class
@@ -1014,6 +1240,11 @@ public class RemSoundPlugin : AudioPluginBase
     /// fallback for when that person is no longer connected.</para></summary>
     public override byte[] SaveState()
     {
+        // The base class saves each parameter's PROCESS value. A change the host makes from its own parameter list moves
+        // only the EDIT value (our window writes both), so Send switched on from Reaper worked and was off again when the
+        // project reopened (found 2026-09-25). Bring them level first: the edit value is the one a person set.
+        foreach (var parameter in Parameters)
+            if (parameter.ProcessValue != parameter.EditValue) parameter.ProcessValue = parameter.EditValue;
         var baseState = base.SaveState() ?? [];
         // Tagged, so a payload this build did not write is never misread. See RestoreState. The payload is the "all peers" flag and
         // then the chosen set, by address: "v3|A|" or "v3|-|10.0.0.5,10.0.0.9".
@@ -1112,6 +1343,8 @@ public class RemSoundPlugin : AudioPluginBase
     {
         refreshTimer?.Dispose();
         refreshTimer = null;
+        parameterWatch?.Dispose();
+        parameterWatch = null;
         PluginSendBus.Unregister(instanceId);
         bridge?.Dispose();
         bridge = null;
@@ -1125,8 +1358,13 @@ public class RemSoundPlugin : AudioPluginBase
     public override void Start()
     {
         base.Start();
+        // Every buffer the audio thread needs, sized now for the host's largest block, so no block ever waits on it.
+        if (hostMaxSamples > 0 || Host is not null)
+            PrepareBuffers((int)Math.Max(hostMaxSamples, Host?.MaxAudioBufferSize ?? 0), Host?.SampleRate ?? WireSampleRate);
         capture?.Start([]);
         if (SendEnabled && bridge is { } sendLink) PluginSendBus.Register(instanceId, sendLink);
+        deactivated = false;
+        log?.Resume();
         log?.Event("activated by the host");
         // Ask again who is available: RemSound may have been started, or its peers changed, while
         // this instance sat inactive in a saved session.

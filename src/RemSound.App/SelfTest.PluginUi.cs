@@ -30,8 +30,8 @@ internal static partial class SelfTest
         var status = "Not connected.";
         panel.StatusSource = () => status;
 
-        (bool Send, bool Receive, IReadOnlyList<string> Peers, bool All, float SendDb, float ReceiveDb)? lastJob = null;
-        panel.JobChanged += (send, receive, chosen, all, sl, rl) => lastJob = (send, receive, chosen, all, sl, rl);
+        (bool Active, bool Send, bool Receive, IReadOnlyList<string> Peers, bool All, float SendDb, float ReceiveDb)? lastJob = null;
+        panel.JobChanged += (active, send, receive, chosen, all, sl, rl) => lastJob = (active, send, receive, chosen, all, sl, rl);
 
         // --- The peer list comes from the app, with NAMES -----------------------------------------
         panel.Refresh(fromTimer: false);
@@ -131,8 +131,10 @@ internal static partial class SelfTest
         Check(lastJob?.Peers.Count > 0, "and the chosen peers must survive switching sending on beside it");
 
         panel.SetReceiveForTest(false);
-        Check(lastJob is { Send: true, Receive: false } && lastJob?.Peers.Count == 0,
-            "unticking receive must release the peers - otherwise they stay mute in RemSound with the plugin no longer playing them");
+        // The window reports the CHOICE; the engine releases whoever is no longer received (see "The plugin keeps its
+        // choices when Active or Receive is switched off").
+        Check(lastJob is { Send: true, Receive: false } && lastJob?.Peers.Contains("192.168.1.51") == true,
+            "unticking receive must report receive off and still say who is ticked, so ticking it again puts them back");
         Check(!panel.PeerListEnabledForTest,
             "the peer list must be disabled, not hidden, when not receiving - hiding it would shift the tab order under a screen-reader user mid-session");
 
@@ -151,10 +153,11 @@ internal static partial class SelfTest
         panel.SetReceiveForTest(true);
         Check(lastJob is { Receive: true }, "back to receiving");
         panel.SetActiveForTest(false);
-        Check(lastJob is { Send: false, Receive: false } && lastJob?.Peers.Count == 0,
-            "unticking Active must stop BOTH directions and hand the peers back to RemSound's speakers, not leave them playing nowhere");
+        Check(lastJob is { Active: false, Send: true, Receive: true } && lastJob?.Peers.Contains("192.168.1.51") == true,
+            "unticking Active must report Active off with the choices left as they are - the engine stops both directions, "
+            + "and the choices must survive to come back");
         panel.SetActiveForTest(true);
-        Check(lastJob is { Send: true, Receive: true } && lastJob?.Peers.Contains("192.168.1.51") == true,
+        Check(lastJob is { Active: true, Send: true, Receive: true } && lastJob?.Peers.Contains("192.168.1.51") == true,
             "re-ticking Active must restore exactly what was on before, peers included - it is a bypass, not a reset");
 
         // --- The status line must say what is true, including the awkward cases -------------------
@@ -194,6 +197,15 @@ internal static partial class SelfTest
             Check(!string.IsNullOrWhiteSpace(plugin.Company), "Company is marshalled into the same struct and must be set");
             Check(!string.IsNullOrWhiteSpace(plugin.Website), "Website likewise");
             Check(!string.IsNullOrWhiteSpace(plugin.PluginName), "the plugin must have a name to show in the effects list");
+
+            // --- An effect, not an instrument (2026-09-24). Live, Cubase, Studio One, Reason and Samplitude won't put an
+            // instrument on an audio track and Audition won't load one, so as an instrument nobody there could send a
+            // track. It was briefly an instrument to cure a REAPER dropout that turned out to be REAPER closing its audio
+            // when it loses focus - which hit the instrument just as hard.
+            Check(plugin.PluginCategory.Split('|')[0] == "Fx",
+                $"the plugin must be an effect ('Fx' first), or hosts that keep instruments off audio tracks cannot send a track through it (got '{plugin.PluginCategory}')");
+            Check(!plugin.PluginCategory.Contains("Instrument", StringComparison.OrdinalIgnoreCase),
+                $"...and not an instrument as well - 'Fx|Instrument' is read differently by every host (got '{plugin.PluginCategory}')");
 
             // --- The window.
             Check(plugin.HasUserInterface,
@@ -243,16 +255,16 @@ internal static partial class SelfTest
 
             for (var i = 0; i < left.Length; i++) { left[i] = 0.5; right[i] = -0.5; }
 
-            // The FIRST block after a block-size or rate change is deliberately silent: that is when
-            // buffers are resized, and resizing on the audio thread otherwise means allocating in the
-            // middle of somebody's take. Assert that too, so the silence stays a considered choice
-            // rather than becoming an accident again.
+            // The FIRST block plays. It used to be silenced while the buffers were sized, the track's own sound included:
+            // a click at every change of block size, and the start cut from anything Audacity applied the plugin to. The
+            // buffers are sized before the first block now, and a block that finds them too small still plays
+            // (review 2026-09-25; see "The plugin plays every block, whatever size the host hands it").
             plugin.Process();
             var firstBlock = (AudioIOPortManaged)plugin.OutputPorts[0];
-            var quiet = 0;
+            var through = 0;
             for (var i = 0; i < Math.Min(64, firstBlock.GetAudioBuffer(0).Length); i++)
-                if (Math.Abs(firstBlock.GetAudioBuffer(0)[i]) < 0.001) quiet++;
-            Check(quiet > 32, "the first block after a format change is silent while buffers resize");
+                if (Math.Abs(firstBlock.GetAudioBuffer(0)[i] - 0.5) < 0.001) through++;
+            Check(through == Math.Min(64, firstBlock.GetAudioBuffer(0).Length), $"the first block must pass the track through, not silence it ({through} of 64 samples)");
 
             // Refill (the port buffers are read each block) and run a steady-state block.
             left = input.GetAudioBuffer(0);
@@ -426,12 +438,19 @@ internal static partial class SelfTest
             var hostProperty = Require(pluginType.GetProperty("Host"),
                 "the plugin must expose Host, or the DAW cannot hand it one");
             hostProperty.SetValue(instance, new StubAudioHost());
+            // Its own copy of the code has its own copy of the test port, which the run's setting never reached: point it
+            // at the run's listener too, or it says hello to the RemSound the person has open.
+            const System.Reflection.BindingFlags StaticField = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
+            Require(pluginType.GetField("BridgePortForTest", StaticField), "the plugin's BridgePortForTest seam is gone - this step would talk to the real RemSound")
+                .SetValue(null, RemSoundPlugin.BridgePortForTest);
             try { initialize.Invoke(instance, null); }
             catch (Exception ex)
             {
                 var inner = ex.InnerException ?? ex;
                 Check(false, $"the plugin must INITIALISE from the shipped folder, not just construct: {inner.GetType().Name}: {inner.Message}");
             }
+            var reachedRealApp = (int)Require(pluginType.GetField("RealPortInitialisationsForTest", StaticField), "the plugin's real-port counter is gone").GetValue(null)!;
+            Check(reachedRealApp == 0, "THE LEAK: the plugin loaded from its own folder talked to the real RemSound port");
 
             // Tidy up: close its link and log rather than leaving a socket open in the gate. The
             // LOOKUP must not be swallowed — a renamed CloseForTest would leak a socket per run and
@@ -539,8 +558,11 @@ internal static partial class SelfTest
     /// is to exercise the REAL plugin, not to simulate Reaper.</summary>
     private sealed class StubAudioHost : IAudioHost
     {
-        public double SampleRate => 48000;
-        public uint MaxAudioBufferSize => 4096;
+        public double SampleRate { get; init; } = 48000;
+        public uint MaxAudioBufferSize { get; init; } = 4096;
+        /// <summary>Every edit call the plugin made to the host, and the thread it came from: VST3 allows them only on the
+        /// host's UI thread.</summary>
+        public System.Collections.Concurrent.ConcurrentQueue<(string Call, int Thread)> Edits { get; } = new();
         public uint CurrentAudioBufferSize => 512;
         public EAudioBitsPerSample BitsPerSample => EAudioBitsPerSample.Bits64;
         public double BPM => 120;
@@ -552,9 +574,9 @@ internal static partial class SelfTest
         public void SendNoteOff(int channel, int noteNumber, float velocity, int sampleOffset) { }
         public void SendPolyPressure(int channel, int noteNumber, float pressure, int sampleOffset) { }
         public void SendCC(int channel, int ccNumber, int ccValue, int sampleOffset) { }
-        public void BeginEdit(int parameter) { }
-        public void PerformEdit(int parameter, double normalizedValue) { }
-        public void EndEdit(int parameter) { }
+        public void BeginEdit(int parameter) => Edits.Enqueue(("begin", Environment.CurrentManagedThreadId));
+        public void PerformEdit(int parameter, double normalizedValue) => Edits.Enqueue(("perform", Environment.CurrentManagedThreadId));
+        public void EndEdit(int parameter) => Edits.Enqueue(("end", Environment.CurrentManagedThreadId));
         public void SetParameter(int parameter, double normalizedValue) { }
         public void Log(string message) { }
     }
@@ -634,6 +656,24 @@ internal static partial class SelfTest
                 var snap = text.Split('\n').First(l => l.StartsWith("SNAP"));
                 Check(snap.Contains("\t44100\t") && snap.Contains("\tyes\t"),
                     $"the snapshot must report the host's real rate and whether we are resampling (got: {snap.Trim()})");
+
+                // The columns added 2026-09-24 to find where a send stops. Read by NAME through the header, so a
+                // value that lands under the wrong heading fails - a shifted column reads as a plausible wrong number.
+                var header = text.Split('\n')[0].TrimEnd('\r').Split('\t');
+                var values = snap.TrimEnd('\r').Split('\t');
+                Check(values.Length == header.Length, $"every snapshot line must have one value per heading ({values.Length} values, {header.Length} headings)");
+                string Column(string name)
+                {
+                    var at = Array.IndexOf(header, name);
+                    Check(at >= 0, $"the header must carry '{name}'");
+                    return values[at];
+                }
+                Check(Column("HostCalls") == "98765", $"HostCalls must sit under its own heading (got '{Column("HostCalls")}')");
+                Check(Column("LastFrames") == "256", $"LastFrames likewise (got '{Column("LastFrames")}')");
+                Check(Column("Submitted") == "4321", $"Submitted likewise (got '{Column("Submitted")}')");
+                Check(Column("BusFlushed") == "4300", $"BusFlushed likewise (got '{Column("BusFlushed")}')");
+                Check(Column("BusSenders") == "2", $"BusSenders likewise (got '{Column("BusSenders")}')");
+                Check(Column("InputPeakDb") == "-6.0", $"InputPeakDb must be written in dBFS to one place (got '{Column("InputPeakDb")}')");
             }
 
             // --- The APP's half: every claim and release must reach the log ---------------------
@@ -744,7 +784,8 @@ internal static partial class SelfTest
         Job: "receive", Peer: "192.168.1.50", Connected: true,
         HostSampleRate: 44100, BlockFrames: 512, Resampling: true,
         BlocksOut: 0, BlocksIn: 120, ShortBlocks: 3, RingFrames: 558,
-        BytesOut: 0, BytesIn: 245760, KnownPeers: 2);
+        BytesOut: 0, BytesIn: 245760, KnownPeers: 2,
+        HostCalls: 98765, LastFrames: 256, Submitted: 4321, BusFlushed: 4300, BusSenders: 2, InputPeakDb: -6.02);
 
     /// <summary>The plugin has to actually BE in this copy of RemSound, and be complete.
     ///
@@ -778,6 +819,16 @@ internal static partial class SelfTest
         Check(files.Any(f => f.Equals("RemSound.Ui.dll", StringComparison.OrdinalIgnoreCase)),
             "the shared accessible controls must ship - they are the entire reason the plugin window can be read by a screen reader");
 
+        // OUR loader, not the package's (2026-09-24). Ours reports an infinite tail, so hosts that go by the tail keep
+        // calling a receiving plugin on a track with nothing else on it. The two files are the same size and both load
+        // fine, so nothing else would notice the package's copy coming back. The override is a symbol only ours has.
+        var loader = Path.Combine(folder, "RemSound.PluginBridge.vst3");
+        Check(File.Exists(loader), $"the loader must ship as RemSound.PluginBridge.vst3 ({loader})");
+        var marker = System.Text.Encoding.ASCII.GetBytes("getTailSamples@AudioPlugSharpProcessor");
+        Check(File.ReadAllBytes(loader).AsSpan().IndexOf(marker) >= 0,
+            "the shipped loader must be RemSound's patched one (third-party\\AudioPlugSharpVst), which reports an infinite tail - "
+          + "this is the package's own, and hosts that go by the tail will stop calling a receiving track");
+
         // And the real installer must succeed FROM this real folder, into a throwaway target. Testing
         // the installer only against invented files would never catch a payload that cannot be copied.
         var target = Path.Combine(Path.GetTempPath(), "remsound-plugin-payload-" + Guid.NewGuid().ToString("N"));
@@ -786,8 +837,11 @@ internal static partial class SelfTest
             var (ok, message) = PluginInstaller.InstallForTest(folder, target);
             Check(ok, $"installing the REAL plugin folder must succeed: {message}");
             Check(PluginInstaller.IsInstalledAt(target), "...and be detected as installed afterwards");
-            var placed = Directory.GetFiles(target, "*", SearchOption.AllDirectories).Length;
-            Check(placed >= files.Count, $"every file must arrive ({placed} placed, {files.Count} in the folder plus its manifest)");
+            // File by file, not a count: the install adds a manifest and a version stamp of its own, so "at least as many"
+            // hid up to two missing files (found 2026-09-24).
+            var source = Directory.GetFiles(folder, "*", SearchOption.AllDirectories).Select(f => Path.GetRelativePath(folder, f)).ToList();
+            var missing = source.Where(rel => !File.Exists(Path.Combine(target, rel))).ToList();
+            Check(missing.Count == 0, $"every file must arrive - missing: {string.Join(", ", missing)}");
         }
         finally
         {
@@ -795,7 +849,7 @@ internal static partial class SelfTest
         }
 
         return $"the plugin ships with this build ({files.Count} files incl. the .vst3, its runtimeconfig, deps, Ijwhost and the accessible controls) "
-             + "and the real installer copies it whole";
+             + "and the real installer copies it whole; the loader is our patched one, with the infinite tail";
     }
 
     /// <summary>Both rate conversions, driven with a real tone and measured — because "it ran" is not

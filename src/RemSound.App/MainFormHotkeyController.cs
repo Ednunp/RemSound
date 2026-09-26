@@ -190,6 +190,23 @@ internal sealed class MainFormHotkeyController : IDisposable
     /// build-then-show split the other inline dialogs already use.</summary>
     internal Form BuildKeyboardShortcutsDialogForAudit() => BuildKeyboardShortcutsDialog();
 
+    /// <summary>The "press a key" window, with F1 help on its two controls. It lives in RemSound.Core, which cannot see
+    /// ContextHelp (that is in RemSound.Ui, and Core references neither), so its controls are marked here, where it is
+    /// made. The dialog audits build it through here too, so they see the marks.</summary>
+    internal static HotkeyCaptureForm NewHotkeyCaptureForm()
+    {
+        var form = new HotkeyCaptureForm();
+        var pending = new Stack<Control>(form.Controls.Cast<Control>());
+        while (pending.Count > 0)
+        {
+            var control = pending.Pop();
+            if (control is TextBox) ContextHelp.Mark(control, "dialog.press-a-key.current-hotkey");
+            else if (control is Button) ContextHelp.Mark(control, "dialog.press-a-key.cancel");
+            foreach (Control child in control.Controls) pending.Push(child);
+        }
+        return form;
+    }
+
     public void ShowKeyboardShortcutsDialog(IWin32Window dialogOwner)
     {
         using var built = BuildKeyboardShortcutsDialog();
@@ -447,6 +464,9 @@ internal sealed class MainFormHotkeyController : IDisposable
         // focus is on the list. AcceptButton fires only when nothing consumed Enter.
         dialog.AcceptButton = closeButton;
         dialog.CancelButton = closeButton;
+        ContextHelp.Mark(list, "dialog.keyboard-shortcuts.list");
+        ContextHelp.Mark(clearButton, "dialog.keyboard-shortcuts.clear");
+        ContextHelp.Mark(closeButton, "dialog.keyboard-shortcuts.close");
         dialog.Load += (_, _) => list.Focus();
         return dialog;
     }
@@ -494,7 +514,7 @@ internal sealed class MainFormHotkeyController : IDisposable
     /// "capture …: cancelled (DialogResult=Cancel)" / "register …: FAILED Win32 1409".</summary>
     private void ChangeHotkey(IWin32Window dialogOwner, string description, Action<HotkeyInfo> apply)
     {
-        using var dialog = new HotkeyCaptureForm();
+        using var dialog = NewHotkeyCaptureForm();
         var result = dialog.ShowDialog(dialogOwner);
         if (result == DialogResult.OK && dialog.CapturedHotkey is not null)
         {
@@ -714,7 +734,7 @@ internal sealed class MainFormHotkeyController : IDisposable
         // Use the Win32 MessageBox API directly with MB_TOPMOST + MB_SETFOREGROUND so the
         // popup is guaranteed to sit above every other window on the desktop, including
         // any modal dialog stack RemSound currently has open. The previous WinForms
-        // MessageBox.Show(parent, …) calls were sometimes hiding behind the still-modal
+        // AppMessageBox.Show(parent, …) calls were sometimes hiding behind the still-modal
         // Keyboard shortcuts dialog — the user reported "no popup" when in fact the popup
         // had been created and then occluded.
         //
@@ -722,6 +742,13 @@ internal sealed class MainFormHotkeyController : IDisposable
         // rules, but MB_TOPMOST overrides that. Together they're the most reliable way to
         // get a hotkey-conflict warning into the user's face at the moment the conflict is
         // detected.
+        // Nobody to see it (a --silent or --headless start): logged, not shown. This box is Windows' own, so it dinged and
+        // stood on screen in a run that must do neither (2026-09-25).
+        if (Windowless.NobodyToAsk)
+        {
+            RemSoundLog.Current?.Event($"hotkeys: {message.Replace('\n', ' ').Replace("\r", "")}");
+            return;
+        }
         var hwnd = (Form.ActiveForm?.Handle) ?? owner?.Handle ?? IntPtr.Zero;
         const uint MB_OK = 0x00000000;
         const uint MB_ICONWARNING = 0x00000030;

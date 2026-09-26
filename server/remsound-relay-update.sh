@@ -7,13 +7,18 @@
 # What it does:
 #   1. Read the installed tag from /etc/remsound-relay/version.
 #   2. Query the GitHub Releases API for tags starting with "server-".
-#   3. If the latest is newer than the installed tag:
+#   3. Walk the releases newer than the installed tag, newest first, and take
+#      the first one that passes every check (pre-release sweep 2026-09-25: it
+#      used to try only the newest, so one refused release blocked every later
+#      update for ever). For each, until one passes:
 #      a. Download the matching tarball asset and its "<tarball>.sig" signature.
 #         Refuse to go any further unless the signature is valid for the
 #         RemSound release key built into this script (2026-09-13: this used
 #         to install whatever appeared, as root, unchecked). Then refuse it
 #         unless the VERSION file inside it names the same release as the tag
 #         (2026-09-25: an old signed release could be put up under a new tag).
+#         A refused release is logged with the reason, and the next one down
+#         is tried. If none passes, nothing is touched and the run fails.
 #      b. Snapshot current installed files to /etc/remsound-relay/backup/.
 #      c. Stop the relay service.
 #      d. Replace the relay files with the new tarball contents.
@@ -175,9 +180,11 @@ release_is_version() {
 
 # -------- GitHub releases query ---------------------------------------------
 
-# Fetch the releases list and pick the latest server-tag release.
-# Outputs four lines: tag, asset_url, asset_name, signature_url (empty when the
-# release has no "<asset_name>.sig"). Exits non-zero on no match.
+# Fetch the releases list and write out every eligible server-tag release, NEWEST FIRST, four lines each: tag,
+# asset_url, asset_name, signature_url (empty when the release has no "<asset_name>.sig"). Exits non-zero on no match.
+# It gave only the newest until the pre-release sweep of 2026-09-25, when main() began walking down the list past a
+# release it refuses. The name stays, because the app's self-test drives this function by it, and the first four lines
+# are still the newest release, as they always were.
 #
 # The list goes through a FILE. It was handed to python as one command-line argument, and Linux refuses any single
 # argument over 32 memory pages: 128 KB on most machines (a Pi 4, an ordinary server), 512 KB on a Pi 5. Thirty releases
@@ -267,11 +274,11 @@ if not candidates:
     sys.exit(4)
 
 candidates.sort(reverse=True)
-_, tag, url, name, sig_url = candidates[0]
-print(tag)
-print(url)
-print(name)
-print(sig_url)
+for _, tag, url, name, sig_url in candidates:
+    print(tag)
+    print(url)
+    print(name)
+    print(sig_url)
 PY
     rc=$?
     rm -f "$list"
@@ -347,78 +354,100 @@ main() {
     current="$(read_current_version)"
     log "currently installed: $current"
 
-    local release_info
-    if ! release_info="$(get_latest_release)"; then
-        log "no upgrade attempted (could not query releases or no eligible release)"
-        return 0
-    fi
-    latest_tag="$(printf '%s\n' "$release_info" | sed -n '1p')"
-    asset_url="$(printf '%s\n' "$release_info" | sed -n '2p')"
-    asset_name="$(printf '%s\n' "$release_info" | sed -n '3p')"
-    sig_url="$(printf '%s\n' "$release_info" | sed -n '4p')"
-    log "latest available: $latest_tag asset=$asset_name"
-
-    if ! tag_newer_than "$latest_tag" "$current"; then
-        log "up to date (installed $current >= available $latest_tag)"
-        return 0
-    fi
-
-    log "newer release found: $latest_tag -> upgrading from $current"
-
-    # Refuse anything that cannot prove where it came from, before touching the running relay.
-    if [[ -z "$sig_url" ]]; then
-        log "ERROR: $latest_tag has no signature ($asset_name.sig) - refusing to install an unsigned release"
-        return 1
-    fi
-    if ! command -v openssl >/dev/null 2>&1; then
-        log "ERROR: openssl is needed to check the release signature - refusing to update (sudo apt-get install -y openssl)"
-        return 1
-    fi
-
     # Working area in /tmp. Use the script-global $WORK_DIR (not a function
     # local) so the EXIT trap can still see the variable after main returns.
     # The trap is also script-global, registered just below.
     WORK_DIR="$(mktemp -d -t remsound-relay-update.XXXXXXXX)"
 
-    local tarball="$WORK_DIR/$asset_name"
-    log "downloading $asset_url"
-    if ! curl --fail --silent --show-error --max-time 120 \
-            --location -o "$tarball" "$asset_url"; then
-        log "ERROR: download failed"
-        return 1
+    # The release list goes through a file, not "$(...)": that would drop the empty signature line of the last release.
+    local releases="$WORK_DIR/releases"
+    if ! get_latest_release > "$releases"; then
+        log "no upgrade attempted (could not query releases or no eligible release)"
+        return 0
     fi
 
-    log "downloading $sig_url"
-    if ! curl --fail --silent --show-error --max-time 30 \
-            --location -o "$tarball.sig" "$sig_url"; then
-        log "ERROR: signature download failed - refusing to install"
-        return 1
-    fi
-    printf '%s\n' "$RELEASE_PUBLIC_KEY" > "$WORK_DIR/release-public-key.pem"
-    if ! verify_release_signature "$tarball" "$tarball.sig" "$WORK_DIR/release-public-key.pem"; then
-        log "ERROR: $asset_name is not signed by the RemSound release key - refusing to install"
-        return 1
-    fi
-    log "signature checked: $asset_name is signed by the RemSound release key"
+    # Walk the releases newer than this one, newest first, and take the first that passes every check below. It used to
+    # try only the newest: a release it refused - no signature, a bad one, a VERSION that does not match its tag (a
+    # mistyped tag, or an old release put up under a new name) - was refused again every hour for ever, and no good
+    # release after it was ever looked at, until somebody deleted it (pre-release sweep 2026-09-25). Every check is
+    # exactly as strict as it was. A refusal now logs its reason, once each run, and moves on to the next release down.
+    # Each release unpacks into a folder of its own, so one refused cannot be mistaken for the next. Read on descriptor 3,
+    # so nothing run inside the loop can swallow the list.
+    local tarball candidate_dir staging="" newest="" tried=0
+    while IFS= read -r latest_tag <&3 && IFS= read -r asset_url <&3 \
+            && IFS= read -r asset_name <&3 && IFS= read -r sig_url <&3; do
+        [[ -n "$newest" ]] || newest="$latest_tag"
+        if ! tag_newer_than "$latest_tag" "$current"; then
+            break   # newest first, so every release after this one is older still
+        fi
+        tried=$((tried + 1))
+        log "newer release found: $latest_tag asset=$asset_name (installed $current)"
 
-    log "extracting $asset_name"
-    if ! tar -xzf "$tarball" -C "$WORK_DIR"; then
-        log "ERROR: tarball extraction failed"
-        return 1
-    fi
-    # Find the staging root — first directory inside the work dir.
-    local staging
-    staging="$(find "$WORK_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+        # Refuse anything that cannot prove where it came from, before touching the running relay.
+        if [[ -z "$sig_url" ]]; then
+            log "REFUSED $latest_tag: it has no signature ($asset_name.sig) - refusing to install an unsigned release"
+            continue
+        fi
+        if ! command -v openssl >/dev/null 2>&1; then
+            # Not the release's fault: every release would fail the same way.
+            log "ERROR: openssl is needed to check the release signature - refusing to update (sudo apt-get install -y openssl)"
+            return 1
+        fi
+
+        candidate_dir="$WORK_DIR/release-$tried"
+        mkdir -p "$candidate_dir"
+        tarball="$candidate_dir/$asset_name"
+        log "downloading $asset_url"
+        if ! curl --fail --silent --show-error --max-time 120 \
+                --location -o "$tarball" "$asset_url"; then
+            log "REFUSED $latest_tag: download failed"
+            continue
+        fi
+
+        log "downloading $sig_url"
+        if ! curl --fail --silent --show-error --max-time 30 \
+                --location -o "$tarball.sig" "$sig_url"; then
+            log "REFUSED $latest_tag: signature download failed - refusing to install"
+            continue
+        fi
+        printf '%s\n' "$RELEASE_PUBLIC_KEY" > "$WORK_DIR/release-public-key.pem"
+        if ! verify_release_signature "$tarball" "$tarball.sig" "$WORK_DIR/release-public-key.pem"; then
+            log "REFUSED $latest_tag: $asset_name is not signed by the RemSound release key - refusing to install"
+            continue
+        fi
+        log "signature checked: $asset_name is signed by the RemSound release key"
+
+        log "extracting $asset_name"
+        if ! tar -xzf "$tarball" -C "$candidate_dir"; then
+            log "REFUSED $latest_tag: tarball extraction failed"
+            continue
+        fi
+        # Find the staging root — first directory inside this release's own folder.
+        staging="$(find "$candidate_dir" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+        if [[ -z "$staging" ]]; then
+            log "REFUSED $latest_tag: tarball did not contain a top-level folder"
+            continue
+        fi
+        log "staging at $staging"
+        if ! release_is_version "$staging" "$latest_tag"; then
+            log "REFUSED $latest_tag: $asset_name says it is '$(tr -d '[:space:]' < "$staging/VERSION" 2>/dev/null || true)', not $latest_tag - refusing to install an old release under a new name"
+            staging=""
+            continue
+        fi
+        log "version checked: the signed release is $latest_tag"
+        break
+    done 3< "$releases"
+
     if [[ -z "$staging" ]]; then
-        log "ERROR: tarball did not contain a top-level folder"
+        if [[ "$tried" -eq 0 ]]; then
+            log "up to date (installed $current >= available ${newest:-none})"
+            return 0
+        fi
+        log "ERROR: none of the $tried newer release(s) passed its checks (each refusal is above) - staying on $current"
         return 1
     fi
-    log "staging at $staging"
-    if ! release_is_version "$staging" "$latest_tag"; then
-        log "ERROR: $asset_name says it is '$(tr -d '[:space:]' < "$staging/VERSION" 2>/dev/null || true)', not $latest_tag - refusing to install an old release under a new name"
-        return 1
-    fi
-    log "version checked: the signed release is $latest_tag"
+
+    log "upgrading from $current to $latest_tag"
 
     snapshot_backup
 

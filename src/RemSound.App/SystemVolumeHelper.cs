@@ -109,6 +109,20 @@ internal static class SystemVolumeHelper
         return cachedDevice;
     }
 
+    /// <summary>Drop the device kept for speed, so the next command finds the CURRENT default output. Called when Windows
+    /// reports an audio device change: the cache used to be dropped only when a call failed, so after the default moved to
+    /// another device that was still plugged in, remote volume kept changing the old one.</summary>
+    public static void ForgetDevice()
+    {
+        lock (cacheLock) InvalidateCacheLocked();
+    }
+
+    /// <summary>Gate seam: the id of the device kept, or null.</summary>
+    internal static string? CachedDeviceIdForTest
+    {
+        get { lock (cacheLock) { try { return cachedDevice?.ID; } catch { return null; } } }
+    }
+
     private static void InvalidateCacheLocked()
     {
         try { cachedDevice?.Dispose(); } catch { /* ignore */ }

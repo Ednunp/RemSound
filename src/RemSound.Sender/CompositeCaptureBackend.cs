@@ -89,16 +89,49 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
         }
     }
 
-    /// <summary>Running means "started AND the WASAPI lane is actually alive". Folding the fault in
-    /// here is what gives a dead capture a recovery route: the main window's one-second tick calls
-    /// EnsureRequestedAudioRunning, sees the sender as not-running, re-applies, and the restart
-    /// re-opens the device. Without it a faulted lane sat "running" and silent forever.
-    /// The ASIO child is excluded deliberately — it is legitimately open-and-parked when sending is
-    /// off, and reporting that as not-running would make the tick restart the sender every second.
-    /// 2026-08-23 audit, findings S6 and S7.</summary>
+    /// <summary>Running means "started AND the WASAPI lane has not died beyond repair". A source that failed or died is
+    /// NOT a reason to call the lane down any more: the heal below re-opens that one source in place every few seconds,
+    /// and leaves the working ones - and the ASIO lane - alone. Reporting it as not-running made the main window restart
+    /// the whole sender, which closed and re-opened every healthy source and gave the ASIO stream a fresh start at the
+    /// far end, a dropout on audio that had nothing wrong with it; and a source that failed to OPEN was never reported
+    /// at all, so it stayed silent until it was unticked and ticked again (review 2026-09-25; Ed agreed both fixes).
+    /// Only a mix loop that has itself ended still counts. The ASIO child is excluded deliberately — it is legitimately
+    /// open-and-parked when sending is off, and reporting that as not-running would make the tick restart the sender
+    /// every second. 2026-08-23 audit, findings S6 and S7.</summary>
     public bool IsRunning => started && !HasFaulted;
 
-    public bool HasFaulted => wasapi?.HasFaulted ?? false;
+    public bool HasFaulted => wasapi is MixingEngine mixing && mixing.MixLoopDied;
+
+    /// <summary>How often the WASAPI lane's sources are healed: the outputs' own beat.</summary>
+    internal static int HealIntervalMs = 3000;
+    private System.Threading.Timer? healTimer;
+
+    /// <summary>Every <see cref="HealIntervalMs"/> while started: re-open any WASAPI source that is not capturing. Off the
+    /// audio thread; never while a swap is waiting to happen.</summary>
+    private void Heal()
+    {
+        try
+        {
+            lock (gate)
+            {
+                if (!started || pendingRebuildSpecs is not null) return;
+                wasapi?.HealSources();
+                // And the ASIO lane: a driver that failed to open is tried again (it has its own, longer, back-off).
+                if (asioSpecs.Count > 0) asio?.HealSources();
+            }
+        }
+        catch (Exception ex)
+        {
+            // A timer thread: nothing may escape it (see OnRebuildDue).
+            onDiagnostic?.Invoke($"wasapi: heal failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>Gate seam: heal now instead of waiting for the beat.</summary>
+    internal void HealNowForTest() => Heal();
+
+    /// <summary>Gate seam: the WASAPI lane itself.</summary>
+    internal ICaptureBackend? WasapiLaneForTest => wasapi;
 
     /// <summary>The capture device latency for whichever lane is actually capturing. ASIO first when it
     /// is running, since that is the lane the user is listening on; otherwise WASAPI. See
@@ -231,6 +264,7 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
                 else asio.Start(asioSpecs);
             }
             started = true;
+            healTimer ??= new System.Threading.Timer(_ => Heal(), null, HealIntervalMs, HealIntervalMs);
             // Name the CONFIGURATION — which lanes are actually capturing — ahead of the mode, which says
             // "WASAPI + ASIO" whenever a driver is chosen. The render side's line does the same; see
             // CompositeRenderBackend.RenderStartLabel for the misreading that taught it.
@@ -361,6 +395,7 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
     {
         Stop();
         try { rebuildTimer?.Dispose(); } catch { /* ignore */ }
+        try { healTimer?.Dispose(); } catch { /* ignore */ }
         try { wasapi?.Dispose(); } catch { /* ignore */ }
         // ASIO child not disposed — see StopInternal above.
     }

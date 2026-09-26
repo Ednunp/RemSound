@@ -24,7 +24,8 @@ public sealed class PluginLog : IDisposable
 {
     private const string SnapHeader =
         "Kind\tTimestamp\tInstance\tJob\tPeer\tConnected\tHostRate\tBlockFrames\tResampling\t" +
-        "BlocksOut\tBlocksIn\tShortBlocks\tRingFrames\tBytesOut\tBytesIn\tKnownPeers";
+        "BlocksOut\tBlocksIn\tShortBlocks\tRingFrames\tBytesOut\tBytesIn\tKnownPeers\t" +
+        "HostCalls\tLastFrames\tSubmitted\tBusFlushed\tBusSenders\tInputPeakDb";
 
     private readonly object writeGate = new();
     private readonly Guid instanceId;
@@ -99,6 +100,12 @@ public sealed class PluginLog : IDisposable
         }
     }
 
+    /// <summary>Stop the once-a-second line while the instance is deactivated - a plugin removed from its track would
+    /// otherwise write one a second until the DAW closed - and start it again.</summary>
+    public void Pause() { try { snapshotTimer?.Change(Timeout.Infinite, Timeout.Infinite); } catch (ObjectDisposedException) { } }
+
+    public void Resume() { try { snapshotTimer?.Change(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1)); } catch (ObjectDisposedException) { } }
+
     private void WriteSnapshot()
     {
         var source = SnapshotSource;
@@ -115,7 +122,9 @@ public sealed class PluginLog : IDisposable
                 "SNAP", Stamp(), Short(instanceId), snap.Job, snap.Peer ?? "-", snap.Connected ? "yes" : "no",
                 snap.HostSampleRate.ToString("0"), snap.BlockFrames, snap.Resampling ? "yes" : "no",
                 snap.BlocksOut, snap.BlocksIn, snap.ShortBlocks, snap.RingFrames,
-                snap.BytesOut, snap.BytesIn, snap.KnownPeers));
+                snap.BytesOut, snap.BytesIn, snap.KnownPeers,
+                snap.HostCalls, snap.LastFrames, snap.Submitted, snap.BusFlushed, snap.BusSenders,
+                snap.InputPeakDb <= -120 ? "silent" : snap.InputPeakDb.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)));
         }
     }
 
@@ -211,4 +220,14 @@ public sealed record PluginLogSnapshot(
     int RingFrames,
     long BytesOut,
     long BytesIn,
-    int KnownPeers);
+    int KnownPeers,
+    // Where a send stops, when it stops (2026-09-24: in Reaper the plugin sent for two seconds of playback and then
+    // nothing, with every other column saying all was well). How often the host called us, the size of its last
+    // block, how many blocks we handed to the send bus, how many the bus got out, how many senders it had, and the
+    // loudest sample coming IN since the last line - blocks can flow and still carry silence.
+    long HostCalls = 0,
+    int LastFrames = 0,
+    long Submitted = 0,
+    long BusFlushed = 0,
+    int BusSenders = 0,
+    double InputPeakDb = -200);

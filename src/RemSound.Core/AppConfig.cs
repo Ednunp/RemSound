@@ -111,7 +111,7 @@ public sealed class AppConfig
     /// (Ed, 2026-07: both remembered lists live in global, not the profile). Before this the list rode
     /// in each profile's JSON, so it was per-profile in practice; each old profile's legacy list is
     /// unioned in here ONCE (RemSoundSettingsStore.MigrateRememberedPeersToGlobal, gated by
-    /// <see cref="RememberedPeersMigrated"/>). Null = none yet. Cleared from Preferences → General.</summary>
+    /// <see cref="RememberedPeersMigrated"/>). Null = none yet. Cleared from Preferences → Connectivity.</summary>
     public List<string>? RememberedPeers { get; set; }
 
     /// <summary>Set true after the one-time migration of a profile's legacy per-profile peers into
@@ -170,6 +170,19 @@ public sealed class AppConfig
     /// it describes this machine, not a profile.</summary>
     public bool EnableDawPluginLink { get; set; } = true;
 
+    /// <summary>The folder the DAW plugin was installed in when it was put somewhere other than the standard per-user
+    /// VST3 folder (Ed, 2026-09-25) - its own RemSound folder, in full. Null for the standard place. Updates refresh the
+    /// plugin here, and Remove plugin removes it from here.</summary>
+    public string? PluginFolder { get; set; }
+
+    /// <summary>The "Please note: RemSound will now put any plugin updates in ..." message, shown after installing the
+    /// plugin somewhere other than the standard place, until its "Do not show me this message again" is ticked.</summary>
+    public bool PluginFolderNoticeSuppressed { get; set; }
+
+    /// <summary>The RemSound version for which "update the plugin now?" was answered No, when the plugin is in a folder
+    /// that needs Windows' permission to change: asked once after each update, not at every start.</summary>
+    public string? PluginRefreshDeclinedVersion { get; set; }
+
     /// <summary>Per-cue enable flags for the machine-wide cues added 2026-06-13: the send/receive
     /// on/off toggle cues and the minimise(hide)/restore(show) cues. Machine-wide (like the startup
     /// cue) rather than per-profile - they're app-level feedback for an action, not a per-profile
@@ -186,6 +199,10 @@ public sealed class AppConfig
     /// <summary>Sound played whenever the user switches between tabs anywhere in the app (the main
     /// window's tab strip and every tabbed dialog). Machine-wide, default on.</summary>
     public bool EnableTabSwitchCue { get; set; } = true;
+    /// <summary>Sounds played as F1 help opens and as it closes, anywhere in the app (2026-09-25, Ed's sounds).
+    /// Machine-wide, default on.</summary>
+    public bool EnableHelpOpenCue { get; set; } = true;
+    public bool EnableHelpCloseCue { get; set; } = true;
 
     /// <summary>Custom WAV overrides for the machine-wide cues above, keyed by cue id. The
     /// equivalent of <see cref="Profile.CustomCuePaths"/> but machine-wide, since these cues don't
@@ -321,6 +338,11 @@ public sealed class AppConfig
     /// "auto-options default off" rule doesn't really apply; users can untick it.</summary>
     public bool ShowWhatsNewAfterUpdate { get; set; } = true;
 
+    /// <summary>Show the message about F1 help (F1 for the control you're on, Shift+F1 for the whole manual) when
+    /// RemSound starts. Ed's design, 2026-09-25: on until the message's own "Do not show me this message again" is
+    /// ticked; the Startup behaviour tab of Preferences turns it back on. Per machine, not per profile.</summary>
+    public bool ShowF1HelpMessageAtStartup { get; set; } = true;
+
     /// <summary>If true, RemSound tries to open the audio port (UDP 47830) on the local router
     /// using UPnP / NAT-PMP / PCP, so peers on the public internet can reach this machine
     /// without manual port forwarding. Default false — the toggle opt-in only, because some
@@ -374,12 +396,20 @@ public sealed class AppConfig
     public string? RelayClientId { get; set; }
 
     /// <summary>Relay servers this machine has connected to, newest first, offered again in the Connectivity tab.
-    /// Cleared from Preferences → General, beside the remembered peers and applications.</summary>
+    /// Cleared from Preferences → Connectivity, beside the remembered peers.</summary>
     public List<string> RememberedRelays { get; set; } = new();
+
+    /// <summary>The devices ticked on this computer, by their own identity (their discovery instance id): a device ticked
+    /// before is accepted again when it connects just to listen, following Accept connections (Ed, 2026-09-26). By identity
+    /// and never by name, so one "iPhone" is never taken for another. Cleared with the remembered peers list.</summary>
+    public List<string> TickedDeviceIds { get; set; } = new();
 
     /// <summary>True once the user has ticked "don't show this again" on the notice shown when connecting to a
     /// relay. Machine-wide: it explains how relays work, not anything about one set of people.</summary>
     public bool RelayNoticeSuppressed { get; set; }
+
+    /// <summary>The accounts already told that the service belongs to another account, so each is told once.</summary>
+    public List<string> ServiceOwnerNoticeShownFor { get; set; } = new();
 
     /// <summary>
     /// Who this COMPUTER is on a server: one id, kept once per computer, so every copy of the app on it and the
@@ -397,6 +427,91 @@ public sealed class AppConfig
     /// used, this falls back to the copy's own settings, which is how it always worked. Never throws.</para>
     /// </summary>
     public static Guid LoadOrCreateRelayClientId()
+    {
+        var machine = LoadOrCreateMachineRelayClientId();
+        // One person per Windows ACCOUNT (2026-09-25 sweep; Ed agreed). Two people signed in to one computer at once - fast
+        // user switching, each with RemSound running - were one id on a server, and the server moved that id between their
+        // two copies on every packet, so each got broken sound and lists. The computer's id stays with the account that
+        // first ran this version (on a computer one person uses, that person: nobody has to be ticked again); any other
+        // account gets an id of its own. The service - SYSTEM - is given the id of whoever set its profile up
+        // (ServiceStore.LoadRelayClientId), and without one uses the computer's.
+        var me = CurrentUserSid();
+        if (me is null || IsServiceAccountSid(me)) return machine;
+        var owner = ClaimOrReadIdentityOwner(me);
+        if (owner is null || string.Equals(owner, me, StringComparison.OrdinalIgnoreCase)) return machine;
+        return LoadOrCreateAccountRelayClientId(me) ?? machine;
+    }
+
+    /// <summary>The file in <see cref="MachineIdentityDirectory"/> naming the Windows account (its SID) whose id the
+    /// computer's is.</summary>
+    public const string MachineIdentityOwnerFileName = "server-identity-owner.txt";
+
+    internal static Func<string?>? CurrentUserSidForTest;
+
+    /// <summary>The Windows account running this copy (its SID), or null if it cannot be told.</summary>
+    public static string? CurrentAccountSid() => CurrentUserSid();
+
+    private static string? CurrentUserSid()
+    {
+        if (CurrentUserSidForTest is { } seam) return seam();
+        try { return System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value; }
+        catch { return null; }
+    }
+
+    /// <summary>LocalSystem, LocalService and NetworkService: the service's accounts, which are nobody's.</summary>
+    private static bool IsServiceAccountSid(string sid) => sid is "S-1-5-18" or "S-1-5-19" or "S-1-5-20";
+
+    /// <summary>Who the computer's id belongs to - this account, if nobody has it yet. Null when it cannot be told.</summary>
+    private static string? ClaimOrReadIdentityOwner(string me)
+    {
+        var path = Path.Combine(MachineIdentityDirectory, MachineIdentityOwnerFileName);
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            try
+            {
+                if (File.Exists(path)) return File.ReadAllText(path).Trim() is { Length: > 0 } owner ? owner : null;
+                Directory.CreateDirectory(MachineIdentityDirectory);
+                // CreateNew: two accounts arriving at once, only one may be the computer's person.
+                using (var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+                using (var writer = new StreamWriter(file))
+                {
+                    writer.Write(me);
+                }
+                return me;
+            }
+            catch (IOException) when (attempt == 0) { /* somebody else claimed it first: read theirs */ }
+            catch { return null; }
+        }
+        return null;
+    }
+
+    /// <summary>Where an account that is not the computer's person keeps its own id: its own local application data,
+    /// which is per account and never synced (unlike a RemSound folder in Dropbox).</summary>
+    internal static string AccountIdentityDirectory(string sid) =>
+        _machineIdentityOverride is { } isolated
+            ? Path.Combine(isolated, "accounts", sid)
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemSound");
+
+    private static Guid? LoadOrCreateAccountRelayClientId(string sid)
+    {
+        var dir = AccountIdentityDirectory(sid);
+        var path = Path.Combine(dir, MachineIdentityFileName);
+        try
+        {
+            if (File.Exists(path) && Guid.TryParse(File.ReadAllText(path).Trim(), out var kept) && kept != Guid.Empty) return kept;
+            Directory.CreateDirectory(dir);
+            var made = Guid.NewGuid();
+            File.WriteAllText(path, made.ToString("D"));
+            return made;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Whether this run keeps the computer's identity somewhere of its own (the self-test, a --config-dir start).</summary>
+    internal static bool MachineIdentityIsolated => _machineIdentityOverride is not null;
+
+    /// <summary>The computer's own server id - see <see cref="LoadOrCreateRelayClientId"/>. Never throws.</summary>
+    private static Guid LoadOrCreateMachineRelayClientId()
     {
         var path = Path.Combine(MachineIdentityDirectory, MachineIdentityFileName);
         for (var attempt = 0; attempt < 2; attempt++)
@@ -438,6 +553,11 @@ public sealed class AppConfig
         _machineIdentityOverride ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "RemSound");
 
     private static string? _machineIdentityOverride;
+
+    /// <summary>The run's own machine-level folder when this is a run that touches nothing real (the self-test, a
+    /// --config-dir start), else null. Anything computer-wide that such a run would otherwise write - the plugin pointer,
+    /// the installed plugin - goes under here instead.</summary>
+    public static string? ThrowawayMachineDirectory => _machineIdentityOverride;
 
     /// <summary>Keep this process's computer-wide id in <paramref name="path"/> instead: for --config-dir, whose whole point
     /// is a run that touches nothing real. NOT used by the service, which redirects its settings but must share the
@@ -548,7 +668,15 @@ public sealed class AppConfig
     ///
     /// <para>A pointer file rather than asking the app over the link, because the case where a log
     /// matters MOST is the one where the app is not answering.</para></summary>
-    public static string PluginPointerPath => Path.Combine(
+    public static string PluginPointerPath => _machineIdentityOverride is { } throwaway
+        // A throwaway run (the self-test, a --config-dir start) keeps its pointer with its other machine-level state.
+        // It used to write the real one: on 2026-09-24 a gate run left Ed's plugin pointing at a deleted temp folder with
+        // logging off, and the plugin test that followed had no plugin log to read.
+        ? Path.Combine(throwaway, "plugin-home.txt")
+        : DefaultPluginPointerPath;
+
+    /// <summary>Where the pointer lives for the real app and for every plugin in every DAW.</summary>
+    public static string DefaultPluginPointerPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RemSound", "plugin-home.txt");
 
     /// <summary>Record where this copy of RemSound lives, for any plugin running in a DAW. Called

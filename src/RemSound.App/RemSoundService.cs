@@ -23,7 +23,7 @@ public sealed class RemSoundService : ServiceBase
     private ServiceSendHost? host;
     private RemSoundLog? log;
     private System.Threading.Timer? updateWatch;
-    private volatile bool restartScheduled;
+    private DateTime? restartAskedUtc;       // when this service last asked to be restarted onto a newer build
     private long lastResumeHandledMs;
     /// <summary>The app folder's RemSound.exe version at the previous update poll — see <see cref="ServiceUpdate.ReadyToApply"/>.</summary>
     private string? onDiskVersionAtLastPoll;
@@ -111,12 +111,12 @@ public sealed class RemSoundService : ServiceBase
 
     private void CheckForUpdate()
     {
-        if (restartScheduled) return;
+        if (ServiceUpdate.StillWaitingOnRestart(restartAskedUtc, DateTime.UtcNow)) return;
         var onDisk = ServiceUpdate.OnDiskVersion();
         var ready = ServiceUpdate.ReadyToApply(ServiceUpdate.RunningVersion(), onDisk, onDiskVersionAtLastPoll, ServiceUpdate.SwapInProgress());
         onDiskVersionAtLastPoll = onDisk;
         if (!ready) return;
-        restartScheduled = true;
+        restartAskedUtc = DateTime.UtcNow;
         var running = ServiceUpdate.RunningVersion();
         var runningText = running is null ? "?" : $"{running.Major}.{running.Minor}";
         // Always-on update log (not gated on the service-logging toggle) — updates are rare + important.

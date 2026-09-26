@@ -50,6 +50,7 @@ internal sealed class UpdateInstallNoticeDialog : Form
     private readonly Button postponeButton;
     private readonly System.Windows.Forms.Timer countdownTimer = new();
     private int secondsRemaining = CountdownSeconds;
+    internal int SecondsRemainingForTest => secondsRemaining;
 
     public UpdateInstallNoticeDialog(UpdateInfo info)
     {
@@ -159,6 +160,9 @@ internal sealed class UpdateInstallNoticeDialog : Form
 
         AcceptButton = installNowButton;
         CancelButton = postponeButton;
+        ContextHelp.Mark(installNowButton, "dialog.update-install-notice.install-now");
+        ContextHelp.Mark(skipButton, "dialog.update-install-notice.skip");
+        ContextHelp.Mark(postponeButton, "dialog.update-install-notice.postpone");
 
         // Esc = postpone (matches CancelButton). Avoids the "I just opened the app, where
         // did the window go" surprise if the user mashes Esc to dismiss whatever popped up.
@@ -178,6 +182,9 @@ internal sealed class UpdateInstallNoticeDialog : Form
         countdownTimer.Interval = 1000;
         countdownTimer.Tick += (_, _) =>
         {
+            // Paused while context help is open (F1 on one of these buttons): reading what a button does must not run
+            // the clock out and install behind the help window (2026-09-25).
+            if (ContextHelp.Open is not null) return;
             secondsRemaining--;
             if (secondsRemaining <= 0)
             {

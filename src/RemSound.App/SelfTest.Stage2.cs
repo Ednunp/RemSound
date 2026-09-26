@@ -44,6 +44,10 @@ internal static partial class SelfTest
                 + "card can still be held when it is opened next");
             found.Add($"{why}: {first / 1000} s");
         }
+        // And the bound itself: comparing the close against its own constant proves only that the constant was used. The
+        // Audient takes 5 to 8 seconds to close, so nothing under 8 will do (found 2026-09-24).
+        Check(RemSound.Sender.AsioCaptureBackend.CloseTimeoutMs >= 8000,
+            $"the interactive close bound must be at least 8 seconds - the Audient takes 5 to 8 s to close (it is {RemSound.Sender.AsioCaptureBackend.CloseTimeoutMs} ms)");
         return "the old ASIO driver is let go with the interactive close bound — " + string.Join("; ", found);
     }
 
@@ -143,32 +147,46 @@ internal static partial class SelfTest
                     AudioConfiguration.AsioOnly => [RenderRoute.AsioLane],
                     _ => [RenderRoute.WasapiLane, RenderRoute.AsioLane],
                 };
-                var floors = new Dictionary<RenderRoute, int>();
-                foreach (var lane in tuned)
+                // Through the window's own handlers: a person ticked, then the same person unticked. This called the
+                // forgetting routine directly until 2026-09-24, so a handler that stopped calling it stayed green.
+                var peer = new PeerAnnouncement(Guid.NewGuid(), "Tune peer", RemPacket.DefaultPort, true, true, DateTime.UtcNow,
+                    System.Net.IPAddress.Parse("192.0.2.80"));
+                var deselect = Require(typeof(MainForm).GetMethod("DeselectPeer",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic, [typeof(Guid), typeof(bool)]),
+                    "MainForm.DeselectPeer(Guid, bool) not found");
+                foreach (var (change, act) in new (string, Action)[]
                 {
-                    form.SeedTuneEvidenceForTest(lane, renderGapMs: 12, floorMs: 30);
-                    var seeded = form.TuneEvidenceForTest(lane);
-                    Check(seeded.LaneRenderGaps > 0 && seeded.FloorMs > 0,
-                        $"{name}: premise — the {lane} lane must hold readings and a learned floor before the change");
-                    floors[lane] = seeded.FloorMs;
-                }
-
-                form.InvalidateAutoTuneHistoryForTest();
-
-                foreach (var lane in tuned)
+                    ("ticking a person", () => form.SelectPeerForTest(peer)),
+                    ("unticking them", () => deselect.Invoke(form, [peer.InstanceId, true])),
+                })
                 {
-                    var e = form.TuneEvidenceForTest(lane);
-                    Check(e.LaneRenderGaps == 0 && e.SharedRenderGaps == 0,
-                        $"{name}: after a peer or source change the {lane} lane's OWN readings must go too (lane window {e.LaneRenderGaps}, "
-                        + $"shared {e.SharedRenderGaps}) — the tuner reads the lane's window first");
-                    Check(e.NeedsBaseline, $"{name}: ...and the {lane} lane's underrun count must be re-based");
-                    Check(e.FloorMs == floors[lane],
-                        $"{name}: ...while what the {lane} lane LEARNED is kept (floor {floors[lane]} before, {e.FloorMs} after)");
+                    var floors = new Dictionary<RenderRoute, int>();
+                    foreach (var lane in tuned)
+                    {
+                        form.SeedTuneEvidenceForTest(lane, renderGapMs: 12, floorMs: 30);
+                        var seeded = form.TuneEvidenceForTest(lane);
+                        Check(seeded.LaneRenderGaps > 0 && seeded.FloorMs > 0,
+                            $"{name}: premise — the {lane} lane must hold readings and a learned floor before {change}");
+                        floors[lane] = seeded.FloorMs;
+                    }
+
+                    act();
+
+                    foreach (var lane in tuned)
+                    {
+                        var e = form.TuneEvidenceForTest(lane);
+                        Check(e.LaneRenderGaps == 0 && e.SharedRenderGaps == 0,
+                            $"{name}: after {change} the {lane} lane's OWN readings must go too (lane window {e.LaneRenderGaps}, "
+                            + $"shared {e.SharedRenderGaps}) — the tuner reads the lane's window first");
+                        Check(e.NeedsBaseline, $"{name}: ...and after {change} the {lane} lane's underrun count must be re-based");
+                        Check(e.FloorMs == floors[lane],
+                            $"{name}: ...while what the {lane} lane LEARNED is kept through {change} (floor {floors[lane]} before, {e.FloorMs} after)");
+                    }
                 }
                 proven.Add(name);
             }
         }
-        return $"in {string.Join(", ", proven)}, a peer or source change clears every reading on every tuned lane and keeps the learned floor";
+        return $"in {string.Join(", ", proven)}, ticking and unticking a person through the window clears every reading on every tuned lane and keeps the learned floor";
     }
 
     /// <summary>
@@ -312,19 +330,71 @@ internal static partial class SelfTest
         Check(MainForm.SendEndpointsChanged([a, b], [a]), "a peer removed is a change");
         Check(MainForm.SendEndpointsChanged([], [a]), "the first peer chosen is a change");
 
-        var root = FindSourceRoot();
-        if (root is null) return Skip("the source tree is not reachable from here (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
-        var text = File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "MainForm.cs"));
-        var apply = SourceMethodBody(text, "private void ApplyAudioRuntime()");
-        var ensure = SourceMethodBody(text, "private void EnsureRequestedAudioRunning()");
-        Check(apply.Length > 0 && ensure.Length > 0, "ApplyAudioRuntime and EnsureRequestedAudioRunning must still exist to be checked");
-        var clears = apply.Split('\n').Where(l => l.Contains("activeAudioReceiverSignature = null", StringComparison.Ordinal)).ToList();
-        Check(clears.Count > 0 && clears.All(l => l.Contains("SendEndpointsChanged(", StringComparison.Ordinal)),
-            "the audio set-up may forget which peers are armed ONLY when the chosen peers changed — forgetting it every time is what "
-            + "re-armed them and logged it once a second with \"Send my audio\" on and nothing ticked");
-        Check(ensure.Contains("WantsToSend", StringComparison.Ordinal) && apply.Contains("WantsToSend", StringComparison.Ordinal),
-            "the once-a-second check and the set-up must ask the same question about sending — a DAW plugin sending counts");
-        return "the armed peers are re-pushed only when the chosen peers change, and the once-a-second check counts a sending plugin";
+        // DRIVEN, since 2026-09-24: the window connected for real - on a throwaway port, with its one peer a listener of this
+        // step's own on this computer - "Send my audio" on and nothing ticked to send, and the once-a-second check run five
+        // times. Until then only the source was read, on the belief that a gate run could not connect.
+        var peerSink = new System.Net.Sockets.UdpClient(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 0));
+        int windowPort;
+        using (var probe = new System.Net.Sockets.UdpClient(new System.Net.IPEndPoint(System.Net.IPAddress.Any, 0)))
+            windowPort = ((System.Net.IPEndPoint)probe.Client.LocalEndPoint!).Port;
+        MainForm.LocalAudioPortForTest = windowPort;
+        MainForm? form = null;
+        try
+        {
+            var profile = Profile.NewBlank();
+            profile.Password = RemSoundCrypto.Obfuscate("setup-not-redone-password");
+            try { form = new MainForm(null, profile, null, null, headless: true); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+            _ = form.Handle;
+            var sinkPort = ((System.Net.IPEndPoint)peerSink.Client.LocalEndPoint!).Port;
+            form.SelectPeerForTest(new PeerAnnouncement(Guid.NewGuid(), "Setup peer", sinkPort, true, true, DateTime.UtcNow, System.Net.IPAddress.Loopback));
+            Require(FieldOf<CheckBox>(form, "sendMyAudioCheckbox"), "MainForm.sendMyAudioCheckbox not found").Checked = true;
+
+            var updates = 0;
+            string? listenerLine = null;
+            form.LogForTest.EventTapForTest = line =>
+            {
+                if (line.StartsWith("audio receivers updated", StringComparison.Ordinal)) Interlocked.Increment(ref updates);
+                if (line.StartsWith("receiver listener", StringComparison.Ordinal)) listenerLine = line;
+            };
+            var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+            Require(typeof(MainForm).GetMethod("Connect", flags, Type.EmptyTypes), "MainForm.Connect not found").Invoke(form, null);
+            Check(listenerLine == $"receiver listener started port={windowPort}",
+                $"the window must connect on the step's own port, never the one the person's RemSound uses (got: {listenerLine ?? "nothing"})");
+            Check(updates >= 1, "connecting with a peer chosen must arm them once - or the count below is watching a path that never runs");
+            var sender = Require(FieldOf<RemSound.Sender.AudioSender>(form, "sender"), "MainForm.sender not found");
+            Check(!sender.IsRunning, "with nothing ticked to send, the sender must not count as running - the state the bug lived in");
+
+            var afterConnect = updates;
+            var ensure = Require(typeof(MainForm).GetMethod("EnsureRequestedAudioRunning", flags), "MainForm.EnsureRequestedAudioRunning not found");
+            for (var i = 0; i < 5; i++) ensure.Invoke(form, null);
+            Check(updates == afterConnect,
+                $"five seconds of the once-a-second check with the same peer chosen must not re-arm them - it did {updates - afterConnect} "
+                + "times, which is \"audio receivers updated\" in the log every second with \"Send my audio\" on and nothing ticked");
+
+            // The once-a-second check and the set-up must ask the same question about the capture. What that question is -
+            // "Send my audio", and never a sending plugin - is driven by the step "SEND: a DAW track sending never puts your
+            // own inputs on the wire".
+            var root = FindSourceRoot();
+            if (root is not null)
+            {
+                var text = File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "MainForm.cs"));
+                var apply = SourceMethodBody(text, "private void ApplyAudioRuntime()");
+                var ensureBody = SourceMethodBody(text, "private void EnsureRequestedAudioRunning()");
+                Check(ensureBody.Contains("WantsToSend", StringComparison.Ordinal) && apply.Contains("WantsToSend", StringComparison.Ordinal),
+                    "the once-a-second check and the set-up must ask the same question about sending");
+            }
+            return $"connected on a throwaway port with one peer chosen and nothing ticked to send, the peer was armed {afterConnect} time(s) "
+                 + "and five runs of the once-a-second check armed them no more; the check and the set-up ask the same question"
+                 + (root is null ? " (that half not checked: no source tree)" : "");
+        }
+        finally
+        {
+            try { if (form is not null) form.LogForTest.EventTapForTest = null; } catch { /* teardown */ }
+            try { form?.Dispose(); } catch { /* teardown */ }
+            MainForm.LocalAudioPortForTest = 0;
+            peerSink.Dispose();
+        }
     }
 
     /// <summary>The body of the method whose declaration starts with <paramref name="signature"/>, by brace matching, or "".</summary>

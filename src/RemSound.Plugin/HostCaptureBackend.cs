@@ -40,6 +40,7 @@ internal sealed class HostCaptureBackend : ICaptureBackend
     private float[] resampledOut = [];
 
     private double hostSampleRate;
+    private bool prepared;
     private long callbacks;
     private long bytes;
     private volatile bool running;
@@ -57,8 +58,11 @@ internal sealed class HostCaptureBackend : ICaptureBackend
     /// from the host's block-size announcement — never from the process callback.</summary>
     public void PrepareForBlockSize(int maxFramesPerBlock, double sampleRate)
     {
-        hostSampleRate = sampleRate <= 0 ? WireSampleRate : sampleRate;
-        resampler.SetRates(hostSampleRate, WireSampleRate);
+        var rate = sampleRate <= 0 ? WireSampleRate : sampleRate;
+        // Only a new rate resets the resampler; more room at the same rate must not put a join in the audio going out.
+        if (!prepared || Math.Abs(rate - hostSampleRate) > 0.5) resampler.SetRates(rate, WireSampleRate);
+        prepared = true;
+        hostSampleRate = rate;
 
         var interleaved = Math.Max(1, maxFramesPerBlock) * Channels;
         // Output can exceed input when converting UP (44.1k -> 48k). Doubling is generous headroom
@@ -119,6 +123,9 @@ internal sealed class HostCaptureBackend : ICaptureBackend
     // report the host rather than pretending to enumerate hardware. ----------------------------
 
     public bool IsRunning => running;
+
+    /// <summary>Blocks handed over since the start, for the plugin's log line.</summary>
+    internal long Callbacks => Interlocked.Read(ref callbacks);
 
     /// <summary>There is no device to lose — the host owns it, and if the DAW stops calling us there
     /// is nothing here to re-open. Always false. See <see cref="ICaptureBackend.HasFaulted"/>.</summary>

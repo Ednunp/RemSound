@@ -29,7 +29,9 @@ internal static class ForegroundDialog
             TopMost = true,
         };
         owner.Show();
-        ForceForeground(owner.Handle);
+        // A --headless copy keeps every window out of sight and focus (Windowless), and pulling one to the front
+        // would also lower the system-wide foreground lock. Its dialogs wait, hidden, for the control channel.
+        if (!Windowless.Hiding) ForceForeground(owner.Handle);
         try { return show(owner); }
         finally { try { owner.Close(); } catch { /* ignore */ } }
     }

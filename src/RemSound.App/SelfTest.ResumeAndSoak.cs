@@ -136,10 +136,13 @@ internal static partial class SelfTest
         var highestFloor = 0;
         var reachedZeroInLastHour = false;
         var minutes = 12 * 60;
+        // Clean ticks counted SINCE THE LAST SHORTFALL, as the app counts them (MainForm's CleanTicks). This passed the
+        // absolute minute until 2026-09-24, which let the floor relax the very tick after a shortfall.
+        var cleanTicks = 0;
         for (var i = 0; i < minutes; i++)
         {
-            if (rng.NextDouble() < 1.0 / 30) creep.NoteShortfallAt(atMs: 40, justifiedMs: justifiedMs);
-            else creep.NoteCleanRun(cleanTicks: i);
+            if (rng.NextDouble() < 1.0 / 30) { creep.NoteShortfallAt(atMs: 40, justifiedMs: justifiedMs); cleanTicks = 0; }
+            else creep.NoteCleanRun(cleanTicks: ++cleanTicks);
             if (creep.DiscoveredFloorMs > highestFloor) highestFloor = creep.DiscoveredFloorMs;
             if (i > minutes - 60 && creep.DiscoveredFloorMs == 0) reachedZeroInLastHour = true;
         }

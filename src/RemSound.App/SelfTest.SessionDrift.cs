@@ -348,7 +348,18 @@ internal static partial class SelfTest
                     Check(fall <= 5.0,
                         $"in {DriftWhere(configuration, run)}, the per-person timing correction must not bring latency down faster than it does today "
                         + $"after 60 ms of backlog lands (it fell {fall:0.00} ms in one second, where today it falls 4.8)");
-                    measured.Add($"{DriftWhere(configuration, run)} {fall:0.00} ms/s, lowest {lowest:0.0} ms against target");
+                    // And it must come down at all, dipping under the target no further than it does today. Only the speed
+                    // limit was checked until 2026-09-24, and a correction that never touched the backlog is well inside it.
+                    var offMs = Math.Abs(run.DepthPerSecond[115] - run.TargetMs);
+                    // Today, 2026-09-24: 2.4 ms off on every lane (3.0 on the ASIO lane beside WASAPI), still settling after the dip below.
+                    // A correction that never touched the backlog ends about 60 ms off.
+                    Check(offMs <= 5,
+                        $"in {DriftWhere(configuration, run)}, 60 ms of backlog must be worked off: 90 seconds on the buffer was still {offMs:0.0} ms from its {run.TargetMs} ms target, where today it is 2.4");
+                    // Today, 2026-09-24: 11.6 ms under on every lane (11.7 on the ASIO lane beside WASAPI).
+                    Check(lowest >= -13,
+                        $"in {DriftWhere(configuration, run)}, working off a backlog must not take the buffer further under its target than today "
+                        + $"(it went {-lowest:0.0} ms under, where today it goes 11.6) - under target is where the dropouts are");
+                    measured.Add($"{DriftWhere(configuration, run)} {fall:0.00} ms/s, lowest {lowest:0.0} ms against target, {offMs:0.0} ms off at the end");
                 }
             }
             finally { foreach (var run in runs) run.Session.Dispose(); }

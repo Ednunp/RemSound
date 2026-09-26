@@ -33,6 +33,12 @@ A v1 packet from an endpoint the pair has no room for gets an address-check
 cookie back, rate-limited, so a newer client learns it is talking to a relay
 and can join its group.
 
+A v2 client is sent nothing but its address-check cookie - no member list, no
+sound, and it is in nobody's list - until it echoes that cookie back
+(--v2-watch-only turns this off). Once it has, its place can move to a new
+address only when the new one has echoed a cookie of its own and the old one
+has fallen silent (pre-release sweep 2026-09-25).
+
 Operator guide: server/README.md. The original design (historical, not current):
 server/remsound server update.md.
 """
@@ -59,6 +65,18 @@ RECV_BUFFER_BYTES = 2048
 IDLE_TIMEOUT_SECONDS = 60
 STATS_INTERVAL_SECONDS = 60
 ROSTER_HEARTBEAT_SECONDS = 1.0  # v2 only — periodic roster broadcast
+# A change to the group (a join, a new name, a new tick list) sends the member list out again at once rather than on the
+# next heartbeat - but no sooner than this after the last one went out. It used to go out on EVERY packet that changed
+# something, and one 68-byte hello with a new name made the relay send a list to every member at once: 155 KB for 56
+# members, about 2300 times what it was sent (pre-release sweep 2026-09-25). A burst of changes inside this window goes
+# out as one list when the window allows, so at most four a second on top of the heartbeat.
+ROSTER_DIRTY_MIN_INTERVAL_SECONDS = 0.25
+# A member who has proved its address keeps it until a packet bearing its client id comes from a new address that ALSO
+# proves itself, AND the old address has been silent this long. A genuine move (a router rebinding, Wi-Fi to cable)
+# silences the old address; somebody else sending with that member's id - which every member of the group knows, it is
+# in the list - does not (pre-release sweep 2026-09-25). A member sends a hello every 2 s and wrapped heartbeats besides,
+# so this is more than two missed hellos in a row.
+REBIND_SILENCE_SECONDS = 5.0
 SOCKET_POLL_TIMEOUT_SECONDS = 1.0
 DEFAULT_LOG_PATH = "/var/log/remsound-relay/remsound-relay.log"  # systemd's LogsDirectory for the relay's own user
 LOG_KEEP_DAYS = 14  # a new log file each midnight; this many old ones are kept and older ones deleted
@@ -156,10 +174,27 @@ class PeerSlot:
 
 
 @dataclass
+class PendingMove:
+    """v2 protocol — a new address that has sent packets bearing a PROVED member's client id (pre-release sweep
+    2026-09-25). It is held beside the member, not in its place, with an address check of its own, until it has answered
+    that check and the member's own address has been silent for REBIND_SILENCE_SECONDS (see Relay._v2_move_if_ready).
+    The fields the address check uses have the same names as a client's, so _send_addr_check and _try_verify serve both."""
+    addr: tuple[str, int]
+    since: float
+    verified: bool = False
+    cookie: bytes = b""
+    cookie_sent: float = 0.0
+    refused_logged: bool = False
+
+
+@dataclass
 class ClientEntry:
     """v2 protocol — one client in the lobby, keyed by CLIENT_ID."""
     addr: tuple[str, int]
     display_name: str
+    # Refreshed ONLY by packets from addr itself. A packet with this client id from anywhere else must not keep the
+    # entry alive, or somebody sending with a member's id could make that member's own address look as if it were
+    # still in use when it had gone quiet (see PendingMove).
     last_seen: float
     rx_packets: int = 0
     tx_packets: int = 0
@@ -168,6 +203,10 @@ class ClientEntry:
     cookie: bytes = b""
     cookie_sent: float = 0.0
     would_block_logged: bool = False
+    # Logged once that nothing is being sent to this unproven client (see Relay._v2_note_withheld).
+    withheld_logged: bool = False
+    # A new address claiming this client's id while it is proved, waiting to take over (see PendingMove).
+    move: Optional[PendingMove] = None
     # The group tag from this client's LobbyHello (empty until one arrives, or from a pre-groups hello).
     group: bytes = b""
     # The client ids this client has ticked, or None for "everyone in my group" (no list sent).
@@ -183,9 +222,10 @@ class RelayStats:
     pair_changes: int = 0              # v1 slot joins/leaves/replacements
     lobby_changes: int = 0             # v2 joins/leaves/expiries
     addr_checks_verified: int = 0      # cookies echoed back correctly
-    blocked_unverified: int = 0        # forwards withheld (enforce mode only)
+    blocked_unverified: int = 0        # forwards withheld (enforce mode, or a v2 client while v2 is enforced)
     would_block_unverified: int = 0    # forwards that WOULD be withheld (watch-only)
     rejected_ip_cap: int = 0           # admissions refused by MAX_ENTRIES_PER_IP
+    rosters_withheld_unverified: int = 0  # member lists not sent to a v2 client that has not proved its address
     # The DEVICES behind those two, not the packets: one quiet unverified phone sends hundreds of packets a minute,
     # and the decision these figures exist for - can enforcement be switched on? - is about how many devices it
     # would cut off.
@@ -322,7 +362,8 @@ class Relay:
     """Dispatcher that owns both the v1 pair state and the v2 lobby state."""
 
     def __init__(self, sock: socket.socket, log: logging.Logger, max_clients: int,
-                 require_addr_check: bool = False, max_per_ip: int = MAX_ENTRIES_PER_IP):
+                 require_addr_check: bool = False, max_per_ip: int = MAX_ENTRIES_PER_IP,
+                 v2_watch_only: bool = False):
         self.sock = sock
         self.log = log
         self.max_clients = max_clients
@@ -330,8 +371,20 @@ class Relay:
         # Enforcement switch for the address-proof: False = watch-only (log who WOULD be blocked,
         # forward anyway — safe while pre-5.6 clients that can't echo are still around); True =
         # withhold all forwarded traffic from unverified addresses. Flipped by --require-addr-check
-        # in a later server release once the 5.6 auto-update has rolled through.
+        # in a later server release once the 5.6 auto-update has rolled through. It governs the v1
+        # pairs; the v2 groups have their own switch, just below.
         self.require_addr_check = require_addr_check
+        # The v2 groups are enforced whatever require_addr_check says, unless this is set (pre-release sweep
+        # 2026-09-25). In watch-only mode anybody could send hellos from made-up addresses, in a group they made up
+        # or a real one: each made-up address was then sent the member list every second for a minute, the whole list
+        # went out to everybody again whenever a hello changed a name, and the made-up people were LISTED, so real
+        # members saw them and, accepting automatically, ticked them and had their sound sent to them. 56 made-up
+        # entries drew about 155 KB a second out of the relay. So a v2 client that has not answered its address check
+        # is sent nothing but that check: no list, no sound, and it is not in anybody's list, until it answers. Every
+        # Windows app and the lock-screen service answer within a second or two; phones use v1, which this does not
+        # touch. --v2-watch-only (REMSOUND_V2_WATCH_ONLY=1) puts the groups back to watch-only - for a client that
+        # joins a group but cannot answer (the iPhone app is meant to answer; that is not yet confirmed).
+        self.v2_watch_only = v2_watch_only
         # v1 state
         self.v1_peers: list[PeerSlot] = []
         # v2 state
@@ -387,14 +440,38 @@ class Relay:
             self.note(logging.WARNING, "addr_check_send_failed", addr,
                       "event=addr_check_send_failed to=%s err=%s", _fmt_addr(addr), e)
 
-    def _try_verify(self, entry, data: bytes, addr: tuple[str, int], header_len: int) -> None:
+    def _try_verify(self, entry, data: bytes, addr: tuple[str, int], header_len: int) -> bool:
         """An AddrCheck came back from a registered endpoint — verify its cookie. The echo may
-        arrive v1-framed (as sent) even from a v2 client, so callers pass their header length."""
+        arrive v1-framed (as sent) even from a v2 client, so callers pass their header length.
+        True when this echo is the one that proved it."""
         cookie = data[header_len:header_len + ADDR_CHECK_COOKIE_LEN]
         if entry.cookie and cookie == entry.cookie and not entry.verified:
             entry.verified = True
             self.stats.addr_checks_verified += 1
             self.note(logging.INFO, "addr_verified", addr, "event=addr_verified addr=%s", _fmt_addr(addr))
+            if isinstance(entry, ClientEntry):
+                # A v2 client that has just proved itself was, until now, sent nothing and listed nowhere (while v2 is
+                # enforced). It is a member like any other from this moment, so the list goes out again - to it and to
+                # everybody who should now see it - rather than on the next heartbeat (pre-release sweep 2026-09-25).
+                self.v2_roster_dirty = True
+            return True
+        return False
+
+    def _v2_enforced(self) -> bool:
+        """Is anything but the address check withheld from a v2 client that has not proved its address? Yes unless
+        --v2-watch-only; and always under --require-addr-check, which has enforced the groups since it existed."""
+        return self.require_addr_check or not self.v2_watch_only
+
+    def _v2_note_withheld(self, entry: ClientEntry) -> None:
+        """Log, once per client, that nothing but its address check is being sent to it - not once per packet or per
+        list, which a flood of made-up hellos would turn into a line each (the log limits would hold most of them back,
+        but they would crowd out the lines that matter)."""
+        if entry.withheld_logged:
+            return
+        entry.withheld_logged = True
+        self.note(logging.INFO, "withheld_unverified", entry.addr,
+                  "event=withheld_unverified proto=v2 addr=%s (address not proved: no member list, no sound and not "
+                  "listed until it answers its address check)", _fmt_addr(entry.addr))
 
     def _ip_at_cap(self, ip: str) -> bool:
         """True when this source IP already holds max_per_ip lobby/pair entries (MAX_ENTRIES_PER_IP by default). A group
@@ -503,12 +580,15 @@ class Relay:
 
     def _may_forward_to(self, entry, proto: str) -> bool:
         """The enforcement point: may forwarded traffic be delivered to this entry's address?
-        Watch-only mode always says yes but logs (once per entry) who WOULD have been blocked."""
+        Watch-only mode always says yes but logs (once per entry) who WOULD have been blocked.
+        A v2 client is enforced unless --v2-watch-only (see Relay.__init__)."""
         if entry.verified:
             return True
-        if self.require_addr_check:
+        if self.require_addr_check or (proto == "v2" and self._v2_enforced()):
             self.stats.blocked_unverified += 1
             self.stats.blocked_devices.add(entry.addr)
+            if proto == "v2":
+                self._v2_note_withheld(entry)
             return False
         self.stats.would_block_unverified += 1
         self.stats.would_block_devices.add(entry.addr)
@@ -593,11 +673,22 @@ class Relay:
         if pkt_type == TYPE_ADDR_CHECK:
             # A cookie coming home. Echoes come back v1-framed regardless of the client's protocol
             # (clients echo our framing verbatim), so match by ADDRESS across BOTH protocol states
-            # — and never ADMIT anyone off one: an AddrCheck is proof, not a join request.
-            for e in self.v2_clients.values():
+            # — and never ADMIT anyone off one: an AddrCheck is proof, not a join request. It may also be a
+            # proved member's NEW address answering the check it was sent while it waits to take over
+            # (PendingMove, pre-release sweep 2026-09-25); if the old address has fallen silent, that is the move.
+            member = moved = False
+            for cid, e in self.v2_clients.items():
                 if e.addr == addr:
                     self._try_verify(e, data, addr, V1_HEADER_LEN)
-                    return
+                    member = True
+                elif e.move is not None and e.move.addr == addr:
+                    self._try_verify(e.move, data, addr, V1_HEADER_LEN)
+                    moved = self._v2_move_if_ready(cid, e, now) or moved
+                    member = True
+            if moved:
+                self._v1_dissolve_group_pairs()
+            if member:
+                return
             found = self._v1_find_slot(addr)
             if found is not None:
                 self._try_verify(self.v1_peers[found], data, addr, V1_HEADER_LEN)
@@ -664,7 +755,12 @@ class Relay:
         struct.pack_into("<I", header, 8, 0)  # sequence (unused)
         header[V2_CLIENT_ID_OFFSET:V2_CLIENT_ID_OFFSET + V2_CLIENT_ID_LEN] = SERVER_CLIENT_ID_BYTES
         payload = bytearray()
-        members = [(cid, e) for cid, e in self.v2_clients.items() if e.group == recipient.group][:255]  # 1-byte count
+        # A client that has not proved its address is nobody's business yet: while v2 is enforced it is left out of every
+        # list, so a made-up entry is never shown to real members, and never ticked by one that accepts automatically
+        # (pre-release sweep 2026-09-25). It appears the moment it answers its address check.
+        listed_unproven = not self._v2_enforced()
+        members = [(cid, e) for cid, e in self.v2_clients.items()
+                   if e.group == recipient.group and (e.verified or listed_unproven)][:255]  # 1-byte count
         payload.append(len(members))
         for cid, entry in members:
             payload.extend(cid.bytes)
@@ -675,15 +771,21 @@ class Relay:
         payload.append(ROSTER_FLAG_V1_PAIRED if self._v1_paired(recipient.addr) else 0)
         return bytes(header) + bytes(payload)
 
-    def _v2_broadcast_roster(self) -> None:
+    def _v2_broadcast_roster(self, now: Optional[float] = None) -> None:
+        now = time.monotonic() if now is None else now
         if not self.v2_clients:
             self.v2_roster_dirty = False
-            self.v2_last_roster_broadcast = time.monotonic()
+            self.v2_last_roster_broadcast = now
             return
+        enforced = self._v2_enforced()
         for cid, entry in self.v2_clients.items():
             # Under enforcement even the roster stays away from unverified addresses — it's
-            # relay-originated traffic too, and it grows with the lobby. (Watch-only: send.)
-            if self.require_addr_check and not entry.verified:
+            # relay-originated traffic too, and it grows with the lobby. (Watch-only: send.) The v2
+            # groups are enforced unless --v2-watch-only: a list sent every second to a made-up address
+            # is what made the relay an amplifier (pre-release sweep 2026-09-25).
+            if enforced and not entry.verified:
+                self.stats.rosters_withheld_unverified += 1
+                self._v2_note_withheld(entry)
                 continue
             try:
                 self.sock.sendto(self._v2_build_roster_packet(cid, entry), entry.addr)
@@ -693,7 +795,7 @@ class Relay:
                     _fmt_addr(entry.addr), e,
                 )
         self.v2_roster_dirty = False
-        self.v2_last_roster_broadcast = time.monotonic()
+        self.v2_last_roster_broadcast = now
 
     def _v2_send_lobby_full(self, attempted_client_id: uuid.UUID, addr: tuple[str, int]) -> None:
         """Send a LobbyFull packet back to an over-cap client and log it."""
@@ -735,6 +837,62 @@ class Relay:
             )
             self.stats.lobby_changes += 1
             self.v2_roster_dirty = True
+
+    def _v2_candidate_packet(self, client_id: uuid.UUID, entry: ClientEntry, data: bytes, addr: tuple[str, int],
+                             pkt_type: int, now: float) -> bool:
+        """A packet bearing a proved member's id from an address that is not the member's. The address becomes the
+        member's candidate (one at a time: a different address replaces it) and is sent an address check of its own,
+        re-sent at the usual rate. True only when this packet completes the move, and the caller then handles it as the
+        member's own; otherwise nothing it carries is acted on. It does NOT refresh the member's last_seen."""
+        move = entry.move
+        if move is None or move.addr != addr:
+            move = entry.move = PendingMove(addr=addr, since=now)
+            self.note(logging.INFO, "client_endpoint_move_pending", addr,
+                "event=client_endpoint_move_pending client_id=%s old=%s new=%s "
+                "(the new address must answer its address check and the old one fall silent first)",
+                client_id, _fmt_addr(entry.addr), _fmt_addr(addr),
+            )
+        if pkt_type == TYPE_ADDR_CHECK:
+            # An echo wrapped in group framing (the usual one comes back v1-framed, in _handle_v1).
+            header_len = V2_HEADER_LEN if len(data) >= V2_HEADER_LEN + ADDR_CHECK_COOKIE_LEN else V1_HEADER_LEN
+            self._try_verify(move, data, addr, header_len)
+        else:
+            self._send_addr_check(move, addr, now)
+        return self._v2_move_if_ready(client_id, entry, now)
+
+    def _v2_move_if_ready(self, client_id: uuid.UUID, entry: ClientEntry, now: float) -> bool:
+        """Move a proved member to its candidate address if the candidate has proved itself and the member's own address
+        has been silent for REBIND_SILENCE_SECONDS. True when it moved. A candidate still refused once the old address has
+        kept talking for that long after it appeared is logged, once: that is somebody else using the member's id (or a
+        second copy of the same computer's RemSound), not a move."""
+        move = entry.move
+        if move is None or not move.verified:
+            return False
+        quiet = now - entry.last_seen
+        if quiet < REBIND_SILENCE_SECONDS:
+            if not move.refused_logged and (now - move.since) >= REBIND_SILENCE_SECONDS:
+                move.refused_logged = True
+                self.note(logging.WARNING, "client_endpoint_move_refused", move.addr,
+                    "event=client_endpoint_move_refused client_id=%s old=%s new=%s old_heard_s_ago=%.1f "
+                    "(the member's own address is still in use)",
+                    client_id, _fmt_addr(entry.addr), _fmt_addr(move.addr), quiet,
+                )
+            return False
+        old = entry.addr
+        entry.addr = move.addr
+        entry.verified = True
+        entry.cookie = move.cookie
+        entry.cookie_sent = move.cookie_sent
+        entry.would_block_logged = False
+        entry.withheld_logged = False
+        entry.move = None
+        entry.last_seen = now
+        self.note(logging.INFO, "client_endpoint_moved", entry.addr,
+            "event=client_endpoint_moved client_id=%s old=%s new=%s old_silent_s=%.1f",
+            client_id, _fmt_addr(old), _fmt_addr(entry.addr), quiet,
+        )
+        self.v2_roster_dirty = True  # its list, and its v1-paired flag, now go to the new address
+        return True
 
     def _handle_v2(self, data: bytes, addr: tuple[str, int]) -> None:
         parsed = parse_header_v2(data)
@@ -781,10 +939,22 @@ class Relay:
             )
             self.stats.lobby_changes += 1
             self.v2_roster_dirty = True
+        elif entry.addr != addr and entry.verified:
+            # A PROVED member's id from another address. It used to move the member there on the spot, before the
+            # packet was even looked at; every member of a group knows every other member's id (it is in the list), so
+            # one keepalive with somebody else's id sent that person's sound to whoever sent it - to hear them, speak as
+            # them or cut them off (pre-release sweep 2026-09-25, Ed agreed the fix). Now the new address waits beside
+            # the member (PendingMove) and nothing it sends is acted on: not forwarded, not taken as the member's hello,
+            # and no BYE. It takes over only once it has answered an address check of its own AND the member's own
+            # address has gone quiet, which a real move does and a stolen id does not.
+            if not self._v2_candidate_packet(client_id, entry, data, addr, pkt_type, now):
+                return
+            from_registered_endpoint = True  # it has just become the member's address
         else:
             # Refresh endpoint (handles NAT rebind) and last-seen. A MOVED endpoint must re-prove
             # itself — the new address hasn't echoed anything yet, and "rebind" is also exactly
-            # what a spoofed takeover of a known client_id looks like.
+            # what a spoofed takeover of a known client_id looks like. Only a client that has
+            # never proved an address moves at once like this: it has nothing yet to steal.
             if entry.addr != addr:
                 self.note(logging.INFO, "client_endpoint_update", addr,
                     "event=client_endpoint_update client_id=%s old=%s new=%s",
@@ -795,6 +965,8 @@ class Relay:
                 entry.cookie = b""
                 entry.cookie_sent = 0.0
                 entry.would_block_logged = False
+                entry.withheld_logged = False
+                entry.move = None
             entry.last_seen = now
         entry.rx_packets += 1
         # A member may just have joined, or moved, onto an endpoint that holds a v1 slot beside another member.
@@ -902,11 +1074,16 @@ class Relay:
         self._v2_expire_idle(now)
         if self.v1_hinted:
             self.v1_hinted = {a: t for a, t in self.v1_hinted.items() if (now - t) < IDLE_TIMEOUT_SECONDS}
+        # The heartbeat list every second, and a changed one sooner - but no sooner than
+        # ROSTER_DIRTY_MIN_INTERVAL_SECONDS after the last, however many changes came in between. This is called
+        # after every packet, and a list honoured on every packet was the relay's biggest amplifier
+        # (pre-release sweep 2026-09-25). Nothing is lost: the flag stays set until the list goes out.
+        since = now - self.v2_last_roster_broadcast
         if self.v2_clients and (
-            self.v2_roster_dirty
-            or (now - self.v2_last_roster_broadcast) >= ROSTER_HEARTBEAT_SECONDS
+            since >= ROSTER_HEARTBEAT_SECONDS
+            or (self.v2_roster_dirty and since >= ROSTER_DIRTY_MIN_INTERVAL_SECONDS)
         ):
-            self._v2_broadcast_roster()
+            self._v2_broadcast_roster(now)
 
     def maybe_log_stats(self, now: float) -> None:
         if (now - self.last_stats_log) < STATS_INTERVAL_SECONDS:
@@ -934,13 +1111,17 @@ class Relay:
         # anything already reading it expects. They are the evidence for when --require-addr-check can
         # be switched on: while would_block_unverified keeps climbing in watch-only mode, clients that
         # cannot echo their cookie are still in use, and enforcement would cut them off.
+        # v2_addr_check and rosters_withheld (pre-release sweep 2026-09-25) go on the end, so every field before them
+        # is where it always was.
         self.log.info(
             "event=addr_check_stats addr_check=%s addr_checks_verified=%d blocked_unverified=%d "
-            "would_block_unverified=%d rejected_ip_cap=%d blocked_devices=%d would_block_devices=%d",
+            "would_block_unverified=%d rejected_ip_cap=%d blocked_devices=%d would_block_devices=%d "
+            "v2_addr_check=%s rosters_withheld=%d",
             "ENFORCED" if self.require_addr_check else "watch-only",
             s.addr_checks_verified, s.blocked_unverified,
             s.would_block_unverified, s.rejected_ip_cap,
             len(s.blocked_devices), len(s.would_block_devices),
+            "ENFORCED" if self._v2_enforced() else "watch-only", s.rosters_withheld_unverified,
             extra={"keep": True},
         )
         # What the log limits held back this minute: one line per kind, so a flood shows up as a number, not as a
@@ -983,6 +1164,15 @@ def main() -> int:
              "once the 5.6+ client rollout is complete - pre-5.6 clients cannot echo.",
     )
     parser.add_argument(
+        "--v2-watch-only",
+        action="store_true",
+        default=os.environ.get("REMSOUND_V2_WATCH_ONLY", "") == "1",
+        help="put the v2 groups back to watch-only: a group client that has not echoed its address-proof "
+             "cookie is still sent the member list and sound, and listed (default off = enforced: it is "
+             "sent only the cookie until it echoes). For a group client that cannot echo. The v1 pairs "
+             "follow --require-addr-check as before, and --require-addr-check enforces the groups too.",
+    )
+    parser.add_argument(
         "--max-per-ip", type=int,
         default=int(os.environ.get("REMSOUND_MAX_PER_IP", str(MAX_ENTRIES_PER_IP))),
         help=f"how many devices one address may have on the relay at once (default {MAX_ENTRIES_PER_IP}, "
@@ -998,9 +1188,11 @@ def main() -> int:
 
     log = setup_logger(args.log_path)
     log.info(
-        "event=startup version_supported=v1,v2 listen=%s:%d max_clients=%d max_per_ip=%d addr_check=%s",
+        "event=startup version_supported=v1,v2 listen=%s:%d max_clients=%d max_per_ip=%d addr_check=%s "
+        "v2_addr_check=%s",
         args.host, args.port, args.max_clients, args.max_per_ip,
         "ENFORCED" if args.require_addr_check else "watch-only",
+        "ENFORCED" if args.require_addr_check or not args.v2_watch_only else "watch-only",
     )
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1012,7 +1204,7 @@ def main() -> int:
         return 1
 
     relay = Relay(sock, log, args.max_clients, require_addr_check=args.require_addr_check,
-                  max_per_ip=args.max_per_ip)
+                  max_per_ip=args.max_per_ip, v2_watch_only=args.v2_watch_only)
     stop_flag = {"stop": False}
 
     def _stop_signal(_signum, _frame):
@@ -1023,8 +1215,12 @@ def main() -> int:
 
     try:
         while not stop_flag["stop"]:
+            # A changed member list waiting on ROSTER_DIRTY_MIN_INTERVAL_SECONDS goes out when that is up, even
+            # if no packet comes in to wake the loop before the ordinary one-second poll.
+            timeout = (ROSTER_DIRTY_MIN_INTERVAL_SECONDS if relay.v2_roster_dirty and relay.v2_clients
+                       else SOCKET_POLL_TIMEOUT_SECONDS)
             try:
-                ready, _, _ = select.select([sock], [], [], SOCKET_POLL_TIMEOUT_SECONDS)
+                ready, _, _ = select.select([sock], [], [], timeout)
             except InterruptedError:
                 continue
             except OSError as e:

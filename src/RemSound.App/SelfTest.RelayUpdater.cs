@@ -149,6 +149,139 @@ internal static partial class SelfTest
         return null;
     }
 
+    /// <summary>
+    /// THE RELAY UPDATER READS A LONG RELEASE LIST, AND FINDS THE SERVER RELEASE IN IT.
+    ///
+    /// <para>It handed the whole GitHub release list to python as one command-line argument. Linux refuses a single
+    /// argument over 32 memory pages - 128 KB on most machines, 512 KB on a Pi 5 - and the list, every release with its
+    /// notes, was already 197 KB: on most machines the hourly check failed every time, saying only "no upgrade attempted"
+    /// (found 2026-09-25; Ed's Pi 5 still had room). And it read thirty releases, so a
+    /// server release behind thirty of the app's own would never have been seen. Driven here in bash, with the real
+    /// function, over a list of a hundred releases several hundred KB long with the newest server release deep inside
+    /// it. (Windows refuses an argument over 32 KB, so the old way fails here even sooner.)</para>
+    /// </summary>
+    private static string? AuditRelayUpdaterReadsALongReleaseList()
+    {
+        var root = FindSourceRoot();
+        if (root is null) return Skip("the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
+        var text = File.ReadAllText(Path.Combine(root, "server", "remsound-relay-update.sh")).Replace("\r", "");
+        Check(text.Contains("per_page=100", StringComparison.Ordinal), "the relay updater must read a hundred releases a page, not thirty");
+        var bash = FindGitBash();
+        if (bash is null) return Skip("the updater asks for a hundred releases, but no bash (Git for Windows) was found here to run its reading of them");
+
+        var dir = Path.Combine(Path.GetTempPath(), "remsound-relaylist-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            object Release(string tag, bool server) => new Dictionary<string, object>
+            {
+                ["tag_name"] = tag,
+                ["draft"] = false,
+                ["prerelease"] = false,
+                ["body"] = new string('n', 4000),
+                ["assets"] = server
+                    ? new object[]
+                    {
+                        new Dictionary<string, string> { ["name"] = $"remsound-server-{tag["server-".Length..]}.tar.gz", ["browser_download_url"] = $"https://example.invalid/{tag}.tar.gz" },
+                        new Dictionary<string, string> { ["name"] = $"remsound-server-{tag["server-".Length..]}.tar.gz.sig", ["browser_download_url"] = $"https://example.invalid/{tag}.tar.gz.sig" },
+                    }
+                    : new object[] { new Dictionary<string, string> { ["name"] = "RemSound.zip", ["browser_download_url"] = "https://example.invalid/app.zip" } },
+            };
+            var releases = new List<object>();
+            for (var i = 0; i < 97; i++)
+            {
+                if (i == 60) releases.Add(Release("server-v2.11", server: true));   // deep inside, behind sixty app releases
+                releases.Add(Release($"v6.0.{97 - i}", server: false));
+            }
+            releases.Add(Release("server-v2.10", server: true));
+            releases.Add(Release("server-v2.9", server: true));
+            var json = System.Text.Json.JsonSerializer.Serialize(releases);
+            File.WriteAllText(Path.Combine(dir, "releases.json"), json);
+            Check(json.Length > 200_000, $"premise: the list must be past Linux's 128 KB limit for one argument ({json.Length:N0} bytes)");
+
+            // curl hands back the list (to the file it is told, or its output); python3 is Windows' own Python here.
+            const string script =
+                "command -v py >/dev/null 2>&1 || { echo no-python; exit 0; }; "
+                + "curl() { local out=\"\"; while [[ $# -gt 0 ]]; do if [[ \"$1\" == \"-o\" ]]; then out=\"$2\"; shift 2; else shift; fi; done; "
+                + "if [[ -n \"$out\" ]]; then cat \"$D/releases.json\" > \"$out\"; else cat \"$D/releases.json\"; fi; }; "
+                + "python3() { py -3 \"$@\"; }; log() { echo \"LOG: $*\" >&2; }; "
+                + "found=\"$(get_latest_release)\"; rc=$?; echo \"$found\"; echo \"rc=$rc\"";
+            var output = RunRelayUpdaterCheck(bash, text, dir, script);
+            if (output.Contains("no-python", StringComparison.Ordinal)) return Skip("no Python here to run the updater's reading of the list");
+            if (output.Contains("no-openssl", StringComparison.Ordinal)) return Skip("this bash has no openssl, which the updater's check helper insists on");
+            var lines = output.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            Check(Regex.IsMatch(output, @"\brc=0\b") && lines.FirstOrDefault() == "server-v2.11",
+                $"THE SILENCE: over a release list of {json.Length:N0} bytes the updater must still find the newest server release, "
+                + $"server-v2.11, sixty releases in (bash said: {ShortTail(output)})");
+            Check(lines.Any(l => l.EndsWith("server-v2.11.tar.gz.sig", StringComparison.Ordinal)), "and its signature, which it will not install without");
+            return $"over a release list of {json.Length:N0} bytes the updater finds server-v2.11 behind sixty app releases, with its signature";
+        }
+        finally { try { Directory.Delete(dir, recursive: true); } catch { /* temp */ } }
+    }
+
+    /// <summary>
+    /// THE RELAY UPDATER REFUSES AN OLD RELEASE PUT UP UNDER A NEW NAME.
+    ///
+    /// <para>The signature covers the release, but its version came only from its name on GitHub, which is not signed.
+    /// Anybody able to publish a release but without the key could put an old signed one up as, say, server-v99: the
+    /// relay went back to the old code and, believing it had v99, never took a real update again (review 2026-09-25).
+    /// It now installs a release only when the VERSION file inside it names the same release, checked before anything
+    /// touches the running relay. Driven here in bash with the real function.</para>
+    /// </summary>
+    private static string? AuditRelayUpdaterRefusesAnOldReleaseUnderANewName()
+    {
+        var root = FindSourceRoot();
+        if (root is null) return Skip("the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
+        var text = File.ReadAllText(Path.Combine(root, "server", "remsound-relay-update.sh")).Replace("\r", "");
+        var main = text.IndexOf("\nmain() {", StringComparison.Ordinal);
+        Check(main >= 0, "the relay updater's main() is gone — this check is watching nothing");
+        int At(string s) => text.IndexOf(s, main, StringComparison.Ordinal);
+        var check = At("release_is_version \"$staging\" \"$latest_tag\"");
+        Check(check > At("tar -xzf") && check < At("snapshot_backup") && check < At("systemctl stop") && check < At("install_from_staging \"$staging\""),
+            "the relay updater must check the release's own version after unpacking it and before it backs up, stops or installs anything");
+        var version = File.ReadAllText(Path.Combine(root, "server", "VERSION")).Trim();
+        Check(Regex.IsMatch(version, @"^server-v\d+(\.\d+)+$"),
+            $"server/VERSION must name the release it is built into, as server-vN.N, or the relay will refuse it (it says \"{version}\")");
+
+        var bash = FindGitBash();
+        if (bash is null) return Skip("the updater checks the release's own version, but no bash (Git for Windows) was found here to run it");
+        var dir = Path.Combine(Path.GetTempPath(), "remsound-relayversion-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            void Release(string name, string? versionFile)
+            {
+                Directory.CreateDirectory(Path.Combine(dir, name));
+                if (versionFile is not null) File.WriteAllText(Path.Combine(dir, name, "VERSION"), versionFile);
+            }
+            Release("genuine", "server-v2.12 \r\n");   // a stray space and a Windows line ending
+            Release("old", "server-v2.6\n");
+            Release("prefix", "server-v2.1\n");
+            Release("empty", "  \n");
+            Release("none", null);
+            var output = RunRelayUpdaterCheck(bash, text, dir,
+                "release_is_version \"$D/genuine\" server-v2.12; echo \"genuine=$?\"; "
+              + "release_is_version \"$D/old\" server-v99; echo \"old=$?\"; "
+              + "release_is_version \"$D/prefix\" server-v2.12; echo \"prefix=$?\"; "
+              + "release_is_version \"$D/empty\" server-v2.12; echo \"empty=$?\"; "
+              + "release_is_version \"$D/none\" server-v2.12; echo \"none=$?\"");
+            if (output.Contains("no-openssl", StringComparison.Ordinal))
+                return Skip("the updater checks the release's own version, but this bash has no openssl, which its check helper insists on");
+            Check(Regex.IsMatch(output, @"\bgenuine=0\b"),
+                $"a release whose own VERSION names its tag must be accepted, stray space and Windows line ending and all (bash said: {ShortTail(output)})");
+            foreach (var (label, what) in new[]
+            {
+                ("old", "an old release (server-v2.6) put up as server-v99"),
+                ("prefix", "a release that says server-v2.1 put up as server-v2.12"),
+                ("empty", "a release with an empty VERSION file"),
+                ("none", "a release with no VERSION file"),
+            })
+                Check(Regex.IsMatch(output, $@"\b{label}=[1-9]"), $"the relay updater must refuse {what} (bash said: {ShortTail(output)})");
+            return $"the updater checks a release's own version before touching the relay: it accepts its own name and refuses an "
+                 + $"old release under a new name, a near miss, an empty VERSION and none; server/VERSION says {version}";
+        }
+        finally { try { Directory.Delete(dir, recursive: true); } catch { /* temp */ } }
+    }
+
     /// <summary>Source an LF copy of the relay updater in bash, with <c>$D</c> set to <paramref name="dir"/>, and run
     /// <paramref name="script"/>. Returns what bash printed. Prints "no-openssl" and stops when openssl is missing.</summary>
     private static string RunRelayUpdaterCheck(string bash, string updaterText, string dir, string script)

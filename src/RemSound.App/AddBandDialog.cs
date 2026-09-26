@@ -108,6 +108,11 @@ internal sealed class AddBandDialog : Form
         Controls.Add(grid);
         AcceptButton = okButton;
         CancelButton = cancelButton;
+        ContextHelp.Mark(startFreq, "dialog.add-eq-band.start");
+        ContextHelp.Mark(endFreq, "dialog.add-eq-band.end");
+        ContextHelp.Mark(gainDb, "dialog.add-eq-band.gain");
+        ContextHelp.Mark(okButton, "dialog.add-eq-band.ok");
+        ContextHelp.Mark(cancelButton, "dialog.add-eq-band.cancel");
 
         foreach (var box in new[] { startFreq, endFreq, gainDb })
         {
@@ -199,7 +204,7 @@ internal sealed class AddBandDialog : Form
             Icon = TaskDialogIcon.Warning,
             Buttons = { TaskDialogButton.OK },
         };
-        TaskDialog.ShowDialog(this, page);
+        AppTaskDialog.ShowDialog(this, page);
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)

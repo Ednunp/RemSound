@@ -19,11 +19,11 @@ namespace RemSound.App;
 ///
 /// Two kinds of option:
 ///   * "do-and-exit" commands (--help, --version, --devices, --list-profiles, --list-named-peers,
-///     --selftest, --perftest, --diagnostics, --log, --close, and the developer and publishing verbs
+///     --selftest, --perftest, --diagnostics, --log, --close, --control (which talks to a --headless copy), and the developer and publishing verbs
 ///     --plugin-window, --sign-update and --sign-server-release) print to the calling terminal (and/or a
 ///     file) and terminate the process; --plugin-window shows a window instead of printing.
 ///   * "launch options" (--profile, --connect, --minimized) modify a normal GUI start.
-/// <c>--config-dir</c> (<see cref="TryGetConfigDir"/>) applies to both. Program handles --silent,
+/// <c>--config-dir</c> (<see cref="TryGetConfigDir"/>) applies to both. Program handles --silent, --headless,
 /// --foreground, --await-pid, --uninstall, --apply-update and the service verbs itself.
 ///
 /// Wired into <see cref="Program"/> before the single-instance guard. The do-and-exit commands need no window and no instance lock.
@@ -102,6 +102,13 @@ internal static class CommandLine
                     return WithConsole(() => SetLogging(ValueAfter(args, raw)));
                 case "--close": case "--quit":
                     return WithConsole(CloseRunning);
+                case "--install-plugin": case "--uninstall-plugin": case "--remove-plugin": case "--service":
+                    // The DAW plugin and Service menus, for the scripts beside the exe and anyone who can't reach the window.
+                    return WithConsole(() => TryRunMenuAction(args, Console.Out, out var rc) ? rc : 1);
+                case "--control":
+                    // Drive a copy started with --headless: each --control "<command>" is sent to it in turn and its
+                    // answer printed. See RemoteControl.
+                    return WithConsole(() => RemoteControl.RunClient(ValuesAfterEach(args, "--control")));
                 case "--sign-update":
                     // Publish-pipeline verb (build-release.ps1): sign a release zip with the private
                     // key so the updater's signature enforcement accepts it. Not a user command.
@@ -254,7 +261,7 @@ internal static class CommandLine
                     + Environment.NewLine + "Test window: no audio is carried here."
                 : "RemSound is not answering." + Environment.NewLine
                     + "Start RemSound, or switch the link on in its DAW plugin menu.";
-            panel.JobChanged += (send, receive, chosen, all, sendLevel, receiveLevel) => { /* no audio in the test window - see the status text */ };
+            panel.JobChanged += (active, send, receive, chosen, all, sendLevel, receiveLevel) => { /* no audio in the test window - see the status text */ };
         });
         return 0;
     }
@@ -346,7 +353,16 @@ internal static class CommandLine
         Console.WriteLine("Settings and control (these act, then exit):");
         Console.WriteLine("  --log on|off          Turn the diagnostic log on or off.");
         Console.WriteLine("  --close               Close a running copy of RemSound.");
+        Console.WriteLine("  --control \"<command>\" Drive a copy started with --headless: send it a command and");
+        Console.WriteLine("                        print its answer. Repeat --control for several in a row.");
+        Console.WriteLine("                        --control help lists the commands.");
         Console.WriteLine("  --uninstall           Uninstall an installed copy of RemSound (asks first).");
+        Console.WriteLine("  --install-plugin [folder]  Install the DAW plugin, as DAW plugin, Install plugin does: into the");
+        Console.WriteLine("                        folder given (a RemSound folder inside it), or where it is now.");
+        Console.WriteLine("  --uninstall-plugin    Remove the DAW plugin, as DAW plugin, Remove plugin does.");
+        Console.WriteLine("  --service install|uninstall|start|stop|status");
+        Console.WriteLine("                        Do what the Service menu does (Windows asks for");
+        Console.WriteLine("                        administrator permission), or say how the service is.");
         Console.WriteLine();
         Console.WriteLine("Start-up options (these change how RemSound launches):");
         Console.WriteLine("  --profile \"<name>\"    Start straight into the named profile (skip the picker).");
@@ -357,8 +373,13 @@ internal static class CommandLine
         Console.WriteLine("                        and logs, instead of the usual location. Lets a test");
         Console.WriteLine("                        exercise RemSound without touching your real settings.");
         Console.WriteLine("                        Works with any command (e.g. --selftest --config-dir ...).");
-        Console.WriteLine("  --silent              Play no cue sounds and show no missing-sound pop-ups for");
-        Console.WriteLine("                        this run - for automated / unattended launches.");
+        Console.WriteLine("  --silent              Play no cue sounds, and show none of the messages or");
+        Console.WriteLine("                        questions RemSound raises by itself (someone asking to");
+        Console.WriteLine("                        connect, a password that doesn't match, start-up notices);");
+        Console.WriteLine("                        they go to the log. For automated / unattended launches.");
+        Console.WriteLine("  --headless            Run with no window at all, no sounds and no speech, driven");
+        Console.WriteLine("                        by --control. Its questions wait, hidden, to be answered");
+        Console.WriteLine("                        with --control. Show RemSound in the tray hands it back.");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  RemSound.exe --devices");
@@ -708,6 +729,41 @@ internal static class CommandLine
 
     /// <summary>The token after the first occurrence of <paramref name="flag"/>, unless that token
     /// is itself a flag (starts with '-'); null when absent. Used for optional values like a path.</summary>
+    /// <summary>The menu actions a script can ask for: <c>--install-plugin</c>, <c>--uninstall-plugin</c> (or
+    /// <c>--remove-plugin</c>) and <c>--service install|uninstall|start|stop|status</c>. Each runs the code the menu item
+    /// runs. <c>--service</c> is never the elevated helper verbs themselves (<c>--install-service</c> and the rest): it
+    /// asks Windows for them, as the menu does. False when <paramref name="args"/> holds none of them. Internal so the
+    /// gate can prove every script beside the exe calls something this answers.</summary>
+    internal static bool TryRunMenuAction(string[] args, TextWriter output, out int rc)
+    {
+        foreach (var raw in args)
+        {
+            switch (raw.ToLowerInvariant())
+            {
+                case "--install-plugin":
+                    rc = PluginCommandLine.Run(install: true, output, ValueAfter(args, raw));
+                    return true;
+                case "--uninstall-plugin": case "--remove-plugin":
+                    rc = PluginCommandLine.Run(install: false, output);
+                    return true;
+                case "--service":
+                    rc = ServiceCommandLine.Run(ValueAfter(args, raw), output);
+                    return true;
+            }
+        }
+        rc = 0;
+        return false;
+    }
+
+    /// <summary>The value after every occurrence of <paramref name="flag"/>, in order.</summary>
+    private static List<string> ValuesAfterEach(string[] args, string flag)
+    {
+        var values = new List<string>();
+        for (var i = 0; i < args.Length - 1; i++)
+            if (args[i].Equals(flag, StringComparison.OrdinalIgnoreCase)) values.Add(args[i + 1]);
+        return values;
+    }
+
     private static string? ValueAfter(string[] args, string flag)
     {
         for (var i = 0; i < args.Length - 1; i++)

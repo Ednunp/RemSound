@@ -22,6 +22,11 @@ internal static partial class SelfTest
         var inUse = Path.GetFullPath(AppConfig.UserDataDirectory).TrimEnd('\\');
         Check(!string.Equals(inUse, beside, StringComparison.OrdinalIgnoreCase),
             $"a gate run must keep settings in a throwaway folder, never the real one beside the exe (it is using {inUse})");
+        // The installed service's settings too (2026-09-24: one step wrote ProgramData\RemSound\service three times).
+        var programData = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData)).TrimEnd('\\');
+        var serviceStore = Path.GetFullPath(ServiceStore.Directory).TrimEnd('\\');
+        Check(!serviceStore.StartsWith(programData + "\\", StringComparison.OrdinalIgnoreCase),
+            $"a gate run must keep the service's settings in a throwaway folder, never the installed service's own ({serviceStore})");
 
         var root = FindSourceRoot();
         if (root is null) return Skip("this run's settings are throwaway, but the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");

@@ -138,14 +138,40 @@ internal sealed class MainFormTrayController : IDisposable
         menu.Items.Add(profilesItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(exitItem);
+        // Context help on every tray menu item (F1 with the tray menu open), by the name each is built with.
+        ContextHelp.MarkItemsByName(menu.Items, new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["Show RemSound"] = "tray.show",
+            ["Enable sending"] = "tray.sending",
+            ["Enable receiving"] = "tray.receiving",
+            ["Profiles"] = "tray.profiles",
+            ["No recent profiles"] = "tray.profiles",
+            ["Exit RemSound"] = "tray.exit",
+        });
+        ContextHelp.TrackMenu(menu);
 
         // Refresh the checkable items' state every time the menu opens so the visible
         // ticks match the current main-window state (which can have changed while the
         // user was clicking around elsewhere).
         menu.Opening += (_, _) => RefreshMenuState();
 
+        // A --headless copy keeps every window off-screen and refuses them focus, and this menu is a window too: so a
+        // right-click on the tray icon of a headless copy showed nothing at all, and the tray - the way a person takes
+        // the copy over - was a dead end (Ed, 2026-09-24). The press on the icon is the person asking, so windows behave
+        // normally from then until the menu closes. The Applications key on a tray icon arrives as the same right-button
+        // press, so this is the keyboard's way in too.
+        trayIcon.MouseDown += (_, e) => { if (e.Button == MouseButtons.Right) Windowless.PersonOpeningTrayMenu(); };
+        trayIcon.MouseUp += (_, e) => { if (e.Button == MouseButtons.Right && !menu.Visible) Windowless.TrayMenuClosed(); };
+        menu.Closed += (_, _) => Windowless.TrayMenuClosed();
+
         trayIcon.ContextMenuStrip = menu;
+        // Help from the tray menu opens the menu again afterwards; in front first, as the tray icon does when it opens it.
+        ContextHelp.BeforeTrayMenuReopens = () => { try { if (!Windowless.Hiding) SetForegroundWindow(owner.Handle); } catch { /* best effort */ } };
     }
+
+    /// <summary>Gate seams: the icon and its menu, so a test can raise the press and the close without a real click.</summary>
+    internal NotifyIcon TrayIconForTest => trayIcon;
+    internal ContextMenuStrip TrayMenuForTest => menu;
 
     /// <summary>Replace the tooltip the OS shows over the tray icon. Called from MainForm's
     /// 1 Hz snapshot tick to keep the text current with peer count + send/receive state.
@@ -207,6 +233,8 @@ internal sealed class MainFormTrayController : IDisposable
     {
         // Only sound the "show" cue on a genuine hidden -> shown transition, not a no-op restore.
         var wasHidden = !owner.Visible || owner.WindowState == FormWindowState.Minimized;
+        // A --headless copy: the person at the keyboard has asked for the window, so it is theirs now.
+        Windowless.HandOver(owner);
         owner.Show();
         if (owner.WindowState == FormWindowState.Minimized)
         {
@@ -285,11 +313,11 @@ internal sealed class MainFormTrayController : IDisposable
             // visible Text carries the number; AccessibleName is just the profile name so
             // NVDA reads "MyProfile, menu item, one of five" rather than the noisier
             // "Recent profile 1: MyProfile" that the original code was reading out.
-            var item = new ToolStripMenuItem($"&{slot} {title}")
+            var item = ContextHelp.MarkItem(new ToolStripMenuItem($"&{slot} {title}")
             {
                 AccessibleName = title,
                 Tag = path,
-            };
+            }, "tray.profiles");
             item.Click += (s, _) =>
             {
                 var sender = (ToolStripMenuItem)s!;
@@ -303,11 +331,11 @@ internal sealed class MainFormTrayController : IDisposable
 
         if (profilesItem.DropDownItems.Count == 0)
         {
-            profilesItem.DropDownItems.Add(new ToolStripMenuItem("(No recent profiles)")
+            profilesItem.DropDownItems.Add(ContextHelp.MarkItem(new ToolStripMenuItem("(No recent profiles)")
             {
                 Enabled = false,
                 AccessibleName = "No recent profiles",
-            });
+            }, "tray.profiles"));
         }
     }
 }

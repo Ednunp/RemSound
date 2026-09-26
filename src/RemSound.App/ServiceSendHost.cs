@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using NAudio.CoreAudioApi;
 using RemSound.Core;
@@ -50,6 +51,33 @@ public sealed class ServiceSendHost : IDisposable
     private static readonly TimeSpan PruneUnreachableAfter = TimeSpan.FromSeconds(30);
     private IPEndPoint[] allEndpoints = [];
     private string? armedSignature;
+
+    // Names that could not be looked up (review 2026-09-25; Ed agreed the fix). The service looks up its peers' and its
+    // server's names when it starts sending. At boot, or straight after waking, that can be before the network is up: the
+    // look-ups failed, it sent to nobody, and nothing tried again until a device changed or the app came and went. Now a
+    // name that failed is looked up again every NameRetryInterval, and at once when Windows says the network changed, on
+    // a thread of its own so the loop never waits on the network. Only when one answers does the service start again
+    // with it, so a name that never answers (a typo) never interrupts the people it is already sending to.
+    internal static TimeSpan NameRetryInterval = TimeSpan.FromSeconds(30);   // shortened by the self-test
+    internal static Func<string, IPAddress?>? ResolveForTest;                  // the self-test's stand-in for name look-ups
+    private volatile string[] unresolvedNames = [];
+    private long lastLookupTick;
+    private volatile bool networkChanged;
+    private volatile bool aNameNowAnswers;
+    private int lookupRunning;                                                 // 1 while a background look-up is out
+
+    // A server named by its name, and where that name led when the service started with it. A home server's address can
+    // change under it; the service went on sending to the old one for good. Now, as the app does (MainForm.NameLookups):
+    // once the server has not answered for RelayMovedAfter, or when Windows says the network changed, the name is looked
+    // up again, and if it leads somewhere new the service starts again with it (2026-09-25 sweep).
+    internal static TimeSpan RelayMovedAfter = TimeSpan.FromSeconds(30);      // shortened by the self-test
+    private volatile string? relayName;
+    private volatile IPEndPoint? relayAt;
+    private volatile IPEndPoint? relayMovedTo;
+    private volatile bool relayNetworkChanged;
+    private long relaySilentSinceTick;                                         // 0 while it answers
+    private long lastRelayRecheckTick;
+    private int relayRecheckRunning;                                           // 1 while a background look-up is out
 
     /// <param name="loadProfile">Supplies the current service profile (re-read on each resume so edits
     /// are picked up). Returns null if none is configured.</param>
@@ -397,6 +425,12 @@ public sealed class ServiceSendHost : IDisposable
     /// <summary>Test seam: is the network presence (discovery + listener + heartbeat) currently up? Tracks
     /// sending — up while streaming, torn down to a shell while yielded to the interactive app.</summary>
     internal bool IsNetworkPresenceUpForTest => presence.IsUp;
+    internal bool IsNetworkListenerBoundForTest => presence.ListenerBound;
+
+    /// <summary>Gate seam: the port the network presence binds instead of the well-known one. A gate run must never take
+    /// 47830 - with RemSound open the bind failed silently and the step still passed; with it closed, the test's
+    /// service sat on the real port.</summary>
+    internal static int PresencePortForTest;
 
     /// <summary>Test seam: the crypto material the host pushed to the sender + the codec/frame it set, so
     /// a self-test can prove the service configures the sender exactly like the main app.</summary>
@@ -414,10 +448,16 @@ public sealed class ServiceSendHost : IDisposable
         // to the interactive app), the RunLoop tick and the self-heal for the whole timeout.
         if (disposed) return false;
         var specs = BuildSendSpecs(profile);
-        var endpoints = BuildEndpoints(profile);
+        var unresolved = new List<string>();
+        var endpoints = BuildEndpoints(profile, unresolved);
         // The relay the profile is connected to, and the people ticked there. One copy goes up to the relay and the relay
         // passes that copy to each of them, so the relay is a send target of its own alongside the direct peers.
-        var relay = BuildRelayEndpoint(profile);
+        var relay = BuildRelayEndpoint(profile, unresolved);
+        NoteUnresolvedNames(unresolved);
+        relayName = relay is not null && !IPAddress.TryParse(PeerAddress.Split(profile.RelayServer).Host, out _) ? profile.RelayServer!.Trim() : null;
+        relayAt = relay;
+        relayMovedTo = null;
+        Interlocked.Exchange(ref relaySilentSinceTick, 0);
         var tickedOnRelay = ParseTickedIds(profile);
         if (relay is not null && !endpoints.Any(e => e.Equals(relay))) endpoints.Add(relay);
         var appsMode = IsApplicationsMode(profile);
@@ -425,7 +465,15 @@ public sealed class ServiceSendHost : IDisposable
         {
             if (disposed) return false;
             appliedAppSignature = appsMode ? AppCaptureSignature(specs) : null;
-            if (specs.Count == 0 && appsMode && endpoints.Count > 0)
+            // Nobody to send to comes first: with nobody ticked, that is the reason, whatever else is missing.
+            if (endpoints.Count == 0)
+            {
+                log?.Invoke(profile.SelectedConnectedPeers.Any(p => !string.IsNullOrWhiteSpace(p))
+                    ? "service: profile has no reachable peers — nothing to stream to"
+                    : "service: nobody is ticked in the service profile — nothing to stream to");
+                return false;
+            }
+            if (specs.Count == 0 && appsMode)
             {
                 // None of the chosen applications is running yet. Keep the session watcher, so the first one to start is
                 // picked up then. Nothing used to look again until the next app hand-over, boot or device change — an
@@ -435,7 +483,6 @@ public sealed class ServiceSendHost : IDisposable
                 return false;
             }
             if (specs.Count == 0) { log?.Invoke("service: profile has no WASAPI send sources — nothing to stream"); return false; }
-            if (endpoints.Count == 0) { log?.Invoke("service: profile has no reachable peers — nothing to stream to"); return false; }
 
             // Encryption: key + fingerprint always together, through the ONE shared rule (the peer
             // verifies the fingerprint before accepting a stream; a key alone gets silently rejected).
@@ -483,7 +530,7 @@ public sealed class ServiceSendHost : IDisposable
             // They reset per sending STINT in Resume() (and on power resume).
             // Come up on the network too, so the peers can discover and connect to us — not just receive a
             // blind push. Same well-known audio port and the same components the interactive app uses.
-            presence.Start(RemPacket.DefaultPort, endpoints, relay, tickedOnRelay);
+            presence.Start(PresencePortForTest > 0 ? PresencePortForTest : RemPacket.DefaultPort, endpoints, relay, tickedOnRelay, profile.RelayPairPartnerTicked);
             running = true;
             // Un-throttle the process while streaming. A headless Windows SERVICE is treated by the OS as a
             // background process and gets aggressively downclocked (EcoQoS), migrated onto efficiency cores
@@ -587,6 +634,33 @@ public sealed class ServiceSendHost : IDisposable
         try { deviceNotifier ??= new AudioDeviceChangeNotifier(OnDeviceSetChanged); }
         catch (Exception ex) { log?.Invoke($"service: device-change watcher unavailable ({ex.GetType().Name}) — relying on app-transition re-opens"); }
 
+        // Windows says when the network changes (an address comes or goes, the network becomes available): the cue to look
+        // up again any name that failed, rather than waiting for the next NameRetryInterval.
+        NetworkAddressChangedEventHandler onAddressChanged = (_, _) => OnNetworkChanged();
+        NetworkAvailabilityChangedEventHandler onAvailabilityChanged = (_, e) => { if (e.IsAvailable) OnNetworkChanged(); };
+        try
+        {
+            NetworkChange.NetworkAddressChanged += onAddressChanged;
+            NetworkChange.NetworkAvailabilityChanged += onAvailabilityChanged;
+        }
+        catch (Exception ex)
+        {
+            log?.Invoke($"service: network-change watcher unavailable ({ex.GetType().Name}) — names that fail are still looked up again every {NameRetryInterval.TotalSeconds:0} s");
+        }
+        try { RunLoopTicks(ct, isAppPresent, pollMs, resumeSettleMs); }
+        finally
+        {
+            try
+            {
+                NetworkChange.NetworkAddressChanged -= onAddressChanged;
+                NetworkChange.NetworkAvailabilityChanged -= onAvailabilityChanged;
+            }
+            catch { /* never subscribed */ }
+        }
+    }
+
+    private void RunLoopTicks(CancellationToken ct, Func<bool> isAppPresent, int pollMs, int resumeSettleMs)
+    {
         var appWasPresent = true; // force an initial evaluation
         var absentSince = Environment.TickCount64;
         var triedThisAbsence = false;
@@ -626,6 +700,10 @@ public sealed class ServiceSendHost : IDisposable
                 RefreshSendArming();
                 WatchCaptureHealth();
             }
+            // A name that did not look up is tried again, whether or not the service is sending to anybody else yet.
+            if (wantSending && unresolvedNames.Length > 0) RetryUnresolvedNames();
+            // A server by name that has gone quiet may have moved.
+            if (wantSending && relayName is not null) FollowRelayIfMoved();
             appWasPresent = appPresent;
             ct.WaitHandle.WaitOne(pollMs);
         }
@@ -701,18 +779,25 @@ public sealed class ServiceSendHost : IDisposable
         return specs;
     }
 
-    // Resolve the profile's configured peers to audio endpoints. v1: direct addresses only.
-    internal static List<IPEndPoint> BuildEndpoints(Profile p)
+    // Resolve the profile's ticked peers to audio endpoints. v1: direct addresses only.
+    // Only the ticked ones, as in the main app: nobody ticked is nobody. An empty tick list used to mean every listed peer,
+    // so unticking them all sent to all of them (review 2026-09-25; Ed agreed the fix). Every version since the service
+    // first shipped (5.3) has saved the ticks, so nobody upgrading relied on the old reading.
+    internal static List<IPEndPoint> BuildEndpoints(Profile p) => BuildEndpoints(p, null);
+
+    /// <summary><see cref="BuildEndpoints(Profile)"/>, adding each ticked peer whose name did not look up to
+    /// <paramref name="unresolved"/>.</summary>
+    private static List<IPEndPoint> BuildEndpoints(Profile p, List<string>? unresolved)
     {
-        var entries = p.SelectedConnectedPeers.Count > 0 ? p.SelectedConnectedPeers : p.RememberedPeers;
+        var entries = p.SelectedConnectedPeers;
         var result = new List<IPEndPoint>();
         var seen = new HashSet<string>();
         foreach (var entry in entries.Where(e => !string.IsNullOrWhiteSpace(e)).Distinct())
         {
             // Shared split + resolve (PeerAddress) — the app's peer paths use the same rules.
             var (_, port) = PeerAddress.Split(entry);
-            var addr = PeerAddress.ResolveHost(entry);
-            if (addr is null) continue;
+            var addr = Resolve(entry);
+            if (addr is null) { unresolved?.Add(entry); continue; }
             // Send to the peer's audio port: an explicit "host:port" wins, else the standard peer port —
             // the same default the main app's manual-peer path uses (NOT the local listen port).
             var ep = new IPEndPoint(addr, port ?? RemPacket.DefaultPeerDialPort);
@@ -723,14 +808,111 @@ public sealed class ServiceSendHost : IDisposable
 
     /// <summary>The relay the profile is connected to, resolved, or null when it names none or asks not to connect on
     /// start. Same rules as the app's own relay box: a host or an address, with an optional port.</summary>
-    internal static IPEndPoint? BuildRelayEndpoint(Profile p)
+    internal static IPEndPoint? BuildRelayEndpoint(Profile p) => BuildRelayEndpoint(p, null);
+
+    private static IPEndPoint? BuildRelayEndpoint(Profile p, List<string>? unresolved)
     {
         if (!p.RelayConnectOnStart || string.IsNullOrWhiteSpace(p.RelayServer)) return null;
         var entry = p.RelayServer!.Trim();
         var (_, port) = PeerAddress.Split(entry);
-        var addr = PeerAddress.ResolveHost(entry);
-        return addr is null ? null : new IPEndPoint(addr, port ?? RemPacket.DefaultPort);
+        var addr = Resolve(entry);
+        if (addr is null) { unresolved?.Add(entry); return null; }
+        return new IPEndPoint(addr, port ?? RemPacket.DefaultPort);
     }
+
+    private static IPAddress? Resolve(string entry) => ResolveForTest is { } standIn ? standIn(entry) : PeerAddress.ResolveHost(entry);
+
+    /// <summary>Remember which names did not look up this time, and say so in the log when that changes.</summary>
+    private void NoteUnresolvedNames(List<string> names)
+    {
+        aNameNowAnswers = false;
+        Interlocked.Exchange(ref lastLookupTick, Environment.TickCount64);
+        var before = unresolvedNames;
+        unresolvedNames = names.ToArray();
+        if (names.Count > 0 && !names.SequenceEqual(before))
+            log?.Invoke($"service: could not look up {string.Join(", ", names)} — trying again every "
+                + $"{NameRetryInterval.TotalSeconds:0} s, and whenever the network changes");
+        else if (names.Count == 0 && before.Length > 0)
+            log?.Invoke("service: every name looks up now");
+    }
+
+    /// <summary>On the loop's tick while the service should be sending and a name did not look up: look the names up
+    /// again, on a thread of its own, every <see cref="NameRetryInterval"/> or at once after a network change; and once
+    /// one answers, start again with it.</summary>
+    private void RetryUnresolvedNames()
+    {
+        if (aNameNowAnswers)
+        {
+            var profile = loadProfile();
+            if (profile is null) return;
+            aNameNowAnswers = false;
+            log?.Invoke("service: a name that could not be looked up answers now — starting again with it");
+            if (IsSending) Suspend("a name that could not be looked up answers now");
+            ApplyProfile(profile);
+            return;
+        }
+        var due = networkChanged
+            || Environment.TickCount64 - Interlocked.Read(ref lastLookupTick) >= (long)NameRetryInterval.TotalMilliseconds;
+        if (!due || Interlocked.CompareExchange(ref lookupRunning, 1, 0) != 0) return;
+        networkChanged = false;
+        Interlocked.Exchange(ref lastLookupTick, Environment.TickCount64);
+        var names = unresolvedNames;
+        _ = Task.Run(() =>
+        {
+            try { if (names.Any(n => Resolve(n) is not null)) aNameNowAnswers = true; }
+            catch { /* the next try */ }
+            finally { Interlocked.Exchange(ref lookupRunning, 0); }
+        });
+    }
+
+    /// <summary>On the loop's tick while the profile's server is a name: once it has not answered for
+    /// <see cref="RelayMovedAfter"/>, or the network has changed, look the name up again on a thread of its own; and if it
+    /// now leads somewhere else, start again with it.</summary>
+    private void FollowRelayIfMoved()
+    {
+        if (relayMovedTo is { } moved)
+        {
+            var profile = loadProfile();
+            if (profile is null) return;
+            relayMovedTo = null;
+            log?.Invoke($"service: the server \"{relayName}\" now looks up to {moved}, not {relayAt} - it has moved; starting again with it");
+            if (IsSending) Suspend("the server has moved to a new address");
+            ApplyProfile(profile);
+            return;
+        }
+        var now = Environment.TickCount64;
+        if (presence.RelayAnswering) Interlocked.Exchange(ref relaySilentSinceTick, 0);
+        else if (Interlocked.Read(ref relaySilentSinceTick) == 0) Interlocked.Exchange(ref relaySilentSinceTick, now);
+        var silentSince = Interlocked.Read(ref relaySilentSinceTick);
+        var wait = (long)RelayMovedAfter.TotalMilliseconds;
+        var silentLongEnough = silentSince != 0 && now - silentSince >= wait && now - Interlocked.Read(ref lastRelayRecheckTick) >= wait;
+        if (!relayNetworkChanged && !silentLongEnough) return;
+        if (Interlocked.CompareExchange(ref relayRecheckRunning, 1, 0) != 0) return;
+        relayNetworkChanged = false;
+        Interlocked.Exchange(ref lastRelayRecheckTick, now);
+        var (name, at) = (relayName, relayAt);
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                if (name is null || at is null) return;
+                if (Resolve(name) is { } address && !address.Equals(at.Address)) relayMovedTo = new IPEndPoint(address, at.Port);
+            }
+            catch { /* the next try */ }
+            finally { Interlocked.Exchange(ref relayRecheckRunning, 0); }
+        });
+    }
+
+    /// <summary>Windows says the network changed: look any name that failed up again on the next tick, and the server's.</summary>
+    private void OnNetworkChanged()
+    {
+        networkChanged = true;
+        relayNetworkChanged = true;
+    }
+
+    internal void NetworkChangedForTest() => OnNetworkChanged();
+    internal IReadOnlyList<string> UnresolvedNamesForTest => unresolvedNames;
+    internal IPEndPoint? RelayAtForTest => relayAt;
 
     /// <summary>The people the profile has ticked on its relay. Anything unreadable is simply skipped.</summary>
     internal static List<Guid> ParseTickedIds(Profile p)

@@ -727,9 +727,11 @@ internal static partial class SelfTest
         Check(sender.IsPluginSending,
             "and the next block from a DAW that is still playing must bring it straight back, without waiting for anything");
 
-        // A clean goodbye takes the same path, immediately.
-        source.Forget(first);
-        Check(!sender.IsPluginSending, "a plugin saying goodbye must release the lane at once rather than after the timeout");
+        // A clean unload takes the same path: the plugin stops sending, and the sweep lets it go (there is no separate
+        // goodbye for a track - PluginTrackSource.Forget, which claimed to be one, was never called; removed 2026-09-25).
+        Thread.Sleep((int)PluginTrackSource.HostIdleTimeout.TotalMilliseconds + 250);
+        source.Sweep();
+        Check(!sender.IsPluginSending, "a DAW that stops sending must release the lane once the sweep sees it quiet");
 
         return "first block arms, second DAW joins without taking the clock, both time out with no goodbye, a stop is recovered from, and a return re-arms";
     }
@@ -777,8 +779,10 @@ internal static partial class SelfTest
             $"two DAWs at 0.25 each must arrive summed, near 0.5, not as one of them alone (decoded peak {peak:0.000})");
         Check(peak < 0.75f, $"and not doubled again on top of that ({peak:0.000})");
 
-        // --- Hand-over ------------------------------------------------------------------------------
-        source.Forget(driver);
+        // --- Hand-over: the driving DAW stops sending (closed or crashed - the same to us), the other carries on ---------
+        var quietUntil = DateTime.UtcNow + PluginTrackSource.HostIdleTimeout + TimeSpan.FromMilliseconds(250);
+        while (DateTime.UtcNow < quietUntil) { source.OnTrackBlock(joiner, Block(120, 0.25f)); Thread.Sleep(20); }
+        source.Sweep();
         Check(source.DriverForTest == joiner, "when the driving DAW goes, the other must take the clock");
         Check(sender.IsPluginSending, "and the lane must stay armed - somebody is still playing");
         sink.Clear();
@@ -881,23 +885,26 @@ internal static partial class SelfTest
             $"and the ring must hold a cushion without running away - roughly the target, not empty and not seconds deep ({matchedDepth} frames)");
 
         // --- A producer running FAST: the ring fills, so the rate must be biased up to drain it ------
-        var fast = RunLane(1.002, out var fastDepth, out _);
+        var fast = RunLane(1.002, out var fastDepth, out var fastStep);
         Check(fast > matched,
             $"a DAW whose clock runs fast must be pulled from faster, or its ring fills until it drops audio (applied {fast:F6} vs {matched:F6})");
         Check(fastDepth < 24000, $"and the ring must stay bounded - half a second is already too deep ({fastDepth} frames)");
 
         // --- A producer running SLOW: the ring drains, so the rate must be biased down ---------------
-        var slow = RunLane(0.998, out _, out _);
+        var slow = RunLane(0.998, out _, out var slowStep);
         Check(slow < matched,
             $"a DAW whose clock runs slow must be pulled from slower, or its ring empties and the track drops out (applied {slow:F6} vs {matched:F6})");
 
         // --- And the correction must be a nudge, not a pitch shift -----------------------------------
         Check(Math.Abs(fast - 1.0) < 0.06 && Math.Abs(slow - 1.0) < 0.06,
             $"corrections must stay inside the sanity clamp - anything larger is audible as pitch ({fast:F6}, {slow:F6})");
-        Check(matchedStep < 0.05f,
-            $"a corrected sine must stay continuous - a step is a click, which is worse than the drift it fixes ({matchedStep:0.0000})");
+        // Asked of the fast and slow runs too - they are the ones where the corrector is actually working. Only the
+        // matched run was checked until 2026-09-24, where the corrector does nothing and so cannot click.
+        var worstOfAll = Math.Max(matchedStep, Math.Max(fastStep, slowStep));
+        Check(worstOfAll < 0.05f,
+            $"a corrected sine must stay continuous - a step is a click, which is worse than the drift it fixes (matched {matchedStep:0.0000}, fast {fastStep:0.0000}, slow {slowStep:0.0000})");
 
         return $"matched clocks left the rate at {matched:F6}; a fast producer moved it to {fast:F6} and a slow one to {slow:F6}; "
-             + $"worst sample step on the corrected signal {matchedStep:0.0000}";
+             + $"worst sample step on the corrected signal {worstOfAll:0.0000} (fast {fastStep:0.0000}, slow {slowStep:0.0000})";
     }
 }

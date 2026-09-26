@@ -37,7 +37,26 @@ internal sealed class ServiceNetworkPresence : IDisposable
     private HeartbeatService? heartbeat;
     // One person among several on a relay, exactly as the app is (RelayGroupClient; GitHub #29, 2026-09-18).
     private RelayGroupClient? relayGroup;
+    private AddrCheckEchoGate echoGate => echoGateField ??= new AddrCheckEchoGate(line => log?.Invoke($"service: {line}"));
+    private AddrCheckEchoGate? echoGateField;
+
+    /// <summary>Is the service talking to that address: a peer it pings, or the server it is on.</summary>
+    private bool TalkingTo(IPAddress address) =>
+        heartbeat?.Pings(address) == true || relayGroup?.ConnectedRelay is { } relay && relay.Address.Equals(address);
+
+    internal bool TalkingToForTest(IPAddress address) => TalkingTo(address);
+    internal void EchoAddrCheckForTest(byte[] packet, IPEndPoint remote) => EchoAddrCheck(packet, packet.Length, remote);
+    internal long EchoRefusedForTest => echoGate.RefusedCount;
+
+    /// <summary>Who the service is on a server: whoever set its profile up, else the computer's own id.</summary>
+    internal static Guid ServiceRelayClientId() => ServiceStore.LoadRelayClientId() ?? AppConfig.LoadOrCreateRelayClientId();
+
+    /// <summary>Whether the server the service went to is answering, as far as can be told: the service is in a group on
+    /// it. With no password there is no group to be in, and so nothing to tell by - that counts as answering.</summary>
+    public bool RelayAnswering =>
+        relayGroup is not { ConnectedRelay: { } relay } group || sender.AudioFingerprint is null || group.IsInGroup(relay);
     private List<Guid> profileTicks = [];
+    private bool profilePairTicked;
     private bool acceptRelayAutomatically;
     private bool running;
     private bool disposed;
@@ -58,6 +77,8 @@ internal sealed class ServiceNetworkPresence : IDisposable
     /// </summary>
     private void EchoAddrCheck(byte[] packet, int length, IPEndPoint remote)
     {
+        // As the app: only a server or peer the service is talking to, at most once a second each (AddrCheckEchoGate).
+        if (!echoGate.ShouldEcho(remote, TalkingTo, Environment.TickCount64)) return;
         try { sender.SendVia(packet, length, remote); }
         catch (Exception ex) { log?.Invoke($"service: addr-check echo to {remote} failed: {ex.GetType().Name}: {ex.Message}"); }
         relayGroup?.NoteRelay(remote);
@@ -65,13 +86,15 @@ internal sealed class ServiceNetworkPresence : IDisposable
 
     /// <summary>Everybody the service ticks on its server, and whether that includes a phone or older app the server
     /// pairs with it. Both answers come from here, so the two can never disagree about what the Accept tick means.</summary>
+    /// The phone or older app is reached when the service accepts people who tick it, or when its profile ticked that row
+    /// itself - the profile names them, like any other tick (saved since 2026-09-24).
     internal static (List<Guid> Ticks, bool PairPartner) WhoTheServiceTicks(IEnumerable<Guid> fromProfile,
-        IEnumerable<RelayGroupClient.Member> members, bool acceptAutomatically) =>
-        (TicksFor(fromProfile, members, acceptAutomatically), acceptAutomatically);
+        IEnumerable<RelayGroupClient.Member> members, bool acceptAutomatically, bool pairTickedInProfile = false) =>
+        (TicksFor(fromProfile, members, acceptAutomatically), acceptAutomatically || pairTickedInProfile);
 
     private void ApplyTicks(RelayGroupClient group)
     {
-        var (ticks, pairPartner) = WhoTheServiceTicks(profileTicks, group.Members, acceptRelayAutomatically);
+        var (ticks, pairPartner) = WhoTheServiceTicks(profileTicks, group.Members, acceptRelayAutomatically, profilePairTicked);
         group.SetTicked(ticks, pairPartner);
     }
 
@@ -116,7 +139,8 @@ internal sealed class ServiceNetworkPresence : IDisposable
     /// <summary>Bring the service up as a discoverable, reachable, send-only peer on <paramref name="port"/>,
     /// tracking <paramref name="endpoints"/> (the profile's peers) for heartbeat/pairing and unicast
     /// announcements. Idempotent: re-applies cleanly if already up. Never throws.</summary>
-    public void Start(int port, IReadOnlyList<IPEndPoint> endpoints, IPEndPoint? relay = null, IReadOnlyList<Guid>? tickedOnRelay = null)
+    public void Start(int port, IReadOnlyList<IPEndPoint> endpoints, IPEndPoint? relay = null, IReadOnlyList<Guid>? tickedOnRelay = null,
+        bool pairPartnerTicked = false)
     {
         if (disposed) return;
         if (running) Stop();
@@ -126,13 +150,14 @@ internal sealed class ServiceNetworkPresence : IDisposable
         // packets — audio/format returns are ignored because we never play received audio.
         heartbeat = new HeartbeatService(m => log?.Invoke($"heartbeat: {m}"));
         heartbeat.SendTransport = sender.SendVia;
-        var group = relayGroup = new RelayGroupClient(AppConfig.LoadOrCreateRelayClientId(), m => log?.Invoke($"relay group: {m}"));
+        var group = relayGroup = new RelayGroupClient(ServiceRelayClientId(), m => log?.Invoke($"relay group: {m}"));
         group.SetIdentity(Environment.MachineName, sender.AudioFingerprint);
         // The relay the profile names, if it names one: a relay is somewhere you go, and the service goes to the same one
         // the app does. The people ticked there are the profile's, so the relay passes our sound to exactly them.
         if (relay is not null)
         {
             profileTicks = (tickedOnRelay ?? []).ToList();
+            profilePairTicked = pairPartnerTicked;
             acceptRelayAutomatically = ServiceStore.LoadAcceptRelayConnectionsAutomatically();
             group.Connect(relay);
             // A phone or older app the server pairs with the service is somebody ticking it, like any other: it gets

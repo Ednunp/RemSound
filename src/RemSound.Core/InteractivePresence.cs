@@ -18,12 +18,21 @@ public static class InteractivePresence
 {
     private const string MutexName = @"Global\RemSound.Interactive.v1";
 
+    /// <summary>Gate seam: a name BOTH no-argument entry points use in place of the real one. The gate has to prove the
+    /// app's entry point and the service's reach the same token, and until 2026-09-24 it did that by taking the REAL
+    /// token whenever no app held it - which paused an installed service's stream for as long as it held it. With this
+    /// it proves the same agreement on a token of its own: an entry point that hard-coded some other name would ignore
+    /// the override and fail the check.</summary>
+    internal static string? NameOverrideForTest;
+
+    private static string Name => NameOverrideForTest ?? MutexName;
+
     /// <summary>Called ONCE by the interactive app at startup. Acquires and holds the presence token
     /// (on a dedicated thread, so ownership isn't tied to the UI thread and release is crash-safe) until
     /// the returned handle is disposed or the process exits. Returns null if the token couldn't be
     /// acquired — the app then simply runs without a hold (worst case the service doesn't yield to it).
     /// Never throws, never blocks the app for more than a few seconds.</summary>
-    public static IDisposable? AcquireHold() => AcquireHold(MutexName);
+    public static IDisposable? AcquireHold() => AcquireHold(Name);
 
     /// <summary>Testable overload against a caller-supplied token name so a test never collides with a
     /// real running app holding the production token.</summary>
@@ -37,7 +46,7 @@ public static class InteractivePresence
     /// Works by trying to take the same token briefly: if the app holds it we can't, so it's present;
     /// if we take it (or find it abandoned = the app crashed) we release it again immediately and report
     /// "not present". The service must never end up holding the token itself.</summary>
-    public static bool IsInteractiveAppRunning() => IsInteractiveAppRunning(MutexName);
+    public static bool IsInteractiveAppRunning() => IsInteractiveAppRunning(Name);
 
     /// <summary>Testable overload — see <see cref="AcquireHold(string)"/>.</summary>
     internal static bool IsInteractiveAppRunning(string name)

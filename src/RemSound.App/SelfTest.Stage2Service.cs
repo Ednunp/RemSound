@@ -238,7 +238,7 @@ internal static partial class SelfTest
         var root = FindSourceRoot();
         if (root is null) return Skip("the rules hold, but the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
         var installer = File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "AppInstaller.cs"));
-        var install = SourceMethodBody(installer, "public static void RunInstall(IWin32Window owner, Action<string>? log = null)");
+        var install = SourceMethodBody(installer, "public static void RunInstall(IWin32Window owner, Action<string>? log = null, Func<bool>? prepareToLeave = null, Action? leave = null)");
         Check(install.Contains("ServiceControl.InstallVerb, \"Installing the RemSound service...\", serviceSource: target", StringComparison.Ordinal),
             "installing the service during the app install must name the installed folder");
         Check(install.Contains("RepointServiceSource(", StringComparison.Ordinal),
@@ -320,7 +320,7 @@ internal static partial class SelfTest
         var root = FindSourceRoot();
         if (root is null) return Skip("the dialog and removals hold, but the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
         var installer = File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "AppInstaller.cs"));
-        foreach (var signature in new[] { "public static void RunUninstallInProcess(IWin32Window owner, Action<string>? log = null)", "public static void RunUninstallStandalone()" })
+        foreach (var signature in new[] { "public static void RunUninstallInProcess(IWin32Window owner, Action<string>? log = null, Func<bool>? prepareToLeave = null, Action? leave = null)", "public static void RunUninstallStandalone()" })
         {
             var body = SourceMethodBody(installer, signature);
             var remove = body.IndexOf("RemoveChosenComponents(", StringComparison.Ordinal);
@@ -395,7 +395,7 @@ internal static partial class SelfTest
         var src = FindSourceRoot();
         if (src is null) return Skip("the rules hold, but the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
         var main = File.ReadAllText(Path.Combine(src, "src", "RemSound.App", "MainForm.cs"));
-        Check(SourceMethodBody(main, "private void RunStartupNotices()").Contains("RefreshInstalledPluginIfStale();", StringComparison.Ordinal)
+        Check(SourceMethodBody(main, "private void RunStartupNotices(bool coldStart)").Contains("RefreshInstalledPluginIfStale();", StringComparison.Ordinal)
               && SourceMethodBody(main, "private void RefreshInstalledPluginIfStale()").Contains("PluginInstaller.RefreshIfStale()", StringComparison.Ordinal),
             "starting the app must bring an installed plugin up to date");
         var autostart = File.ReadAllText(Path.Combine(src, "src", "RemSound.App", "StartupAutoStart.cs"));

@@ -105,14 +105,16 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
-    <!-- Install Scripts (vendored). A .cmd / .ps1 that install the .NET 10 Desktop Runtime RemSound
+    <!-- Install and Uninstall Scripts (vendored). A .cmd / .ps1 that install the .NET 10 Desktop Runtime RemSound
          needs, via winget, for the rare machine that doesn't have it yet. RemSound is a .NET 10 app, so
          it can't install its own runtime — it can't start without it — hence a plain script (cmd/ps1
-         run on what's already in Windows). Shipped next to the exe in an "Install Scripts" folder; the
+         run on what's already in Windows). Shipped next to the exe in an "Install and Uninstall Scripts" folder; the
          manual points users here if RemSound won't start. EnsureInstallScriptsPublished below makes the
-         publish copy marker-independent (same belt-and-braces as the cue WAVs / Tolk DLLs). -->
-    <Content Include="..\..\Install Scripts\*.cmd;..\..\Install Scripts\*.ps1">
-      <Link>Install Scripts\%(Filename)%(Extension)</Link>
+         publish copy marker-independent (same belt-and-braces as the cue WAVs / Tolk DLLs). Since 2026-09-24 it also holds
+         .cmd scripts for the DAW plugin and the service menus (install, uninstall, start, stop), for anyone who
+         can't reach the window; they call RemSound.exe with its install-plugin, uninstall-plugin and service options. -->
+    <Content Include="..\..\Install and Uninstall Scripts\*.cmd;..\..\Install and Uninstall Scripts\*.ps1">
+      <Link>Install and Uninstall Scripts\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
@@ -146,12 +148,12 @@
   </Target>
 
   <!-- Same marker-independent guarantee for the install scripts: always land them in a PUBLISHED build
-       so a release zip can never ship without the "Install Scripts" folder the manual points to. -->
+       so a release zip can never ship without the "Install and Uninstall Scripts" folder the manual points to. -->
   <Target Name="EnsureInstallScriptsPublished" AfterTargets="Publish">
     <ItemGroup>
-      <_InstallScripts Include="..\..\Install Scripts\*.cmd;..\..\Install Scripts\*.ps1" />
+      <_InstallScripts Include="..\..\Install and Uninstall Scripts\*.cmd;..\..\Install and Uninstall Scripts\*.ps1" />
     </ItemGroup>
-    <Copy SourceFiles="@(_InstallScripts)" DestinationFolder="$(PublishDir)Install Scripts" SkipUnchangedFiles="false" />
+    <Copy SourceFiles="@(_InstallScripts)" DestinationFolder="$(PublishDir)Install and Uninstall Scripts" SkipUnchangedFiles="false" />
   </Target>
 
   <!-- THE VST PLUGIN, in a plugin\ folder next to the exe.

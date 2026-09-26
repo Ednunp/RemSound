@@ -272,6 +272,42 @@ internal static partial class SelfTest
     }
 
     /// <summary>
+    /// A PROFILE THAT CONNECTS TO A SERVER ON START KEEPS ITS TICKS WHEN THE PASSWORD'S KEY ARRIVES.
+    ///
+    /// <para>At start-up the key is still being worked out when the profile connects to its server. The connect recorded
+    /// that as an EMPTY password, so the key arriving a moment later read as a change of password: every tick on the
+    /// server went, the profile was marked changed and NVDA said "Password changed". Found by the 2026-09-25 review.</para>
+    /// </summary>
+    private static string? AServerJoinedBeforeTheKeyKeepsItsTicks()
+    {
+        MainForm? form = null;
+        using var server = new System.Net.Sockets.UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        var at = (IPEndPoint)server.Client.LocalEndPoint!;
+        try
+        {
+            try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+            var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+            Check(Require(typeof(MainForm).GetField("currentAudioFingerprint", flags), "MainForm.currentAudioFingerprint not found").GetValue(form) is null,
+                "premise: the key must not be known yet when the profile connects, as at start-up");
+            form.ConnectToRelayForTest($"127.0.0.1:{at.Port}", at);
+            var ticked = Require(FieldOf<HashSet<Guid>>(form, "relayTicked"), "MainForm.relayTicked not found");
+            var someone = Guid.NewGuid();
+            ticked.Add(someone);
+            var keyArrives = Require(typeof(MainForm).GetMethod("RelayPasswordChanged", flags), "MainForm.RelayPasswordChanged not found");
+
+            keyArrives.Invoke(form, [new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }]);
+            Check(ticked.Contains(someone), "THE BUG: the password's key arriving after the connect is not a change of password - the ticks on the server must stay");
+
+            // And a real change after that still starts the list again.
+            keyArrives.Invoke(form, [new byte[] { 8, 7, 6, 5, 4, 3, 2, 1 }]);
+            Check(ticked.Count == 0, "a real change of password afterwards must still clear the ticks: they belong to the people on the old password");
+            return "a server joined before the key was known keeps its ticks when the key arrives, and a real password change still clears them";
+        }
+        finally { try { form?.Dispose(); } catch { /* teardown */ } }
+    }
+
+    /// <summary>
     /// CONNECTING TO A RELAY, REMEMBERING IT, AND TICKING WHO IS ON IT.
     ///
     /// <para>Ed's design, 2026-09-20: a relay is a place you go, not a person in your peer list. This drives the real
@@ -376,6 +412,11 @@ internal static partial class SelfTest
 
             // Changing the profile password is a different set of people, so the ticks cannot carry over.
             form.RelayPeerTickedForTest(form.RelayPeersListForTest.Items.Cast<object>().ToList().FindIndex(i => i.ToString() == "Alice"), true);
+            // First the key for the password it joined under arrives, as it always does - joined before the key was ready,
+            // that is not a change of password (see AServerJoinedBeforeTheKeyKeepsItsTicks). Then a real change.
+            var (_, joinedFingerprint) = RemSoundCrypto.ForPlainPassword("the password it joined under");
+            form.RelayPasswordChangedForTest(joinedFingerprint);
+            Check(form.RelayTickedForTest.Count == 1, "premise: the key arriving for the password it joined under keeps the tick");
             var (_, otherFingerprint) = RemSoundCrypto.ForPlainPassword("a completely different password");
             form.RelayPasswordChangedForTest(otherFingerprint);
             Check(form.RelayTickedForTest.Count == 0,
@@ -762,23 +803,52 @@ internal static partial class SelfTest
     {
         Check(ScreenReader.Suppressed, "a gate run must say nothing out loud — it is running on somebody's machine");
         Check(!ScreenReader.Speak("this must never be heard"), "and a call to speak during a run must do nothing at all");
+        // The cues, for the whole run - they were muted step by step, so a step that forgot played them (2026-09-24).
+        Check(CuePlayer.GloballyMuted, "a gate run must hold the cue sounds muted from start to finish, not leave it to each step");
+        Check(CuePlayer.NoDeviceForTest, "and a cue a step unmutes on purpose must still open no device - it would play on the real speakers");
 
         var root = FindSourceRoot();
         if (root is null) return Skip("the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
         var speakers = new List<string>();
+        var bypasses = new List<string>();
         foreach (var file in Directory.EnumerateFiles(Path.Combine(root, "src"), "*.cs", SearchOption.AllDirectories))
         {
-            if (file.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.Ordinal) || file.EndsWith("ScreenReader.cs", StringComparison.Ordinal)) continue;
+            if (file.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.Ordinal)) continue;
+            var name = Path.GetFileName(file);
+            if (name.StartsWith("SelfTest", StringComparison.Ordinal)) continue;
             var text = File.ReadAllText(file);
-            var at = 0;
-            while ((at = text.IndexOf("ScreenReader.Speak(", at, StringComparison.Ordinal)) >= 0)
+            if (name != "ScreenReader.cs")
             {
-                speakers.Add(Path.GetFileName(file));
-                at += 1;
+                var at = 0;
+                while ((at = text.IndexOf("ScreenReader.Speak(", at, StringComparison.Ordinal)) >= 0) { speakers.Add(name); at += 1; }
+                at = 0;
+                while ((at = text.IndexOf("ScreenReader.Notify(", at, StringComparison.Ordinal)) >= 0) { speakers.Add(name); at += 1; }
+                // Windows' own notification, raised directly, speaks through NVDA without asking the switch. One did, on
+                // the pan and EQ tab, until 2026-09-24.
+                if (text.Contains("RaiseAutomationNotification(", StringComparison.Ordinal)) bypasses.Add($"{name} (a direct screen-reader notification)");
             }
+            // Windows' own boxes make the sound of their icon however hidden they are, and in a headless copy the control
+            // channel cannot answer a task dialog. Every one goes through AppMessageBox or AppTaskDialog (2026-09-25),
+            // except the update helper's own, which runs as a separate process after RemSound has closed, and the hotkey
+            // warning's, which asks Windowless.NobodyToAsk first.
+            if (name != "AppMessageBox.cs")
+            {
+                if (System.Text.RegularExpressions.Regex.IsMatch(text, @"(?<!App)TaskDialog\.ShowDialog\("))
+                    bypasses.Add($"{name} (a Windows task dialog shown directly)");
+                if (name != "UpdateApplier.cs" && System.Text.RegularExpressions.Regex.IsMatch(text, @"(?<!App)MessageBox\.Show\("))
+                    bypasses.Add($"{name} (a Windows message box shown directly)");
+                if (name != "MainFormHotkeyController.cs" && text.Contains("MessageBoxW(", StringComparison.Ordinal))
+                    bypasses.Add($"{name} (Windows' raw message box)");
+            }
+            // Tolk (and NVDA's own controller) is the speech library; anything but its wrapper calling it goes round the switch.
+            if (name != "TolkScreenReaderOutput.cs" && System.Text.RegularExpressions.Regex.IsMatch(text, @"\bTolk_\w+\(|""Tolk\.dll""|nvdaController_\w+\("))
+                bypasses.Add($"{name} (the speech library called directly)");
         }
         Check(speakers.Count > 0, "the app must speak somewhere, or this guard is watching nothing");
-        return $"a run is silent, and the {speakers.Count} place(s) that speak are all behind the one switch it holds down";
+        Check(bypasses.Count == 0,
+            $"everything that speaks or dings must go through ScreenReader, AppMessageBox or AppTaskDialog, which a run holds silent - these go round them: {string.Join(", ", bypasses)}");
+        return $"a run is silent - cues muted throughout, and the {speakers.Count} place(s) that speak are all behind the one switch it "
+             + "holds down, with nothing raising speech round it";
     }
 
     /// <summary>
@@ -816,7 +886,8 @@ internal static partial class SelfTest
             form.SyncAllPeerListsForTest();
 
             var list = form.ConnectedPeersListForTest;
-            if (list.Items.Count != 4) return Skip($"the connected list did not take all four peers ({list.Items.Count})");
+            // A list that did not take all four is a failure of the thing under test, not a reason to skip it (2026-09-24).
+            Check(list.Items.Count == 4, $"the connected list must take all four peers ({list.Items.Count})");
             int RowOf(string name) => Enumerable.Range(0, list.Items.Count)
                 .First(i => list.Items[i]!.ToString()!.Contains(name, StringComparison.Ordinal));
             Check(RowOf("AAA_one") == 0 && RowOf("BBB_two") == 1,
@@ -1050,15 +1121,18 @@ internal static partial class SelfTest
 
         // Still announcing: nothing goes, and nothing is announced as going.
         var toldBefore = Volatile.Read(ref told);
-        Check(!discovery.ExpireQuietPeersForTest(), "somebody still announcing must not be dropped");
+        // Driven through a turn of the announce loop, which is what runs every second - not the expiry on its own, which
+        // stayed green with the loop's call to it deleted (2026-09-24). With no network, the turn announces nothing.
+        discovery.AnnounceTickForTest();
+        Check(discovery.Peers.Count == 1, "somebody still announcing must not be dropped");
         Check(discovery.Peers.Count == 1 && Volatile.Read(ref told) == toldBefore,
             "and the window must not be told anything, or the list is rebuilt every second and a screen reader is talked over");
 
         // Now they are switched off. Nothing arrives from anybody; only the clock moves.
         discovery.BackdateForTest(them.InstanceId, TimeSpan.FromSeconds(20));
         toldBefore = Volatile.Read(ref told);
-        Check(discovery.ExpireQuietPeersForTest(), "THE BUG: somebody who has stopped announcing must be dropped by the clock alone");
-        Check(discovery.Peers.Count == 0, $"and must actually be gone from the list ({discovery.Peers.Count} left)");
+        discovery.AnnounceTickForTest();
+        Check(discovery.Peers.Count == 0, $"THE BUG: somebody who has stopped announcing must be dropped by the clock alone, on the loop's next turn ({discovery.Peers.Count} left)");
         Check(Volatile.Read(ref told) == toldBefore + 1,
             $"and the window must be TOLD, exactly once — that is the whole of issue #31 ({Volatile.Read(ref told) - toldBefore} times)");
         Check(discovery.GetKnownAddresses(them.InstanceId).Count == 0,
@@ -1066,7 +1140,8 @@ internal static partial class SelfTest
 
         // And it does not keep saying it.
         toldBefore = Volatile.Read(ref told);
-        Check(!discovery.ExpireQuietPeersForTest() && Volatile.Read(ref told) == toldBefore,
+        discovery.AnnounceTickForTest();
+        Check(Volatile.Read(ref told) == toldBefore,
             "an empty list must not be reported as changing, over and over, for ever");
 
         return "a peer still announcing is left alone and reported as nothing; one that has gone quiet is dropped by "
@@ -1386,6 +1461,8 @@ internal static partial class SelfTest
             "THE BUG: with Accept off, a phone the server pairs with the service must get nothing");
         Check(ServiceNetworkPresence.WhoTheServiceTicks([], nobody, acceptAutomatically: true).PairPartner,
             "and with Accept on, it gets the service's sound like anybody else who ticks it");
+        Check(ServiceNetworkPresence.WhoTheServiceTicks([], nobody, acceptAutomatically: false, pairTickedInProfile: true).PairPartner,
+            "and a profile that ticked the phone-or-older-app row reaches it with Accept off, as it reaches anyone else it names (2026-09-24)");
         var root = FindSourceRoot();
         if (root is not null)
         {
@@ -1489,11 +1566,11 @@ internal static partial class SelfTest
         Need(service, "group.Connect(relay);", "the service must connect to the relay its profile names");
         Need(service, "ApplyTicks(group);",
             "the service must tell the relay who its profile has ticked, plus anyone it is set to accept");
-        Need(service, "WhoTheServiceTicks(profileTicks, group.Members, acceptRelayAutomatically);",
+        Need(service, "WhoTheServiceTicks(profileTicks, group.Members, acceptRelayAutomatically, profilePairTicked);",
             "and the phone paired through the server must follow the same Accept tick as everybody else (Ed, 2026-09-23)");
         Need(service, "group.Changed += OnRelayGroupChanged;",
             "the service must work that out again each time the relay's member list changes, not only at start-up");
-        Need(host, "presence.Start(RemPacket.DefaultPort, endpoints, relay, tickedOnRelay);", "the service must pass its profile's relay and ticks to its network presence");
+        Need(host, "presence.Start(PresencePortForTest > 0 ? PresencePortForTest : RemPacket.DefaultPort, endpoints, relay, tickedOnRelay, profile.RelayPairPartnerTicked);", "the service must pass its profile's relay and ticks to its network presence");
         Check(missing.Count == 0, string.Join(" | ", missing));
         return "the app and the send-only service both route through, listen to, learn and leave their relay groups";
     }
@@ -1720,5 +1797,91 @@ internal static partial class SelfTest
         }
         catch (IOException) { return ""; }
         catch (UnauthorizedAccessException) { return ""; }
+    }
+    /// <summary>
+    /// A PC ALONE ON A SERVER STILL PINGS IT, so a phone waiting there can be paired with it.
+    ///
+    /// <para>2026-09-24, on Ed's desk: his phone reached the server and waited in a pair slot, and his PC - alone in its
+    /// group there - never claimed the slot beside it, so the phone said "unreachable" for ever. Since the server became a
+    /// place of its own (2026-09-20) the app pinged it only while somebody on it was ticked; the ping is what claims the
+    /// slot. The lock-screen service never lost it. Now the server is pinged as a place for as long as we are on it -
+    /// never as a person, so it is no row, no connect sound and no status line, and no audio goes to it for that.</para>
+    /// </summary>
+    private static string? APcAloneOnAServerStillPingsIt()
+    {
+        var peer = new IPEndPoint(IPAddress.Parse("192.0.2.10"), RemPacket.DefaultPort);
+        var relay = new IPEndPoint(IPAddress.Parse("203.0.113.97"), RemPacket.DefaultPort);
+
+        // The heartbeat: a place is pinged, and never kept as a peer.
+        var sent = new List<IPEndPoint>();
+        using (var hb = new HeartbeatService { SendTransport = (_, _, to) => { lock (sent) sent.Add(to); return true; } })
+        {
+            hb.SetTrackedPeers([peer]);
+            hb.SetPingOnlyTargets([relay]);
+            hb.Start();
+            Check(WaitFor(() => { lock (sent) return sent.Contains(relay) && sent.Contains(peer); }, TimeSpan.FromSeconds(3)),
+                "a place must be pinged alongside the peers");
+            Check(hb.GetAllPeerHealth().All(h => !h.AudioEndpoint.Equals(relay)), "and never kept as a peer: nothing that reacts to peers may see it");
+            hb.SetTrackedPeers([peer, relay]);
+            Thread.Sleep(1200);
+            lock (sent) sent.Clear();
+            Thread.Sleep(2300);
+            int toRelay, toPeer;
+            lock (sent) { toRelay = sent.Count(e => e.Equals(relay)); toPeer = sent.Count(e => e.Equals(peer)); }
+            Check(toRelay == toPeer && toRelay > 0, $"once it is a peer as well, it is pinged once a round, not twice ({toRelay} to it, {toPeer} to the peer)");
+        }
+
+        // The window: on a server with nobody ticked, the server is pinged - and gets no audio for it.
+        var restoreMuted = CuePlayer.GloballyMuted;
+        CuePlayer.GloballyMuted = true;
+        MainForm? form = null;
+        try
+        {
+            try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+            var pinged = new List<IPEndPoint>();
+            var said = new List<string>();
+            form.LogForTest.EventTapForTest = line => { lock (said) said.Add(line); };
+            var hb = form.StartHeartbeatForTest((_, _, to) => { lock (pinged) pinged.Add(to); return true; });
+            form.ConnectToRelayForTest("remote.example.test", relay);
+            Check(form.ServerPingTargetsForTest().SequenceEqual([relay]), "on a server, the server must be pinged");
+            Check(form.SelectedSendEndpointsForTest().Length == 0, "but with nobody ticked no audio may go to it");
+            Check(WaitFor(() => { lock (pinged) return pinged.Contains(relay); }, TimeSpan.FromSeconds(3)),
+                "THE BUG: a PC alone on a server must still ping it - that ping is what claims the slot beside a waiting phone");
+            Check(hb.GetAllPeerHealth().All(h => !h.AudioEndpoint.Equals(relay)), "and the server must never become a peer for it");
+            Check(said.Any(l => l.Contains("heartbeat: pinging the server at 203.0.113.97", StringComparison.Ordinal)),
+                "and the log must say the server is being pinged, and why");
+
+            // Once the server pairs a phone with us, the status box's server line says so.
+            var roster = RosterPacket(Array.Empty<(Guid Id, string Name)>(), paired: false);
+            var len = roster.Length;
+            form.RelayGroupForTest.HandleInbound(roster, ref len, relay, out _);
+            Check(form.DescribeRelayGroupForTest(relay) == "a group, nobody else here yet", $"alone, the server line says so (got: {form.DescribeRelayGroupForTest(relay)})");
+            roster = RosterPacket(Array.Empty<(Guid Id, string Name)>(), paired: true);
+            len = roster.Length;
+            form.RelayGroupForTest.HandleInbound(roster, ref len, relay, out _);
+            Check(form.DescribeRelayGroupForTest(relay) == "a phone or older app paired with us",
+                $"THE SLIP: with a phone paired, the server line must not say nobody is here (got: {form.DescribeRelayGroupForTest(relay)})");
+
+            // And a silent run never logs a cue as played.
+            Check(MainForm.CueOutcome(enabled: true, sound: null) == "silenced (a silent or headless run)",
+                "THE SLIP: in a silent or headless run the log must say a cue was silenced, never that it played");
+
+            form.DisconnectFromRelayForTest();
+            Check(hb.PingOnlyTargets.Count == 0, "off the server, it must stop pinging it");
+            Thread.Sleep(1200);
+            lock (pinged) pinged.Clear();
+            Thread.Sleep(2300);
+            lock (pinged) Check(!pinged.Contains(relay), "and no ping may reach it after");
+            Check(said.Any(l => l.Contains("heartbeat: no longer pinging a server", StringComparison.Ordinal)), "and the log must say so");
+            form.LogForTest.EventTapForTest = null;
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            CuePlayer.GloballyMuted = restoreMuted;
+        }
+        return "the server is pinged for as long as we are on it with nobody ticked - as a place, never a peer, and with no audio "
+            + "sent to it - and a place already a peer is pinged once a round; leaving it stops the pings; the log says both";
     }
 }

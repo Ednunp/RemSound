@@ -327,6 +327,17 @@ internal sealed class RecordingSettingsDialog : Form
         channelList.TabIndex = 4;
         okButton.TabIndex = 5;
         cancelButton.TabIndex = 6;
+
+        // Context help (F1): each control's entry in the manual.
+        ContextHelp.Mark(splitTracksBox, "dialog.recording-settings.split-tracks");
+        ContextHelp.Mark(bypassShapingBox, "dialog.recording-settings.bypass-pan-eq");
+        ContextHelp.Mark(sourceList, "dialog.recording-settings.source");
+        ContextHelp.Mark(formatList, "dialog.recording-settings.file-format");
+        ContextHelp.Mark(attributesList, "dialog.recording-settings.attributes");
+        ContextHelp.Mark(flacCompressionList, "dialog.recording-settings.flac-compression");
+        ContextHelp.Mark(channelList, "dialog.recording-settings.channels");
+        ContextHelp.Mark(okButton, "dialog.recording-settings.ok");
+        ContextHelp.Mark(cancelButton, "dialog.recording-settings.cancel");
     }
 
     protected override void OnShown(EventArgs e)

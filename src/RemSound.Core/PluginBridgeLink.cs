@@ -41,9 +41,19 @@ public sealed class PluginBridgeLink : IDisposable
     /// silently swallowed: a rising count means something else is talking to this port.</summary>
     public long MalformedReceived { get; private set; }
 
+    /// <summary>The socket's own buffer each way: many big blocks' worth.</summary>
+    public const int ReceiveBufferBytes = 1 << 20;
+
+    internal int ReceiveBufferSizeForTest => socket.ReceiveBufferSize;
+
     public PluginBridgeLink(int port)
     {
         socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        // Room for several big blocks while this end is busy. A DAW buffer of 16384 frames goes as five messages, 128 KB
+        // together, and Windows gives a socket 64 KB: with the machine busy, the last of them overflowed and was lost - a
+        // gap in the track (found 2026-09-26, the gate losing a piece of a big block under full load). Both ends.
+        socket.ReceiveBufferSize = ReceiveBufferBytes;
+        socket.SendBufferSize = ReceiveBufferBytes;
         // Bind to loopback explicitly. Binding to Any would expose the link to the network.
         socket.Bind(new IPEndPoint(Loopback, port));
         Port = ((IPEndPoint)socket.LocalEndPoint!).Port;

@@ -38,6 +38,12 @@ internal interface ICaptureBackend : IDisposable
     /// </summary>
     bool HasFaulted { get; }
 
+    /// <summary>Re-open, in place, any source this backend was asked for that is not capturing - one that failed to open
+    /// or start, or died since - leaving every source that is working alone. Called every few seconds while sending
+    /// (<see cref="CompositeCaptureBackend"/>), off the audio thread. A source that failed used to stay silent until it was
+    /// unticked and ticked again, and one that died restarted the whole send (review 2026-09-25).</summary>
+    void HealSources() { }
+
     /// <summary>
     /// How long audio waits in the CAPTURE device before this backend sees it, in milliseconds, as
     /// reported by the device itself. Zero when the device won't say.

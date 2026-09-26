@@ -125,6 +125,9 @@ internal static partial class SelfTest
         {
             var captured = new List<string>();
             form.LogForTest.EventTapForTest = line => { lock (captured) captured.Add(line); };
+            // The log file ON, as Ed's was that night (it lives in the run's throwaway folder): the tap sits before the file
+            // write, so on its own it proves the line is issued, not that it reaches the file (2026-09-24).
+            form.LogForTest.Enabled = true;
             try
             {
                 // IDLE. Not sending, not receiving, no device open — the state Ed's machine spent
@@ -134,6 +137,9 @@ internal static partial class SelfTest
                 first = Require(first,
                     "the very first tick must write a long-run line even with nothing running — this is the exact state "
                     + "in which the per-second diagnostic line goes silent, and the whole reason this report exists");
+                var logPath = form.LogForTest.Path;
+                Check(logPath is not null && ReadSharedText(logPath).Contains("\tlongrun ", StringComparison.Ordinal),
+                    $"and the long-run line must be IN the log file, not only handed to the logger (file: {logPath ?? "none"})");
 
                 Check(first.Contains("stage=", StringComparison.Ordinal),
                     $"the line must carry the WASAPI stage field even when there is no stage yet (got \"{first}\")");

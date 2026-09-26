@@ -44,6 +44,11 @@ internal static partial class SelfTest
     /// </summary>
     private static readonly AudioAxisExemption[] AudioAxisExemptions =
     [
+        new("EveryDialogIsAudited", "names the ASIO loading splash only as a window that is not a dialog; no audio is involved"),
+        new("AnAsioInterfaceSwitchedOnLateComesBack", "an ASIO driver's probe: only ASIO only and both have a driver, and the probe is the same for both"),
+        new("TheAsioSplashNeverSticks", "the ASIO loading splash is a window shown while a driver opens; no audio is involved"),
+        new("AnAsioCopyPlayingKeepsItsSessionAlive", "a second copy to play from exists only with both output types; in WASAPI only and ASIO only the one copy is always the one fed"),
+        new("HeadlessWindowsStayOutOfSightUntilHandedOver", "names the ASIO loading splash only to prove it never starts while headless; no audio is involved"),
         // ---- Driver and device lifecycle. About opening and closing hardware, not about which
         // combination a user has selected. --------------------------------------------------------
         new("AsioApartmentThread", "the apartment thread's contract is the same however many lanes exist"),
@@ -58,6 +63,8 @@ internal static partial class SelfTest
         new("AuditNothingCreepsOverHours", "the three things soaked here — the WASAPI cushion target, the drift loop and the tuner's learned floor — are driven directly as arithmetic, and the WASAPI output stage has NO ASIO counterpart at all: ASIO pulls straight from the engine, with no device buffer, no cushion target and no rate-trimming resampler. That asymmetry is the SUBJECT of the test (the fault appears on WASAPI and never on ASIO), not a gap in it. Running the same arithmetic three times would add nothing"),
         new("AuditLongRunReportIsActuallyWritten", "this is a WIRING check, not a behaviour one: it drives the real per-second tick with NOTHING running — no receiver, no sender, no device ticked — because that is precisely the state in which the per-second diagnostic line goes silent and produced five lines in fourteen hours. There is no audio configuration in that state to vary. What the line SAYS in each of the three is covered by AuditLongRunReportSaysWhatCreeps, which loops all three"),
         new("AuditUntickedLaneIsNotFedForever", "this IS the both-lanes configuration and cannot be anything else — it is about switching one of two lanes off, and WASAPI-only and ASIO-only have no second lane to switch off. With one active lane no mirror replica is ever made, so there is nothing that can be left written-but-unread: those two configurations cannot REACH this bug rather than being untested for it. The test does run both ways round, ASIO off with WASAPI surviving and WASAPI off with ASIO surviving, because nothing in the read path is lane-specific"),
+        new("APluginTrackPlaysWhenTheWasapiOutputStops", "this IS the both-outputs configuration and cannot be anything else: it is about the WASAPI output stopping while the ASIO one plays on, and with one kind of output there is no second copy to fall back to - the primary is the only copy and is always the one fed"),
+        new("AFailedAsioOpenIsTriedAgain", "the ASIO backends' own open-and-retry: there is no WASAPI half to it, and no output configuration is involved - it drives the two backends directly with a driver that cannot open"),
         new("AuditPluginShapingSwitchActuallySwitches", "a claimed peer belongs to a DAW TRACK, which has no output lane — ReadClaimedPeer deliberately does not filter by lane, and the shaping runs inside the peer's own session read before any lane is involved. The three configurations decide which SPEAKER lanes exist, and a claimed peer is excluded from every one of them"),
 
         // ---- Pure arithmetic and decision cores, tested by feeding values directly. Covering three
@@ -91,6 +98,12 @@ internal static partial class SelfTest
         // configuration at all. ---------------------------------------------------------------------
         new("ServiceProfileIsolation", "the service profile is a separate store; the service never renders"),
         new("ServiceSendHostStream", "the service is WASAPI send-only and has no output lane"),
+        new("ServiceLooksNamesUpAgainUntilTheyAnswer", "the service is WASAPI send-only and has no output lane; this is about name look-ups"),
+        new("ServiceFollowsAServerThatMoves", "the service is WASAPI send-only and has no output lane; this is about looking a server's name up again"),
+        new("AFailedSendSourceIsTriedAgain", "the heal is in the WASAPI side of the capture, the same code with or without ASIO beside it; "
+            + "'both' needs a real ASIO driver, which the gate does not have"),
+        new("ADeadSendSourceIsReopenedAlone", "the heal is in the WASAPI side of the capture, the same code with or without ASIO beside it; "
+            + "what spares the ASIO stream in 'both' (only the sender's Start resets it) is pinned from source in the step"),
         new("AuditPushModeReadsIntegerCapture", "pure sample-format arithmetic on the push-mode capture class, fed bytes directly; it names the class, and no output configuration or audio device is involved"),
         new("AuditServiceSendsAnApplicationStartedLater", "it names the WASAPI send mode only to choose specific applications; the service never opens ASIO and never renders, so there is no output configuration to vary"),
         new("ServiceSenderParity", "compares service and app SENDER settings; the receive configuration is not in scope"),
@@ -114,6 +127,9 @@ internal static partial class SelfTest
         new("PluginLaneObeysTheHouseRules", "sender side: no password, mute and the recorder tap are the same SenderLane code in every sender mode; the route it reads is the plugin lane's own tag"),
         new("ThreeConcurrentStreamsFromOneSender", "about session identity on the receiver: three streams from one peer, one per lane tag, stay three sessions and a shared tag still supersedes; decode only, so no output is opened"),
         new("AuditJitterBufferHasOneName", "reads the source for one stale name and anchors on the WASAPI-only label; the wording each configuration shows is set in UpdateBothIndependentVisibility, which the control suite runs in all three"),
+
+        // ---- The control channel (--headless / --control), 2026-09-24. ----------------------------------------------
+        new("RemoteControlDrivesTheWholeApp", "about reaching controls by the names a screen reader reads: the ASIO auto-tune box is named only to prove that two controls sharing a start are refused, never guessed. The channel presses the same controls through the same handlers whichever configuration is ticked, and what each control does in each of the three is the control suite's, which runs all three"),
     ];
 
     /// <summary>
@@ -154,7 +170,10 @@ internal static partial class SelfTest
                 if (!body.Nullable && !registered.Contains(body.Name)) continue;
                 if (!axis.IsMatch(body.Body)) continue;
                 touching.Add(body.Name);
-                if (!coversAll.IsMatch(body.Body)) continue;
+                // Judged on the CODE: a comment or a message that says "WASAPI only, ASIO only and both", or names
+                // AudioConfigurations.All, is not a loop over them (2026-09-24).
+                var code = CodeOnly(body.Body);
+                if (!coversAll.IsMatch(code)) continue;
                 covering.Add(body.Name);
 
                 // AND HOW MUCH OF IT ACTUALLY RUNS IN THERE.
@@ -166,7 +185,7 @@ internal static partial class SelfTest
                 // arithmetic checked in one shape only while this guard stayed green (Ed, 2026-08-24,
                 // and not for the first time). A guard that checks a shape exists rather than what it
                 // covers is the disease, not the cure.
-                var (inside, outside) = CountAssertionsInsideConfigurationLoop(body.Body);
+                var (inside, outside) = CountAssertionsInsideConfigurationLoop(code);
                 split[body.Name] = (inside, outside);
                 if (inside == 0) decorative.Add(body.Name);
             }
@@ -278,6 +297,62 @@ internal static partial class SelfTest
             i = close;
         }
         return (inside, Math.Max(0, total - inside));
+    }
+
+    /// <summary>The source with its comments and the insides of its string and character literals taken out, so a
+    /// pattern matches what the code DOES rather than what it says about itself. Line breaks are kept.</summary>
+    internal static string CodeOnly(string source)
+    {
+        var sb = new System.Text.StringBuilder(source.Length);
+        var i = 0;
+        while (i < source.Length)
+        {
+            var c = source[i];
+            var next = i + 1 < source.Length ? source[i + 1] : '\0';
+            if (c == '/' && next == '/')
+            {
+                while (i < source.Length && source[i] != '\n') i++;
+                continue;
+            }
+            if (c == '/' && next == '*')
+            {
+                var end = source.IndexOf("*/", i + 2, StringComparison.Ordinal);
+                var stop = end < 0 ? source.Length : end + 2;
+                for (var k = i; k < stop; k++) if (source[k] == '\n') sb.Append('\n');
+                i = stop;
+                continue;
+            }
+            // A string: up to two of $ and @ in either order, then the quote.
+            var j = i;
+            var verbatim = false;
+            while (j < source.Length && j - i < 2 && (source[j] == '$' || source[j] == '@')) { verbatim |= source[j] == '@'; j++; }
+            if (j < source.Length && source[j] == '"')
+            {
+                j++;
+                while (j < source.Length)
+                {
+                    if (verbatim && source[j] == '"' && j + 1 < source.Length && source[j + 1] == '"') { j += 2; continue; }
+                    if (!verbatim && source[j] == '\\') { j += 2; continue; }
+                    if (source[j] == '"' || (!verbatim && source[j] == '\n')) break;
+                    j++;
+                }
+                sb.Append("\"\"");
+                i = Math.Min(source.Length, j + 1);
+                continue;
+            }
+            if (c == '\'')
+            {
+                var k = i + 1;
+                k += k < source.Length && source[k] == '\\' ? 2 : 1;
+                while (k < source.Length && source[k] != '\'' && k - i < 10) k++;
+                sb.Append("''");
+                i = Math.Min(source.Length, k + 1);
+                continue;
+            }
+            sb.Append(c);
+            i++;
+        }
+        return sb.ToString();
     }
 
     /// <summary>Split a source file into test-method bodies by brace matching, so the axis check is

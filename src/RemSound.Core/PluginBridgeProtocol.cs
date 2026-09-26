@@ -37,7 +37,11 @@ public enum PluginBridgeMessage : byte
     ClaimPeers = 8,
     /// <summary>App → plugin: a block of the claimed peers' audio,
     /// stamped with WHICH DAW BLOCK it is for. Payload is a little-endian int64 round number, then the
-    /// int32 ask number the plugin sent with its request, then the interleaved float samples.
+    /// int32 ask number the plugin sent with its request, then the int32 offset of this part and the int32
+    /// length of the whole block (both in floats), then this part's interleaved float samples. A block
+    /// that fits one message is one part; a bigger one - a DAW buffer of 4096 or more - comes in as many
+    /// parts as it takes, in order, and the plugin puts them back together (review 2026-09-25: those
+    /// buffers used to go silent, because the whole block could never fit one message).
     ///
     /// <para>The app numbers the blocks of each DAW: every instance in one host process asking once is
     /// one round, and an instance asking again is the next. So two tracks that ask in the same DAW
@@ -79,14 +83,23 @@ public static class PluginBridgeProtocol
     public const int HeaderSize = 16;
     public const byte Version = 1;
 
+    /// <summary>A line in the peer list saying RemSound's "Receive audio" is off, so there is nobody to receive.</summary>
+    public const string ReceiveOffLine = "#receive-off";
+
     /// <summary>The loopback port the app listens on for plugin instances. Fixed so a plugin can find
     /// the app with no discovery step; bound to 127.0.0.1 only, never to a routable address.</summary>
     public const int DefaultPort = 47831;
 
-    /// <summary>Largest audio payload a single message carries. One DAW block of stereo float at a
-    /// generous 4096 frames; bigger blocks are split by the caller. Sized so a message always fits a
-    /// loopback datagram without fragmentation.</summary>
+    /// <summary>Largest audio payload a single message carries: 4096 frames of stereo float. Sized so a
+    /// message always fits a loopback datagram without fragmentation. A bigger block goes as several
+    /// messages: in parts on the way to the plugin (see <see cref="PluginBridgeMessage.PeerAudioRound"/>),
+    /// and as consecutive track messages on the way to the app, which reads them as one stream.</summary>
     public const int MaxAudioBytes = 4096 * 2 * sizeof(float);
+
+    /// <summary>The largest DAW block the link carries, in frames at <see cref="WireSampleRate"/>, however
+    /// many messages it takes: past any buffer a DAW offers (8192 at most in the ones we know), with room
+    /// for a 44.1 kHz host's block growing when it is converted to 48 kHz.</summary>
+    public const int MaxBlockFrames = 16384;
 
     /// <summary>What audio on this link is: interleaved stereo 32-bit float at this rate. The DAW may
     /// well be running at 44.1 or 96 kHz, so the PLUGIN resamples at its own boundary rather than
@@ -176,25 +189,35 @@ public static class PluginBridgeProtocol
     /// <summary>The same with the trailing ask number (see <see cref="PluginBridgeMessage.PeerAudioRound"/>).</summary>
     public static int ClaimSetSizeWithAsk(int peerCount) => ClaimSetSize(peerCount) + sizeof(int);
 
-    /// <summary>Header of a <see cref="PluginBridgeMessage.PeerAudioRound"/> payload: the round, then the ask number.</summary>
-    public const int AudioRoundHeaderSize = sizeof(long) + sizeof(int);
+    /// <summary>Header of a <see cref="PluginBridgeMessage.PeerAudioRound"/> payload: the round, the ask number, then this
+    /// part's offset and the whole block's length, in floats.</summary>
+    public const int AudioRoundHeaderSize = sizeof(long) + 3 * sizeof(int);
 
-    /// <summary>Write the round and ask number in front of a block's samples.</summary>
-    public static void WriteAudioRoundHeader(Span<byte> destination, long round, int askNumber)
+    /// <summary>The most samples one part carries, in floats: whole frames, and a message that fits <see cref="MaxAudioBytes"/>.</summary>
+    public const int AudioRoundPartFloats = (MaxAudioBytes - AudioRoundHeaderSize) / sizeof(float) / WireChannels * WireChannels;
+
+    /// <summary>Write the round, ask number, part offset and block length in front of a part's samples.</summary>
+    public static void WriteAudioRoundHeader(Span<byte> destination, long round, int askNumber, int offsetFloats, int totalFloats)
     {
         BinaryPrimitives.WriteInt64LittleEndian(destination, round);
         BinaryPrimitives.WriteInt32LittleEndian(destination[sizeof(long)..], askNumber);
+        BinaryPrimitives.WriteInt32LittleEndian(destination[(sizeof(long) + sizeof(int))..], offsetFloats);
+        BinaryPrimitives.WriteInt32LittleEndian(destination[(sizeof(long) + 2 * sizeof(int))..], totalFloats);
     }
 
-    /// <summary>Read them back; the samples follow.</summary>
-    public static bool TryReadAudioRoundHeader(ReadOnlySpan<byte> payload, out long round, out int askNumber)
+    /// <summary>Read them back; the part's samples follow. False for anything that is not a sane part of a block.</summary>
+    public static bool TryReadAudioRoundHeader(ReadOnlySpan<byte> payload, out long round, out int askNumber, out int offsetFloats, out int totalFloats)
     {
         round = 0;
         askNumber = -1;
+        offsetFloats = 0;
+        totalFloats = 0;
         if (payload.Length < AudioRoundHeaderSize) return false;
         round = BinaryPrimitives.ReadInt64LittleEndian(payload);
         askNumber = BinaryPrimitives.ReadInt32LittleEndian(payload[sizeof(long)..]);
-        return true;
+        offsetFloats = BinaryPrimitives.ReadInt32LittleEndian(payload[(sizeof(long) + sizeof(int))..]);
+        totalFloats = BinaryPrimitives.ReadInt32LittleEndian(payload[(sizeof(long) + 2 * sizeof(int))..]);
+        return totalFloats > 0 && totalFloats <= MaxBlockFrames * WireChannels && offsetFloats >= 0 && offsetFloats < totalFloats;
     }
 
     /// <summary>Write "I want these people, and I just consumed this many frames". IPv4 only, which is

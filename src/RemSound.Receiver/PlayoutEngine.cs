@@ -44,6 +44,7 @@ internal sealed class PlayoutEngine : IWaveProvider
     /// the app pays nothing for a feature it isn't using.</summary>
     private PluginPeerClaims? pluginClaims;
     public void SetPluginPeerClaims(PluginPeerClaims? claims) => pluginClaims = claims;
+    internal PluginPeerClaims? PluginClaimsForTest => pluginClaims;
 
     /// <summary>Which claimed peer a stream belongs to, keyed by stream id.
     ///
@@ -58,6 +59,30 @@ internal sealed class PlayoutEngine : IWaveProvider
     /// claimed peer's address it stays associated with that peer, and both the plugin read and the
     /// speaker mix follow it wherever it turns up next.</para></summary>
     private readonly System.Collections.Concurrent.ConcurrentDictionary<ushort, IPAddress> claimedStreamOwners = new();
+
+    /// <summary>A stream id stays a claimed peer's while a session carries it, and for <see cref="StreamOwnerGrace"/> after
+    /// the last one goes. They were never forgotten, so an id left behind could match an unrelated peer's new stream much
+    /// later and silence it everywhere - off the speakers as the plugin's, and not on the plugin's track either
+    /// (2026-09-25 sweep). The grace is for a peer whose stream is pruned and opened again, at the same address or a new
+    /// one: still theirs. Caller holds sessionsLock.</summary>
+    private void ForgetStreamOwnersWithoutSessionLocked(long nowTick)
+    {
+        foreach (var id in claimedStreamOwners.Keys)
+        {
+            if (sessions.Keys.Any(k => k.Item2 == id)) { streamOwnerOrphanedAt.Remove(id); continue; }
+            if (!streamOwnerOrphanedAt.TryGetValue(id, out var since)) { streamOwnerOrphanedAt[id] = nowTick; continue; }
+            if (nowTick - since < (long)StreamOwnerGrace.TotalMilliseconds) continue;
+            claimedStreamOwners.TryRemove(id, out _);
+            streamOwnerOrphanedAt.Remove(id);
+        }
+    }
+
+    /// <summary>When each claimed stream id last lost its last session. Guarded by sessionsLock.</summary>
+    private readonly Dictionary<ushort, long> streamOwnerOrphanedAt = new();
+    internal static readonly TimeSpan StreamOwnerGrace = TimeSpan.FromMinutes(1);
+
+    internal int ClaimedStreamOwnersForTest => claimedStreamOwners.Count;
+    internal void ForgetStreamOwnersForTest(long nowTick) { lock (sessionsLock) ForgetStreamOwnersWithoutSessionLocked(nowTick); }
 
     /// <summary>Is this session's audio spoken for by a plugin — at its own address, or as a stream we
     /// have already seen belonging to a claimed peer? Used by BOTH mix paths, so a peer that moves
@@ -294,6 +319,9 @@ internal sealed class PlayoutEngine : IWaveProvider
     /// <summary>Sets (or clears with null) the pan+EQ chain for every current and future session from
     /// this peer address. Live-updates existing sessions and remembers it so a session created later
     /// (a reconnect, or a peer that starts streaming after you set it) inherits it from frame zero.</summary>
+    /// <summary>Gate seam: the pan and EQ chain held for a peer right now, or null when there is none.</summary>
+    internal PeerDspChain? PeerDspForTest(IPAddress address) { lock (sessionsLock) return peerDspByAddress.GetValueOrDefault(address); }
+
     public void SetPeerDsp(IPAddress address, PeerDspChain? chain)
     {
         lock (sessionsLock)
@@ -302,8 +330,12 @@ internal sealed class PlayoutEngine : IWaveProvider
             else peerDspByAddress[address] = chain;
             // The PERSON, not the path. A peer who moved between networks keeps a session at the
             // address it opened on, and matching exactly would leave their volume slider inert.
+            // Each STREAM gets its own copy (its own filter state), exactly as each mirror does. A person sending two
+            // streams - their mic and their DAW track, or WASAPI and ASIO sources - had one chain run over both, one
+            // after the other, so every block started from the other stream's filter state: with EQ on, their sound
+            // distorted (measured 2026-09-25: a silent second stream moved the output by 0.26 on a 0.26 peak).
             foreach (var s in sessions.Values)
-                if (SamePerson(s.Endpoint.Address, address)) s.SetDsp(chain);
+                if (SamePerson(s.Endpoint.Address, address)) s.SetDsp(chain?.Clone());
             // Mirror replicas each need their OWN chain instance (independent biquad state) — a fresh
             // clone per mirror, or null to clear. Never share one chain across two output lanes.
             foreach (var (key, mirs) in mirrorsByKey)
@@ -513,6 +545,15 @@ internal sealed class PlayoutEngine : IWaveProvider
     /// recorder. The recorder uses the tag to keep per-lane streams separate and mix them
     /// at drain time. The classic-mode all-sessions Read passes <see cref="RenderRoute.Mixed"/>;
     /// per-lane Reads pass their own route.</summary>
+    /// <summary>The block boundary for split recordings, guarded like the mixed tap: a recorder that throws must not reach
+    /// the render path (on ASIO that is the driver's own callback).</summary>
+    private void FireRecordBlockComplete(int floats)
+    {
+        var cb = OnRecordBlockComplete;
+        if (cb is null) return;
+        try { cb(floats); } catch { /* recorder failure isolated from audio path */ }
+    }
+
     private void DispatchReceivedSamples(ReadOnlyMemory<float> samples, RenderRoute lane)
     {
         var cb = OnReceivedSamples;
@@ -606,6 +647,8 @@ internal sealed class PlayoutEngine : IWaveProvider
         {
             if (!sessions.TryGetValue(key, out var sp))
             {
+                // Before this stream is counted: a claimed peer's id gone past its grace must not be taken for this one.
+                if (streamOwnerOrphanedAt.Count > 0) ForgetStreamOwnersWithoutSessionLocked(Environment.TickCount64);
                 sp = new SessionPlayout(endpoint, streamId, capacityBytes);
                 // Inherit the engine-wide artifact selection so a session created mid-stream
                 // gets the right artifact from frame zero (rather than the SessionPlayout
@@ -615,11 +658,12 @@ internal sealed class PlayoutEngine : IWaveProvider
                 // frame zero rather than only on the next SetPeerDsp call.
                 // Exact first, then the peer's other addresses: a session opening on the VPN path
                 // must inherit the shaping the user set while they were on the LAN.
-                if (peerDspByAddress.TryGetValue(endpoint.Address, out var chain)) sp.SetDsp(chain);
+                // A copy of its own, never the held chain itself - see SetPeerDsp.
+                if (peerDspByAddress.TryGetValue(endpoint.Address, out var chain)) sp.SetDsp(chain?.Clone());
                 else foreach (var (shaped, other) in peerDspByAddress)
                 {
                     if (!SamePerson(shaped, endpoint.Address)) continue;
-                    sp.SetDsp(other);
+                    sp.SetDsp(other?.Clone());
                     break;
                 }
                 if (recordTap is not null) sp.SetRecordTap(recordTap, recordTapRaw);
@@ -644,6 +688,7 @@ internal sealed class PlayoutEngine : IWaveProvider
                 if (mirrorsByKey.Remove(key, out var mirs))
                     foreach (var m in mirs) m.Dispose();
                 RebuildSnapshotLocked();
+                ForgetStreamOwnersWithoutSessionLocked(Environment.TickCount64);
                 return true;
             }
             return false;
@@ -1165,6 +1210,15 @@ internal sealed class PlayoutEngine : IWaveProvider
 
         if (!anyContributed)
         {
+            // Nobody played this block, but a recording still moves on with it: silence for the mix and a block boundary for
+            // the split tracks, so every track stays sample-locked to your own. Returning before the record hooks recorded
+            // nothing while no peer was playing - after a dropout every later peer word landed early against your track,
+            // and a received-only recording silently lost the time (2026-09-25 sweep).
+            if (recordHere)
+            {
+                DispatchReceivedSamples(mixBuf.AsMemory(0, outFloats), route);
+                FireRecordBlockComplete(outFloats);
+            }
             Array.Clear(buffer, offset, count);
             return count;
         }
@@ -1202,7 +1256,7 @@ internal sealed class PlayoutEngine : IWaveProvider
         if (recordHere)
         {
             DispatchReceivedSamples(mixBuf.AsMemory(0, outFloats), route);
-            OnRecordBlockComplete?.Invoke(outFloats);
+            FireRecordBlockComplete(outFloats);
         }
 
         Buffer.BlockCopy(mixBuf, 0, buffer, offset, outFloats * sizeof(float));
@@ -1263,8 +1317,10 @@ internal sealed class PlayoutEngine : IWaveProvider
             if (session.IsMirror) continue;
             if (!SamePerson(session.Endpoint.Address, peer)) continue;
             claimedStreamOwners[session.StreamId] = peer;
-            var laneLatency = LatencyFor(session.Route);
-            var got = session.ReadFloats(scratch.AsSpan(0, outFloats), wanted, laneLatency.TargetMs, laneLatency.MaxMs, smoothness, pluginShapingEnabled);
+            // The copy that is being fed - the primary, or its mirror while the primary's own lane is not reading.
+            var fed = session.FedCopy;
+            var laneLatency = LatencyFor(fed.Route);
+            var got = fed.ReadFloats(scratch.AsSpan(0, outFloats), wanted, laneLatency.TargetMs, laneLatency.MaxMs, smoothness, pluginShapingEnabled);
             if (got <= 0) continue;
             // A DIRECT MATCH ONLY WINS IF IT ACTUALLY PRODUCED AUDIO. Setting this before the read
             // meant a session still sitting at the claimed address with a dry ring — which is exactly
@@ -1290,8 +1346,9 @@ internal sealed class PlayoutEngine : IWaveProvider
             if (!claimedStreamOwners.TryGetValue(session.StreamId, out var owner) || !owner.Equals(peer)) continue;
             if (otherClaims is not null && !SamePerson(session.Endpoint.Address, peer)
                 && otherClaims.IsClaimed(session.Endpoint.Address)) continue;
-            var laneLatency = LatencyFor(session.Route);
-            var got = session.ReadFloats(scratch.AsSpan(0, outFloats), wanted, laneLatency.TargetMs, laneLatency.MaxMs, smoothness, pluginShapingEnabled);
+            var fed = session.FedCopy;
+            var laneLatency = LatencyFor(fed.Route);
+            var got = fed.ReadFloats(scratch.AsSpan(0, outFloats), wanted, laneLatency.TargetMs, laneLatency.MaxMs, smoothness, pluginShapingEnabled);
             if (got <= 0) continue;
             produced = Math.Max(produced, got);
             var summed = got * MixChannels;
@@ -1354,6 +1411,9 @@ internal sealed class PlayoutEngine : IWaveProvider
 
         if (!anyContributed)
         {
+            // As in the lane read: the recording moves on in silence rather than losing the time.
+            DispatchReceivedSamples(mixBuf.AsMemory(0, outFloats), RenderRoute.Mixed);
+            FireRecordBlockComplete(outFloats);
             Array.Clear(buffer, offset, count);
             return count;
         }
@@ -1380,7 +1440,7 @@ internal sealed class PlayoutEngine : IWaveProvider
         // Tagged with RenderRoute.Mixed; the recorder maps Mixed to its wasapi-slot ring
         // (the single-lane slot), so each rendered block is recorded exactly once.
         DispatchReceivedSamples(mixBuf.AsMemory(0, outFloats), RenderRoute.Mixed);
-        OnRecordBlockComplete?.Invoke(outFloats);
+        FireRecordBlockComplete(outFloats);
 
         Buffer.BlockCopy(mixBuf, 0, buffer, offset, outFloats * sizeof(float));
         return count;

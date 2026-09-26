@@ -89,14 +89,19 @@ internal static class AppInstaller
     /// wires up shortcuts/registration/auto-start, then relaunches the installed copy and asks the
     /// portable one to exit. <paramref name="log"/> (may be null) records milestones to the diagnostic
     /// log when logging is on.</summary>
-    public static void RunInstall(IWin32Window owner, Action<string>? log = null)
+    /// <param name="prepareToLeave">Called once the person has chosen to go ahead and before anything is copied: offers to
+    /// save unsaved changes (false - they chose Cancel - stops the install) and finishes a recording, so the copy carries
+    /// the saved profile and a whole file.</param>
+    /// <param name="leave">How this copy then goes: the window's normal close. It used to end the process outright, which
+    /// lost unsaved changes and cut a recording off (2026-09-25 sweep). Null (the self-test): end the process.</param>
+    public static void RunInstall(IWin32Window owner, Action<string>? log = null, Func<bool>? prepareToLeave = null, Action? leave = null)
     {
         var source = NormalizeFolder(AppContext.BaseDirectory);
         var target = NormalizeFolder(InstallFolder);
 
         if (IsInstalledCopy)
         {
-            MessageBox.Show(owner,
+            AppMessageBox.Show(owner,
                 "This copy of RemSound is already installed, so there's nothing to do. " +
                 "To remove it, use Uninstall RemSound from this PC.",
                 "Already installed", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -111,6 +116,7 @@ internal static class AppInstaller
         var updating = InstallExistsAtTarget;
         var options = ShowInstallOptionsDialog(owner, target, updating);
         if (options is null) return; // cancelled
+        if (prepareToLeave is not null && !prepareToLeave()) { log?.Invoke("install: stopped - the person chose to stay"); return; }
 
         var installedExe = Path.Combine(target, ExeName);
         try
@@ -157,7 +163,7 @@ internal static class AppInstaller
         catch (Exception ex)
         {
             log?.Invoke($"install: FAILED — {ex.GetType().Name}: {ex.Message}");
-            MessageBox.Show(owner,
+            AppMessageBox.Show(owner,
                 "RemSound could not finish installing:" + Environment.NewLine + Environment.NewLine + ex.Message +
                 Environment.NewLine + Environment.NewLine +
                 "Nothing was changed to the copy you're running now — you can keep using it.",
@@ -165,7 +171,7 @@ internal static class AppInstaller
             return;
         }
 
-        MessageBox.Show(owner,
+        AppMessageBox.Show(owner,
             $"RemSound is now installed on this PC, in:{Environment.NewLine}{target}{Environment.NewLine}{Environment.NewLine}" +
             "Press OK to finish. RemSound will now close and reopen from the new install location.",
             "RemSound installed", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -177,7 +183,7 @@ internal static class AppInstaller
         {
             if (!ServiceControl.IsInstalled())
             {
-                var wantService = MessageBox.Show(owner,
+                var wantService = AppMessageBox.Show(owner,
                     "Do you also want to install the RemSound service?" + Environment.NewLine + Environment.NewLine +
                     "The service streams this PC's audio to your RemSound peers even when nobody is logged in " +
                     "(for example at the lock screen after a reboot). It's send-only and steps aside whenever the " +
@@ -193,7 +199,7 @@ internal static class AppInstaller
                     {
                         // Offer to start it now — otherwise it only comes up at the next boot, so a
                         // first-time user sees nothing happen after installing it.
-                        var startNow = MessageBox.Show(owner,
+                        var startNow = AppMessageBox.Show(owner,
                             "The RemSound service was installed." + Environment.NewLine + Environment.NewLine +
                             "Do you want to start it now? It will also start automatically at every boot. " +
                             "You can configure who it sends to from the app's Service menu.",
@@ -202,7 +208,7 @@ internal static class AppInstaller
                         {
                             log?.Invoke("install: user opted to start the service now");
                             var startRc = RunElevatedResponsive(owner, ServiceControl.StartVerb, "Starting the RemSound service...");
-                            MessageBox.Show(owner,
+                            AppMessageBox.Show(owner,
                                 startRc == 0
                                     ? "The RemSound service is running."
                                     : "The service was installed but couldn't be started just now. You can start it later from the app's Service menu.",
@@ -211,7 +217,7 @@ internal static class AppInstaller
                     }
                     else
                     {
-                        MessageBox.Show(owner,
+                        AppMessageBox.Show(owner,
                             "The RemSound service was not installed (the elevation prompt was declined, or it failed). You can try again later from the app's Service menu.",
                             "RemSound service", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     }
@@ -240,7 +246,7 @@ internal static class AppInstaller
         // id, and waits for THIS process to exit (lock released) before it takes the lock. Then we exit
         // decisively.
         try { StartRelaunchAfterExit(installedExe, target); } catch { /* fall through — worst case the user starts it from the shortcut */ }
-        Environment.Exit(0);
+        if (leave is not null) leave(); else Environment.Exit(0);
     }
 
     /// <summary>Run an elevated service verb while keeping the UI thread ALIVE. The install flow is
@@ -287,14 +293,16 @@ internal static class AppInstaller
     /// <summary>Options → "Uninstall RemSound from this PC", chosen from inside the running installed
     /// copy. THIS process holds the files open, so we confirm, tear down shortcuts/registration/
     /// auto-start, launch the wait-then-delete batch, and exit so it can remove the folder.</summary>
-    public static void RunUninstallInProcess(IWin32Window owner, Action<string>? log = null)
+    /// <param name="prepareToLeave">As for <see cref="RunInstall"/>: before anything is removed.</param>
+    /// <param name="leave">As for <see cref="RunInstall"/>.</param>
+    public static void RunUninstallInProcess(IWin32Window owner, Action<string>? log = null, Func<bool>? prepareToLeave = null, Action? leave = null)
     {
         // The folder we're running from IS the install (the marker confirms it) — delete that, rather
         // than a separately computed path, so uninstall never targets the wrong place.
         var target = NormalizeFolder(AppContext.BaseDirectory);
         if (!IsInstalledCopy)
         {
-            MessageBox.Show(owner,
+            AppMessageBox.Show(owner,
                 "This copy of RemSound isn't an installed one, so there's nothing to uninstall from here. " +
                 "You can just delete this folder.",
                 "Not an installed copy", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -303,6 +311,7 @@ internal static class AppInstaller
 
         var options = ShowUninstallConfirmDialog(owner, target);
         if (options is null) return; // cancelled
+        if (prepareToLeave is not null && !prepareToLeave()) { log?.Invoke("uninstall: stopped - the person chose to stay"); return; }
 
         log?.Invoke($"uninstall: starting (removeProfilesConfigLogs={options.RemoveProfilesConfigLogs}, " +
                     $"removeRecordings={options.RemoveRecordings}, removePlugin={options.RemovePlugin}, removeService={options.RemoveService})");
@@ -313,7 +322,7 @@ internal static class AppInstaller
         catch (Exception ex)
         {
             log?.Invoke($"uninstall: could not start remover — {ex.Message}");
-            MessageBox.Show(owner,
+            AppMessageBox.Show(owner,
                 "RemSound couldn't start the uninstaller:" + Environment.NewLine + Environment.NewLine + ex.Message,
                 "Uninstall failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
@@ -321,9 +330,9 @@ internal static class AppInstaller
 
         // Uninstall doesn't relaunch — just tell the user it's done, then close (the remover finishes
         // deleting the folder the moment this process exits).
-        MessageBox.Show(owner, FinishedUninstallMessage(leftBehind),
+        AppMessageBox.Show(owner, FinishedUninstallMessage(leftBehind),
             "RemSound uninstalled", MessageBoxButtons.OK, leftBehind is null ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
-        Environment.Exit(0);
+        if (leave is not null) leave(); else Environment.Exit(0);
     }
 
     /// <summary>The <c>--uninstall</c> switch: run from the Start-menu "Uninstall" shortcut or Windows
@@ -338,7 +347,7 @@ internal static class AppInstaller
         var target = NormalizeFolder(AppContext.BaseDirectory);
         if (!IsInstalledCopy)
         {
-            MessageBox.Show(
+            AppMessageBox.Show(
                 "This copy of RemSound isn't an installed one, so there's nothing to remove.",
                 "Nothing to uninstall", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
@@ -356,13 +365,13 @@ internal static class AppInstaller
         try { StartDeleteAfterExit(target, options.RemoveProfilesConfigLogs, options.RemoveRecordings); }
         catch (Exception ex)
         {
-            MessageBox.Show(
+            AppMessageBox.Show(
                 "RemSound couldn't start the uninstaller:" + Environment.NewLine + Environment.NewLine + ex.Message,
                 "Uninstall failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
-        MessageBox.Show(FinishedUninstallMessage(leftBehind),
+        AppMessageBox.Show(FinishedUninstallMessage(leftBehind),
             "RemSound uninstalled", MessageBoxButtons.OK, leftBehind is null ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
     }
 
@@ -378,7 +387,8 @@ internal static class AppInstaller
         {
             var (ok, message) = removePlugin();
             log?.Invoke($"uninstall: DAW plugin — {message}");
-            if (!ok) problems.Add("The DAW plugin could not be removed — close your music software and remove it from its plugin folder.");
+            if (!ok) problems.Add("The DAW plugin could not be removed: your music software may have it open, or Windows' "
+                + "permission to change its folder was refused. Remove it from its plugin folder yourself.");
         }
         if (options.RemoveService)
         {
@@ -413,6 +423,8 @@ internal static class AppInstaller
     /// <summary>Copy the PROGRAM files (exe, DLLs, native runtimes, default sounds, manual, Tolk, …) —
     /// everything beside the exe EXCEPT the user-data entries, which are handled separately so the
     /// tick-boxes can include or exclude them. Overwrites, so a re-run cleanly updates/repairs.</summary>
+    internal static void CopyProgramFilesForTest(string source, string target) => CopyProgramFiles(source, target);
+
     private static void CopyProgramFiles(string source, string target)
     {
         foreach (var file in Directory.GetFiles(source))
@@ -421,6 +433,9 @@ internal static class AppInstaller
             // target itself, so a source copy's marker must not leak in and mislabel things.
             if (string.Equals(Path.GetFileName(file), InstalledMarkerName, StringComparison.OrdinalIgnoreCase))
                 continue;
+            // Nor the updater's notes about the portable copy's own last update: a half-finished update there would have
+            // told the new install it was broken, and held its service back (2026-09-25 sweep).
+            if (ServiceControl.IsSkippedProgramFile(Path.GetFileName(file))) continue;
             File.Copy(file, Path.Combine(target, Path.GetFileName(file)), overwrite: true);
         }
 
@@ -429,6 +444,7 @@ internal static class AppInstaller
             var name = Path.GetFileName(dir);
             if (UserDataEntries.Any(e => string.Equals(e, name, StringComparison.OrdinalIgnoreCase)))
                 continue; // user data — copied conditionally below
+            if (ServiceControl.IsSkippedProgramFolder(name)) continue;   // the updater's backups
             CopyDirectory(dir, Path.Combine(target, name));
         }
     }
@@ -766,7 +782,7 @@ internal static class AppInstaller
 
     // ---------------- dialogs ----------------
 
-    private sealed class InstallOptions
+    internal sealed class InstallOptions
     {
         public bool CreateDesktopShortcut;
         public bool CreateStartMenuFolder;
@@ -789,7 +805,16 @@ internal static class AppInstaller
     /// user has tabbed past the options. Escape cancels.</summary>
     private static InstallOptions? ShowInstallOptionsDialog(IWin32Window owner, string target, bool updating)
     {
-        using var dialog = new Form
+        using var dialog = BuildInstallOptionsDialog(target, updating, out var readOptions);
+        return dialog.ShowDialog(owner) == DialogResult.OK ? readOptions() : null;
+    }
+
+    /// <summary>Builds the install tick-box dialog without showing it, so the dialog audits can reach it (it was built and
+    /// shown in one step until 2026-09-24, out of their sight). <paramref name="readOptions"/> reads the ticks once the
+    /// user has answered.</summary>
+    internal static Form BuildInstallOptionsDialog(string target, bool updating, out Func<InstallOptions> readOptions)
+    {
+        var dialog = new Form
         {
             Text = updating ? "Update the RemSound install" : "Install RemSound on this PC",
             StartPosition = FormStartPosition.CenterParent,
@@ -831,7 +856,7 @@ internal static class AppInstaller
             "Run RemSound automatically when you sign in to Windows", StartupAutoStart.IsEnabled);
         var profilesBox = MakeCheck("Copy my &profiles and settings across",
             "Copy your profiles and all your settings from this copy into the install folder", true);
-        var recordingsBox = MakeCheck("Copy my re&cordings across",
+        var recordingsBox = MakeCheck("Copy my r&ecordings across",
             "Copy your recordings from this copy into the install folder", true);
         var logsBox = MakeCheck("Copy my &logs across",
             "Copy your diagnostic logs from this copy into the install folder", false);
@@ -878,8 +903,17 @@ internal static class AppInstaller
         dialog.CancelButton = cancelButton; // Escape cancels
         dialog.AcceptButton = null;
 
-        if (dialog.ShowDialog(owner) != DialogResult.OK) return null;
-        return new InstallOptions
+        // Context help (F1): each control's entry in the manual.
+        ContextHelp.Mark(desktopBox, "dialog.install.desktop-shortcut");
+        ContextHelp.Mark(startMenuBox, "dialog.install.start-menu");
+        ContextHelp.Mark(startupBox, "dialog.install.run-at-sign-in");
+        ContextHelp.Mark(profilesBox, "dialog.install.copy-profiles");
+        ContextHelp.Mark(recordingsBox, "dialog.install.copy-recordings");
+        ContextHelp.Mark(logsBox, "dialog.install.copy-logs");
+        ContextHelp.Mark(installButton, "dialog.install.install");
+        ContextHelp.Mark(cancelButton, "dialog.install.cancel");
+
+        readOptions = () => new InstallOptions
         {
             CreateDesktopShortcut = desktopBox.Checked,
             CreateStartMenuFolder = startMenuBox.Checked,
@@ -888,6 +922,7 @@ internal static class AppInstaller
             CopyRecordings = recordingsBox.Checked,
             CopyLogs = logsBox.Checked,
         };
+        return dialog;
     }
 
     // AccessibleCheckBox (not a plain CheckBox) — it re-fires the MSAA focus event on every toggle so
@@ -1011,6 +1046,14 @@ internal static class AppInstaller
         cancelButton.TabIndex = 1;
         dialog.CancelButton = cancelButton;
         dialog.AcceptButton = null;
+
+        // Context help (F1): each control's entry in the manual.
+        ContextHelp.Mark(removeDataBox, "dialog.uninstall.remove-profiles");
+        ContextHelp.Mark(removeRecBox, "dialog.uninstall.remove-recordings");
+        ContextHelp.Mark(removePluginBox, "dialog.uninstall.remove-plugin");
+        ContextHelp.Mark(removeServiceBox, "dialog.uninstall.remove-service");
+        ContextHelp.Mark(okButton, "dialog.uninstall.ok");
+        ContextHelp.Mark(cancelButton, "dialog.uninstall.cancel");
 
         readOptions = () => new UninstallOptions
         {

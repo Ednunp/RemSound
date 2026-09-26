@@ -54,10 +54,11 @@ internal static partial class SelfTest
             var output = (AudioIOPortManaged)plugin.OutputPorts[0];
 
             // Run one block with the track at a known level, and hand back the loudest sample the DAW
-            // would have heard on its output. The first block after a format change is deliberately
-            // silent (buffers resize there rather than on the audio thread), so callers run a few.
+            // would have heard on its output.
+            var blocksRun = 0;
             double RunBlock()
             {
+                blocksRun++;
                 var left = input.GetAudioBuffer(0);
                 var right = input.GetAudioBuffer(1);
                 for (var i = 0; i < left.Length; i++) { left[i] = TrackLevel; right[i] = TrackLevel; }
@@ -82,7 +83,7 @@ internal static partial class SelfTest
             int SentCount() { lock (sentBlocks) return sentBlocks.Count; }
 
             // --- Neither direction: the track still passes through ---------------------------------
-            RunBlock();                       // the silent format-change block
+            RunBlock();                       // the first block (it plays now; kept so the counts below are as before)
             ClearSent();
             for (var i = 0; i < 5; i++) RunBlock();
             var idlePeak = RunBlock();
@@ -102,6 +103,36 @@ internal static partial class SelfTest
             var sendOnlyPeak = SentPeak();
             Check(Math.Abs(sendOnlyPeak - TrackLevel) < 0.01f,
                 $"what is sent must be the track at its own level (peak {sendOnlyPeak:0.000}, track is {TrackLevel:0.000})");
+
+            // --- The log line's own counters, against the calls we really made ---------------------
+            // Added 2026-09-24 to find where a send stops in a real DAW. A counter nobody wired reads 0 and
+            // looks like an answer, so each one is checked against something this test knows independently.
+            var snap = plugin.DescribeForLogForTest();
+            for (var tries = 0; tries < 5 && snap.InputPeakDb <= -120; tries++)
+            {
+                // The plugin's own log timer may have taken the peak a moment ago; one more block puts it back.
+                RunBlock();
+                snap = plugin.DescribeForLogForTest();
+            }
+            Check(snap.HostCalls == blocksRun,
+                $"HostCalls must count every call the host makes - this test made {blocksRun}, the line says {snap.HostCalls}");
+            Check(snap.LastFrames == input.GetAudioBuffer(0).Length,
+                $"LastFrames must be the host's block size ({input.GetAudioBuffer(0).Length}), got {snap.LastFrames}");
+            var trackDb = 20 * Math.Log10(TrackLevel);
+            Check(Math.Abs(snap.InputPeakDb - trackDb) < 0.1,
+                $"InputPeakDb must be the loudest input sample - the track is {trackDb:0.0} dBFS, the line says {snap.InputPeakDb:0.0}");
+            Check(plugin.DescribeForLogForTest().InputPeakDb <= -120,
+                "the peak is 'since the last line': reading it must start it again, or one loud moment reads loud forever");
+            Check(snap.Submitted > 0, $"Submitted must count blocks handed to the send side while sending (got {snap.Submitted})");
+            Check(snap.BusSenders >= 1, $"BusSenders must count this instance while it sends (got {snap.BusSenders})");
+            Check(snap.BusFlushed > 0, $"BusFlushed must count blocks that left for the app - {SentCount()} crossed the link, the line says {snap.BusFlushed}");
+            // And the log really reads these numbers: the checks above ask the plugin directly, so a log whose source was
+            // never wired - or wired to something else - wrote no line, or wrong ones, with this step green (2026-09-24).
+            var logSource = plugin.LogSnapshotSourceForTest;
+            Check(logSource is not null, "the plugin's log must be given the plugin's own numbers for its once-a-second line");
+            var logged = logSource!();
+            Check(logged.HostCalls == blocksRun && logged.Job == "send",
+                $"the line the log writes must be this plugin's own - {blocksRun} host calls while sending, the log reads {logged.HostCalls} ({logged.Job})");
 
             // --- BOTH AT ONCE, which is the whole point ---------------------------------------------
             plugin.SetJobForTest(send: true, receive: true, peer: IPAddress.Loopback);

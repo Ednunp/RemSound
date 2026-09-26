@@ -49,6 +49,9 @@ public static class ServiceStore
         catch { return null; }
     }
 
+    /// <summary>Gate seam: runs between the temporary file and the move, so a check can crash a write half way.</summary>
+    internal static Action? MidWriteForTest;
+
     /// <summary>Write a whole file crash-safely: a sibling temp file, then an atomic move over the target. A torn write of the
     /// service profile read back as NO service profile, and the service stayed idle with nothing said. Every whole file in
     /// this folder is written this way; the two append-only logs are not whole files. 2026-09-13 review.</summary>
@@ -58,6 +61,7 @@ public static class ServiceStore
         try
         {
             File.WriteAllText(tmp, contents);
+            MidWriteForTest?.Invoke();
             File.Move(tmp, path, overwrite: true);
         }
         catch
@@ -165,6 +169,25 @@ public static class ServiceStore
     {
         try { System.IO.Directory.CreateDirectory(Directory); WriteAtomic(InstallingUserSidFile, sid); }
         catch { /* best-effort */ }
+        // And a copy every account can read, beside the locked folder rather than in it: the one in it can be read only by
+        // the account it names, so another account could not tell the folder was simply not theirs (2026-09-25 sweep).
+        try { WriteAtomic(ServiceOwnerFile, sid); }
+        catch { /* best-effort */ }
+    }
+
+    private static string ServiceOwnerFile => Path.Combine(Path.GetDirectoryName(Directory.TrimEnd('\\', '/'))!, "service-owner.txt");
+    internal static string ServiceOwnerFileForTest => ServiceOwnerFile;
+
+    /// <summary>The account the service belongs to - the copy of <see cref="LoadInstallingUserSid"/> every account can read.
+    /// Null when there is none yet (a service set up before 6.0 gets one at its next update or repair).</summary>
+    public static string? LoadServiceOwnerSid()
+    {
+        try
+        {
+            var sid = File.Exists(ServiceOwnerFile) ? File.ReadAllText(ServiceOwnerFile).Trim() : null;
+            return sid is not null && sid.StartsWith("S-1-", StringComparison.Ordinal) && sid.Length < 200 ? sid : null;
+        }
+        catch { return null; }
     }
 
     /// <summary>The recorded installing-user SID, or null if none / unreadable.</summary>
@@ -242,6 +265,9 @@ public static class ServiceStore
         // Somebody on a relay ticking the service: tick them back, or leave it to the profile. There is nobody at a
         // screen to ask, so the app's third option (ask me) has no meaning here. Off by default, house rule.
         public bool AcceptRelayConnectionsAutomatically { get; set; }
+        // Who the service is on a server: the id of the Windows account that set its profile up. Null before anybody has
+        // since 2026-09-25, when the service uses the computer's own id.
+        public string? RelayClientId { get; set; }
     }
 
     private static ServiceSettings LoadSettings()
@@ -281,6 +307,18 @@ public static class ServiceStore
     /// (ask, automatic, manual); the service has two, because nobody is at the screen to be asked. Off by default:
     /// the service reaches exactly the people its profile names until you say otherwise.</summary>
     public static bool LoadAcceptRelayConnectionsAutomatically() => LoadSettings().AcceptRelayConnectionsAutomatically;
+
+    /// <summary>The server id of the account that set the service's profile up, or null. The service is that person on a
+    /// server - the same place in everybody's list as their own RemSound.</summary>
+    public static Guid? LoadRelayClientId() =>
+        Guid.TryParse(LoadSettings().RelayClientId, out var id) && id != Guid.Empty ? id : null;
+
+    public static void SaveRelayClientId(Guid id)
+    {
+        var s = LoadSettings(); // load-modify-save: never clobber the other settings in the file
+        s.RelayClientId = id.ToString("D");
+        SaveSettings(s);
+    }
 
     public static void SaveAcceptRelayConnectionsAutomatically(bool automatic)
     {

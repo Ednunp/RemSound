@@ -27,6 +27,7 @@ internal sealed class RelayConnectDialog : Form
     private readonly Action<string> forget;
     private readonly Func<string> status;
     private bool wasConnected;
+    private string? lastLine;
 
     /// <param name="connectedTo">The relay we are on, as it was typed, or null when we are on none.</param>
     /// <param name="connect">Go to this relay. Resolving happens off the window's thread, so the answer arrives later.</param>
@@ -115,6 +116,10 @@ internal sealed class RelayConnectDialog : Form
         statusLabel.TabIndex = 5;
         AcceptButton = actionButton;
         CancelButton = close;
+        ContextHelp.Mark(addressBox, "dialog.server.address");
+        ContextHelp.Mark(rememberedList, "dialog.server.remembered");
+        ContextHelp.Mark(actionButton, "dialog.server.connect");
+        ContextHelp.Mark(close, "dialog.server.close");
 
         FillRemembered();
         addressBox.Text = connectedTo() ?? loadRemembered().FirstOrDefault() ?? "";
@@ -144,8 +149,14 @@ internal sealed class RelayConnectDialog : Form
             return;
         }
         connect(typed);
-        ApplyState(speak: false);
+        // Spoken: an address connects there and then, and "Connecting..." is worth hearing. Recorded silently, the change
+        // was never announced at all (2026-09-25 sweep).
+        ApplyState(speak: true);
     }
+
+    /// <summary>Gate seams: press the button's action, and one tick of the window's watch.</summary>
+    internal void ActionForTest() => OnAction();
+    internal void TickForTest() => ApplyState(speak: true);
 
     private void FillRemembered()
     {
@@ -170,12 +181,23 @@ internal sealed class RelayConnectDialog : Form
             actionButton.AccessibleName = connected ? "Disconnect from server" : "Connect to server";
         }
         var line = status();
+        var lineChanged = line != lastLine;
+        lastLine = line;
         if (statusLabel.Text != line) statusLabel.Text = line;
         if (connected != wasConnected)
         {
             wasConnected = connected;
             FillRemembered();   // a relay we have just gone to is remembered now
             if (speak) ScreenReader.Speak(connected ? "Connected. The button is now Disconnect." : "Not connected.");
+        }
+        // The line under the buttons, spoken when it changes while you are not on a server ("Connecting...", "Couldn't
+        // find ..."), or when it says something is wrong. Only written to the label, a person on the button never heard a
+        // failed connect, and assumed it was still trying (2026-09-25 sweep). Not while connected otherwise: the waiting
+        // list changes there, and the person announcements have their own speech.
+        else if (speak && lineChanged && line.Length > 0
+                 && (!connected || line.Contains("isn't answering", StringComparison.Ordinal) || line.Contains("password", StringComparison.Ordinal)))
+        {
+            ScreenReader.Speak(line);
         }
     }
 

@@ -18,10 +18,22 @@ internal static partial class SelfTest
         var needle = string.Concat("rsound", " key");
         var assembly = typeof(SelfTest).Assembly.Location;
         Check(File.Exists(assembly), $"the built assembly must be readable to check it ({assembly})");
-        var bytes = File.ReadAllBytes(assembly);
-        foreach (var (encoding, name) in new[] { (System.Text.Encoding.Unicode, "UTF-16"), (System.Text.Encoding.UTF8, "UTF-8") })
-            Check(bytes.AsSpan().IndexOf(encoding.GetBytes(needle)) < 0,
-                $"RemSound must not carry the signing key's folder — \"{needle}\" is in {Path.GetFileName(assembly)} as {name} text");
+        // EVERY file this copy of RemSound ships, not only RemSound.dll: until 2026-09-24 the key's folder could have sat in
+        // RemSound.Core.dll, a deps file, the manual or a script and nothing would have looked. User state is skipped.
+        var shipped = Path.GetDirectoryName(assembly)!;
+        var scanned = 0;
+        foreach (var file in Directory.EnumerateFiles(shipped, "*", SearchOption.AllDirectories))
+        {
+            var rel = Path.GetRelativePath(shipped, file);
+            if (rel.StartsWith(RemSound.Core.AppConfig.UserDataFolderName, StringComparison.OrdinalIgnoreCase)) continue;
+            byte[] bytes;
+            try { bytes = File.ReadAllBytes(file); } catch { continue; }
+            scanned++;
+            foreach (var (encoding, name) in new[] { (System.Text.Encoding.Unicode, "UTF-16"), (System.Text.Encoding.UTF8, "UTF-8") })
+                Check(bytes.AsSpan().IndexOf(encoding.GetBytes(needle)) < 0,
+                    $"RemSound must not carry the signing key's folder — \"{needle}\" is in {rel} as {name} text");
+        }
+        Check(scanned >= 10, $"the scan must actually cover the shipped files ({scanned} read in {shipped})");
 
         var zip = Path.Combine(Path.GetTempPath(), "remsound-signtest-" + Guid.NewGuid().ToString("N") + ".zip");
         var restoreKey = Environment.GetEnvironmentVariable("REMSOUND_SIGNING_KEY");
@@ -38,7 +50,7 @@ internal static partial class SelfTest
             Environment.SetEnvironmentVariable("REMSOUND_SIGNING_KEY", restoreKey);
             try { File.Delete(zip); File.Delete(zip + RemSound.Core.UpdateSignature.SignatureAssetSuffix); } catch { /* temp */ }
         }
-        return $"{Path.GetFileName(assembly)} carries no key folder; with no key given, signing refuses";
+        return $"none of the {scanned} files this copy ships carries the key folder; with no key given, signing refuses";
     }
 
     /// <summary>

@@ -193,7 +193,7 @@ internal sealed class RemSoundUpdater
     {
         try
         {
-            var installDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var installDir = (InstallDirForTest ?? AppContext.BaseDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
             // Stage the new version into a LOCAL, per-user temp folder OUTSIDE the install (and off any
             // Dropbox/OneDrive folder the install might sit in). The new RemSound.exe is launched FROM
@@ -206,7 +206,7 @@ internal sealed class RemSoundUpdater
 
             // This attempt starts clean: clear any stale failure marker / resume sentinel / what's-new
             // marker in the install.
-            TryDelete(Path.Combine(installDir, "update-failed.txt"));
+            TryDelete(Path.Combine(installDir, UpdateApplier.FailureMarkerName));
             TryDelete(Path.Combine(installDir, ResumeProfileSentinelName));
             TryDelete(Path.Combine(installDir, WhatsNewMarkerName));
 
@@ -214,7 +214,7 @@ internal sealed class RemSoundUpdater
             await using (var src = await http.GetStreamAsync(info.DownloadUrl, token).ConfigureAwait(false))
             await using (var dst = File.Create(zipPath))
             {
-                await src.CopyToAsync(dst, token).ConfigureAwait(false);
+                await CopyWithStallLimitAsync(src, dst, DownloadStallLimit, token).ConfigureAwait(false);
             }
 
             // Signature enforcement (2026-07-27) — the release must carry a valid signature by the
@@ -291,14 +291,21 @@ internal sealed class RemSoundUpdater
     /// is covered elsewhere; this pins that the updater actually REFUSES). A missing signature is
     /// refused, not tolerated: every genuine release from 5.6 on is signed, and the updater never
     /// downgrades, so "no .sig" is a red flag, not a legacy case.</summary>
-    internal static bool VerifyStagedRelease(byte[] zipBytes, string? signatureUrl, string? signatureBase64, Action<string>? log)
+    internal static bool VerifyStagedRelease(byte[] zipBytes, string? signatureUrl, string? signatureBase64, Action<string>? log) =>
+        VerifyStagedRelease(zipBytes, signatureUrl, signatureBase64, log, UpdateSignature.Verify);
+
+    /// <summary>The same gate with the signature check handed in, so the gate can prove it ACCEPTS a genuine signature on
+    /// any machine, with a throwaway key: an updater that refused every release passed the old check wherever the
+    /// publisher key wasn't on disk (found 2026-09-24).</summary>
+    internal static bool VerifyStagedRelease(byte[] zipBytes, string? signatureUrl, string? signatureBase64, Action<string>? log,
+        Func<byte[], string, bool> signatureVerifies)
     {
         if (string.IsNullOrEmpty(signatureUrl) || string.IsNullOrEmpty(signatureBase64))
         {
             log?.Invoke("updater: REFUSED — release has no signature file; a genuine RemSound release always ships one. Install left untouched.");
             return false;
         }
-        if (!UpdateSignature.Verify(zipBytes, signatureBase64))
+        if (!signatureVerifies(zipBytes, signatureBase64))
         {
             log?.Invoke("updater: REFUSED — the release signature does not verify (tampered download or not signed by the RemSound release key). Install left untouched.");
             return false;
@@ -371,6 +378,37 @@ internal sealed class RemSoundUpdater
             int.TryParse(parts[i], out nums[i]);
         }
         return new Version(nums[0], nums[1], nums[2]);
+    }
+
+    /// <summary>How long a download may go with nothing arriving before it is given up. The client's own timeout covers
+    /// only the wait for the reply's headers; the body had no limit at all, so a download that stalled with its
+    /// connection still open waited for ever, and every later "Install now" did nothing until RemSound restarted
+    /// (review 2026-09-25; Ed agreed the fix). It is silence that counts, not the total: a slow download that keeps
+    /// arriving is never cut off.</summary>
+    internal static TimeSpan DownloadStallLimit = TimeSpan.FromSeconds(60);   // shortened by the self-test
+
+    /// <summary>Self-test seam: the install folder the download clears its old notes from, instead of this copy's own.</summary>
+    internal static string? InstallDirForTest;
+
+    /// <summary>Copy <paramref name="src"/> to <paramref name="dst"/>, giving up with a <see cref="TimeoutException"/> if
+    /// nothing arrives for <paramref name="stallLimit"/>.</summary>
+    internal static async Task CopyWithStallLimitAsync(Stream src, Stream dst, TimeSpan stallLimit, CancellationToken token)
+    {
+        var buffer = new byte[81920];
+        using var stall = CancellationTokenSource.CreateLinkedTokenSource(token);
+        stall.CancelAfter(stallLimit);
+        while (true)
+        {
+            int read;
+            try { read = await src.ReadAsync(buffer, stall.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                throw new TimeoutException($"the download stalled: nothing arrived for {stallLimit.TotalSeconds:0} seconds");
+            }
+            if (read == 0) return;
+            await dst.WriteAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
+            stall.CancelAfter(stallLimit);   // something arrived: the silence starts again from now
+        }
     }
 
     private static HttpClient CreateClient()

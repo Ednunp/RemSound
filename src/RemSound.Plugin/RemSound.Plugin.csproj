@@ -63,6 +63,36 @@
     <PackageReference Include="AudioPlugSharpVst3" Version="0.7.13" />
   </ItemGroup>
 
+  <!-- OUR OWN VST3 LOADER, NOT THE PACKAGE'S.
+
+       The package's loader reports no tail, so hosts that go by the tail stop calling an effect whose input is
+       silent - and a receiving RemSound is exactly that. Ours is the same loader with one override,
+       getTailSamples() = kInfiniteTail (third-party\AudioPlugSharpVst\README.md has why and how to rebuild it).
+       The package's own target copies its loader first; this one runs after it and puts ours in its place, so
+       everything downstream (the app's plugin\ folder, publish, the installer) ships ours.
+
+       Built for AudioPlugSharpVst3 0.7.13. A loader from one version with the managed side of another is a
+       mismatch nobody would see until a DAW failed to load it, so a version change stops the build. -->
+  <PropertyGroup>
+    <RemSoundPatchedBridge>$(MSBuildThisFileDirectory)..\..\third-party\AudioPlugSharpVst\AudioPlugSharpVst.vst3</RemSoundPatchedBridge>
+    <RemSoundPatchedBridgeFor>0.7.13</RemSoundPatchedBridgeFor>
+  </PropertyGroup>
+  <Target Name="RemSoundPatchedBridge" AfterTargets="AudioPlugSharpVst3">
+    <Error Condition="!Exists('$(RemSoundPatchedBridge)')" Text="RemSound's patched VST3 loader is missing: $(RemSoundPatchedBridge)" />
+    <Error Condition="'%(PackageReference.Identity)' == 'AudioPlugSharpVst3' And '%(PackageReference.Version)' != '$(RemSoundPatchedBridgeFor)'"
+           Text="AudioPlugSharpVst3 is now %(PackageReference.Version) but RemSound's patched loader was built for $(RemSoundPatchedBridgeFor). Rebuild it from the matching commit (third-party\AudioPlugSharpVst\README.md)." />
+    <Copy SourceFiles="$(RemSoundPatchedBridge)" DestinationFiles="$(TargetDir)$(TargetName)Bridge.vst3" />
+  </Target>
+
+  <ItemGroup>
+    <!-- Its own copy of the manual, for context help (2026-09-25): inside a DAW the app's copy is out of reach. It
+         travels with the plugin's files into the app's plugin\ folder, and Install plugin copies it with the rest. -->
+    <Content Include="..\..\readme.html">
+      <Link>readme.html</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\RemSound.Core\RemSound.Core.csproj" />
     <ProjectReference Include="..\RemSound.Sender\RemSound.Sender.csproj" />

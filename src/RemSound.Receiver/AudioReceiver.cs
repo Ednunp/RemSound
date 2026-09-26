@@ -80,8 +80,8 @@ public sealed class AudioReceiver : IDisposable
     // OnHeartbeatReceived, regardless of the user's "Receive audio" tick state.
     private volatile bool playbackEnabled;
 
-    // Audio decryption (2026-05-31). One shared decryptor — all receive decode runs on the
-    // single network thread, so no per-session cipher is needed. AudioKey is the AES key derived
+    // Audio decryption (2026-05-31). One shared decryptor, safe from both receive threads (the listener's and the
+    // sender socket's, for audio from a server): each decrypts into a buffer of its own. See AudioDecryptor. AudioKey is the AES key derived
     // from the local profile's password; AudioFingerprint is the short id of that password we
     // compare against the fingerprints peers advertise in their format packets. Both are pushed
     // down by the app and read on the network thread (hence volatile). peerSecurity records the
@@ -98,6 +98,12 @@ public sealed class AudioReceiver : IDisposable
     /// derived from the fingerprint each peer advertises in its format packets. Keyed by source
     /// address. The app polls this to tell the user about a password mismatch or an out-of-date
     /// peer instead of leaving a silent stream a mystery.</summary>
+    /// <summary>Test seam: what the password check says about an address.</summary>
+    internal void SetPeerSecurityForTest(IPAddress address, PeerSecurityStatus status)
+    {
+        lock (securityLock) peerSecurity[address] = status;
+    }
+
     public IReadOnlyList<KeyValuePair<IPAddress, PeerSecurityStatus>> GetPeerSecurityStatuses()
     {
         lock (securityLock)
@@ -231,6 +237,10 @@ public sealed class AudioReceiver : IDisposable
     /// Nothing in the app reads this — the live count is otherwise visible only in a log line.</summary>
     internal int LiveSessionCountForTest { get { lock (sessionsLock) return sessions.Count; } }
 
+    /// <summary>Gate seam: audio bytes really decoded into the open sessions' buffers - the strict "audio came through",
+    /// where IsAudioFlowingFrom is also briefly true for a session a format packet has only just opened.</summary>
+    internal long AudioBytesDecodedForTest { get { lock (sessionsLock) return sessions.Values.Sum(s => s.AudioBytesWrittenForTest); } }
+
     /// <summary>Which output lanes have a ticked device. Normally derived by CompositeRenderBackend
     /// from <see cref="SetOutputDevices"/> — exposed because this, NOT the audio mode, is what decides
     /// which lane an incoming stream is tagged with, and therefore which latency control governs it.
@@ -311,6 +321,9 @@ public sealed class AudioReceiver : IDisposable
     /// Applies to that peer's current and future sessions. Called from the UI thread.</summary>
     public void SetPeerDsp(IPAddress address, PeerDspChain? chain) =>
         playoutEngine.SetPeerDsp(address, chain);
+
+    /// <summary>Gate seam: the pan and EQ chain held for a peer right now - what the window's controls actually put here.</summary>
+    internal PeerDspChain? PeerDspForTest(IPAddress address) => playoutEngine.PeerDspForTest(address);
 
     /// <summary>Sets (or clears with null) the split-recording tap on every current and future session,
     /// so the recorder receives each peer's block separately. <paramref name="raw"/> = before pan/EQ
@@ -449,6 +462,23 @@ public sealed class AudioReceiver : IDisposable
         return RelayOfMember?.Invoke(remote) is { } relay && snapshot.Contains(relay.Address);
     }
 
+    private long controlRefused;
+    private long controlRefusedLoggedMs = long.MinValue;
+
+    /// <summary>Gate seam: remote-control packets refused before reaching the app.</summary>
+    internal long ControlRefusedForTest => Interlocked.Read(ref controlRefused);
+
+    private void NoteControlRefused(IPEndPoint remote)
+    {
+        var count = Interlocked.Increment(ref controlRefused);
+        Interlocked.Increment(ref packetsDropped);
+        var now = Environment.TickCount64;
+        var last = Interlocked.Read(ref controlRefusedLoggedMs);
+        if (last != long.MinValue && now - last < 60_000) return;
+        if (Interlocked.CompareExchange(ref controlRefusedLoggedMs, now, last) != last) return;
+        diagnosticSink?.Invoke($"remote-control: ignored {count} message(s) so far from senders not ticked (latest from {remote}) - said at most once a minute");
+    }
+
     /// <summary>Test seam: would audio from this address be let in right now? The same question the receive path asks.</summary>
     internal bool IsSenderAllowedForTest(IPEndPoint remote) => IsSenderAllowed(remote);
 
@@ -507,6 +537,8 @@ public sealed class AudioReceiver : IDisposable
     /// <summary>Hand the receiver the plugin claim registry, so peers taken over by a VST instance
     /// stop coming out of this machine's speakers (see PluginPeerClaims).</summary>
     public void SetPluginPeerClaims(PluginPeerClaims? claims) => playoutEngine.SetPluginPeerClaims(claims);
+    /// <summary>Gate seam: the claim register the speakers consult - the one the app handed over, or none.</summary>
+    internal PluginPeerClaims? PluginClaimsForTest => playoutEngine.PluginClaimsForTest;
 
     public int CurrentBufferMs => playoutEngine.CurrentBufferMs;
 
@@ -827,7 +859,15 @@ public sealed class AudioReceiver : IDisposable
     /// receive path. Which devices are ticked, and whether that is remembered, is the app's
     /// business.
     /// </summary>
-    public void SetOutputDevices(IReadOnlyList<string> deviceIds) => multiOutput.SetOutputDevices(deviceIds);
+    public void SetOutputDevices(IReadOnlyList<string> deviceIds)
+    {
+        Interlocked.Increment(ref setOutputDevicesCalls);
+        multiOutput.SetOutputDevices(deviceIds);
+    }
+
+    /// <summary>Gate seam: how many times the outputs have been handed over to be opened.</summary>
+    internal int SetOutputDevicesCallsForTest => Volatile.Read(ref setOutputDevicesCalls);
+    private int setOutputDevicesCalls;
 
     /// <summary>Take a snapshot of the rolling diagnostic counters. Caller drives at 1 Hz.</summary>
     public ReceiverDiagnostics.DiagSnapshot TakeDiagnosticsSnapshot() => diagnostics.Take(MixBytesPerSecond);
@@ -1103,6 +1143,10 @@ public sealed class AudioReceiver : IDisposable
     /// Travels on the same UDP socket as audio + heartbeat (single-port model 2026-05-07).</summary>
     public Action<byte[], IPEndPoint>? OnRemoteControlReceived { get; set; }
 
+    /// <summary>A tick proof arrived (<see cref="TickProof"/>): somebody has ticked us and says they hold the password.
+    /// Handed up raw, as remote control is - the app checks the seal against its own key. Raised on the network thread.</summary>
+    public Action<byte[], IPEndPoint>? OnTickProofReceived { get; set; }
+
     private void HandleRawPacket(byte[] packet, int length, IPEndPoint remote)
     {
         Interlocked.Increment(ref packetsReceived);
@@ -1147,7 +1191,13 @@ public sealed class AudioReceiver : IDisposable
                 // key + replay guard, then gates on allow-list AND the user's opt-in preference.
                 // A legacy 2-byte plaintext payload (pre-5.6 peer) fails the size check here and
                 // is dropped — an unauthenticated command must never reach the handler.
-                if (payload.Length == ControlSealing.SealedPayloadBytes)
+                // Nobody we let in gets as far as the window: a flood of junk from anywhere used to cost the window a
+                // call and a log line per packet (2026-09-25 sweep). Counted, and said once a minute.
+                if (!IsSenderAllowed(remote))
+                {
+                    NoteControlRefused(remote);
+                }
+                else if (payload.Length == ControlSealing.SealedPayloadBytes)
                 {
                     OnRemoteControlReceived?.Invoke(payload.ToArray(), remote);
                 }
@@ -1155,6 +1205,11 @@ public sealed class AudioReceiver : IDisposable
                 {
                     Interlocked.Increment(ref packetsDropped);
                 }
+                break;
+            case RemPacketType.TickProof:
+                // Crypto-dumb here too: the size is the only gate, and the app does the rest.
+                if (payload.Length == TickProof.SealedPayloadBytes) OnTickProofReceived?.Invoke(payload.ToArray(), remote);
+                else Interlocked.Increment(ref packetsDropped);
                 break;
             default:
                 Interlocked.Increment(ref packetsDropped);
@@ -1381,6 +1436,9 @@ public sealed class AudioReceiver : IDisposable
 
     private readonly ConcurrentDictionary<string, long> unselectedSenderNoted = new();
     private static readonly TimeSpan UnselectedSenderInterval = TimeSpan.FromSeconds(10);
+    internal const int UnselectedSenderCap = 256;
+    internal int UnselectedSenderNotedForTest => unselectedSenderNoted.Count;
+    internal void UnselectedSenderForTest(IPEndPoint remote, byte[] fingerprint) => NoteUnselectedSender(remote, fingerprint);
 
     private void NoteUnselectedSender(IPEndPoint remote, ReadOnlySpan<byte> peerFingerprint)
     {
@@ -1390,6 +1448,14 @@ public sealed class AudioReceiver : IDisposable
         var now = Stopwatch.GetTimestamp();
         var every = (long)(Stopwatch.Frequency * UnselectedSenderInterval.TotalSeconds);
         if (unselectedSenderNoted.TryGetValue(key, out var last) && now - last < every) return;
+        // Capped, as peerSecurity beside it is: every new address sending a format packet added an entry for good
+        // (2026-09-25 sweep). Entries past their ten seconds are only there to be forgotten.
+        if (unselectedSenderNoted.Count >= UnselectedSenderCap)
+        {
+            foreach (var (address, at) in unselectedSenderNoted)
+                if (now - at >= every) unselectedSenderNoted.TryRemove(address, out _);
+            if (unselectedSenderNoted.Count >= UnselectedSenderCap) return;   // a flood of new addresses: let them wait
+        }
         unselectedSenderNoted[key] = now;
         var ours = audioFingerprint;
         var samePassword = ours is not null && peerFingerprint.Length == ours.Length && peerFingerprint.SequenceEqual(ours);

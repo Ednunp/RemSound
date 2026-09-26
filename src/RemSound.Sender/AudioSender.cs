@@ -702,6 +702,22 @@ public sealed class AudioSender : IDisposable
         pluginSendActive = false;
     }
 
+    /// <summary>
+    /// Stop the person's OWN capture - the WASAPI lane stopped, the ASIO lane parked, exactly as <see cref="Stop"/> does
+    /// them - and leave a DAW track's lane alone. "Send my audio" switched off while a plugin is sending: the track goes
+    /// on, the microphone doesn't. Until the 2026-09-25 sweep a sending plugin kept the whole sender up, every ticked input
+    /// with it. The sources are forgotten too, so nothing can start them again without the app handing them over afresh.
+    /// </summary>
+    public void StopCapture()
+    {
+        engine.Stop();
+        lock (configGate) persistentAsio?.Park();
+        pendingSources = [];
+    }
+
+    /// <summary>How many capture sources the sender has been handed - what it would open on its next start.</summary>
+    internal int PendingSourceCountForTest => pendingSources.Count;
+
     // === plugin lane (the DAW track) ===
 
     // Whether the plugin lane is armed. Volatile because SubmitPluginBlock reads it on the bridge

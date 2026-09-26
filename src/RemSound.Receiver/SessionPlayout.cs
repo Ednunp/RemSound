@@ -383,6 +383,11 @@ internal sealed class SessionPlayout : IDisposable
     /// to prune long-idle sessions so the dictionary doesn't grow unboundedly.</summary>
     public DateTime LastWriteUtc { get; private set; } = DateTime.UtcNow;
 
+    /// <summary>Gate seam: audio bytes really written into this session's buffer since it opened. LastWriteUtc starts at
+    /// "now" so a new session is not swept at once, which means a session opened by a format packet alone reads as
+    /// recently written for a moment; this does not.</summary>
+    internal long AudioBytesWrittenForTest => Interlocked.Read(ref bytesWrittenForDriftEst);
+
     public SessionPlayout(IPEndPoint endpoint, ushort streamId, int capacityBytes)
     {
         Endpoint = endpoint;
@@ -423,6 +428,10 @@ internal sealed class SessionPlayout : IDisposable
 
     public void Write(ReadOnlySpan<byte> source)
     {
+        // Audio arrived for this stream, whichever copy below plays it. Stamped only inside WriteLocal, a stream playing
+        // from its ASIO copy while the WASAPI lane was not reading looked silent, was pruned four seconds later, and came
+        // back on the next format packet: the ASIO output dropped out every few seconds (found 2026-09-25).
+        LastWriteUtc = DateTime.UtcNow;
         var mir = mirrors;
         // EACH LANE PLAYS ITS OWN COPY. When the lane this primary belongs to stops reading while a mirror's lane
         // is still reading, that mirror is what plays the peer. So the primary is not fed — exactly as a mirror on
@@ -442,6 +451,22 @@ internal sealed class SessionPlayout : IDisposable
             // the CPU, which starved the lane he was actually listening to. See LaneActivity.
             if (m.LaneIsConsuming is { } consuming && !consuming(m.Route)) continue;
             m.WriteLocal(source);
+        }
+    }
+
+    /// <summary>The copy of this stream being fed right now: this primary, or - when its own lane has stopped reading and a
+    /// mirror's lane still is - that mirror, exactly as <see cref="Write"/> decides. A plugin's track reads whichever copy is
+    /// fed: reading the primary alone, a DAW track receiving the peer went silent whenever the WASAPI output stopped being
+    /// read with an ASIO output still going (2026-09-25 sweep, measured: 95,040 frames with the lane read, 0 without).</summary>
+    internal SessionPlayout FedCopy
+    {
+        get
+        {
+            var mir = mirrors;
+            if (mir.Length == 0 || LaneIsConsuming is not { } primaryLane || primaryLane(Route)) return this;
+            for (var i = 0; i < mir.Length; i++)
+                if (primaryLane(mir[i].Route)) return mir[i];
+            return this;
         }
     }
 

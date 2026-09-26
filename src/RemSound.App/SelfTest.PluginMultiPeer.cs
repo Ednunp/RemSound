@@ -528,13 +528,24 @@ internal static partial class SelfTest
               + $"ticking everybody once ({plugin.ChosenPeersForTest.Count} on the track)");
 
             // --- Saved and restored -----------------------------------------------------------------
+            // Into a FRESH instance, as a DAW reopening the project does: restoring into the same one proved nothing about
+            // the chosen set, which that instance never forgot (found 2026-09-24). And the exact set, not "at least two".
+            // What the plugin remembers by address is the people ticked by hand; anyone "all peers" picked up comes back through
+            // that tick instead, so it is not part of the remembered set.
+            var chosenAtSave = plugin.SavedPeerAddressesForTest.OrderBy(a => a).ToList();
+            Check(chosenAtSave.Count == 2, $"the two people ticked by hand must be what the track remembers by address ({chosenAtSave.Count})");
             var saved = plugin.SaveState();
-            all.EditValue = 0;
-            plugin.ApplyParameters();
-            plugin.RestoreState(saved);
-            Check(plugin.AllPeersForTest, "the all-peers tick must survive a save and reload");
-            Check(plugin.SavedPeerAddressesForTest.Count >= 2,
-                $"and so must the chosen set, by address ({plugin.SavedPeerAddressesForTest.Count} remembered)");
+            var reopened = new RemSoundPlugin { Host = new StubAudioHost() };
+            try
+            {
+                reopened.Initialize();
+                reopened.RestoreState(saved);
+                Check(reopened.AllPeersForTest, "the all-peers tick must survive a save and reload");
+                var restoredSet = reopened.SavedPeerAddressesForTest.OrderBy(a => a).ToList();
+                Check(restoredSet.SequenceEqual(chosenAtSave),
+                    $"and so must the chosen set, by address - exactly ({string.Join(", ", restoredSet)} restored, {string.Join(", ", chosenAtSave)} saved)");
+            }
+            finally { try { reopened.CloseForTest(); } catch { } }
         }
         finally
         {

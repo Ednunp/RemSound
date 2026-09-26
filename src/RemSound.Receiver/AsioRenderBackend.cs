@@ -33,6 +33,14 @@ internal sealed class AsioRenderBackend : IRenderBackend
     // The driver, SHARED with the sender's capture side - one instance per driver name, full duplex.
     // See SharedAsioDevice, and the matching field in AsioCaptureBackend for why.
     private SharedAsioDevice? device;
+
+    /// <summary>When an open last failed. Tried again no sooner than <see cref="ReopenBackoff"/> after it: some drivers
+    /// take seconds to fail, and the heal asks every few seconds.</summary>
+    private DateTime lastFailedOpenUtc = DateTime.MinValue;
+    internal static TimeSpan ReopenBackoff = TimeSpan.FromSeconds(10);
+
+    /// <summary>Gate seam: how many times the driver has been opened, or tried.</summary>
+    internal int OpenAttemptsForTest;
     private List<int> activeChannelPairs = [];
     private BroadcastProvider? broadcaster;
 
@@ -96,9 +104,12 @@ internal sealed class AsioRenderBackend : IRenderBackend
         }
     }
 
+    /// <summary>The pairs actually OPEN. The pairs wanted were reported whether the driver opened or not, so an ASIO output
+    /// that failed to open - after sleep, with a music program holding a single-client interface - read as open, the
+    /// once-a-second heal never saw it missing, and it stayed silent until re-ticked (2026-09-25 sweep).</summary>
     public IReadOnlyList<string> ActiveDeviceIds
     {
-        get { lock (gate) return activeChannelPairs.Select(AsioDeviceId.Format).ToList(); }
+        get { lock (gate) return device is null ? [] : activeChannelPairs.Select(AsioDeviceId.Format).ToList(); }
     }
 
     public void Start()
@@ -141,6 +152,7 @@ internal sealed class AsioRenderBackend : IRenderBackend
             // at Start time. Just update the broadcaster's pair list and we're done.
             if (device is null)
             {
+                if (DateTime.UtcNow - lastFailedOpenUtc < ReopenBackoff) return;   // tried moments ago: the next heal tries again
                 OpenAsioLocked();
                 return;
             }
@@ -151,6 +163,7 @@ internal sealed class AsioRenderBackend : IRenderBackend
 
     private void OpenAsioLocked()
     {
+        OpenAttemptsForTest++;
         try
         {
             // Through the SHARED device - see SharedAsioDevice. The capture side may already hold this
@@ -184,6 +197,7 @@ internal sealed class AsioRenderBackend : IRenderBackend
                     ? $"asio render: driver reports {shared.PlaybackLatencySamples} samples of playback latency = {reportedOutputLatencyMs:0.0} ms"
                     : "asio render: driver did not report a playback latency — the estimate falls back to its own figure");
                 onDiagnostic?.Invoke($"asio render started \"{driverName}\" {MixSampleRate} Hz, {outputChannelCount} output channel(s); pairs={string.Join(",", activeChannelPairs)}");
+                lastFailedOpenUtc = DateTime.MinValue;
             }
             catch
             {
@@ -194,7 +208,8 @@ internal sealed class AsioRenderBackend : IRenderBackend
         }
         catch (Exception ex)
         {
-            onDiagnostic?.Invoke($"asio render start failed: {ex.GetType().Name}: {SharedAsioDevice.Explain(ex)}");
+            onDiagnostic?.Invoke($"asio render start failed: {ex.GetType().Name}: {SharedAsioDevice.Explain(ex)} - tried again in {ReopenBackoff.TotalSeconds:0} s");
+            lastFailedOpenUtc = DateTime.UtcNow;
             StopInternal();
         }
     }
@@ -240,6 +255,10 @@ internal sealed class AsioRenderBackend : IRenderBackend
     /// channels that aren't selected. Output is interleaved 32-bit float at 48 kHz, exactly
     /// what NAudio's AsioOut wants.
     /// </summary>
+    /// <summary>Test seam: one read through the ASIO output's broadcast, as the driver's callback makes it.</summary>
+    internal static void ReadThroughBroadcastForTest(IWaveProvider source, int outputChannels, byte[] buffer) =>
+        new BroadcastProvider(source, outputChannels, [0, 1]).Read(buffer, 0, buffer.Length);
+
     private sealed class BroadcastProvider : IWaveProvider
     {
         private readonly IWaveProvider source;
@@ -264,6 +283,10 @@ internal sealed class AsioRenderBackend : IRenderBackend
             activePairs = pairs.ToList();
         }
 
+        private long readFaults;
+        /// <summary>How many blocks were silenced because reading them threw.</summary>
+        public long ReadFaults => Interlocked.Read(ref readFaults);
+
         public int Read(byte[] buffer, int offset, int count)
         {
             // Frame size in BYTES on the output side.
@@ -275,7 +298,14 @@ internal sealed class AsioRenderBackend : IRenderBackend
             // per frame.
             var sourceBytes = frames * MixChannels * sizeof(float);
             if (sourceScratchBytes.Length < sourceBytes) sourceScratchBytes = new byte[sourceBytes];
-            source.Read(sourceScratchBytes, 0, sourceBytes);
+            // Nothing may be thrown from here into the driver's callback (native code): silence for the block instead
+            // (2026-09-25 sweep; hardening, nothing known to throw).
+            try { source.Read(sourceScratchBytes, 0, sourceBytes); }
+            catch (Exception)
+            {
+                Interlocked.Increment(ref readFaults);
+                Array.Clear(sourceScratchBytes, 0, sourceBytes);
+            }
 
             // Interpret source bytes as float array, output bytes as float array, broadcast.
             var srcFloats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(sourceScratchBytes.AsSpan(0, sourceBytes));

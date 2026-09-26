@@ -20,8 +20,14 @@ internal static class WinEventNotifier
     [DllImport("user32.dll")]
     private static extern void NotifyWinEvent(uint eventMin, nint hwnd, int idObject, int idChild);
 
+    /// <summary>Tell the screen reader nothing. RemSound started with --headless sets this while its windows are
+    /// hidden: it is being driven by a script, and the person at the machine must not hear its controls change
+    /// (Ed, 2026-09-24: "this is going to get confusing to listen to").</summary>
+    internal static bool Quiet { get; set; }
+
     public static void NotifyFocus(Control control)
     {
+        if (Quiet) return;
         if (control.IsHandleCreated)
         {
             NotifyWinEvent(EVENT_OBJECT_FOCUS, control.Handle, OBJID_CLIENT, CHILDID_SELF);
@@ -38,6 +44,7 @@ internal static class WinEventNotifier
     /// is showing) instead. Best run deferred (BeginInvoke), after the show/foreground settles.</summary>
     public static void AnnounceByFocusingLeaf(ContainerControl form, Control? page, Control fallback)
     {
+        if (Quiet) return;
         var leaf = FirstFocusableLeaf(page) ?? fallback;
         form.ActiveControl = null;
         leaf.Focus();
@@ -96,6 +103,7 @@ internal class AccessibleCheckBox : CheckBox
     private static void NotifyWinEvent(uint eventMin, nint hwnd, int idObject, int idChild)
     {
         RaisedWinEventsForTest?.Add(eventMin);
+        if (WinEventNotifier.Quiet) return;
         NotifyWinEventNative(eventMin, hwnd, idObject, idChild);
     }
 

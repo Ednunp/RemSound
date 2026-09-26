@@ -22,6 +22,12 @@ internal static partial class SelfTest
         {
             return Skip("set REMSOUND_ASIO_TEST_DRIVER to the name of an installed ASIO driver to run this on real hardware");
         }
+        // Never open a driver another RemSound on this desktop may be holding: a second open of one ASIO driver from two
+        // processes is the vendor-driver crash this whole shared-device design exists to avoid (found 2026-09-24).
+        var mine = System.Diagnostics.Process.GetCurrentProcess();
+        var others = System.Diagnostics.Process.GetProcessesByName("RemSound").Where(p => p.Id != mine.Id && p.SessionId == mine.SessionId).ToList();
+        if (others.Count > 0)
+            return Skip($"another RemSound is running on this desktop (process {others[0].Id}) and may hold {driver}; close it to run this on real hardware");
 
         var lines = new List<string>();
         void Log(string line) { lock (lines) lines.Add(line); }

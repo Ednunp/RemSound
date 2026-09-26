@@ -388,6 +388,10 @@ internal static partial class SelfTest
     /// BEFORE checking focus, so a change that landed while the box was focused was never written
     /// afterwards — it waited for the next change. Both now share one decision, so they cannot drift
     /// apart again.</para>
+    ///
+    /// <para>The rule only, and it stays that way: "focused" is the box holding Windows' keyboard focus, which a window
+    /// the gate never shows cannot be given. That each writer asks this rule with the box's own Focused is read by eye;
+    /// the wobble filter beside it is driven through the real box. 2026-09-24.</para>
     /// </summary>
     private static string? AuditReadoutHoldsStillWhileRead()
     {
@@ -453,8 +457,35 @@ internal static partial class SelfTest
             $"replaying Ed's own 21 readings must not redraw the box more than a handful of times — got {redraws}. "
             + "Every redraw is NVDA speaking over him.");
 
+        // AND THROUGH THE REAL BOX, in all three configurations. The rule above can be right while the writer stops
+        // asking it - the box would then speak once a second again with this step green (2026-09-24).
+        var boxRedraws = new List<string>();
+        foreach (var configuration in AudioConfigurations.All)
+        {
+            MainForm form;
+            try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+            using (form)
+            {
+                SetAudioConfigurationForTest(form, configuration);
+                var shown = form.FeedLatencyReadoutForTest(-1, -1);
+                var changes = 0;
+                foreach (var live in observed)
+                {
+                    var now = form.FeedLatencyReadoutForTest(live, live);
+                    if (now != shown) changes++;
+                    shown = now;
+                }
+                Check(changes <= 4,
+                    $"in {configuration.Describe()} Ed's 21 readings must not rewrite the real Total latency box more than a handful of "
+                    + $"times — it was rewritten {changes} times, and every rewrite is NVDA speaking");
+                Check(changes >= 1, $"in {configuration.Describe()} the box must show the readings at all (it never changed)");
+                boxRedraws.Add($"{configuration.Describe()} {changes}");
+            }
+        }
+
         return $"wobble under {MainForm.LatencyReadoutDeadbandMs:0} ms is held; start, stop and real moves get through; "
-             + $"Ed's 21 recorded readings redraw the box {redraws} times instead of 21";
+             + $"Ed's 21 recorded readings redraw the box {redraws} times instead of 21, and the real box likewise ({string.Join(", ", boxRedraws)})";
     }
 
     /// <summary>
@@ -1303,6 +1334,7 @@ internal static partial class SelfTest
     {
         // --- The trap itself, driven -------------------------------------------------------------
         var diag = new ReceiverDiagnostics();
+        var diagnosticsWere = RemSound.Core.DiagnosticsGate.Enabled;
         RemSound.Core.DiagnosticsGate.Enabled = true;
         try
         {
@@ -1336,7 +1368,7 @@ internal static partial class SelfTest
                 }
             }
         }
-        finally { RemSound.Core.DiagnosticsGate.Enabled = false; }
+        finally { RemSound.Core.DiagnosticsGate.Enabled = diagnosticsWere; }
 
         // --- And the tick must obey it ------------------------------------------------------------
         var root = FindSourceRoot();
@@ -1384,6 +1416,7 @@ internal static partial class SelfTest
     /// </summary>
     private static string? AuditRenderWorkIsAttributedPerLane()
     {
+        var diagnosticsWere = RemSound.Core.DiagnosticsGate.Enabled;
         RemSound.Core.DiagnosticsGate.Enabled = true;
         try
         {
@@ -1432,7 +1465,7 @@ internal static partial class SelfTest
                     + $"reports the sum of the whole session (got {againW}/{againA}/{againM})");
             }
         }
-        finally { RemSound.Core.DiagnosticsGate.Enabled = false; }
+        finally { RemSound.Core.DiagnosticsGate.Enabled = diagnosticsWere; }
 
         return "render time lands on the lane that actually spent it, never on the other lane or the single-lane path, "
              + "and resets when taken — in all three configurations";
@@ -1605,6 +1638,9 @@ internal static partial class SelfTest
             form.LogForTest.EventTapForTest = line => { lock (lines) lines.Add(line); };
             try
             {
+                // Receiving, as in a real session: the heal is for outputs that should be playing. (No output is ticked
+                // here, so nothing real opens.)
+                form.ReceiverForTest.SetPlaybackEnabled(true);
                 // Nothing wrong: the tick must not touch the devices. Re-applying for no reason would
                 // break audio every second, which is worse than the fault being fixed.
                 form.ReceiverForTest.ForceFaultedOutputForTest = false;
@@ -1628,11 +1664,18 @@ internal static partial class SelfTest
                     $"the re-open line must carry the audio configuration like every other change — got: {reopened}");
 
                 // It must not then re-apply on EVERY tick — a device that is genuinely gone would be
-                // hammered once a second for as long as it stays away.
-                lines.Clear();
+                // hammered once a second for as long as it stays away. Counted by attempts: the line is written once
+                // per episode, so watching the log for it could never see a retry (found 2026-09-24).
+                Check(form.OutputReopenAttemptsForTest == 1, $"the faulted tick must make exactly one attempt (made {form.OutputReopenAttemptsForTest})");
                 form.SnapshotTickForTest();
-                Check(!lines.Any(l => l.Contains("re-opening", StringComparison.OrdinalIgnoreCase)),
-                    $"the retry interval must hold off the next attempt — got: [{string.Join(" | ", lines)}]");
+                form.SnapshotTickForTest();
+                Check(form.OutputReopenAttemptsForTest == 1,
+                    $"inside the retry interval the next ticks must hold off - {form.OutputReopenAttemptsForTest - 1} more attempt(s) in two seconds is a dead card hammered every second");
+                // ...and must try again once it is up, or an output that fails its first re-open is given up on.
+                form.BackdateOutputReopenForTest(MainForm.FaultedOutputRetryIntervalForTest + TimeSpan.FromMilliseconds(100));
+                form.SnapshotTickForTest();
+                Check(form.OutputReopenAttemptsForTest == 2,
+                    $"once the retry interval is up a still-faulted output must be tried again ({form.OutputReopenAttemptsForTest} attempts)");
 
                 // AND IT MUST NOTICE RECOVERY, so the log shows the round trip rather than an
                 // unexplained gap.
@@ -1642,16 +1685,43 @@ internal static partial class SelfTest
                 Check(lines.Any(l => l.Contains("recovered", StringComparison.OrdinalIgnoreCase)),
                     $"once the output is healthy again the log must say so — an episode that starts and never ends "
                     + $"reads as still broken. Got: [{string.Join(" | ", lines)}]");
+
+                // THE OTHER WAY IN: an output ticked but never opened (a Bluetooth headset not back yet after a resume).
+                // Nothing faulted, so only the ticked-but-not-open comparison can notice. Never driven until 2026-09-24.
+                form.BackdateOutputReopenForTest(MainForm.FaultedOutputRetryIntervalForTest + TimeSpan.FromMilliseconds(100));
+                var before = form.OutputReopenAttemptsForTest;
+                form.SetTickedOutputIdsForTest("{gate-headset-not-back-yet}");
+                lines.Clear();
+                form.SnapshotTickForTest();
+                Check(form.OutputReopenAttemptsForTest == before + 1
+                        && lines.Any(l => l.Contains("ticked output is not open", StringComparison.OrdinalIgnoreCase)),
+                    $"an output that is ticked but not open must be re-opened by the tick too, and say which way it got there "
+                    + $"({form.OutputReopenAttemptsForTest - before} attempt(s); logged: [{string.Join(" | ", lines)}])");
+
+                // AND NOT WHILE RECEIVE AUDIO IS OFF. The outputs are closed on purpose then; every ticked one read as not
+                // open, so the tick re-opened them all - the audio interface included, held with send and receive both off
+                // (found 2026-09-25).
+                form.ReceiverForTest.SetPlaybackEnabled(false);
+                form.BackdateOutputReopenForTest(MainForm.FaultedOutputRetryIntervalForTest + TimeSpan.FromMilliseconds(100));
+                form.SetTickedOutputIdsForTest("{gate-output-while-receive-off}");
+                var whileOff = form.OutputReopenAttemptsForTest;
+                form.SnapshotTickForTest();
+                form.ReceiverForTest.ForceFaultedOutputForTest = true;
+                form.SnapshotTickForTest();
+                Check(form.OutputReopenAttemptsForTest == whileOff,
+                    $"with Receive audio off the tick must re-open nothing - the outputs are closed on purpose ({form.OutputReopenAttemptsForTest - whileOff} attempt(s))");
             }
             finally
             {
                 form.LogForTest.EventTapForTest = null;
                 form.ReceiverForTest.ForceFaultedOutputForTest = false;
+                form.ReceiverForTest.SetPlaybackEnabled(false);
             }
         }
 
-        return "a faulted output makes the real per-second tick re-apply the devices, once per episode, stamped with "
-             + "the configuration, and the recovery is logged too";
+        return "a faulted output makes the real per-second tick re-apply the devices, logged once per episode and stamped with "
+             + "the configuration, retried every 3 seconds and no more often, the recovery logged; and an output ticked but not open "
+             + "is re-opened the same way";
     }
 
     /// <summary>

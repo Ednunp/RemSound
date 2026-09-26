@@ -4,11 +4,12 @@ using RemSound.Core;
 namespace RemSound.App;
 
 /// <summary>
-/// Preferences dialog. A six-tab dialog using the same accessible
+/// Preferences dialog. A seven-tab dialog using the same accessible
 /// <see cref="QuietTabControl"/> as the main window:
 ///   * General — Browse for RemSound profiles folder, the auto-save list, Accept remote volume
-///     commands, UPnP automatic router port-forwarding (+ its status), and the two "clear
-///     remembered list" buttons.
+///     commands, and clearing the remembered applications list.
+///   * Connectivity — Accept connections from other peers, UPnP automatic router port-forwarding
+///     (+ its status), and clearing the remembered peers and servers lists (Ed, 2026-09-24).
 ///   * Appearance — colour theme, show the volume/pan/EQ tab, main-window tab order, and the
 ///     discovered / remembered peer list toggles.
 ///   * Audio cues — the cue list (a plain list of cue names; arrowing previews each cue's
@@ -275,6 +276,11 @@ internal sealed class PreferencesDialog : Form
             // the base filename here is "tab switch.wav" for variant discovery to match.
             MachineRow("Switch tabs sound", MainForm.CueId.TabSwitch, "tab switch.wav",
                 c => c.EnableTabSwitchCue, (c, v) => c.EnableTabSwitchCue = v),
+            // Played as F1 help opens and as it closes (HelpSoundService). Ed's sounds, 2026-09-25.
+            MachineRow("Context help opened sound", MainForm.CueId.HelpOpen, "help open.wav",
+                c => c.EnableHelpOpenCue, (c, v) => c.EnableHelpOpenCue = v),
+            MachineRow("Context help closed sound", MainForm.CueId.HelpClose, "help close.wav",
+                c => c.EnableHelpCloseCue, (c, v) => c.EnableHelpCloseCue = v),
         ];
     }
 
@@ -592,6 +598,14 @@ internal sealed class PreferencesDialog : Form
         AccessibleName = "Profile to start with",
     };
     private bool suppressStartWithUserHandler;
+    // The context help message at start-up (Ed, 2026-09-25): the message's own "Do not show me this message again" unticks
+    // this, and ticking it here brings the message back. The same AppConfig setting.
+    private readonly AccessibleCheckBox showF1HelpMessageBox = new()
+    {
+        Text = "Enable context help message at startup (Alt+&H)",
+        AccessibleName = "Enable context help message at startup",
+        AutoSize = true,
+    };
 
     private readonly Button closeButton = new()
     {
@@ -672,11 +686,11 @@ internal sealed class PreferencesDialog : Form
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this, $"Could not save app config: {ex.Message}",
+                AppMessageBox.Show(this, $"Could not save app config: {ex.Message}",
                     "RemSound", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            MessageBox.Show(this,
+            AppMessageBox.Show(this,
                 $"Profiles folder updated to:\n\n{picker.SelectedPath}\n\nThe new folder will be used next time RemSound launches.",
                 "Profiles folder updated", MessageBoxButtons.OK, MessageBoxIcon.Information);
         };
@@ -817,21 +831,21 @@ internal sealed class PreferencesDialog : Form
 
         clearRememberedPeersButton.Click += (_, _) =>
         {
-            if (MessageBox.Show(this,
+            if (AppMessageBox.Show(this,
                     "Clear the whole remembered peers list?\n\nThis empties the shared list of peers RemSound has remembered, for every profile. Peers you're actively connected to aren't affected, and any peer will simply be remembered again next time you connect to it.",
                     "RemSound", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
                 onClearRememberedPeers();
         };
         clearRememberedRelaysButton.Click += (_, _) =>
         {
-            if (MessageBox.Show(this,
+            if (AppMessageBox.Show(this,
                     "Clear the whole remembered servers list?\n\nThis empties the shared list of servers RemSound has remembered, for every profile. A server you're connected to isn't affected, and any server is remembered again the next time you connect to it.",
                     "RemSound", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
                 onClearRememberedRelays();
         };
         clearRememberedAppsButton.Click += (_, _) =>
         {
-            if (MessageBox.Show(this,
+            if (AppMessageBox.Show(this,
                     "Clear the whole remembered applications list?\n\nThis empties the shared list of applications RemSound has remembered to send, for every profile. Apps you're actively sending aren't affected, and an app is remembered again the next time you tick it.",
                     "RemSound", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
                 onClearRememberedApplications();
@@ -1086,7 +1100,7 @@ internal sealed class PreferencesDialog : Form
                 DefaultButton = TaskDialogButton.No,
                 AllowCancel = true,
             };
-            if (TaskDialog.ShowDialog(this, confirm) != TaskDialogButton.Yes) return;
+            if (AppTaskDialog.ShowDialog(this, confirm) != TaskDialogButton.Yes) return;
             var removed = deleteAllLogs();
             var done = new TaskDialogPage
             {
@@ -1096,7 +1110,7 @@ internal sealed class PreferencesDialog : Form
                 Icon = TaskDialogIcon.Information,
                 Buttons = { TaskDialogButton.OK },
             };
-            TaskDialog.ShowDialog(this, done);
+            AppTaskDialog.ShowDialog(this, done);
         };
 
         closeButton.Click += (_, _) => Close();
@@ -1205,7 +1219,7 @@ internal sealed class PreferencesDialog : Form
         pruneDaysRow.Controls.Add(pruneDaysBox);
         pruneDaysRow.Controls.Add(pruneDaysUnitLabel);
 
-        // Six tabs (General, Appearance, Audio cues, Startup behaviour, Update settings, Logging),
+        // Seven tabs (General, Connectivity, Appearance, Audio cues, Startup behaviour, Update settings, Logging),
         // accessible (QuietTabControl) like the main window. Ctrl+Tab / arrows on the
         // strip switch tabs; the active page's controls are the next tab stops. The control itself
         // is a field (declared above) so OnShown and Ctrl+1..N can reach it. Logging is its
@@ -1229,18 +1243,25 @@ internal sealed class PreferencesDialog : Form
         };
         acceptPeersPanel.Controls.Add(acceptPeersLabel);
         acceptPeersPanel.Controls.Add(acceptPeersList);
-        // The two "clear remembered list" actions sit at the END of the General tab (they're machine-wide
-        // maintenance, not a per-profile setting). A header separates them from the settings above.
+        // The "clear remembered list" actions are machine-wide maintenance, not a per-profile setting, so a header
+        // separates them from the settings above them. Applications stay on General; peers and servers are on
+        // Connectivity, with the other things about who can reach you.
         var clearListsHeader = Theme.SectionHeader("Remembered lists (shared across all profiles)");
+        var clearConnectivityListsHeader = Theme.SectionHeader("Remembered lists (shared across all profiles)");
         tabs.TabPages.Add(MakeTab("General",
-            browseProfilesFolderButton, autoSavePanel, acceptPeersPanel, acceptRemoteVolumeBox, upnpEnabledBox, upnpStatusLabel,
-            clearListsHeader, clearRememberedPeersButton, clearRememberedRelaysButton, clearRememberedAppsButton));
+            browseProfilesFolderButton, autoSavePanel, acceptRemoteVolumeBox,
+            clearListsHeader, clearRememberedAppsButton));
+        // Connectivity (Ed, 2026-09-24): straight after General, in the order he gave - who may connect to you, opening
+        // the router, then clearing the remembered peers and servers. The router status line stays under its tick box.
+        tabs.TabPages.Add(MakeTab("Connectivity",
+            acceptPeersPanel, upnpEnabledBox, upnpStatusLabel,
+            clearConnectivityListsHeader, clearRememberedPeersButton, clearRememberedRelaysButton));
         tabs.TabPages.Add(MakeTab("Appearance",
             themeRow, showPanEqTabBox, tabOrderLabel, tabOrderList, tabOrderButtons,
             enableDiscoveredPeersBox, enableRememberedPeersBox));
         tabs.TabPages.Add(MakeTab("Audio cues", cueGroup));
         tabs.TabPages.Add(MakeTab("Startup behaviour",
-            startMinimisedBox, startWithUserBox, startWithProfileBox, startupListPanel));
+            startMinimisedBox, startWithUserBox, startWithProfileBox, startupListPanel, showF1HelpMessageBox));
         tabs.TabPages.Add(MakeTab("Update settings",
             checkForUpdatesOnStartupBox, freqRow, checkForUpdatesNowButton, silentlyInstallUpdatesBox, updateWindowBox, updateWindowRangeRow, showWhatsNewAfterUpdateBox));
         tabs.TabPages.Add(MakeTab("Logging",
@@ -1281,6 +1302,49 @@ internal sealed class PreferencesDialog : Form
             page.Controls.Add(body);
             return page;
         }
+
+        // F1 context help: each key is the id of the control's entry in readme.html (id="help-<key>").
+        ContextHelp.Mark(browseProfilesFolderButton, "prefs.general.profiles-folder");
+        ContextHelp.Mark(autoSaveList, "prefs.general.auto-save");
+        ContextHelp.Mark(acceptRemoteVolumeBox, "prefs.general.accept-remote-volume");
+        ContextHelp.Mark(clearRememberedAppsButton, "prefs.general.clear-remembered-apps");
+        ContextHelp.Mark(acceptPeersList, "prefs.connectivity.accept-connections");
+        ContextHelp.Mark(upnpEnabledBox, "prefs.connectivity.upnp");
+        ContextHelp.Mark(clearRememberedPeersButton, "prefs.connectivity.clear-remembered-peers");
+        ContextHelp.Mark(clearRememberedRelaysButton, "prefs.connectivity.clear-remembered-servers");
+        ContextHelp.Mark(themeBox, "prefs.appearance.colour-theme");
+        ContextHelp.Mark(showPanEqTabBox, "prefs.appearance.show-pan-eq-tab");
+        ContextHelp.Mark(tabOrderList, "prefs.appearance.tab-order");
+        ContextHelp.Mark(moveTabUpButton, "prefs.appearance.move-tab-up");
+        ContextHelp.Mark(moveTabDownButton, "prefs.appearance.move-tab-down");
+        ContextHelp.Mark(enableDiscoveredPeersBox, "prefs.appearance.show-discovered-peers");
+        ContextHelp.Mark(enableRememberedPeersBox, "prefs.appearance.show-remembered-peers");
+        ContextHelp.Mark(cueList, "prefs.cues.cue-list");
+        ContextHelp.Mark(defaultSoundList, "prefs.cues.choose-sound");
+        ContextHelp.Mark(playSelectedCueButton, "prefs.cues.play");
+        ContextHelp.Mark(browseSelectedCueButton, "prefs.cues.browse");
+        ContextHelp.Mark(keyboardClicksBox, "prefs.cues.keyboard-clicks");
+        ContextHelp.Mark(startMinimisedBox, "prefs.startup.start-minimised");
+        ContextHelp.Mark(startWithUserBox, "prefs.startup.start-at-login");
+        ContextHelp.Mark(startWithProfileBox, "prefs.startup.start-with-profile");
+        ContextHelp.Mark(startupProfileList, "prefs.startup.profile-list");
+        ContextHelp.Mark(showF1HelpMessageBox, "prefs.startup.context-help-message");
+        ContextHelp.Mark(checkForUpdatesOnStartupBox, "prefs.updates.check-on-startup");
+        ContextHelp.Mark(updateFrequencyBox, "prefs.updates.check-every");
+        ContextHelp.Mark(checkForUpdatesNowButton, "prefs.updates.check-now");
+        ContextHelp.Mark(silentlyInstallUpdatesBox, "prefs.updates.silent-install");
+        ContextHelp.Mark(updateWindowBox, "prefs.updates.time-range");
+        ContextHelp.Mark(updateWindowStartBox, "prefs.updates.window-start");
+        ContextHelp.Mark(updateWindowEndBox, "prefs.updates.window-end");
+        ContextHelp.Mark(showWhatsNewAfterUpdateBox, "prefs.updates.show-whats-new");
+        ContextHelp.Mark(loggingBox, "prefs.logging.enable-logs");
+        ContextHelp.Mark(writeLogsNowButton, "prefs.logging.write-logs-now");
+        ContextHelp.Mark(warnIfLogsExceedBox, "prefs.logging.warn-size");
+        ContextHelp.Mark(logsSizeLimitBox, "prefs.logging.warn-size-megabytes");
+        ContextHelp.Mark(pruneOldLogsBox, "prefs.logging.delete-old");
+        ContextHelp.Mark(pruneDaysBox, "prefs.logging.delete-old-days");
+        ContextHelp.Mark(deleteAllLogsButton, "prefs.logging.delete-all");
+        ContextHelp.Mark(closeButton, "prefs.close");
 
         AcceptButton = closeButton;
         CancelButton = closeButton;
@@ -1374,6 +1438,14 @@ internal sealed class PreferencesDialog : Form
             RecordChangedPreferences(c); try { c.Save(); } catch (Exception ex) { ShowStartupWarning("Could not save Start minimised preference: " + ex.Message); }
         };
 
+        showF1HelpMessageBox.Checked = cfg.ShowF1HelpMessageAtStartup;
+        showF1HelpMessageBox.CheckedChanged += (_, _) =>
+        {
+            var c = AppConfig.Load();
+            c.ShowF1HelpMessageAtStartup = showF1HelpMessageBox.Checked;
+            RecordChangedPreferences(c); try { c.Save(); } catch (Exception ex) { ShowStartupWarning("Could not save the context help message preference: " + ex.Message); }
+        };
+
         startWithUserBox.CheckedChanged += (_, _) =>
         {
             if (suppressStartWithUserHandler) return;
@@ -1382,7 +1454,7 @@ internal sealed class PreferencesDialog : Form
             if (ok) UiChangeLog.Record("start RemSound automatically when you sign in", startWithUserBox.Checked ? "on" : "off");
             if (!ok)
             {
-                MessageBox.Show(this,
+                AppMessageBox.Show(this,
                     "RemSound could not change the auto-start setting in the Windows registry. The setting did not change. (This usually means a policy or another security tool is blocking it.)",
                     "Auto-start change failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 var actual = StartupAutoStart.IsEnabled;
@@ -1402,7 +1474,7 @@ internal sealed class PreferencesDialog : Form
             {
                 if (startupProfileList.Items.Count == 0)
                 {
-                    MessageBox.Show(this,
+                    AppMessageBox.Show(this,
                         "You don't have any saved profiles yet. Save a profile first (File menu, Save as), then come back here and pick it.",
                         "No saved profiles", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     startWithProfileBox.Checked = false;
@@ -1448,7 +1520,7 @@ internal sealed class PreferencesDialog : Form
     }
 
     private void ShowStartupWarning(string message) =>
-        MessageBox.Show(this, message, "Startup behaviour", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        AppMessageBox.Show(this, message, "Startup behaviour", MessageBoxButtons.OK, MessageBoxIcon.Warning);
 
     /// <summary>Refresh the Play and Browse action buttons so their visible text and
     /// AccessibleName reflect the currently-selected cue. Called on every selection change
@@ -1638,12 +1710,16 @@ internal sealed class PreferencesDialog : Form
     /// <summary>What Browse does with a file from outside the built-in sounds folder, without the picker.</summary>
     internal void UseOwnFileForTest(string path)
     {
-        var cue = cueRows[cueList.SelectedIndex];
-        cue.SaveEnabled(true);
-        cue.SaveCustomPath(path);
+        // Browse's own code, after its file picker - as the button runs it, refreshes included.
+        UseChosenSoundFile(cueRows[cueList.SelectedIndex], path);
         RefreshCueActionButtons();
         RefreshDefaultSoundList();
     }
+
+    /// <summary>Whether the selected cue is switched on.</summary>
+    internal bool SelectedCueEnabledForTest => cueRows[cueList.SelectedIndex].LoadEnabled();
+    internal void SetSelectedCueEnabledForTest(bool on) => cueRows[cueList.SelectedIndex].SaveEnabled(on);
+    internal void ClearOwnFileForTest() => cueRows[cueList.SelectedIndex].SaveCustomPath(null);
 
     /// <summary>The file the selected cue would play if it fired now — the same resolution Play uses.</summary>
     internal string? SoundThatWouldPlayForTest() =>
@@ -1698,7 +1774,7 @@ internal sealed class PreferencesDialog : Form
         var path = ResolveCueFilePath(cue);
         if (path is null)
         {
-            MessageBox.Show(this,
+            AppMessageBox.Show(this,
                 $"No sound is currently configured for the {cue.DisplayName.ToLowerInvariant()}. " +
                 "Pick one in the Choose sound list, or use the Browse button to choose your own WAV file.",
                 "RemSound", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -1712,7 +1788,7 @@ internal sealed class PreferencesDialog : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this,
+            AppMessageBox.Show(this,
                 $"Could not play {Path.GetFileName(path)}: {ex.Message}",
                 "RemSound", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
@@ -1743,8 +1819,24 @@ internal sealed class PreferencesDialog : Form
         };
         if (picker.ShowDialog(this) != DialogResult.OK) return;
         if (string.IsNullOrWhiteSpace(picker.FileName)) return;
+        UseChosenSoundFile(cue, picker.FileName);
+    }
 
-        var pickedFullPath = Path.GetFullPath(picker.FileName);
+    /// <summary>
+    /// A sound file chosen for a cue, by Browse. Choosing a sound is asking to hear it, so a cue that was off is switched
+    /// on: the message about a missing sound tells people to choose another, and doing exactly that left the cue silent,
+    /// with the Browse button saying it was using their file (2026-09-25 sweep). The gate's own seam used to switch it on
+    /// itself, so it tested something Browse never did; it calls this now.
+    /// </summary>
+    private void UseChosenSoundFile(CueRowDescriptor cue, string chosenPath)
+    {
+        if (!cue.LoadEnabled())
+        {
+            cue.SaveEnabled(true);
+            UiChangeLog.Record($"cue: {cue.CueId}", "on - a sound was chosen for it");
+        }
+        var soundsFolder = AppConfig.SoundsDirectory;
+        var pickedFullPath = Path.GetFullPath(chosenPath);
         var soundsFolderFullPath = Path.GetFullPath(soundsFolder);
 
         // If the user picked a file inside the built-in default sounds\ folder, treat it as a "use

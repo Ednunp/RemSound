@@ -42,10 +42,17 @@ internal sealed class CuePlayer : IDisposable
     /// form: muted must not increment, unmuted must. 2026-08-24.</para></summary>
     internal static int PlaysStartedForTest;
 
+    /// <summary>Gate seam: a play that gets past the mute is counted and goes no further - no device is opened. The gate sets
+    /// it for its whole run: the check that an unmuted cue plays opened the real speakers to prove it (2026-09-24).</summary>
+    internal static bool NoDeviceForTest;
+
     public void Play()
     {
+        // A headless copy says which cue it would have played, for the control channel's cues command.
+        HeadlessRecords.Note(HeadlessRecords.Cues, $"{Path.GetFileName(filePath)} ({(GloballyMuted ? "silent" : "played")})");
         if (GloballyMuted) return;
         System.Threading.Interlocked.Increment(ref PlaysStartedForTest);
+        if (NoDeviceForTest) return;
         var path = filePath;
         Task.Run(() =>
         {

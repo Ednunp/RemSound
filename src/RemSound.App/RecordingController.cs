@@ -85,6 +85,10 @@ internal sealed class RecordingController
         foreach (var r in LiveRecorders()) r.FailNextWriteForTest = true;
     }
 
+    /// <summary>Gate seam: how many of the running recorders have died, so a check of "one report per take" can prove
+    /// more than one writer really fell over.</summary>
+    internal int FaultedRecordersForTest => LiveRecorders().Count(r => r.FaultReason is not null);
+
     /// <summary>Every recorder currently running.</summary>
     private IEnumerable<AudioRecorder> LiveRecorders()
     {
@@ -133,7 +137,7 @@ internal sealed class RecordingController
             // Through ForegroundDialog: a recording can be started from the global hotkey while RemSound
             // is minimised, and an ownerless MessageBox then opens BEHIND whatever has focus, where a
             // screen reader never finds it. 2026-09-13 review.
-            ForegroundDialog.Show(owner => MessageBox.Show(
+            ForegroundDialog.Show(owner => AppMessageBox.Show(
                 owner,
                 $"Could not start recording:\n\n{ex.Message}",
                 "RemSound — recording",
@@ -389,7 +393,7 @@ internal sealed class RecordingController
         catch (Exception ex)
         {
             diagnostic($"recording: open folder failed: {ex.GetType().Name}: {ex.Message}");
-            MessageBox.Show(owner,
+            AppMessageBox.Show(owner,
                 $"Could not open recordings folder:\n\n{ex.Message}",
                 "RemSound — recordings folder",
                 MessageBoxButtons.OK,

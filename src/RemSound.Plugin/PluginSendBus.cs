@@ -35,7 +35,9 @@ namespace RemSound.Plugin;
 internal static class PluginSendBus
 {
     private const int Channels = PluginBridgeProtocol.WireChannels;
-    private const int MaxFloats = PluginBridgeProtocol.MaxAudioBytes / sizeof(float);
+    // The largest block the link carries, in as many messages as it takes (see PluginBridgeClient.SendTrackBlock). It was one
+    // message's worth, so a 44.1 kHz DAW at a 4096 buffer - 4460 frames at the link's 48 kHz - was dropped here, every block.
+    private const int MaxFloats = PluginBridgeProtocol.MaxBlockFrames * Channels;
 
     private static readonly object Gate = new();
     private static readonly Dictionary<Guid, PluginBridgeClient> Senders = new();

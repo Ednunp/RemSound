@@ -56,6 +56,9 @@ internal sealed class RelayNoticeDialog : Form
         Controls.Add(layout);
         AcceptButton = ok;
         CancelButton = ok;
+        ContextHelp.Mark(message, "dialog.relay-server-notice.notice");
+        ContextHelp.Mark(dontShowAgainBox, "dialog.relay-server-notice.dont-show-again");
+        ContextHelp.Mark(ok, "dialog.relay-server-notice.ok");
     }
 
     /// <summary>Shows the notice. Returns true when the user asked not to see it again. Off by default, like every
@@ -63,7 +66,9 @@ internal sealed class RelayNoticeDialog : Form
     public static bool ShowNotice(IWin32Window? owner)
     {
         using var dialog = new RelayNoticeDialog();
-        ForegroundDialog.Show(_ => dialog.ShowDialog(owner));
+        // Owned by the helper ForegroundDialog brings to the front: owned by a main window sitting in the tray, it opened
+        // behind whatever was on screen (2026-09-25 sweep).
+        ForegroundDialog.Show(front => dialog.ShowDialog(front));
         return dialog.dontShowAgainBox.Checked;
     }
 }

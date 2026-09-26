@@ -152,11 +152,13 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Func<IReadOnlyList<(string Address, string Name)>>? PeerSource { get; set; }
 
-    /// <summary>Raised when the user changes anything about what this instance does: either direction,
-    /// who is being received (empty unless receiving), whether to take all peers, or either level in
-    /// dB.</summary>
+    /// <summary>Raised when the user changes anything about what this instance does: Active, then the CHOICES - either
+    /// direction, who is ticked, whether to take all peers, either level in dB - reported as chosen whatever Active and
+    /// Receive say. The engine decides what runs. The choices used to be reported masked (nobody, neither direction,
+    /// while Active was off), and the engine kept that as the choice: close the window and they were gone
+    /// (review 2026-09-25).</summary>
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
-    public Action<bool, bool, IReadOnlyList<string>, bool, float, float>? JobChanged { get; set; }
+    public Action<bool, bool, bool, IReadOnlyList<string>, bool, float, float>? JobChanged { get; set; }
 
     /// <summary>The plain-English status line. Read rather than pushed, so the panel never has to be
     /// told about something changing behind it.</summary>
@@ -190,7 +192,7 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
     public PluginEditorPanel()
     {
         ColumnCount = 2;
-        RowCount = 8;
+        RowCount = 9;
         AutoSize = true;
         Padding = new Padding(12);
         ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -217,6 +219,8 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
         Controls.Add(activeBox, 0, 6);
         SetColumnSpan(activeBox, 2);
         FormLayoutRows.AddRow(this, 7, "&Status (Alt+S)", statusReadout, c => c.Focus());
+        Controls.Add(helpButton, 0, 8);
+        SetColumnSpan(helpButton, 2);
 
         sendBox.TabIndex = 0;
         receiveBox.TabIndex = 1;
@@ -226,6 +230,22 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
         receiveLevel.TabIndex = 5;
         activeBox.TabIndex = 6;
         statusReadout.TabIndex = 7;
+        helpButton.TabIndex = 8;
+
+        // Context help (2026-09-25). Inside a DAW the host runs the message loop, so WinForms never sees a key before
+        // the control does: F1 is caught on each control. Where the host keeps F1 for itself, the button shows the lot.
+        ContextHelp.Mark(sendBox, "plugin.send");
+        ContextHelp.Mark(receiveBox, "plugin.receive");
+        ContextHelp.Mark(allPeersBox, "plugin.receive-all");
+        ContextHelp.Mark(peerList, "plugin.peers");
+        ContextHelp.Mark(sendLevel, "plugin.send-level");
+        ContextHelp.Mark(receiveLevel, "plugin.receive-level");
+        ContextHelp.Mark(activeBox, "plugin.active");
+        ContextHelp.Mark(statusReadout, "plugin.status");
+        ContextHelp.Mark(helpButton, "plugin.help-button");
+        foreach (var control in new Control[] { sendBox, receiveBox, allPeersBox, peerList, sendLevel, receiveLevel, activeBox, statusReadout, helpButton })
+            control.KeyDown += OnHelpKey;
+        helpButton.Click += (_, _) => ContextHelp.ShowWhole(helpButton, "Plugin window", "plugin.window", WindowHelpKeys);
 
         // Only receiving needs a peer chosen; sending goes to everyone, exactly as the app does today.
         // Kept as enable/disable rather than hide, so the tab order never shifts under a screen-reader
@@ -274,6 +294,33 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
 
     private const string NoPeers = "(no peers yet — set them up in RemSound)";
 
+    private readonly Button helpButton = new()
+    {
+        Text = "Context &help (Alt+H)",
+        AccessibleName = "Context help",
+        AutoSize = true,
+    };
+
+    /// <summary>The window's controls' help, in tab order: what the Context help button shows.</summary>
+    internal static readonly string[] WindowHelpKeys =
+    [
+        "plugin.send", "plugin.receive", "plugin.receive-all", "plugin.peers", "plugin.send-level", "plugin.receive-level",
+        "plugin.active", "plugin.status", "plugin.help-button",
+    ];
+
+    /// <summary>F1 on a control: its context help. Shift+F1: the whole manual.</summary>
+    private void OnHelpKey(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyCode != Keys.F1 || sender is not Control control) return;
+        if (e.Modifiers == Keys.None) ContextHelp.Show(control);
+        else if (e.Modifiers == Keys.Shift) ContextHelp.OpenManualInBrowser?.Invoke(null);
+        else return;
+        e.Handled = true;
+        e.SuppressKeyPress = true;
+    }
+
+    internal Button HelpButtonForTest => helpButton;
+
     // ---- Test seams. Real controls driven the way a user drives them, so the gate exercises the
     // actual handlers rather than a parallel copy of the logic. -----------------------------------
     internal int PeerItemCountForTest => peerList.Items.Count;
@@ -321,18 +368,14 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
         base.Dispose(disposing);
     }
 
-    /// <summary>Tell the engine what this instance is doing now. The peer is reported ONLY while this
-    /// instance is actually receiving one — unticking Receive, or unticking Active, must hand that
-    /// person back to RemSound's speakers rather than leaving them claimed by a plugin that is no
-    /// longer playing them. Getting this wrong leaves someone mute with nothing on screen to explain
-    /// it, which is the worst failure this feature has.</summary>
+    /// <summary>Tell the engine what the person has chosen, and whether it is Active. The engine hands a person back to
+    /// RemSound's speakers the moment this instance stops receiving them - unticking Receive, or unticking Active - so
+    /// nobody is left claimed by a plugin that is no longer playing them; but the choice itself is reported as it
+    /// stands, so switching back on puts back exactly what was there.</summary>
     private void AnnounceJob()
     {
         if (suppressAnnounce > 0) return;
-        var active = activeBox.Checked;
-        var send = active && sendBox.Checked;
-        var receive = active && receiveBox.Checked;
-        JobChanged?.Invoke(send, receive, receive ? ChosenPeerAddresses : [], receive && allPeersBox.Checked,
+        JobChanged?.Invoke(activeBox.Checked, sendBox.Checked, receiveBox.Checked, ChosenPeerAddresses, allPeersBox.Checked,
                            (float)sendLevel.Value, (float)receiveLevel.Value);
     }
 

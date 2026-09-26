@@ -195,6 +195,7 @@ internal sealed class RemSoundLog : IDisposable
     public void Event(string message)
     {
         EventTapForTest?.Invoke(message);
+        HeadlessRecords.Note(HeadlessRecords.Log, message);
         if (!Enabled) return;
         lock (writeGate)
         {

@@ -28,6 +28,10 @@ public enum RemPacketType : byte
     /// drop it as an unknown type, which the relay's watch-only mode tolerates until the
     /// enforcement flip.</summary>
     AddrCheck = 10,
+    /// <summary>"I have ticked you, and I hold the password" (2026-09-25): sent every few seconds to each peer the sender
+    /// has ticked, whatever it sends or receives, so a peer that only listens can still be offered or accepted. The payload
+    /// is sealed with the audio key - see <see cref="TickProof"/> for the layout. Older peers drop it as an unknown type.</summary>
+    TickProof = 11,
 }
 
 public enum HeartbeatKind : byte

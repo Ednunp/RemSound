@@ -16,8 +16,10 @@
 # Run:  powershell -ExecutionPolicy Bypass -File deploy-test.ps1
 # Add -SkipGate to skip the build-and-test gate (e.g. when you just ran it) - by default a binary
 # deploy runs run-tests.ps1 first and refuses to deploy a build that didn't pass.
+# Add -ProjOnly to deploy to publish\ alone and leave D:\Dropbox\remsound as it is (Ed, 2026-09-24: "you can
+# deploy to the proj folder but not dropbox").
 
-param([switch]$SkipGate)
+param([switch]$SkipGate, [switch]$ProjOnly)
 
 $ErrorActionPreference = 'Stop'
 $repo      = $PSScriptRoot
@@ -26,7 +28,7 @@ $srcSounds = Join-Path $repo 'default sounds'
 $publish   = Join-Path $repo 'publish'
 
 # The TWO test run-locations. Each has its own 'default sounds\' copy that must be kept current.
-$runLocations = @($publish, 'D:\Dropbox\remsound')
+$runLocations = if ($ProjOnly) { @($publish) } else { @($publish, 'D:\Dropbox\remsound') }
 
 function Invoke-Robocopy([string[]]$rcArgs) {
     & robocopy @rcArgs /NFL /NDL /NJH /NJS /NP /R:3 /W:1 | Out-Null
@@ -89,4 +91,4 @@ foreach ($loc in $runLocations) {
 }
 
 $count = @(Get-ChildItem $srcSounds -Filter *.wav).Count
-Write-Host "Done. $count default sounds force-synced to BOTH test locations. Tweak away - the next run always takes them all." -ForegroundColor Green
+Write-Host "Done. $count default sounds force-synced to $($runLocations -join " and "). Tweak away - the next run always takes them all." -ForegroundColor Green

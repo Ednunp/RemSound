@@ -1,0 +1,15 @@
+diff --git a/AudioPlugSharpVst/AudioPlugSharpProcessor.h b/AudioPlugSharpVst/AudioPlugSharpProcessor.h
+index d9222f2..539555c 100644
+--- a/AudioPlugSharpVst/AudioPlugSharpProcessor.h
++++ b/AudioPlugSharpVst/AudioPlugSharpProcessor.h
+@@ -35,6 +35,10 @@ public:
+ 	tresult PLUGIN_API canProcessSampleSize(int32 symbolicSampleSize) SMTG_OVERRIDE;
+ 	tresult PLUGIN_API setBusArrangements(SpeakerArrangement* inputs, int32 numIns, SpeakerArrangement* outputs, int32 numOuts);
+ 	tresult PLUGIN_API notify(Vst::IMessage* message) SMTG_OVERRIDE;
++	// RemSound: report that our sound never finishes. Hosts that go by the tail (Cubase, Bitwig and Waveform, per
++	// their docs and code) then keep calling process() on a track with nothing on it, which a receiving plugin needs.
++	// The SDK default is kNoTail. It does not help with REAPER closing its audio device when it loses focus.
++	uint32 PLUGIN_API getTailSamples() SMTG_OVERRIDE { return kInfiniteTail; }
+ 	~AudioPlugSharpProcessor(void);
+ 
+ 	gcroot<AudioPlugSharp::IAudioPlugin^> plugin;

@@ -52,8 +52,12 @@ internal sealed class PeerRenderBridge
     /// <summary>Allocate everything the audio thread will touch, off the audio thread.</summary>
     public void PrepareForBlockSize(int maxFramesPerBlock, double sampleRate)
     {
-        hostSampleRate = sampleRate <= 0 ? PluginBridgeProtocol.WireSampleRate : sampleRate;
-        resampler.SetRates(PluginBridgeProtocol.WireSampleRate, hostSampleRate);
+        var rate = sampleRate <= 0 ? PluginBridgeProtocol.WireSampleRate : sampleRate;
+        // Only a new RATE invalidates what is held; more room at the same rate keeps it, or the grow itself would drop audio.
+        var rateChanged = !prepared || Math.Abs(rate - hostSampleRate) > 0.5;
+        prepared = true;
+        hostSampleRate = rate;
+        if (rateChanged) resampler.SetRates(PluginBridgeProtocol.WireSampleRate, hostSampleRate);
 
         var hostFloats = Math.Max(1, maxFramesPerBlock) * Channels;
         // Wire frames can exceed host frames when the host runs BELOW 48 kHz (a 44.1k host needs
@@ -63,10 +67,17 @@ internal sealed class PeerRenderBridge
         if (hostOut.Length < hostFloats + Channels * 8) hostOut = new float[hostFloats + Channels * 8];
         // The carry holds at most one block plus the rounding surplus. Doubled so a block that
         // produces a little over never has to reallocate on the audio thread.
-        if (carry.Length < hostFloats * 2 + Channels * 8) carry = new float[hostFloats * 2 + Channels * 8];
-        // A format change invalidates anything held at the old rate.
-        carryFrames = 0;
+        if (carry.Length < hostFloats * 2 + Channels * 8)
+        {
+            var grown = new float[hostFloats * 2 + Channels * 8];
+            Array.Copy(carry, grown, Math.Min(carry.Length, carryFrames * Channels));
+            carry = grown;
+        }
+        // A new rate invalidates anything held at the old one.
+        if (rateChanged) carryFrames = 0;
     }
+
+    private bool prepared;
 
     /// <summary>Fill one DAW block from the claimed peer. Audio thread; allocation-free.</summary>
     /// <param name="mixInto">Sum the peer on top of whatever the caller has already put in the block,

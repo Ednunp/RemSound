@@ -50,6 +50,28 @@ internal static class Program
         catch { /* a crash handler must never throw */ }
     }
 
+    /// <summary>
+    /// Read the profile a switch asked for (File, Open; Recent profiles; quick switch). One that cannot be read - held open
+    /// by Dropbox or a virus scan at that moment, a hand edit that broke it - becomes a new, blank, UNTITLED profile with no
+    /// file. It used to become a blank profile under the profile's own title, and a window with that title works out its
+    /// file from it: the next save, auto-save or "Yes" at exit wrote the blank settings, and an empty password, over the
+    /// real file (2026-09-25 sweep).
+    /// </summary>
+    internal static (Profile Profile, string? Title, string? Path, string? Error) ReadProfileForSwitch(string path, string? title)
+    {
+        try
+        {
+            var json = File.ReadAllText(path);
+            var profile = System.Text.Json.JsonSerializer.Deserialize<Profile>(json)
+                          ?? throw new InvalidDataException("the file holds no profile");
+            return (profile, !string.IsNullOrEmpty(title) ? title : System.IO.Path.GetFileNameWithoutExtension(path), path, null);
+        }
+        catch (Exception ex)
+        {
+            return (Profile.NewBlank(), null, null, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
     [STAThread]
     private static void Main(string[] args)
     {
@@ -78,6 +100,12 @@ internal static class Program
             WriteCrashReport("TaskScheduler.UnobservedTaskException", e.Exception);
             e.SetObserved();
         };
+
+        // The DAW plugin's elevated helper: RemSound re-launched with Windows' permission to put the plugin in, or take it
+        // out of, a folder only an administrator can change (the shared VST3 folder, 2026-09-25). It copies files and exits,
+        // before the single-instance lock, the settings and the window.
+        if (args.Length > 0 && PluginInstaller.IsElevatedHelper(args))
+            Environment.Exit(PluginInstaller.RunElevatedHelper(args));
 
         // Windows-service verbs, handled before the single-instance lock and the UI start-up below.
         // The service is a SEPARATE role — it must never take the interactive single-instance lock — and
@@ -122,6 +150,17 @@ internal static class Program
         if (Array.Exists(args, a => string.Equals(a, "--silent", StringComparison.OrdinalIgnoreCase)))
         {
             CuePlayer.GloballyMuted = true;
+            Windowless.SilentLaunch = true;
+        }
+
+        // --headless: the whole app with no window, no sound and no speech, driven through the control channel
+        // (Windowless, RemoteControl). Ed, 2026-09-24: "a way of driving remsound entirely without a window". The
+        // sounds and the screen reader are switched off here, before anything can make either.
+        var headlessRun = Array.Exists(args, a => string.Equals(a, "--headless", StringComparison.OrdinalIgnoreCase));
+        if (headlessRun)
+        {
+            CuePlayer.GloballyMuted = true;
+            ScreenReader.Suppressed = true;
         }
 
         // SustainedLowLatency tells the GC to avoid full (gen 2) collections while audio is streaming.
@@ -132,6 +171,9 @@ internal static class Program
         GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
 
         ApplicationConfiguration.Initialize();
+
+        // Before the first window of any kind: from here every window this thread makes is kept out of sight and focus.
+        if (headlessRun) Windowless.Start();
 
         // The shared accessible controls take their sounds by injection so they carry no dependency
         // on the app's cue machinery (the VST plugin reuses the controls, not the app). Wire them
@@ -164,19 +206,24 @@ internal static class Program
         // running (the remover force-closes it and retries the delete).
         if (Array.Exists(args, a => string.Equals(a, "--uninstall", StringComparison.OrdinalIgnoreCase)))
         {
+            // F1 here too: this window has context help of its own, and F1 did nothing in it (2026-09-25 sweep).
+            HelpLauncher.WireContextHelp();
+            HelpLauncher.Install();
             AppInstaller.RunUninstallStandalone();
             return;
         }
 
         // Command-line interface (Sensor-Readout-style). "Do-and-exit" commands (--help, --version,
         // --devices, --list-profiles, --list-named-peers, --selftest, --perftest, --diagnostics, --log,
-        // --close, and the developer verbs --plugin-window, --sign-update and --sign-server-release) run here —
+        // --close, --control, and the developer verbs --plugin-window, --sign-update and --sign-server-release) run here —
         // before the single-instance lock and before the main window — and terminate the process.
         // Otherwise we collect launch overrides (--profile / --connect / --minimized) and continue the
         // normal GUI start below, applying them as we resolve the profile.
         var cliExit = CommandLine.Process(args, out var cli);
         if (cliExit is { } cliCode) Environment.Exit(cliCode);
         if (cli.StartMinimized) MainForm.startNextInstanceMinimized = true;
+        // Headless takes the --minimized path exactly (no ASIO splash, parked in the tray), only never on screen.
+        if (headlessRun) MainForm.startNextInstanceMinimized = true;
 
         // --foreground: the post-install relaunch passes this so the freshly-installed copy pulls
         // itself to the front and takes focus, instead of opening behind whatever's on top (a new
@@ -199,6 +246,8 @@ internal static class Program
         using var instance = new SingleInstanceCoordinator();
         if (!instance.TryAcquire(TimeSpan.Zero))
         {
+            // Nobody to ask in a headless run. Bow out; --control will say a copy without a control channel is running.
+            if (headlessRun) return;
             // If we can't even ask the user (dialog failed to show), the safe answer is "don't
             // start a second copy" — bowing out is always safer than risking a duplicate.
             SingleInstanceDecision decision;
@@ -218,7 +267,7 @@ internal static class Program
                     // a killed copy is slow to release the abandoned mutex / its audio devices.
                     if (!instance.TryAcquire(TimeSpan.FromSeconds(5)))
                     {
-                        ForegroundDialog.Show(owner => MessageBox.Show(
+                        ForegroundDialog.Show(owner => AppMessageBox.Show(
                             owner,
                             cleared
                                 ? "RemSound closed the other copy but couldn't start cleanly. Please launch RemSound again."
@@ -247,6 +296,35 @@ internal static class Program
         // window yet (the profile picker is up) nothing happens here, and --close ends the process after its wait.
         instance.CloseRequested += () => activeMainForm?.CloseFromCommandLine();
 
+        // The control channel, for a headless copy only, and only once it is THE copy (it holds the lock above). It
+        // works on whatever windows are open, so the profile picker (no profile to start in) is driven the same way.
+        RemoteControlServer? remoteControl = null;
+        if (headlessRun)
+        {
+            var marshal = new Control();
+            _ = marshal.Handle;
+            // The log is the main window's, and the profile picker comes before it: hold what is said until then.
+            var early = new List<string>();
+            // The live main window once there is one; this helper before it (the profile picker). See the server.
+            remoteControl = new RemoteControlServer(RemoteControl.DefaultPipeName,
+                () => activeMainForm is { IsHandleCreated: true, IsDisposed: false } live ? live : marshal,
+                new RemoteControlEngine(() => activeMainForm))
+            {
+                Log = line =>
+                {
+                    lock (early)
+                    {
+                        if (RemSoundLog.Current is not { } log) { early.Add(line); return; }
+                        foreach (var held in early) log.Event(held + " (before the main window opened)");
+                        early.Clear();
+                        log.Event(line);
+                    }
+                },
+            };
+            remoteControl.Start();
+        }
+        using var remoteControlLifetime = remoteControl;
+
         // Hold the interactive-presence token for this copy's whole lifetime, so the send-only
         // lock-screen service (if installed) yields to us — it suspends its own sending while an
         // interactive RemSound is open. Windows releases the token automatically when this process
@@ -257,21 +335,24 @@ internal static class Program
         // Best-effort: clear leftover update temp stages.
         // We hold the single-instance lock here, so only the live copy does this — no sibling race.
         RemSoundUpdater.CleanUpUpdateStages();
+        // The scripts folder was renamed on 2026-09-24; an update brings the new one and would leave the old beside it.
+        var retiredScripts = RetiredFiles.RemoveOldScriptsFolder(AppContext.BaseDirectory);
         // Cap the crash-report pile (keep the newest 10) — the *.log pruning never matched
         // crash-*.txt, so an unlucky install accumulated them forever. Unconditional, unlike the
         // opt-in log pruning: ten reports diagnose a pattern as well as a hundred.
         LogMaintenance.PruneCrashReports(AppConfig.LogsDirectory);
 
-        // F1 anywhere = open the bundled manual. Installed *before* the first ShowDialog so
-        // it works on the profile picker (the very first thing the user sees). The filter
-        // is per-thread and modifier-aware: bare F1 only, so Shift/Ctrl/Alt+F1 stay free.
+        // F1 anywhere = help for the control you're on; Shift+F1 = the whole manual (Ed, 2026-09-25). Installed *before*
+        // the first ShowDialog so it works on the profile picker (the very first thing the user sees). The help window
+        // lives in the shared library, so its sounds, its log lines and the browser come in from here.
+        HelpLauncher.WireContextHelp();
         HelpLauncher.Install();
 
         // Audible typing feedback: a soft click on each keystroke in any edit field, plus a distinct
         // passkey sound on password fields. Machine-wide toggle (on by default). Installed app-wide
         // here - after the single-instance guard, before the profile picker - so it works on the
         // picker and every dialog. Best-effort: inert if the click sounds can't load.
-        KeyClickService.Initialize(AppConfig.Load().EnableKeyboardClicks);
+        KeyClickService.Initialize(!headlessRun && AppConfig.Load().EnableKeyboardClicks);
         Application.ApplicationExit += (_, _) => KeyClickService.Shutdown();
 
         // Tick/untick sounds for checkbox toggles app-wide (CheckSoundService) and the tab-switch
@@ -279,6 +360,7 @@ internal static class Program
         // cue settings change in Preferences.
         CheckSoundService.Reload();
         TabSwitchSoundService.Reload();
+        HelpSoundService.Reload();
 
         // Resolve the first profile, then run the window; the loop below re-opens it for a profile switch. An outer loop
         // for changing the profiles folder mid-session wrapped all of this until 2026-09-13 — nothing had set its flag
@@ -367,7 +449,12 @@ internal static class Program
             else
             {
                 using var dialog = new ProfileSelectionDialog(store);
-                if (dialog.ShowDialog() != DialogResult.OK) return;
+                // In front: after an update RemSound is started again by the updater, not by the person, and Windows then
+                // opened the picker behind whatever they were doing (2026-09-25 sweep).
+                // A headless copy's picker stays out of sight (Windowless); the helper that brings a window to the front
+                // would have left it centred on the screen.
+                var picked = Windowless.Hiding ? dialog.ShowDialog() : ForegroundDialog.Show(_ => dialog.ShowDialog());
+                if (picked != DialogResult.OK) return;
                 // ProfileSelectionDialog can have changed the folder via its Browse button;
                 // if so, it's already saved AppConfig and rebuilt its internal store. Pick up
                 // its post-Browse store reference for the rest of the session.
@@ -404,11 +491,19 @@ internal static class Program
                 // defeats the point of keeping RemSound minimised, and the switch cue already
                 // gave them feedback. Normal launches and visible switches still show it.
                 var splash = MainForm.startNextInstanceMinimized ? null : AsioLoadingSplash.StartIfNeeded(profile);
-                using var form = new MainForm(store, profile, title, nextPath);
+                MainForm built;
+                // Dismissed whatever happens: a window that failed to build left the splash on top of everything for good
+                // (2026-09-25 sweep).
+                try { built = new MainForm(store, profile, title, nextPath); }
+                finally { splash?.Dismiss(); }
+                using var form = built;
                 // Expose the live window to the single-instance activation callback (a second
                 // copy choosing "switch to the running copy" signals us to surface this form).
                 activeMainForm = form;
-                splash?.Dismiss();
+                if (retiredScripts is not null) { RemSoundLog.Current?.Event("startup: " + retiredScripts); retiredScripts = null; }
+                if (headlessRun)
+                    RemSoundLog.Current?.Event($"headless: running with no window, sound or speech; driven through the control channel "
+                        + @"\\.\pipe\" + RemoteControl.DefaultPipeName + " (RemSound --control help)");
                 Application.Run(form);
                 activeMainForm = null;
 
@@ -425,23 +520,19 @@ internal static class Program
                 }
                 else if (!string.IsNullOrEmpty(nextPath))
                 {
-                    try
+                    var wanted = !string.IsNullOrEmpty(nextTitle) ? nextTitle : Path.GetFileNameWithoutExtension(nextPath);
+                    var read = ReadProfileForSwitch(nextPath, nextTitle);
+                    (profile, title, nextPath) = (read.Profile, read.Title, read.Path);
+                    if (read.Error is { } error)
                     {
-                        var json = File.ReadAllText(nextPath);
-                        profile = System.Text.Json.JsonSerializer.Deserialize<Profile>(json) ?? Profile.NewBlank();
-                        title = !string.IsNullOrEmpty(nextTitle)
-                            ? nextTitle
-                            : Path.GetFileNameWithoutExtension(nextPath);
-                    }
-                    catch
-                    {
-                        // Malformed / unreadable JSON. Fall back to blank template under
-                        // whatever title we have, rather than crashing the loop.
-                        profile = Profile.NewBlank();
-                        title = !string.IsNullOrEmpty(nextTitle)
-                            ? nextTitle
-                            : Path.GetFileNameWithoutExtension(nextPath);
-                        nextPath = null;
+                        // Carried into the next window's log (this loop has none of its own), and said to the person - a
+                        // switch can start from the tray, so in front of everything.
+                        MainForm.LineForNextLog = $"profile switch: could not read \"{wanted}\" ({error}) - opened a new, blank, untitled profile instead, so nothing is saved over that file";
+                        if (!Windowless.NobodyToAsk)
+                            ForegroundDialog.Show(owner => AppMessageBox.Show(owner,
+                                $"RemSound could not read the profile \"{wanted}\", so it has opened a new, blank profile instead. "
+                                + $"Your profile file has not been changed.\n\n{error}",
+                                "RemSound", MessageBoxButtons.OK, MessageBoxIcon.Warning));
                     }
                 }
                 else

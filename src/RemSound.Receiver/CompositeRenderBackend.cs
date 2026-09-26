@@ -74,9 +74,9 @@ internal sealed class CompositeRenderBackend : IRenderBackend
 
     public bool IsRunning => started;
 
-    /// <summary>Any WASAPI output sitting dead awaiting a re-open. ASIO is deliberately not included:
-    /// its backend owns its driver outright and recovers through its own park/re-open path rather than
-    /// through the ticked-device set, so there is no equivalent flag to raise here. See
+    /// <summary>Any WASAPI output sitting dead awaiting a re-open. ASIO is not included: an ASIO output that failed to
+    /// open is missing from the backend's ActiveDeviceIds, which the heal reads, and the backend itself tries it again
+    /// after its back-off (AsioRenderBackend.ReopenBackoff). See
     /// <see cref="MultiOutputPlayout.HasFaultedOutput"/> for what this is for. 2026-08-26.</summary>
     public bool HasFaultedOutput => wasapi?.HasFaultedOutput ?? false;
 
