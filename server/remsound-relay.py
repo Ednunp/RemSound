@@ -56,6 +56,7 @@ import struct
 import sys
 import time
 import uuid
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -141,9 +142,35 @@ TYPE_LOBBY_BYE = 9
 TYPE_ADDR_CHECK = 10
 ADDR_CHECK_COOKIE_LEN = 16
 ADDR_CHECK_RESEND_SECONDS = 2.0
+# The master metronome (2026-09-28, server-v2.14): offers, answers, the shared timeline and clock readings between
+# RemSounds - timing only, sealed with the group's password like everything else, a few small packets a second. Passed
+# between group members exactly as sound is (both must have ticked each other); a v1 pair passes it as it passes everything.
+TYPE_METRONOME = 12
 V2_FORWARDABLE_TYPES = {
-    TYPE_FORMAT, TYPE_AUDIO, TYPE_KEEPALIVE, TYPE_HEARTBEAT, TYPE_CONTROL,
+    TYPE_FORMAT, TYPE_AUDIO, TYPE_KEEPALIVE, TYPE_HEARTBEAT, TYPE_CONTROL, TYPE_METRONOME,
 }
+# The server's metronome (2026-09-29, Ed: "make the server give the metronome time by working out the latency of each
+# client ... the slowest person gets the beat early ... to make sure they stay in time"). The relay keeps the beat for each
+# group and gives each member the beat early by exactly how long that member's sound takes to reach the relay, so everyone's
+# playing arrives here on the beat and every listener hears the band together. Read by the relay itself, never forwarded,
+# and not sealed (the relay does not know the password): a member's reports and the master's commands in, each member's
+# own beat grid out. Only members that have sent a report (a RemSound that knows this type) are ever sent a grid.
+# See PLAN-metronome-server-2026-09-29.md.
+TYPE_TIMING = 13
+TIMING_REPORT = 1      # member -> relay: [count u8] then count x (stream u16, sequence u32, captured_us i64, member's clock)
+TIMING_CLAIM = 2       # member -> relay: take the group's metronome (granted when nobody has it)
+TIMING_RELEASE = 3     # master -> relay: let it go; the metronome stops
+TIMING_SET = 4         # master -> relay: [running u8][milli-bpm u32][beats per bar u8][beat unit u8]
+TIMING_GRID = 20       # relay -> member: see Relay._timing_grid_packet
+TIMING_MAX_ENTRIES = 16
+TIMING_ARRIVALS_KEPT = 1024          # per stream: a few seconds of packets at the shortest frames
+TIMING_DELAY_WINDOW_SECONDS = 5.0    # the least-delayed packet of the last five seconds
+TIMING_GRID_EVERY_SECONDS = 1.0
+TIMING_START_LEAD_SECONDS = 0.4      # the first beat, as the app's own metronome starts
+TIMING_MIN_MILLI_BPM = 30_000
+TIMING_MAX_MILLI_BPM = 300_000
+TIMING_LOG_EVERY_SECONDS = 30.0      # event=metronome_timing, per member, while its group's metronome plays
+AUDIO_GAP_LONG_MS = 20.0             # event=audio_timing counts waits between one client's packets longer than this
 # Cap on how many lobby/pair entries one source IP may hold at once. A relay is a place people meet now,
 # not a single pair, so one household or one office behind a single address can legitimately show several
 # machines and a phone or two (distinct ports, same IP). An occupation attacker shows dozens. Overridable
@@ -211,6 +238,35 @@ class ClientEntry:
     group: bytes = b""
     # The client ids this client has ticked, or None for "everyone in my group" (no list sent).
     ticked: Optional[set[bytes]] = None
+    # The server's metronome (TYPE_TIMING): set once this client has sent a report. When each of its audio packets arrived
+    # (stream -> sequence -> relay microseconds), and the delay samples its reports gave (relay microseconds, delay).
+    timing_known: bool = False
+    timing_arrivals: dict = field(default_factory=dict)
+    timing_samples: deque = field(default_factory=deque)
+    # For event=metronome_timing: when this member's timing was last logged, and its least delay then.
+    timing_logged_at: float = 0.0
+    timing_logged_delay_us: Optional[int] = None
+    # For event=audio_timing (2026-09-29): this minute's sound from this client - how many packets, the longest wait
+    # between two, and how many waits were longer than AUDIO_GAP_LONG_MS. The evidence for "crunchy" without a capture.
+    audio_last_arrival: float = 0.0
+    audio_count: int = 0
+    audio_max_gap: float = 0.0
+    audio_long_gaps: int = 0
+
+
+@dataclass
+class GroupBeat:
+    """The server's metronome for one group: who leads it, and the beat on the relay's clock. Beat n falls at
+    anchor_us + (n - anchor_beat) x the beat's length; a bar starts at anchor_beat and every beats_per_bar after."""
+    master: Optional[uuid.UUID] = None
+    running: bool = False
+    milli_bpm: int = 120_000
+    beats_per_bar: int = 4
+    beat_unit: int = 4
+    version: int = 0
+    anchor_beat: int = 0
+    anchor_us: int = 0
+    last_grid: float = 0.0
 
 
 @dataclass
@@ -401,6 +457,10 @@ class Relay:
         self.log_by_address: dict[tuple[str, str], int] = {}
         self.log_by_kind: dict[str, int] = {}
         self.log_held_back: dict[str, int] = {}
+        # The server's metronome, per group tag (see TYPE_TIMING).
+        self.beats: dict[bytes, GroupBeat] = {}
+        # The relay's clock for the metronome, in seconds (a test may stand another in).
+        self.clock = time.monotonic
 
     def note(self, level: int, kind: str, addr: Optional[tuple[str, int]], fmt: str, *args, exc_info: bool = False) -> None:
         """Write one event line, unless lines of this kind have come too often this minute, from this address or from
@@ -1028,9 +1088,18 @@ class Relay:
             self.stats.lobby_changes += 1
             self.v2_roster_dirty = True
             return
+        if pkt_type == TYPE_TIMING:
+            # Read here, never forwarded - and only from a member at the address it is registered at.
+            if from_registered_endpoint and self._may_forward_to(entry, "v2"):
+                self._timing_message(client_id, entry, data[V2_HEADER_LEN:])
+            return
         if pkt_type not in V2_FORWARDABLE_TYPES:
             # Unknown / server-originated type from a client. Ignore quietly.
             return
+        if pkt_type == TYPE_AUDIO:
+            self._audio_note_arrival(entry)
+            if entry.timing_known:
+                self._timing_note_arrival(entry, _stream_id, _sequence)
 
         # Fan-out forwarding to every OTHER client in the same group (verified addresses only, once enforcing).
         for other_id, other in self.v2_clients.items():
@@ -1053,6 +1122,210 @@ class Relay:
                     "event=send_failed proto=v2 to=%s err=%s",
                     _fmt_addr(other.addr), e,
                 )
+
+    # ------- how steadily each client's sound arrives (event=audio_timing) ---
+
+    def _audio_note_arrival(self, entry: ClientEntry) -> None:
+        now = self.clock()
+        if entry.audio_count:
+            gap_ms = (now - entry.audio_last_arrival) * 1000
+            if gap_ms > entry.audio_max_gap:
+                entry.audio_max_gap = gap_ms
+            if gap_ms > AUDIO_GAP_LONG_MS:
+                entry.audio_long_gaps += 1
+        entry.audio_last_arrival = now
+        entry.audio_count += 1
+
+    def _log_audio_timing(self) -> None:
+        """Once a minute, beside event=stats: for each client that sent sound, how many packets, the longest wait between
+        two and how many waits were longer than AUDIO_GAP_LONG_MS - then counted afresh. A wait here is the network's (or
+        the sender's) doing; the relay passes each packet on within a fraction of a millisecond."""
+        for cid, e in self.v2_clients.items():
+            if e.audio_count:
+                self.log.info(
+                    "event=audio_timing client_id=%s addr=%s packets=%d max_gap_ms=%.1f gaps_over_%dms=%d",
+                    cid, _fmt_addr(e.addr), e.audio_count, e.audio_max_gap, int(AUDIO_GAP_LONG_MS), e.audio_long_gaps,
+                    extra={"keep": True},
+                )
+            e.audio_count = 0
+            e.audio_max_gap = 0.0
+            e.audio_long_gaps = 0
+
+    # ------- the server's metronome (TYPE_TIMING) ----------------------------
+
+    def _timing_now_us(self) -> int:
+        return int(self.clock() * 1_000_000)
+
+    def _log_metronome_timing(self, group: bytes) -> None:
+        """Every TIMING_LOG_EVERY_SECONDS while a group's metronome plays, for each member timed: how many readings, how
+        much later than the least a typical and a late packet arrive (the path's jitter), and how far the least has moved
+        since the last line (the clocks drifting apart, or the path changing). The least is what the beat is built on."""
+        now = self.clock()
+        for cid, e in self.v2_clients.items():
+            if e.group != group or not e.timing_known or now - e.timing_logged_at < TIMING_LOG_EVERY_SECONDS:
+                continue
+            least = self._timing_delay_us(e)
+            if least is None:
+                continue   # the first line comes the moment it is measured
+            e.timing_logged_at = now
+            later = sorted(d - least for _, d in e.timing_samples)
+            moved = "" if e.timing_logged_delay_us is None else " moved_ms=%.2f" % ((least - e.timing_logged_delay_us) / 1000)
+            e.timing_logged_delay_us = least
+            self.log.info(
+                "event=metronome_timing client_id=%s addr=%s readings=%d typical_ms=%.2f late_ms=%.2f%s",
+                cid, _fmt_addr(e.addr), len(later), later[len(later) // 2] / 1000, later[int(len(later) * 0.95)] / 1000, moved,
+            )
+
+    def _timing_note_arrival(self, entry: ClientEntry, stream_id: int, sequence: int) -> None:
+        arrivals = entry.timing_arrivals.get(stream_id)
+        if arrivals is None:
+            # A stream gets a new id when its encoder starts again, so the oldest stream kept makes way (four at most).
+            while len(entry.timing_arrivals) >= 4:
+                del entry.timing_arrivals[next(iter(entry.timing_arrivals))]
+            arrivals = entry.timing_arrivals[stream_id] = OrderedDict()
+        arrivals[sequence] = self._timing_now_us()
+        while len(arrivals) > TIMING_ARRIVALS_KEPT:
+            arrivals.popitem(last=False)
+
+    def _timing_delay_us(self, entry: ClientEntry) -> Optional[int]:
+        """How long this member's sound takes to get here, plus the difference between its clock and ours: the least of
+        the last TIMING_DELAY_WINDOW_SECONDS (the packet that waited least on the way). The clocks' difference is in it on
+        purpose - it turns our beat straight into the member's own clock."""
+        now = self._timing_now_us()
+        window = int(TIMING_DELAY_WINDOW_SECONDS * 1_000_000)
+        while entry.timing_samples and now - entry.timing_samples[0][0] > window:
+            entry.timing_samples.popleft()
+        return min((d for _, d in entry.timing_samples), default=None)
+
+    def _timing_message(self, client_id: uuid.UUID, entry: ClientEntry, body: bytes) -> None:
+        if not body:
+            return
+        kind = body[0]
+        if kind == TIMING_REPORT:
+            self._timing_report(entry, body)
+            return
+        beat = self.beats.setdefault(entry.group, GroupBeat())
+        if kind == TIMING_CLAIM:
+            if beat.master is not None and beat.master != client_id and beat.master in self.v2_clients:
+                return   # somebody leads it; the grids say who
+            if beat.master != client_id:
+                beat.master = client_id
+                beat.version += 1
+                self.note(logging.INFO, "metronome_master", entry.addr,
+                    "event=metronome_master client_id=%s group=%s", client_id, entry.group[:2].hex() or "none")
+            self._timing_send_grids(entry.group)
+        elif kind == TIMING_RELEASE:
+            if beat.master != client_id:
+                return
+            beat.master = None
+            beat.running = False
+            beat.version += 1
+            self.note(logging.INFO, "metronome_released", entry.addr,
+                "event=metronome_released client_id=%s", client_id)
+            self._timing_send_grids(entry.group)
+        elif kind == TIMING_SET:
+            if beat.master != client_id or len(body) < 8:
+                return
+            running = body[1] != 0
+            milli_bpm = struct.unpack_from("<I", body, 2)[0]
+            per_bar, unit = body[6], body[7]
+            if not (TIMING_MIN_MILLI_BPM <= milli_bpm <= TIMING_MAX_MILLI_BPM) or not (1 <= per_bar <= 32) or unit not in (1, 2, 4, 8, 16, 32):
+                return
+            if not self._timing_set(beat, running, milli_bpm, per_bar, unit):
+                return
+            self.note(logging.INFO, "metronome_set", entry.addr,
+                "event=metronome_set client_id=%s running=%d bpm=%.3f signature=%d/%d version=%d",
+                client_id, int(running), milli_bpm / 1000, per_bar, unit, beat.version)
+            self._timing_send_grids(entry.group)
+
+    def _timing_report(self, entry: ClientEntry, body: bytes) -> None:
+        if len(body) < 2:
+            return
+        if not entry.timing_known:
+            self.note(logging.INFO, "metronome_reporting", entry.addr,
+                "event=metronome_reporting addr=%s (this member's sound is timed from now on)", _fmt_addr(entry.addr))
+        entry.timing_known = True
+        count = min(body[1], TIMING_MAX_ENTRIES)
+        now = self._timing_now_us()
+        for i in range(count):
+            at = 2 + i * 14
+            if len(body) < at + 14:
+                break
+            stream_id, sequence, captured_us = struct.unpack_from("<HIq", body, at)
+            arrived = entry.timing_arrivals.get(stream_id, {}).get(sequence)
+            if arrived is not None:
+                entry.timing_samples.append((now, arrived - captured_us))
+
+    @staticmethod
+    def _timing_beat_us(beat: GroupBeat) -> float:
+        return 60_000_000_000 / beat.milli_bpm
+
+    def _timing_set(self, beat: GroupBeat, running: bool, milli_bpm: int, per_bar: int, unit: int) -> bool:
+        """False when it changes nothing - the master repeats its setting each second, in case one was lost."""
+        if running == beat.running and (not running or (milli_bpm, per_bar, unit) == (beat.milli_bpm, beat.beats_per_bar, beat.beat_unit)):
+            return False
+        now = self._timing_now_us()
+        if running and not beat.running:
+            # Started: beat one a moment from now, as the app's own metronome starts.
+            beat.anchor_beat = 0
+            beat.anchor_us = now + int(TIMING_START_LEAD_SECONDS * 1_000_000)
+        elif running and beat.running:
+            # A change while it plays takes effect at the next bar line, the count carried on.
+            length = self._timing_beat_us(beat)
+            passed = max(0, int((now - beat.anchor_us) // length) + 1)
+            beats_on = -(-passed // beat.beats_per_bar) * beat.beats_per_bar
+            beat.anchor_us = int(beat.anchor_us + beats_on * length)
+            beat.anchor_beat += beats_on
+        beat.running = running
+        beat.milli_bpm = milli_bpm
+        beat.beats_per_bar = per_bar
+        beat.beat_unit = unit
+        beat.version += 1
+        return True
+
+    def _timing_grid_packet(self, beat: GroupBeat, recipient_id: uuid.UUID, delay_us: Optional[int]) -> bytes:
+        """One member's beat grid: [flags u8: 1 playing, 2 measured, 4 you lead it][master's client id 16][version u32]
+        [milli-bpm u32][beats per bar u8][beat unit u8][anchor beat u32][anchor time i64, in THE MEMBER'S clock: our beat
+        less its delay, so a note it plays on that beat reaches us on it]."""
+        flags = (1 if beat.running else 0) | (2 if delay_us is not None else 0) | (4 if beat.master == recipient_id else 0)
+        anchor = beat.anchor_us - delay_us if delay_us is not None else 0
+        body = (bytes([TIMING_GRID, flags]) + (beat.master.bytes if beat.master else SERVER_CLIENT_ID_BYTES)
+                + struct.pack("<IIBBIq", beat.version, beat.milli_bpm, beat.beats_per_bar, beat.beat_unit, beat.anchor_beat, anchor))
+        return (MAGIC + bytes([V2_VERSION, TYPE_TIMING]) + struct.pack("<H", 0) + struct.pack("<I", beat.version)
+                + SERVER_CLIENT_ID_BYTES + body)
+
+    def _timing_send_grids(self, group: bytes) -> None:
+        beat = self.beats.get(group)
+        if beat is None:
+            return
+        beat.last_grid = self.clock()
+        for cid, member in self.v2_clients.items():
+            if member.group != group or not member.timing_known or not member.verified:
+                continue
+            try:
+                self.sock.sendto(self._timing_grid_packet(beat, cid, self._timing_delay_us(member)), member.addr)
+                member.tx_packets += 1
+            except OSError as e:
+                self.note(logging.WARNING, "send_failed", member.addr,
+                    "event=send_failed proto=v2-timing to=%s err=%s", _fmt_addr(member.addr), e)
+
+    def _timing_tick(self) -> None:
+        """Every second, each group's grids again (a lost one is replaced, and each member's delay followed as it drifts);
+        a master that has left lets the metronome go."""
+        now = self.clock()
+        for group, beat in list(self.beats.items()):
+            if beat.master is not None and beat.master not in self.v2_clients:
+                beat.master = None
+                beat.running = False
+                beat.version += 1
+                self.note(logging.INFO, "metronome_released", None, "event=metronome_released reason=master_left")
+            if not any(m.group == group for m in self.v2_clients.values()):
+                del self.beats[group]
+                continue
+            if now - beat.last_grid >= TIMING_GRID_EVERY_SECONDS:
+                self._timing_send_grids(group)
+            if beat.running:
+                self._log_metronome_timing(group)
 
     # ------- shared --------------------------------------------------------
 
@@ -1078,6 +1351,7 @@ class Relay:
         # ROSTER_DIRTY_MIN_INTERVAL_SECONDS after the last, however many changes came in between. This is called
         # after every packet, and a list honoured on every packet was the relay's biggest amplifier
         # (pre-release sweep 2026-09-25). Nothing is lost: the flag stays set until the list goes out.
+        self._timing_tick()
         since = now - self.v2_last_roster_broadcast
         if self.v2_clients and (
             since >= ROSTER_HEARTBEAT_SECONDS
@@ -1107,6 +1381,7 @@ class Relay:
             len(self.v2_clients), v1_summary, v2_summary,
             extra={"keep": True},
         )
+        self._log_audio_timing()
         # The address-proof counters get their own line, so the event=stats line above stays exactly as
         # anything already reading it expects. They are the evidence for when --require-addr-check can
         # be switched on: while would_block_unverified keeps climbing in watch-only mode, clients that

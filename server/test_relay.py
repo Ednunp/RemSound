@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import math
 import logging.handlers
 import os
 import shutil
@@ -360,6 +361,53 @@ class Ticks(unittest.TestCase):
         self.assertTrue(forwarded_to(r.sock, b, b"FOR-B-ONLY"), "b ticked a and a ticked b")
         self.assertFalse(forwarded_to(r.sock, c, b"FOR-B-ONLY"),
                          "c has ticked a, but a has not ticked c: c must not be sent a's audio")
+
+
+class Metronome(unittest.TestCase):
+    """2026-09-28: the master metronome's messages (type 12) pass between group members exactly as sound does - both
+    must have ticked each other - and types the relay does not know are still dropped."""
+
+    def test_the_metronome_passes_between_members_who_ticked_each_other(self):
+        r = make_relay()
+        a, b, c = ("10.7.0.1", 8400), ("10.7.0.2", 8401), ("10.7.0.3", 8402)
+        join(r, cid(1), "master", G1, a, ticked=[cid(2), cid(3)])
+        join(r, cid(2), "follower", G1, b, ticked=[cid(1)])
+        join(r, cid(3), "not ticked back", G1, c, ticked=[])
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_METRONOME, cid(1), b"METRONOME-OFFER"), a)
+        self.assertTrue(forwarded_to(r.sock, b, b"METRONOME-OFFER"), "a member who ticked the master back must be passed its metronome")
+        self.assertFalse(forwarded_to(r.sock, c, b"METRONOME-OFFER"), "one who has not ticked it back must not")
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_METRONOME, cid(2), b"METRONOME-ACCEPT"), b)
+        self.assertTrue(forwarded_to(r.sock, a, b"METRONOME-ACCEPT"), "and the answer must come back the other way")
+
+    def test_another_password_never_gets_it(self):
+        r = make_relay()
+        a, b = ("10.7.1.1", 8500), ("10.7.1.2", 8501)
+        join(r, cid(1), "master", G1, a)
+        join(r, cid(2), "elsewhere", G2, b)
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_METRONOME, cid(1), b"METRONOME-STATE"), a)
+        self.assertFalse(forwarded_to(r.sock, b, b"METRONOME-STATE"), "a member on another password must never be sent it")
+
+    def test_types_the_relay_does_not_know_are_still_dropped(self):
+        r = make_relay()
+        a, b = ("10.7.2.1", 8600), ("10.7.2.2", 8601)
+        join(r, cid(1), "a", G1, a)
+        join(r, cid(2), "b", G1, b)
+        for unknown in (11, 13, 99):
+            r.sock.sent.clear()
+            r.handle_packet(v2_packet(unknown, cid(1), b"UNKNOWN-TYPE"), a)
+            self.assertFalse(forwarded_to(r.sock, b, b"UNKNOWN-TYPE"), f"type {unknown} is not the relay's to pass on")
+
+    def test_a_v1_pair_passes_it_as_everything_else(self):
+        r = make_relay()
+        a, b = ("10.7.3.1", 8700), ("10.7.3.2", 8701)
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT), a)
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT), b)
+        r.sock.sent.clear()
+        r.handle_packet(v1_packet(relay.TYPE_METRONOME, b"V1-METRONOME"), a)
+        self.assertTrue(forwarded_to(r.sock, b, b"V1-METRONOME"), "two paired devices pass it, as they pass every type")
 
 
 class TicksYouFlag(unittest.TestCase):
@@ -1288,6 +1336,264 @@ class UpdaterWalksPastARefusedRelease(unittest.TestCase):
         self.assertEqual([lines[i] for i in range(0, 24, 4)],
                          ["server-v2.16", "server-v2.15", "server-v2.14", "server-v2.13", "server-v2.12", "server-v2.11"],
                          "then every other server release, newest first")
+
+
+
+def timing_packet(client_id: bytes, body: bytes) -> bytes:
+    return v2_packet(relay.TYPE_TIMING, client_id, body, stream_id=0)
+
+
+def report_body(entries: list[tuple[int, int, int]]) -> bytes:
+    return bytes([relay.TIMING_REPORT, len(entries)]) + b"".join(struct.pack("<HIq", st, sq, cap) for st, sq, cap in entries)
+
+
+def set_body(running: bool, bpm: float, per_bar: int = 4, unit: int = 4) -> bytes:
+    return bytes([relay.TIMING_SET, 1 if running else 0]) + struct.pack("<I", int(bpm * 1000)) + bytes([per_bar, unit])
+
+
+def last_grid(sock: FakeSocket, addr):
+    """The newest beat grid sent to addr, read: flags, master id, version, milli-bpm, per bar, unit, anchor beat, anchor."""
+    for data, to in reversed(sock.sent):
+        if to == addr and data[5] == relay.TYPE_TIMING and len(data) > relay.V2_HEADER_LEN and data[relay.V2_HEADER_LEN] == relay.TIMING_GRID:
+            body = data[relay.V2_HEADER_LEN:]
+            flags = body[1]
+            master = bytes(body[2:18])
+            version, milli, per_bar, unit, anchor_beat, anchor = struct.unpack_from("<IIBBIq", body, 18)
+            return dict(flags=flags, master=master, version=version, milli=milli, per_bar=per_bar, unit=unit,
+                        anchor_beat=anchor_beat, anchor=anchor)
+    return None
+
+
+class ServerMetronome(unittest.TestCase):
+    """2026-09-29 (Ed: "make the server give the metronome time by working out the latency of each client ... the slowest
+    person gets the beat early"): the relay keeps each group's beat and gives each member the beat early by exactly how long
+    that member's sound takes to arrive, measured from the member's own audio - so a note each plays on its beat reaches the
+    relay on it, whatever their distances and however their clocks drift."""
+
+    class Member:
+        def __init__(self, n, addr, upload_ms, offset_us, ppm):
+            self.cid, self.addr, self.upload, self.offset, self.ppm = cid(n), addr, upload_ms / 1000, offset_us, ppm
+
+        def clock_us(self, relay_s):          # this member's own clock, at a relay time
+            return int(relay_s * 1_000_000 * (1 + self.ppm * 1e-6)) + self.offset
+
+        def relay_s(self, clock_us):          # and back
+            return (clock_us - self.offset) / (1 + self.ppm * 1e-6) / 1_000_000
+
+    def setUp(self):
+        self.t = 5000.0
+        self.r = make_relay()
+        self.r.clock = lambda: self.t
+        import random
+        self.rng = random.Random(7)
+        # Andre far and fast-clocked, Ed near and slow-clocked: 15 ms and 40 ms up to the relay, clocks miles apart, one
+        # 80 ppm fast and one 50 ppm slow (a slow clock's delay grows, so a stale least-delay would be a late beat). They
+        # tick each other, so anything the relay wrongly passed on would reach the other.
+        self.ed = self.Member(1, ("10.8.0.1", 9001), 15, 3_000_000_000, -50)
+        self.andre = self.Member(2, ("10.8.0.2", 9002), 40, -77_000_000_000, 80)
+        for m, other in ((self.ed, self.andre), (self.andre, self.ed)):
+            join(self.r, m.cid, f"member{m.cid[0]}", G1, m.addr, ticked=[other.cid])
+        self.seq = {self.ed.cid: 0, self.andre.cid: 0}
+
+    def run_audio(self, seconds: float) -> None:
+        """Both members sending 2.5 ms packets up to the relay, each delayed by its path plus 0-12 ms of queueing, and each
+        reporting when its packets were captured, every 200 ms - in time order, as the relay would see them."""
+        events = []
+        start = self.t
+        for m in (self.ed, self.andre):
+            k = 0
+            while k * 0.0025 < seconds:
+                cap = start + k * 0.0025
+                seq = self.seq[m.cid] = self.seq[m.cid] + 1
+                queue = 0.0 if k % 40 == 0 else self.rng.uniform(0, 0.012)
+                events.append((cap + m.upload + queue, "audio", m, seq, cap))
+                if k % 80 == 79:
+                    events.append((cap + m.upload + 0.05, "report", m, seq, cap))
+                k += 1
+        pending: dict = {}
+        for at, kind, m, seq, cap in sorted(events, key=lambda e: e[0]):
+            self.t = at
+            if kind == "audio":
+                self.r.handle_packet(v2_packet(relay.TYPE_AUDIO, m.cid, b"A", stream_id=7, seq=seq), m.addr)
+                pending.setdefault(m.cid, []).append((seq, cap))
+            else:
+                entries = [(7, sq, m.clock_us(c)) for sq, c in pending.get(m.cid, [])[-16:]]
+                self.r.handle_packet(timing_packet(m.cid, report_body(entries)), m.addr)
+            self.r.tick(self.t)
+        self.t = start + seconds
+
+    def note_error_ms(self, m, grid, relay_beat_s) -> float:
+        """Where a note played on m's own click for the beat falling at relay_beat_s lands at the relay, less the beat."""
+        length = 60_000_000_000 / grid["milli"]
+        n = round((relay_beat_s - self.r.beats[G1].anchor_us / 1e6) / (length / 1e6)) + grid["anchor_beat"]
+        captured_clock = grid["anchor"] + (n - grid["anchor_beat"]) * length
+        return (m.relay_s(captured_clock) + m.upload - relay_beat_s) * 1000
+
+    def test_a_member_that_never_reported_is_sent_no_grid(self):
+        r = self.r
+        silent = ("10.8.0.3", 9003)
+        join(r, cid(3), "old app", G1, silent)
+        r.handle_packet(timing_packet(self.ed.cid, report_body([])), self.ed.addr)
+        r.handle_packet(timing_packet(self.ed.cid, bytes([relay.TIMING_CLAIM])), self.ed.addr)
+        self.assertIsNotNone(last_grid(r.sock, self.ed.addr), "a member that reports is sent its grid")
+        self.assertIsNone(last_grid(r.sock, silent), "one that never reported - a phone, a Mac, an older RemSound - is sent none")
+
+    def test_each_note_on_its_click_reaches_the_relay_on_the_beat(self):
+        r = self.r
+        self.run_audio(6)
+        r.handle_packet(timing_packet(self.ed.cid, bytes([relay.TIMING_CLAIM])), self.ed.addr)
+        r.handle_packet(timing_packet(self.ed.cid, set_body(True, 120)), self.ed.addr)
+        for after in (6, 60):
+            self.run_audio(after if after == 6 else 54)
+            beat = r.beats[G1]
+            upcoming = beat.anchor_us / 1e6 + math.ceil((self.t - beat.anchor_us / 1e6) / 0.5 + 1) * 0.5
+            for m, who in ((self.ed, "Ed, 15 ms away"), (self.andre, "Andre, 40 ms away and 80 ppm fast")):
+                grid = last_grid(r.sock, m.addr)
+                self.assertTrue(grid and grid["flags"] & 3 == 3, f"{who}: a playing, measured grid")
+                err = self.note_error_ms(m, grid, upcoming)
+                self.assertLess(abs(err), 1.0, f"{who}, {after} s in: a note on the click must reach the relay within 1 ms of the beat ({err:+.2f} ms)")
+        # For the same beat, in relay time, Andre plays 25 ms before Ed: the slower player gets the beat early.
+        def played_at(m):
+            grid = last_grid(r.sock, m.addr)
+            length = 60_000_000_000 / grid["milli"]
+            n = round((upcoming - r.beats[G1].anchor_us / 1e6) / (length / 1e6)) + grid["anchor_beat"]
+            return m.relay_s(grid["anchor"] + (n - grid["anchor_beat"]) * length)
+        early = (played_at(self.ed) - played_at(self.andre)) * 1000
+        self.assertAlmostEqual(early, 25, delta=1.0, msg=f"the farther player's beat must come earlier by the difference ({early:.2f} ms)")
+
+    def test_only_the_master_sets_it_and_it_can_be_handed_over(self):
+        r = self.r
+        for m in (self.ed, self.andre):
+            r.handle_packet(timing_packet(m.cid, report_body([])), m.addr)
+        r.handle_packet(timing_packet(self.ed.cid, bytes([relay.TIMING_CLAIM])), self.ed.addr)
+        r.handle_packet(timing_packet(self.andre.cid, bytes([relay.TIMING_CLAIM])), self.andre.addr)
+        self.assertEqual(r.beats[G1].master.bytes, self.ed.cid, "the first to claim leads it; a second claim is refused while the first is there")
+        self.assertEqual(last_grid(r.sock, self.andre.addr)["master"], self.ed.cid, "and every grid says who leads it")
+        self.assertTrue(last_grid(r.sock, self.ed.addr)["flags"] & 4, "the master's own grid says it leads")
+        r.handle_packet(timing_packet(self.andre.cid, set_body(True, 90)), self.andre.addr)
+        self.assertFalse(r.beats[G1].running, "one who does not lead it cannot start it")
+        r.handle_packet(timing_packet(self.ed.cid, set_body(True, 90)), self.ed.addr)
+        self.assertTrue(r.beats[G1].running and r.beats[G1].milli_bpm == 90_000, "the master starts it")
+        # Handing over: the master lets go, the new one claims.
+        r.handle_packet(timing_packet(self.ed.cid, bytes([relay.TIMING_RELEASE])), self.ed.addr)
+        self.assertFalse(r.beats[G1].running, "let go, it stops")
+        r.handle_packet(timing_packet(self.andre.cid, bytes([relay.TIMING_CLAIM])), self.andre.addr)
+        self.assertEqual(r.beats[G1].master.bytes, self.andre.cid, "and the next claim takes it")
+        # A master that leaves lets it go.
+        r.handle_packet(timing_packet(self.andre.cid, set_body(True, 100)), self.andre.addr)
+        r.handle_packet(v2_packet(relay.TYPE_LOBBY_BYE, self.andre.cid), self.andre.addr)
+        r.tick(self.t)
+        self.assertTrue(r.beats[G1].master is None and not r.beats[G1].running, "a master that has left frees it, and it stops")
+
+    def test_a_change_while_it_plays_waits_for_the_bar_line(self):
+        r = self.r
+        r.handle_packet(timing_packet(self.ed.cid, report_body([])), self.ed.addr)
+        r.handle_packet(timing_packet(self.ed.cid, bytes([relay.TIMING_CLAIM])), self.ed.addr)
+        r.handle_packet(timing_packet(self.ed.cid, set_body(True, 120)), self.ed.addr)
+        start = r.beats[G1].anchor_us
+        self.t += 0.4 + 0.5 * 5 + 0.1        # into beat 5 (the second bar's second beat)
+        r.handle_packet(timing_packet(self.ed.cid, set_body(True, 60, 3, 4)), self.ed.addr)
+        b = r.beats[G1]
+        self.assertEqual(b.anchor_beat, 8, "the change starts on the next bar line, beat 8")
+        self.assertAlmostEqual((b.anchor_us - start) / 1e6, 8 * 0.5, delta=1e-6, msg="at that bar line's time, at the old tempo")
+        self.assertTrue(b.milli_bpm == 60_000 and b.beats_per_bar == 3, "and then at the new tempo and signature")
+        # The master repeats its setting each second: the same again changes nothing.
+        version, anchor = b.version, b.anchor_us
+        self.t += 1.3
+        r.handle_packet(timing_packet(self.ed.cid, set_body(True, 60, 3, 4)), self.ed.addr)
+        self.assertTrue(b.version == version and b.anchor_us == anchor, "a repeated setting must not move the beat")
+
+    def test_a_stream_that_starts_again_is_still_measured(self):
+        """A stream gets a new id each time its encoder starts again: the sixth one must be measured as the first was."""
+        r = self.r
+        m = self.ed
+        r.handle_packet(timing_packet(m.cid, report_body([])), m.addr)
+        for stream in range(1, 7):
+            r.handle_packet(v2_packet(relay.TYPE_AUDIO, m.cid, b"A", stream_id=stream, seq=100), m.addr)
+        r.v2_clients[uuid.UUID(bytes=m.cid)].timing_samples.clear()
+        r.handle_packet(timing_packet(m.cid, report_body([(6, 100, m.clock_us(self.t))])), m.addr)
+        self.assertEqual(len(r.v2_clients[uuid.UUID(bytes=m.cid)].timing_samples), 1,
+                         "the newest stream must be measured, however many came before it")
+
+    def _capture_log(self) -> "_CapturedLog":
+        log = logging.getLogger(f"remsound-relay-test-metronome-{uuid.uuid4()}")
+        log.propagate = False
+        log.setLevel(logging.INFO)
+        captured = _CapturedLog()
+        log.addHandler(captured)
+        self.r.log = log
+        return captured
+
+    def test_the_log_says_how_steady_each_members_timing_is(self):
+        """2026-09-29, after the first jam through Ed's Pi: every 30 s while the metronome plays, each member's timing -
+        how much later than the least a typical and a late packet arrive, and how far the least has moved."""
+        r = self.r
+        captured = self._capture_log()
+        # Started before anyone is measured (live on the Pi, 2026-09-29, it said "not measured" at once and then nothing
+        # for 30 s): no line until a member is measured, and then one at once.
+        for m in (self.ed, self.andre):
+            r.handle_packet(timing_packet(m.cid, report_body([])), m.addr)
+        r.handle_packet(timing_packet(self.ed.cid, bytes([relay.TIMING_CLAIM])), self.ed.addr)
+        r.handle_packet(timing_packet(self.ed.cid, set_body(True, 120)), self.ed.addr)
+        r.tick(self.t)
+        self.assertFalse(any(m.startswith("event=metronome_timing") for m in captured.messages), "nobody measured yet: no line")
+        self.run_audio(3)
+        self.assertEqual(sum(1 for m in captured.messages if m.startswith("event=metronome_timing")), 2,
+                         "measured, each member's first line comes at once")
+        self.run_audio(35)
+        lines = [m for m in captured.messages if m.startswith("event=metronome_timing")]
+        andre = [_key_values(m) for m in lines if "addr=10.8.0.2" in m]
+        self.assertGreaterEqual(len(andre), 2, f"a line for Andre at the start and 30 s on ({lines})")
+        second = andre[1]
+        self.assertGreater(int(second["readings"]), 100, "five seconds of readings from his reports")
+        # His packets queue for 0 to 12 ms on the way: a typical one about 6 ms later than the least, a late one nearly 12.
+        self.assertTrue(3 < float(second["typical_ms"]) < 9 and 9 < float(second["late_ms"]) <= 12.5, f"his path's jitter ({second})")
+        # His clock runs 80 ppm fast: over 30 s, once his least delay has settled, it moves by about 2.4 ms. (The first
+        # line, the moment he is measured, is on a moment's readings: the least then still falls as quicker packets come.)
+        self.run_audio(30)
+        third = [_key_values(m) for m in captured.messages if m.startswith("event=metronome_timing") and "addr=10.8.0.2" in m][2]
+        self.assertIn("moved_ms", third, "and each line says how far his least delay moved")
+        self.assertAlmostEqual(abs(float(third["moved_ms"])), 2.4, delta=0.6, msg=f"80 ppm over 30 s ({third})")
+        r.handle_packet(timing_packet(self.ed.cid, set_body(False, 120)), self.ed.addr)
+        count = len(captured.messages)
+        self.run_audio(35)
+        self.assertFalse(any(m.startswith("event=metronome_timing") for m in captured.messages[count:]),
+                         "stopped, nothing more is logged")
+
+    def test_the_log_says_how_steadily_each_clients_sound_arrives(self):
+        """2026-09-29: once a minute beside event=stats, each client's packets, the longest wait between two and how many
+        waits were over 20 ms - the evidence for crunchy sound that took a packet capture on the Pi to find."""
+        r = self.r
+        captured = self._capture_log()
+        seq = 0
+        for gap in [0.0025] * 200 + [0.030] + [0.0025] * 100 + [0.045] + [0.0025] * 50:
+            self.t += gap
+            seq += 1
+            r.handle_packet(v2_packet(relay.TYPE_AUDIO, self.andre.cid, b"A", stream_id=7, seq=seq), self.andre.addr)
+        r.maybe_log_stats(r.last_stats_log + relay.STATS_INTERVAL_SECONDS)
+        lines = [_key_values(m) for m in captured.messages if m.startswith("event=audio_timing") and "addr=10.8.0.2" in m]
+        self.assertEqual(len(lines), 1, f"one line for Andre ({captured.messages})")
+        line = lines[0]
+        self.assertEqual(line["packets"], "352")
+        self.assertAlmostEqual(float(line["max_gap_ms"]), 45.0, delta=0.1)
+        self.assertEqual(line["gaps_over_20ms"], "2")
+        self.assertFalse(any(m.startswith("event=audio_timing") and "addr=10.8.0.1" in m for m in captured.messages),
+                         "a client that sent no sound gets no line")
+        captured.messages.clear()
+        r.maybe_log_stats(r.last_stats_log + relay.STATS_INTERVAL_SECONDS)
+        self.assertFalse(any(m.startswith("event=audio_timing") for m in captured.messages), "counted afresh each minute")
+
+    def test_nonsense_is_refused(self):
+        r = self.r
+        r.handle_packet(timing_packet(self.ed.cid, report_body([])), self.ed.addr)
+        r.handle_packet(timing_packet(self.ed.cid, bytes([relay.TIMING_CLAIM])), self.ed.addr)
+        for bad in (set_body(True, 5), set_body(True, 900), set_body(True, 120, 0, 4), set_body(True, 120, 4, 3), bytes([relay.TIMING_SET, 1])):
+            r.handle_packet(timing_packet(self.ed.cid, bad), self.ed.addr)
+            self.assertFalse(r.beats[G1].running, f"a set it cannot mean must be refused ({bad.hex()})")
+        r.sock.sent.clear()
+        r.handle_packet(timing_packet(self.ed.cid, bytes([relay.TIMING_CLAIM])), self.ed.addr)
+        self.assertFalse(any(to == self.andre.addr and data[5] == relay.TYPE_TIMING and b"\x02" == data[relay.V2_HEADER_LEN:relay.V2_HEADER_LEN + 1]
+                             for data, to in r.sock.sent), "and the relay never forwards a member's timing message to anyone")
 
 
 if __name__ == "__main__":
