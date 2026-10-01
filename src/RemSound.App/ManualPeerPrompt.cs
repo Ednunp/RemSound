@@ -24,7 +24,7 @@ internal static class ManualPeerPrompt
             MinimizeBox = false,
             MaximizeBox = false,
             ShowInTaskbar = false,
-            ClientSize = new Size(440, 130),
+            ClientSize = Dpi.Px(440, 130),
         };
         // No port hint — RemSound now uses a single canonical UDP port (RemPacket.DefaultPort,
         // 47830 as of 2026-05-05) for Tailscale, LAN, and relay peers alike. Users just type a
@@ -33,7 +33,7 @@ internal static class ManualPeerPrompt
         var textBox = new TextBox
         {
             Dock = DockStyle.Top,
-            Width = 380,
+            Width = Dpi.Px(380),
             AccessibleName = "Peer IP address or hostname",
         };
         var okButton = new Button { Text = "&OK", AutoSize = true, DialogResult = DialogResult.OK };
@@ -48,12 +48,15 @@ internal static class ManualPeerPrompt
                 args.SuppressKeyPress = true;
             }
         };
-        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), RowCount = 3, ColumnCount = 1 };
+        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = Dpi.Pad(12), RowCount = 3, ColumnCount = 1 };
         panel.Controls.Add(new Label { Text = "Peer IP address or hostname:", AutoSize = true }, 0, 0);
         panel.Controls.Add(textBox, 0, 1);
         var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill };
-        buttons.Controls.Add(okButton);
+        // OK then Cancel, as Windows orders them (Ed, 2026-09-28): right to left, so Cancel goes in first; OK first for Tab too.
         buttons.Controls.Add(cancelButton);
+        buttons.Controls.Add(okButton);
+        okButton.TabIndex = 0;
+        cancelButton.TabIndex = 1;
         panel.Controls.Add(buttons, 0, 2);
         dialog.Controls.Add(panel);
         dialog.AcceptButton = okButton;

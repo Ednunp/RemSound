@@ -40,17 +40,22 @@ public static class PeerAddress
     public static IPAddress? ResolveHost(string entry)
     {
         var (host, _) = Split(entry);
-        if (IPAddress.TryParse(host, out var direct)) return direct;
-        try { return PreferIPv4(Dns.GetHostAddresses(host)); }
+        if (IPAddress.TryParse(host, out var direct)) return Usable(direct);
+        try { return Usable(PreferIPv4(Dns.GetHostAddresses(host))); }
         catch { return null; }
     }
+
+    /// <summary>An address a peer can have. The metronome's place in the DAW plugin's list (0.0.0.1, see
+    /// <see cref="MetronomeDaw"/>) is never one: typed in, or answered by a name, it is refused like a name that does not
+    /// resolve.</summary>
+    public static IPAddress? Usable(IPAddress? address) => MetronomeDaw.IsPseudoPeer(address) ? null : address;
 
     /// <summary>Async twin of <see cref="ResolveHost"/> for UI callers.</summary>
     public static async Task<IPAddress?> ResolveHostAsync(string entry)
     {
         var (host, _) = Split(entry);
-        if (IPAddress.TryParse(host, out var direct)) return direct;
-        try { return PreferIPv4(await Dns.GetHostAddressesAsync(host).ConfigureAwait(false)); }
+        if (IPAddress.TryParse(host, out var direct)) return Usable(direct);
+        try { return Usable(PreferIPv4(await Dns.GetHostAddressesAsync(host).ConfigureAwait(false))); }
         catch { return null; }
     }
 }

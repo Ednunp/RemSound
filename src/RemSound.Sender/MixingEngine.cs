@@ -39,7 +39,7 @@ internal sealed class MixingEngine : ICaptureBackend
 {
     private const int MixSampleRate = 48000;
     private const int MixChannels = 2;
-    private const int MixTickMs = 10;
+    internal const int MixTickMs = 10;
     private const int MixSamplesPerTick = MixSampleRate * MixChannels * MixTickMs / 1000; // 960 floats
 
     private readonly Action<ReadOnlyMemory<float>> onMixedSamples;
@@ -56,6 +56,13 @@ internal sealed class MixingEngine : ICaptureBackend
 
     /// <summary>Self-test seam: refuse to open a source, as a busy or exclusively held device does.</summary>
     internal static Func<CaptureSourceSpec, bool>? RefuseOpenForTest;
+
+    /// <summary>The per-program capture an id asks for, not yet started: "proc:" is that program and its children, "procx:"
+    /// every program but that one (the service's boot ear). Throws on an id that is neither.</summary>
+    internal static ProcessLoopbackCapture ProcessCaptureFor(string deviceId) =>
+        ProcessLoopbackId.TryParse(deviceId, out var pid, out var excluding)
+            ? new ProcessLoopbackCapture(pid, includeProcessTree: !excluding)
+            : throw new ArgumentException($"bad process-loopback id \"{deviceId}\"");
     private float[] mixScratch = new float[MixSamplesPerTick];
     private CancellationTokenSource? cts;
     private Task? mixTask;
@@ -68,7 +75,11 @@ internal sealed class MixingEngine : ICaptureBackend
         this.onDiagnostic = onDiagnostic;
     }
 
-    public bool IsRunning => mixTask is { IsCompleted: false };
+    public bool IsRunning => manualTick ? mixer is not null : mixTask is { IsCompleted: false };
+
+    // Ticked by the simulator (CaptureDevicesForTest.ManualMixTick), which runs each 10 ms tick on its own clock: no mix
+    // thread of our own.
+    private bool manualTick;
 
     /// <summary>How many capture sources are live. Drives the drift correctors: with ONE source there
     /// is nothing to stay aligned with, so correction stays off and the commonest setup of all is
@@ -267,9 +278,14 @@ internal sealed class MixingEngine : ICaptureBackend
             }
 
             Interlocked.Exchange(ref clippedSampleCount, 0);
-            cts = new CancellationTokenSource();
-            mixTask = Task.Run(() => MixLoop(cts.Token));
-            onDiagnostic?.Invoke($"mixer started with {active.Count} source(s): [{string.Join(", ", active.Select(a => $"\"{a.Source.Name}\" ({a.Source.Kind})"))}]");
+            manualTick = CaptureDevicesForTest.ManualMixTick;
+            if (!manualTick)
+            {
+                cts = new CancellationTokenSource();
+                mixTask = Task.Run(() => MixLoop(cts.Token));
+            }
+            onDiagnostic?.Invoke($"mixer started with {active.Count} source(s): [{string.Join(", ", active.Select(a => $"\"{a.Source.Name}\" ({a.Source.Kind})"))}]"
+                + (manualTick ? " - ticked by the simulator" : ""));
         }
     }
 
@@ -328,7 +344,7 @@ internal sealed class MixingEngine : ICaptureBackend
     /// the heal cannot mend, so the only one reported to the sender as the lane being down.</summary>
     internal bool MixLoopDied { get { lock (gate) return MixLoopDiedLocked(); } }
 
-    private bool MixLoopDiedLocked() => active.Count > 0 && mixTask is { IsCompleted: true };
+    private bool MixLoopDiedLocked() => !manualTick && active.Count > 0 && mixTask is { IsCompleted: true };
 
     private void UpdateSourcesLocked(IReadOnlyList<CaptureSourceSpec> specs)
     {
@@ -417,6 +433,7 @@ internal sealed class MixingEngine : ICaptureBackend
         active.Clear();
         activeCount = 0;
         mixer = null;
+        manualTick = false;
     }
 
     /// <summary>Take the source at <paramref name="index"/> out of the mix and close it. Caller holds <c>gate</c>.</summary>
@@ -490,6 +507,15 @@ internal sealed class MixingEngine : ICaptureBackend
             if (!healing) onDiagnostic?.Invoke($"mixer: failed to open source \"{spec.Name}\" ({spec.Kind}): refused by the self-test");
             return null;
         }
+        // The simulator's device, when it has one for this spec: the same CaptureSource chain, no Windows device.
+        if (CaptureDevicesForTest.Open?.Invoke(spec) is { } simulated)
+            return new ActiveSource
+            {
+                Source = new CaptureSource(simulated, spec.Kind, spec.DeviceId, spec.Name, onDiagnostic)
+                    { ReportedInputLatencyMs = (simulated as CaptureDevicesForTest.IReportsLatency)?.ReportedInputLatencyMs ?? 0 },
+                Device = null,
+                KeepAlive = null,
+            };
         // Per-application source: no MMDevice, no render keepalive — the process-loopback client
         // captures the app's render stream directly. If the app has exited, the PID is stale and
         // activation fails; the caller simply drops it and the next reconcile re-resolves the name.
@@ -497,9 +523,7 @@ internal sealed class MixingEngine : ICaptureBackend
         {
             try
             {
-                if (!ProcessLoopbackId.TryParse(spec.DeviceId, out var pid))
-                    throw new ArgumentException($"bad process-loopback id \"{spec.DeviceId}\"");
-                var proc = new ProcessLoopbackCapture(pid);
+                var proc = ProcessCaptureFor(spec.DeviceId);
                 var src = new CaptureSource(proc, spec.Kind, spec.DeviceId, spec.Name, onDiagnostic);
                 return new ActiveSource { Source = src, KeepAlive = null, Device = null };
             }
@@ -599,29 +623,7 @@ internal sealed class MixingEngine : ICaptureBackend
                 }
                 nextTickStopwatch += ticksPerFrame;
 
-                var localMixer = mixer;
-                if (localMixer is null) continue;
-
-                // Per-thread CPU instrumentation. Capture-the-work-tick at the start of
-                // the active body so we can report this loop's CPU footprint via the
-                // captureMs column on the diag log.
-                var diag = RemSound.Core.DiagnosticsGate.Enabled;
-                var workStart = diag ? Stopwatch.GetTimestamp() : 0L;
-
-                var read = localMixer.Read(mixScratch, 0, MixSamplesPerTick);
-                if (read <= 0)
-                {
-                    if (diag) Interlocked.Add(ref cumulativeMixLoopTicks, Stopwatch.GetTimestamp() - workStart);
-                    continue;
-                }
-
-                // Hard-clamp mixed sum to [-1, 1] to prevent encoder clipping when multiple loud
-                // sources sum past unity. Shared rule (SampleClamp); one batched counter add.
-                var clipped = SampleClamp.ClampBuffer(mixScratch.AsSpan(0, read));
-                if (clipped > 0) Interlocked.Add(ref clippedSampleCount, clipped);
-
-                onMixedSamples(new ReadOnlyMemory<float>(mixScratch, 0, read));
-                if (diag) Interlocked.Add(ref cumulativeMixLoopTicks, Stopwatch.GetTimestamp() - workStart);
+                MixOnce();
             }
             catch (OperationCanceledException)
             {
@@ -642,6 +644,45 @@ internal sealed class MixingEngine : ICaptureBackend
                 if (ct.WaitHandle.WaitOne(50)) break;
             }
         }
+    }
+
+    /// <summary>One tick's work: 10 ms from the mix, clamped, handed to the lane. The mix thread's, and the simulator's when
+    /// it runs the ticks itself (<see cref="MixTickForTest"/>) - the same code either way.</summary>
+    private void MixOnce()
+    {
+        var localMixer = mixer;
+        if (localMixer is null) return;
+
+        // Per-thread CPU instrumentation. Capture-the-work-tick at the start of
+        // the active body so we can report this loop's CPU footprint via the
+        // captureMs column on the diag log.
+        var diag = RemSound.Core.DiagnosticsGate.Enabled;
+        var workStart = diag ? Stopwatch.GetTimestamp() : 0L;
+
+        var read = localMixer.Read(mixScratch, 0, MixSamplesPerTick);
+        if (read <= 0)
+        {
+            if (diag) Interlocked.Add(ref cumulativeMixLoopTicks, Stopwatch.GetTimestamp() - workStart);
+            return;
+        }
+
+        // Hard-clamp mixed sum to [-1, 1] to prevent encoder clipping when multiple loud
+        // sources sum past unity. Shared rule (SampleClamp); one batched counter add.
+        var clipped = SampleClamp.ClampBuffer(mixScratch.AsSpan(0, read));
+        if (clipped > 0) Interlocked.Add(ref clippedSampleCount, clipped);
+
+        onMixedSamples(new ReadOnlyMemory<float>(mixScratch, 0, read));
+        if (diag) Interlocked.Add(ref cumulativeMixLoopTicks, Stopwatch.GetTimestamp() - workStart);
+    }
+
+    /// <summary>The simulator's tick, when it runs them (<see cref="CaptureDevicesForTest.ManualMixTick"/>).</summary>
+    internal void MixTickForTest() => MixOnce();
+
+    /// <summary>Each source's drift corrector (for the simulator and tests): its name, the ratio it applies and whether it
+    /// has a reading.</summary>
+    internal IReadOnlyList<(string Name, double Ratio, bool Tracking)> DriftForTest
+    {
+        get { lock (gate) return active.Select(a => (a.Source.Name, a.Source.AppliedDriftRatio, a.Source.DriftCorrector?.IsTracking ?? false)).ToList(); }
     }
 
     private sealed class ActiveSource

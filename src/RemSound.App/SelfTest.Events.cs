@@ -40,26 +40,36 @@ internal static partial class SelfTest
         // the window is enumerated from the live form, so a handler on a new control cannot hide.
         new("RemSound.App/MainForm.cs", "the control suite in all three configurations, with every control specified",
             "Control suite - ", "Every control is specified"),
+        new("RemSound.App/MainForm.NetworkRecording.cs",
+            "Record > Save the last minute of the network is driven through the control channel, as a user would: the file written "
+            + "to the logs folder and said, and with nothing arrived nothing written",
+            "THE NETWORK RECORDER"),
+        new("RemSound.App/MainForm.AsioBufferSize.cs",
+            "the ASIO buffer size list is driven through the control channel - saved, logged, and the driver reopened once when the "
+            + "choice settles - and by the control suite in all three configurations; the timer's own disposal is the ordinary Disposed teardown",
+            "ASIO BUFFER SIZE PER PROFILE", "Control suite - "),
         new("RemSound.App/KeyClickService.cs",
             "the key-click output stopping is stood in for by setting what its handler sets, because a test cannot take a "
             + "sound device away; the rebuild that follows is driven through the key-press routine",
             "KEY CLICKS"),
-        new("RemSound.App/RelayConnectDialog.cs", "the dialog suite, and the relay connect step",
-            "Dialog control suite", "Connecting to a relay, remembering it and ticking who is on it"),
+        new("RemSound.App/RelayConnectDialog.cs", "the dialog suite, the relay connect step, and the server window step (moving "
+            + "through the remembered servers puts each in the box)",
+            "Dialog control suite", "Connecting to a relay, remembering it and ticking who is on it", "SERVER WINDOW"),
         new("RemSound.App/ServiceSendHost.cs",
             "Windows saying the network changed, through the routine its handlers call, with the real service loop running; "
             + "the subscription itself is read from source, because a test cannot make Windows' network change",
             "The service looks a name up again until it answers"),
         new("RemSound.App/ServiceNetworkPresence.cs",
-            "the relay member list changing, through the routine its handler calls; the subscription itself is read from "
-            + "source, because the service cannot be started here",
+            "the relay member list changing, live: the real service host on a stand-in relay whose list says somebody has "
+            + "ticked it, and the hello that follows at once ticks them back (since 2026-09-28; it was read from source)",
             "The send-only service, and somebody ticking it on a relay", "The app and the send-only service both take part in relay groups"),
         new("RemSound.App/MainForm.Relay.cs",
             "the control suite drives the tab's controls; the relay step goes in after the address lookup, through the routine "
             + "the Connect button's handler finishes in, and drives the remembered list and the tick list through their handlers",
             "Control suite - ", "Connecting to a relay, remembering it and ticking who is on it"),
-        new("RemSound.App/MainFormHotkeyController.cs", "every Alt key, a hotkey change, and the Keyboard shortcuts window in the dialog suite",
-            "Keyboard: every Alt key goes where it says", "AUDIT: changing a hotkey does not claim", "Dialog control suite"),
+        new("RemSound.App/MainFormHotkeyController.cs", "every Alt key, a hotkey change, the Keyboard shortcuts window in the dialog suite, "
+            + "and the metronome's keys' actions",
+            "Keyboard: every Alt key goes where it says", "AUDIT: changing a hotkey does not claim", "Dialog control suite", "METRONOME MENU", "METRONOME TEMPO KEYS"),
         new("RemSound.App/MainFormTrayController.cs",
             "the tray icon's right press and the menu closing are driven; the menu items call the same toggles, restore and exit "
             + "the control suite drives",
@@ -70,12 +80,25 @@ internal static partial class SelfTest
         new("RemSound.App/AboutDialog.cs", "the dialog suite", "Dialog control suite"),
         new("RemSound.App/AddBandDialog.cs", "the dialog suite", "Dialog control suite"),
         new("RemSound.App/ManualPeerPrompt.cs", "the dialog suite", "Dialog control suite"),
-        new("RemSound.App/PreferencesDialog.cs", "the dialog suite, and the sounds", "Dialog control suite", "Every sound is pinned"),
+        new("RemSound.App/PreferencesDialog.cs", "the dialog suite, the sounds, and remembering the main window (driven through the control channel)", "Dialog control suite", "Every sound is pinned", "MAIN WINDOW PLACE:"),
         new("RemSound.App/ProfilePasswordDialog.cs", "the dialog suite", "Dialog control suite"),
         new("RemSound.App/ProfileSaveAsPrompt.cs", "the dialog suite", "Dialog control suite"),
         new("RemSound.App/ProfileSelectionDialog.cs", "the dialog suite", "Dialog control suite"),
         new("RemSound.App/QuickProfileSwitchDialog.cs", "the dialog suite", "Dialog control suite"),
         new("RemSound.App/RecordingSettingsDialog.cs", "the dialog suite", "Dialog control suite"),
+        new("RemSound.App/PushToTalkDialog.cs",
+            "every control of the window driven through the control channel, and OK and Cancel, as a person uses them; and the dialog suite",
+            "PUSH TO TALK WINDOW", "PUSH TO TALK DOUBLE TAP PREVIEW", "Dialog control suite"),
+        new("RemSound.App/MainForm.PushToTalk.cs", "the button after Send my audio, clicked through the control channel to open the window",
+            "PUSH TO TALK WINDOW"),
+        new("RemSound.App/MetronomeSettingsDialog.cs",
+            "every control of the window driven through the control channel, and OK and Cancel, as a person uses them; the sound "
+            + "list's preview; and the dialog suite",
+            "METRONOME WINDOW", "Dialog control suite"),
+        new("RemSound.App/MainForm.Metronome.cs",
+            "the Metronome menu's three items chosen through the control channel's menu command, and the engine's timer ticking in "
+            + "the two-window master test",
+            "METRONOME MENU", "METRONOME MASTER"),
         new("RemSound.App/RenamePeerDialog.cs", "the dialog suite", "Dialog control suite"),
         new("RemSound.App/MainForm.NameLookups.cs", "the network-change handler, invoked as Windows invokes it, looks the waiting names up and connects them",
             "NAMES: a server or peer not found at start"),
@@ -98,6 +121,8 @@ internal static partial class SelfTest
             "Plugin window (peer list, job, bypass", "Context help: F1 on every control in every window"),
         new("RemSound.Ui/ContextHelpWindow.cs", "the context help window: its manual button pressed once in every window",
             "Context help: F1 on every control in every window"),
+        new("RemSound.Ui/ListSelection.cs", "Ctrl+A in a list that holds several, and Manage named peers' Delete of them all",
+            "LISTS: Ctrl+A selects every row"),
         new("RemSound.Core/HotkeyCaptureForm.cs", "the dialog suite and the Alt-key check (the \"press a key\" window)",
             "Dialog control suite", "Keyboard: every Alt key goes where it says"),
 
@@ -113,8 +138,9 @@ internal static partial class SelfTest
         new("RemSound.Core/PeerDiscoveryService.cs", "a malformed broadcast, a remembered peer following discovery, and expiry",
             "AUDIT DISC1", "A remembered peer the DNS got wrong still follows discovery", "Somebody who goes away leaves the list"),
         new("RemSound.Receiver/MultiOutputPlayout.cs",
-            "an output lost under the playout (the handler that notices it) re-opens, and the churn starts and stops outputs",
-            "AUDIT: an output Windows invalidated re-opens itself", "Lifecycle churn"),
+            "what the lost-output handler marks is read by the per-second heal, driven with the fault forced (the handler itself fires "
+            + "only when a real output dies, and the gate opens none - see the plan's note on a stand-in output stage), and the churn starts and stops outputs",
+            "AUDIT: the faulted-output heal actually runs in the per-second tick", "Lifecycle churn"),
         new("RemSound.Core/SharedAsioDevice.cs",
             "the churn (its ASIO leg only with REMSOUND_TEST_ASIO), and the real-driver duplex step when REMSOUND_ASIO_TEST_DRIVER names one",
             "Lifecycle churn", "ASIO: one driver instance carries both directions"),
@@ -157,6 +183,67 @@ internal static partial class SelfTest
             + "the request is not provable here",
             "The router mapping is asked for again before it runs out"),
     ];
+
+    /// <summary>How many handlers each claimed file wired when its claim was last read against them (2026-09-28). A claim is
+    /// per FILE, so a new handler in a file already claimed - MainForm.cs holds most of them - passed unreviewed. Now a count
+    /// that moves fails until somebody reads the claim again and sets the new number here.</summary>
+    private static readonly Dictionary<string, int> ReviewedHandlerCounts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["RemSound.App/AboutDialog.cs"] = 1,
+        ["RemSound.App/AddBandDialog.cs"] = 4,
+        ["RemSound.App/AppInstaller.cs"] = 1,
+        ["RemSound.App/AppMessageBox.cs"] = 1,
+        ["RemSound.App/AsioLoadingSplash.cs"] = 1,
+        ["RemSound.App/CheckedListAccessibility.cs"] = 6,
+        ["RemSound.App/CommandLine.cs"] = 1,
+        ["RemSound.App/CommandLineActions.cs"] = 1,
+        ["RemSound.App/CuePlayer.cs"] = 1,
+        ["RemSound.App/KeyClickService.cs"] = 1,
+        ["RemSound.App/MainForm.cs"] = 124,
+        ["RemSound.App/MainForm.AsioBufferSize.cs"] = 2,
+        ["RemSound.App/MainForm.NameLookups.cs"] = 2,
+        ["RemSound.App/MainForm.NetworkRecording.cs"] = 1,
+        ["RemSound.App/MainForm.Relay.cs"] = 2,
+        ["RemSound.App/MainFormHotkeyController.cs"] = 23,
+        ["RemSound.App/MainFormTrayController.cs"] = 11,
+        ["RemSound.App/ManualPeerPrompt.cs"] = 1,
+        ["RemSound.App/PluginInstallPlaceDialog.cs"] = 2,
+        ["RemSound.App/PowerResumeHandler.cs"] = 1,
+        ["RemSound.App/PreferencesDialog.cs"] = 48,
+        ["RemSound.App/ProfilePasswordDialog.cs"] = 2,
+        ["RemSound.App/ProfileSaveAsPrompt.cs"] = 1,
+        ["RemSound.App/ProfileSelectionDialog.cs"] = 6,
+        ["RemSound.App/Program.cs"] = 6,
+        ["RemSound.App/QuickProfileSwitchDialog.cs"] = 5,
+        ["RemSound.App/RecordingController.cs"] = 1,
+        ["RemSound.App/RecordingSettingsDialog.cs"] = 8,
+        ["RemSound.App/PushToTalkDialog.cs"] = 11,
+        ["RemSound.App/MainForm.PushToTalk.cs"] = 1,
+        ["RemSound.App/MetronomeSettingsDialog.cs"] = 8,
+        ["RemSound.App/MainForm.Metronome.cs"] = 4,
+        ["RemSound.App/RelayConnectDialog.cs"] = 8,
+        ["RemSound.App/RenamePeerDialog.cs"] = 2,
+        ["RemSound.App/RouterPortMapper.cs"] = 1,
+        ["RemSound.App/ServiceNetworkPresence.cs"] = 1,
+        ["RemSound.App/ServiceProfileDialog.cs"] = 11,
+        ["RemSound.App/ServiceSendHost.cs"] = 2,
+        ["RemSound.App/UpdateInstallNoticeDialog.cs"] = 4,
+        ["RemSound.Core/HotkeyCaptureForm.cs"] = 3,
+        ["RemSound.Core/PeerDiscoveryService.cs"] = 1,
+        ["RemSound.Core/PluginBridgeClient.cs"] = 1,
+        ["RemSound.Core/PluginBridgeHost.cs"] = 3,
+        ["RemSound.Core/SharedAsioDevice.cs"] = 1,
+        ["RemSound.Plugin/PluginHelpSounds.cs"] = 1,
+        ["RemSound.Plugin/RemSoundPlugin.cs"] = 10,
+        ["RemSound.Receiver/MultiOutputPlayout.cs"] = 1,
+        ["RemSound.Sender/AudioSessionStartWatcher.cs"] = 1,
+        ["RemSound.Sender/CaptureSource.cs"] = 2,
+        ["RemSound.Sender/PushModeWasapiBackend.cs"] = 2,
+        ["RemSound.Ui/ContextHelpWindow.cs"] = 1,
+        ["RemSound.Ui/FormLayoutRows.cs"] = 3,
+        ["RemSound.Ui/ListSelection.cs"] = 1,
+        ["RemSound.Ui/PluginEditorPanel.cs"] = 12,
+    };
 
     private static string? EveryWiredEventIsClaimed()
     {
@@ -214,6 +301,15 @@ internal static partial class SelfTest
         var bare = EventClaims.Where(c => c.CoveredBy.StartsWith("no test", StringComparison.OrdinalIgnoreCase) && c.CoveredBy.Length < 40)
             .Select(c => c.File).ToList();
         Check(bare.Count == 0, $"an exemption must carry its reason, not just the word 'no test': {string.Join(", ", bare)}");
+
+        var moved = found.Where(kv => ReviewedHandlerCounts.GetValueOrDefault(kv.Key, -1) != kv.Value)
+            .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(kv => $"{kv.Key}: {ReviewedHandlerCounts.GetValueOrDefault(kv.Key)} -> {kv.Value}").ToList();
+        Check(moved.Count == 0,
+            $"these files wire a different number of handlers from when their claims were last read: {string.Join("; ", moved)}. "
+            + "Read each claim again against the new handlers, then set the number in ReviewedHandlerCounts");
+        var gone = ReviewedHandlerCounts.Keys.Where(f => !found.ContainsKey(f)).ToList();
+        Check(gone.Count == 0, $"these counted files wire nothing now - take them off ReviewedHandlerCounts: {string.Join(", ", gone)}");
 
         var exempt = EventClaims.Count(c => c.CoveredBy.StartsWith("no test", StringComparison.OrdinalIgnoreCase));
         var exemptHandlers = EventClaims.Where(c => c.CoveredBy.StartsWith("no test", StringComparison.OrdinalIgnoreCase))

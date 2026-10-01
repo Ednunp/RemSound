@@ -518,6 +518,47 @@ internal static partial class SelfTest
     /// <summary>Decrypt and decode the loudest sample in the audio packets a sink collected. The
     /// sender's own counters cannot answer "was it silence", and this is the same work the receiver
     /// does — decrypt, then unpack int24 — so it measures what a peer would actually hear.</summary>
+    /// <summary>A clock the step moves itself: Stopwatch's, plus however far the step has advanced it, through AudioClock -
+    /// so time only ever goes forward for anything else reading it meanwhile. Put back when disposed.</summary>
+    private sealed class SteppedClock : IDisposable
+    {
+        private long offset;
+        public SteppedClock() => AudioClock.UseSimulated(() => System.Diagnostics.Stopwatch.GetTimestamp() + Interlocked.Read(ref offset));
+        public void Advance(TimeSpan by) => Interlocked.Add(ref offset, (long)(by.TotalSeconds * System.Diagnostics.Stopwatch.Frequency));
+        public void Dispose() => AudioClock.UseSimulated(null);
+    }
+
+    /// <summary>Every single-part audio packet's samples, decrypted, in the order of the sequence numbers they were sent with.</summary>
+    private static List<float> DecryptedInSequence(IEnumerable<byte[]> packets, byte[] key)
+    {
+        using var gcm = RemSoundCrypto.CreateGcm(key);
+        var plain = new byte[8192];
+        var ordered = new SortedDictionary<uint, float[]>();
+        foreach (var packet in packets)
+        {
+            if (!RemPacket.TryReadHeader(packet, out var type, out _, out var sequence) || type != RemPacketType.Audio) continue;
+            var body = packet.AsSpan(RemPacket.HeaderSize);
+            if (body.Length <= RemPcmFrame.SubHeaderSize) continue;
+            if (!RemPcmFrame.TryReadSubHeader(body[..RemPcmFrame.SubHeaderSize], out _, out _, out var totalParts) || totalParts != 1) continue;
+            if (!RemSoundCrypto.TryDecryptInto(gcm, body[RemPcmFrame.SubHeaderSize..], plain, out var written)) continue;
+            var samples = new float[written / 3];
+            PcmPack.Int24LEToFloat(plain.AsSpan(0, samples.Length * 3), samples);
+            ordered[sequence] = samples;
+        }
+        return ordered.Values.SelectMany(s => s).ToList();
+    }
+
+    private static int LongestSilentRun(IReadOnlyList<float> samples)
+    {
+        int longest = 0, run = 0;
+        foreach (var s in samples)
+        {
+            run = Math.Abs(s) < 1e-4 ? run + 1 : 0;
+            if (run > longest) longest = run;
+        }
+        return longest;
+    }
+
     private static float DecryptedPeak(WireSink sink, byte[] key)
     {
         using var gcm = RemSoundCrypto.CreateGcm(key);
@@ -685,6 +726,8 @@ internal static partial class SelfTest
     /// </summary>
     private static string PluginLaneOwnershipAndTimeout()
     {
+        // The idle timeout crossed on a clock the step moves itself, not slept out (2026-09-28: two real 2.25 s sleeps).
+        using var time = new SteppedClock();
         using var sender = new AudioSender();
         using var source = new PluginTrackSource(sender);
         var first = Guid.NewGuid();
@@ -706,9 +749,12 @@ internal static partial class SelfTest
         // crashed-DAW path: no goodbye, no release message, nothing but silence.
         Check(PluginTrackSource.HostIdleTimeout < TimeSpan.FromSeconds(4),
             "the idle timeout must be short enough that a killed DAW does not hold the lane noticeably");
-        Thread.Sleep((int)PluginTrackSource.HostIdleTimeout.TotalMilliseconds + 250);
+        time.Advance(TimeSpan.FromMilliseconds(PluginTrackSource.HostIdleTimeout.TotalMilliseconds - 250));
         source.Sweep();
-        Check(source.HostCount == 0, "a DAW that stops delivering blocks must be forgotten");
+        Check(source.HostCount == 2, "a DAW quiet for less than the timeout must still be held - or the timeout is not what is being tested");
+        time.Advance(TimeSpan.FromMilliseconds(500));
+        source.Sweep();
+        Check(source.HostCount == 0, "a DAW that stops delivering blocks must be forgotten"); 
         Check(!sender.IsPluginSending, "and the last one leaving must release the lane, with no goodbye needed");
         Check(!source.AnyHostSending, "so the app stops answering yes to 'is anybody sending'");
 
@@ -729,7 +775,7 @@ internal static partial class SelfTest
 
         // A clean unload takes the same path: the plugin stops sending, and the sweep lets it go (there is no separate
         // goodbye for a track - PluginTrackSource.Forget, which claimed to be one, was never called; removed 2026-09-25).
-        Thread.Sleep((int)PluginTrackSource.HostIdleTimeout.TotalMilliseconds + 250);
+        time.Advance(PluginTrackSource.HostIdleTimeout + TimeSpan.FromMilliseconds(250));
         source.Sweep();
         Check(!sender.IsPluginSending, "a DAW that stops sending must release the lane once the sweep sees it quiet");
 
@@ -751,6 +797,7 @@ internal static partial class SelfTest
     /// </summary>
     private static string TwoDawsAtOnce()
     {
+        using var time = new SteppedClock();
         using var sink = new WireSink();
         using var sender = new AudioSender();
         ArmSender(sender, sink);
@@ -780,16 +827,27 @@ internal static partial class SelfTest
         Check(peak < 0.75f, $"and not doubled again on top of that ({peak:0.000})");
 
         // --- Hand-over: the driving DAW stops sending (closed or crashed - the same to us), the other carries on ---------
-        var quietUntil = DateTime.UtcNow + PluginTrackSource.HostIdleTimeout + TimeSpan.FromMilliseconds(250);
-        while (DateTime.UtcNow < quietUntil) { source.OnTrackBlock(joiner, Block(120, 0.25f)); Thread.Sleep(20); }
+        // The time moved on by the step itself, the surviving DAW's blocks every 20 ms of it (2026-09-28: 2.25 s of real time).
+        for (var elapsed = TimeSpan.Zero; elapsed < PluginTrackSource.HostIdleTimeout + TimeSpan.FromMilliseconds(250); elapsed += TimeSpan.FromMilliseconds(20))
+        {
+            time.Advance(TimeSpan.FromMilliseconds(20));
+            source.OnTrackBlock(joiner, Block(120, 0.25f));
+        }
         source.Sweep();
         Check(source.DriverForTest == joiner, "when the driving DAW goes, the other must take the clock");
         Check(sender.IsPluginSending, "and the lane must stay armed - somebody is still playing");
+        var throughHandOver = sink.Snapshot();
         sink.Clear();
         for (var i = 0; i < 20; i++) source.OnTrackBlock(joiner, Block(120, 0.25f));
-        Check(WaitUntil(() => AudioPacketCount(sink) > 0), "audio must continue after the hand-over, with no gap the user has to recover from");
+        Check(WaitUntil(() => AudioPacketCount(sink) >= 20), "audio must continue after the hand-over, with no gap the user has to recover from");
         var afterPeak = DecryptedPeak(sink, key!);
         Check(afterPeak > 0.15f, $"and carry the surviving DAW's own level ({afterPeak:0.000})");
+        // What went out, in the order it was numbered, from the summing through the hand-over and after: no silent run longer
+        // than a block (2026-09-28 - "no gap" was a packet count and a peak).
+        var stream = DecryptedInSequence([.. throughHandOver, .. sink.Snapshot()], key!);
+        var longestSilence = LongestSilentRun(stream);
+        Check(stream.Count > 120 * 2 * 40 && longestSilence <= 120 * 2,
+            $"across the hand-over the audio must not fall silent for longer than one block ({longestSilence / 2} frames silent at most, in {stream.Count / 2})");
 
         // --- A driver that goes QUIET without leaving -------------------------------------------
         // The worse case, and the one a sweep alone would not catch for two seconds. A non-driving
@@ -798,7 +856,7 @@ internal static partial class SelfTest
         var third = Guid.NewGuid();
         source.OnTrackBlock(third, Block(120, 0.25f));
         Check(source.DriverForTest == joiner, "a new host joins behind the driver, it does not displace one that is working");
-        Thread.Sleep((int)(TimeSpan.FromMilliseconds(300)).TotalMilliseconds);
+        time.Advance(TimeSpan.FromMilliseconds(300));
         sink.Clear();
         for (var i = 0; i < 20; i++) source.OnTrackBlock(third, Block(120, 0.25f));
         Check(source.DriverForTest == third,

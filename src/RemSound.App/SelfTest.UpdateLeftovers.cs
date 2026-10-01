@@ -106,43 +106,85 @@ internal static partial class SelfTest
              + "once it was, taking the old files with it; a missing named file kept it; a live update was left alone";
     }
 
+    /// <summary>Closing Preferences leaves the keyboard where it was. Until 2026-09-28 this called the tab layout directly -
+    /// what closing Preferences is said to do - and never closed Preferences, so the close path's wiring was unproven (the
+    /// review of every step). Now Preferences is opened from the real Options menu and closed with its own button through
+    /// the control channel, on the hidden desktop: once with nothing changed, once with the pan/EQ tab switched.</summary>
     private static string? PreferencesClosingKeepsYourPlace()
     {
         var restoreMuted = CuePlayer.GloballyMuted;
         CuePlayer.GloballyMuted = true;
         var saved = AppConfig.Load();
         var restoreShowEq = saved.ShowPanEqTab;
+        Windowless.InstallHook();
+        Windowless.SetActiveForTest(true);
         MainForm? form = null;
+        RemoteControlServer? server = null;
+        var pipe = "RemSound.control.selftest.prefsplace." + Guid.NewGuid().ToString("N")[..8];
+        // Opening Preferences holds the command until it closes; the channel answers with what is on screen after this
+        // wait. Three seconds by default - a second is plenty for Preferences to be up, and saves four seconds a run.
+        var restoreWait = RemoteControl.CommandWait;
+        RemoteControl.CommandWait = TimeSpan.FromSeconds(1);
         try
         {
             try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
             catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
             _ = form.Handle;
+            var main = form;
+            server = new RemoteControlServer(pipe, () => main, new RemoteControlEngine(() => main));
+            server.Start();
+            string Ask(string command)
+            {
+                var reply = RemoteControl.Send(command, pipe, out var reached, connectTimeoutMs: 5000);
+                Check(reached, $"the control channel did not answer \"{command}\": {reply}");
+                return reply;
+            }
+            void OpenAndClose(Action? change)
+            {
+                DriveWhilePumping(main, () =>
+                {
+                    var opened = Ask("menu Options > Preferences");
+                    Check(opened.Contains("\"Preferences\"", StringComparison.Ordinal), $"Options, Preferences must open Preferences (got: {Head(opened)})");
+                    change?.Invoke();
+                    Check(Ask("answer Close").StartsWith("ok", StringComparison.Ordinal), "Preferences closes with its own button");
+                }, TimeSpan.FromSeconds(30));
+                for (var k = 0; k < 5; k++) Application.DoEvents();
+                Check(!Application.OpenForms.OfType<PreferencesDialog>().Any(), "premise: Preferences has closed");
+            }
+
             form.ConnectedPeersListForTest.Select();
             Check(form.DeepestActiveControlForTest == form.ConnectedPeersListForTest, "premise: the keyboard is on Connected peers");
             var rebuilds = form.TabLayoutRebuildsForTest;
-            form.ApplyMainTabLayoutForTest();   // what closing Preferences does, with nothing changed
+            OpenAndClose(null);
             Check(form.TabLayoutRebuildsForTest == rebuilds,
                 "THE LOST PLACE: closing Preferences with nothing changed must leave the tabs alone - taking them down moved the keyboard onto the tab strip");
-            Check(form.DeepestActiveControlForTest == form.ConnectedPeersListForTest, "and the keyboard stays where it was");
-
-            // A real change: the tabs are rebuilt, and the keyboard put back.
-            saved.ShowPanEqTab = !restoreShowEq;
-            saved.Save();
-            form.ApplyMainTabLayoutForTest();
-            Check(form.TabLayoutRebuildsForTest == rebuilds + 1, "premise: a change on the Appearance tab rebuilds the tabs");
             Check(form.DeepestActiveControlForTest == form.ConnectedPeersListForTest,
-                "THE LOST PLACE: after a real change the keyboard must be put back on the control it was on");
+                $"and the keyboard stays where it was ({form.DeepestActiveControlForTest?.AccessibleName ?? form.DeepestActiveControlForTest?.GetType().Name ?? "nowhere"})");
+
+            // A real change on the Appearance tab: the tabs are rebuilt when Preferences closes, and the keyboard put back.
+            OpenAndClose(() =>
+            {
+                Check(Ask("tab Appearance").StartsWith("ok", StringComparison.Ordinal), "the Appearance tab must be reachable by name");
+                var set = Ask($"set \"Show the volume, pan and EQ for peers tab\" {(restoreShowEq ? "off" : "on")}");
+                Check(set.StartsWith("ok", StringComparison.Ordinal), $"the pan/EQ tab box must take the change (got: {set})");
+            });
+            Check(form.TabLayoutRebuildsForTest == rebuilds + 1,
+                $"closing Preferences after a change on the Appearance tab must rebuild the tabs - the close must apply it ({form.TabLayoutRebuildsForTest - rebuilds} rebuilds)");
+            Check(form.DeepestActiveControlForTest == form.ConnectedPeersListForTest,
+                $"THE LOST PLACE: after a real change the keyboard must be put back on the control it was on ({form.DeepestActiveControlForTest?.AccessibleName ?? form.DeepestActiveControlForTest?.GetType().Name ?? "nowhere"})");
         }
         finally
         {
+            server?.Dispose();
+            RemoteControl.CommandWait = restoreWait;
             try { form?.Dispose(); } catch { /* teardown */ }
+            Windowless.SetActiveForTest(false);
             var restore = AppConfig.Load();
             restore.ShowPanEqTab = restoreShowEq;
             restore.Save();
             CuePlayer.GloballyMuted = restoreMuted;
         }
-        return "closing Preferences with nothing changed left the tabs alone and the keyboard on Connected peers; a real change rebuilt "
-             + "them and put the keyboard back";
+        return "Preferences opened from the Options menu and closed with its own button: with nothing changed the tabs were left alone "
+             + "and the keyboard stayed on Connected peers; with the pan/EQ tab switched they were rebuilt and the keyboard put back";
     }
 }

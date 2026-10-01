@@ -210,14 +210,18 @@ internal static partial class SelfTest
             var receiving = false;
             host.AppReceivingSource = () => receiving;
             plugin.ApplyWindowJob(active: true, send: false, receive: true, [PeerB.ToString()], all: false, 0, 0);
-            Check(WaitFor(() => plugin.DescribeStatus().StartsWith("Receive audio is off in RemSound.", StringComparison.Ordinal), TimeSpan.FromSeconds(8)),
+            // The plugin's own two-second tick run at once each time, instead of polled for up to 8 s (2026-09-28).
+            plugin.RefreshTickForTest();
+            Check(WaitFor(() => plugin.DescribeStatus().StartsWith("Receive audio is off in RemSound.", StringComparison.Ordinal), TimeSpan.FromSeconds(3)),
                 $"THE STATUS: with Receive audio off in RemSound, a plugin set to receive must say so (it says: {plugin.DescribeStatus()})");
             receiving = true;
-            Check(WaitFor(() => !plugin.DescribeStatus().Contains("Receive audio is off", StringComparison.Ordinal), TimeSpan.FromSeconds(8)),
+            plugin.RefreshTickForTest();
+            Check(WaitFor(() => !plugin.DescribeStatus().Contains("Receive audio is off", StringComparison.Ordinal), TimeSpan.FromSeconds(3)),
                 $"and stop saying it once Receive audio is on again (it says: {plugin.DescribeStatus()})");
             receiving = false;
             plugin.ApplyWindowJob(active: true, send: true, receive: true, [PeerB.ToString()], all: false, 0, 0);
-            Check(WaitFor(() => plugin.DescribeStatus().Contains("this track is still being sent", StringComparison.Ordinal), TimeSpan.FromSeconds(8)),
+            plugin.RefreshTickForTest();
+            Check(WaitFor(() => plugin.DescribeStatus().Contains("this track is still being sent", StringComparison.Ordinal), TimeSpan.FromSeconds(3)),
                 $"while it is sending too, it must say the track is still going out (it says: {plugin.DescribeStatus()})");
         }
         finally

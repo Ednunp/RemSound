@@ -75,9 +75,8 @@ internal static partial class SelfTest
 
         // ---- Plugin. One instance is one track and one peer; the DAW is the device, so the machine's
         // own output configuration is not part of what is being tested. ---------------------------
-        new("PluginBridgeEndToEnd", "the bridge carries raw float between app and DAW; the machine's output configuration is not in that path"),
+        new("PluginBridgeEndToEnd", "the bridge carries raw float between app and DAW; the machine's output configuration is not in that path. It reads the speakers once, in WASAPI only, as its premise; a claimed peer leaving the speakers in all three configurations is PluginSurvivesSessionChurn"),
         new("PluginRateConversion", "resampler arithmetic between host rate and the 48k wire; no lane involved"),
-        new("PluginSurvivesSessionChurn", "claim/release lifecycle in the bridge, not a rendering path"),
         // PluginDoubleAudioGuard is NOT exempt: the doubling bug it now also guards against was
         // configuration-specific (it only bit with both kinds of output ticked), so it covers three.
 
@@ -99,17 +98,139 @@ internal static partial class SelfTest
         new("ServiceProfileIsolation", "the service profile is a separate store; the service never renders"),
         new("ServiceSendHostStream", "the service is WASAPI send-only and has no output lane"),
         new("ServiceLooksNamesUpAgainUntilTheyAnswer", "the service is WASAPI send-only and has no output lane; this is about name look-ups"),
-        new("ServiceFollowsAServerThatMoves", "the service is WASAPI send-only and has no output lane; this is about looking a server's name up again"),
+        // Seen since the pattern also counts rendering through the engine and a route tag (2026-09-28):
+        new("ARecordingThatDiesTellsThePerson", "your own send, fed through the sender's recording tap to a writer made to fail; which outputs are ticked never enters it - the recorder in every configuration is RecordingCapturesInEveryConfiguration"),
+        new("RecordingReportsItsOwnDeath", "the recording writer's death, fed through the sender's and the per-peer taps directly; the route only labels the block, and which outputs are ticked never enters it"),
+        new("RecordingMultiPeerSplit", "one file per person from the per-peer tap, fed directly; the route only labels the block - which lanes render into the tap is RecordingCapturesInEveryConfiguration"),
+        new("AuditWavStopsAtTheFormatLimit", "the WAV writer's 4 GB limit; the route only labels the block handed to it"),
+        new("TidyTheAsioOutputNeverThrowsIntoTheDriver", "the ASIO output's own read guard, fed a source that throws, directly - which outputs are ticked never enters it; the WASAPI output has no driver callback to protect"),
+        // Push to talk (2026-09-28): the simulator steps run WASAPI only, ASIO only and both through SimConfig, as the other
+        // simulator steps do; the rest never reach the outputs.
+        new("PushToTalkHoldsOnlyItsPath", "it runs WASAPI only, ASIO only and both through SimConfig - in both, each lane carries a tone of its own, heard apart on both outputs"),
+        new("PushToTalkOffChangesNothing", "it runs WASAPI only, ASIO only and both through SimConfig and compares every output sample for sample"),
+        new("PushToTalkRecordsAsHeard", "it runs WASAPI only, ASIO only and both through SimConfig, reading the recording tap of the lane each sends on"),
+        new("PushToTalkInTheProfile", "push to talk's settings in the profile and its key on this computer; which outputs are ticked never enters it"),
+        new("PushToTalkIsNotInTheService", "the service is WASAPI send-only and has no output lane; this is that it ignores push to talk"),
+        new("MetronomeIsNotInTheService", "the service is WASAPI send-only and has no output lane to click on; this is that it reads no metronome message"),
+        new("PushToTalkWindowSavesToTheProfile", "the push to talk window and what OK keeps; the gate it sets is proved in all three configurations by the PUSH TO TALK simulator steps"),
+        new("SendAppCaptureChangeDetection", "capturing one application's sound is WASAPI's process loopback - there is no ASIO form of it, and which outputs are ticked never enters it"),
+        new("SharedAsioDeviceIsSharedAndLetGoByTheLast", "the register of shared ASIO drivers - one instance per name, held and let go - which knows nothing of which outputs are ticked; both directions on one real driver is AsioOneDriverBothDirections, when a driver is named"),
+        new("ASenderThatStartsCountingAgainKeepsPlaying", "a session's own sequence bookkeeping as packets arrive, before any output lane; the fan-out to lanes comes after and is covered by the lane steps"),
+        new("ASessionIsNeverFreedWhileItDecodes", "a race between a session's decode and its pruning, on the receive thread, before any output lane"),
+        new("OneStreamFromTwoAddressesIsOneSession", "which session a packet joins, decided by person and stream before any lane; the per-lane copies made after are the plugin and lane steps' business"),
+        new("ServiceSilentCaptureSelfHeal", "the service is WASAPI send-only by design (it runs with nobody signed in, where ASIO drivers do not) and has no output lane; this is its capture self-heal"),
+        new("ServiceBootEar", "the service is WASAPI send-only by design (it runs with nobody signed in, where ASIO drivers do not) and has no output lane; this is which capture it opens at boot"),
+        new("ServiceFollowsAServerThatMoves", "the service is WASAPI send-only and has no output lane; this is about looking a server's name up again and joining its group where it now is"),
+        new("TheServiceDropsAndRearmsAPeer", "the service is WASAPI send-only and has no output lane; this is which peers its sender sends to, judged by the heartbeat, and it names WASAPI only to pick the device the service captures"),
+        // The simulator (2026-09-26): each step sets up the configuration it is about through SimConfig, which builds the
+        // receiver's lanes exactly as ticking output devices does (SetActiveOutputLanes); THREE CONFIGURATIONS runs all three.
+        new("SimulatorThreeConfigurationsPlayClean", "it runs WASAPI only, ASIO only and both, through SimConfig - the simulator sets "
+            + "the receiver's output lanes the way ticked devices do, not through the audio-mode setting"),
+        new("SimulatorAsioLinkIsClean", "about the ASIO-at-both-ends link and its three ways of sending, two of which exist only on the "
+            + "ASIO lane; the three configurations are compared in SimulatorThreeConfigurationsPlayClean"),
+        new("SimulatorHearsATooSmallBuffer", "about a buffer too small for the network, which is the same arithmetic on any output; "
+            + "run on ASIO, where a too-small buffer is most likely to be tried"),
+        new("SimulatorHoldsTwoDriftingCards", "it runs WASAPI only, ASIO only and both, through SimConfig - the simulator sets up "
+            + "its own receiving end rather than ticking devices through AudioConfigurations"),
+        new("SimulatorDescentKeepsTheHousePace", "the descent is each output's own drain: it listens to the ASIO output and the WASAPI "
+            + "one; with both kinds ticked each drains the same way (the three are compared in SimulatorThreeConfigurationsPlayClean)"),
+        new("SimulatorEverydaySetupHolds", "it listens to WASAPI only on purpose - the everyday set-up - and to PCM on both kinds of "
+            + "output; the three configurations are compared in SimulatorThreeConfigurationsPlayClean"),
+        new("SimulatorDropoutTunerFindsTheEdge", "the rare-dropout auto-tune is for the ASIO output only"),
+        // 2026-09-28: these run WASAPI only, ASIO only and both through SimConfig - the simulator builds the receiver's lanes
+        // the way ticked devices do - so the guard's pattern (AudioConfiguration) cannot see that they cover all three.
+        new("SimulatorSnapsDownAndDrains", "it runs WASAPI only, ASIO only and both through SimConfig, from 500, 200 and 100 ms, and "
+            + "asserts inside every one; the hand-moved slider is tried on WASAPI only and ASIO only, the two ways a lane is set by hand"),
+        new("SimulatorAutoTuneComesDownFrom500", "it runs WASAPI only, ASIO only and both through SimConfig, each lane the main window "
+            + "tunes in that configuration (the Mixed route, the ASIO lane, or both lanes), and asserts inside every one"),
+        new("SimulatorAutoTuneClimbsFrom5", "it runs WASAPI only, ASIO only and both through SimConfig, each lane the main window tunes "
+            + "in that configuration, and asserts inside every one"),
+        new("SimulatorBothOutputsAreEachListenedTo", "this IS the both-outputs configuration: it listens to the WASAPI output beside the "
+            + "ASIO one and stalls one to watch the other; with one kind of output there is no second output to listen to or to stall"),
+        new("SimulatorLatencyReadoutMatchesTheTrueDelay", "it runs WASAPI only, ASIO only and both through SimConfig, reading each lane's "
+            + "line of the readout as FormatMeasuredLatency writes it for that configuration"),
+        new("SimulatorStepProbeFlagsAPlantedClick", "it runs WASAPI only, ASIO only and both through SimConfig; the probe itself sits at "
+            + "decode, before any output"),
+        new("SimulatorHoldsOvernight", "the overnight slowdown it soaks for happens on WASAPI and never on ASIO, and the WASAPI output "
+            + "stage it puts in the path has no ASIO counterpart at all (ASIO pulls straight from the engine) - that asymmetry is the "
+            + "subject; the drift and stall steps cover the engine side in all three configurations"),
+        new("SimulatorRecoversFromAStall", "it runs WASAPI only, ASIO only and both through SimConfig, each stall in each, and listens "
+            + "to both outputs of both"),
+        new("SimulatorWasapiOutputStageHoldsItsCushion", "the WASAPI output stage exists only in front of a WASAPI output, so it runs "
+            + "the two configurations that have one - WASAPI only and both - through SimConfig; ASIO only has no stage at all (ASIO pulls "
+            + "straight from the engine), and the engine side in all three is SimulatorLanesStayApart's and the drift and stall steps'"),
+        new("SimulatorServiceStream", "it runs the service's stream into a listener on WASAPI only, ASIO only and both, through SimConfig - "
+            + "the sender is the service's kind (WASAPI only, one untagged stream) in every one, as the service can be nothing else"),
+        new("SimulatorLanesStayApart", "it runs WASAPI only, ASIO only and both through SimConfig for every copy's clock reading, asserting "
+            + "inside every one; the sliders' coupling can only exist with both, where each lane has a slider and a copy of every stream"),
+        new("SimulatorOutputHiccupIsNotAClock", "it runs ASIO only, both and WASAPI only through SimConfig - an ASIO output stopping on ASIO "
+            + "only and both, a WASAPI card stopping behind the output stage on WASAPI only and both - and asserts on every run"),
+        // The simulator review's improvements and the fixes they found (2026-09-30).
+        new("InputStopsAndComesBack", "it runs WASAPI only (an input device that stops), ASIO only and both (the sending card stops) "
+            + "through SimConfig, asserting in each; the momentary empties that must never be refilled run in ASIO only and WASAPI "
+            + "only, the refill being SessionPlayout's, the same on either output"),
+        new("PcmBlocksGoOutInEqualPieces", "the pieces are the sender's, checked on both lanes on the wire; listened to, it runs WASAPI "
+            + "only, ASIO only and both through SimConfig, asserting in each"),
+        new("UnderrunNoiseBurstKeepsEachChannelsLevel", "it runs ASIO only, WASAPI only and both through SimConfig, asserting in each"),
+        new("SimulatorDriftAfterAStall", "it runs ASIO only, both and WASAPI only through SimConfig, every stall time in each"),
+        new("SimulatorAgreesWithLiveRecordings", "a recording is replayed in the configuration it names - the seed's is ASIO only - so "
+            + "the configuration is the recording's and cannot be anything else; the receive path in all three is "
+            + "SimulatorRecoversFromAStall's and SimulatorLanesStayApart's"),
+        new("SimulatorBurstsAndQueues", "loss in bursts and a queue that builds are the network's, met per stream before any output; it "
+            + "runs ASIO only, where a small buffer shows them soonest; the receive path in all three is SimulatorRecoversFromAStall's "
+            + "and SimulatorLanesStayApart's"),
+        new("SimulatorPushModeRates", "push mode is the WASAPI input's own converter - an ASIO input is opened at 48 kHz and has none - "
+            + "so WASAPI only is the one configuration it exists in and cannot be anything else"),
+        new("SimulatorSampleRates", "the converters it checks are the capture side's, the mixing engine's and push mode's, fed by WASAPI "
+            + "inputs - ASIO is opened at 48 kHz - so WASAPI only is the one configuration they exist in and cannot be anything else"),
+        new("SimulatorReplaysARecordedNetwork", "a replay is the network's arrivals, before any output; it checks that the configuration a "
+            + "recording names (WASAPI only, ASIO only or both) is read back, and replays in ASIO only; the receive path in all three is "
+            + "SimulatorRecoversFromAStall's and SimulatorLanesStayApart's"),
+        new("SimulatorServerHop", "the server hop is between the senders and the receiver, over the network and through the server, met per "
+            + "stream before any output; it runs ASIO only; the receive path in all three is SimulatorRecoversFromAStall's and "
+            + "SimulatorLanesStayApart's"),
+        new("SimulatorWallClock", "the wall-clock mode plays one output per run and refuses both at once (checked here); it runs WASAPI "
+            + "only and ASIO only setups, each against virtual time, and virtual time's both is SimulatorLanesStayApart's"),
+        new("TheNetworkRecorderKeepsTheLastMinute", "the recorder keeps packet arrivals as they reach the receiver, before any output: "
+            + "what is ticked changes nothing it keeps"),
+        new("CrossPortKnownAnswers", "the bytes on the wire are the same whichever outputs are ticked; the lane byte's own values are pinned directly"),
+        new("SimulatorRepeatsItself", "repeatability is a property of the simulator's clock and dice, the same whichever output plays"),
+        new("TheHeartbeatCarriesTheJamulusFlag", "the heartbeat is per connection, not per output; the flag only says this copy plays "
+            + "through ASIO and can decode Jamulus-style Opus - which configurations do is JAMULUS-STYLE AUTOMATIC's, which walks all three"),
+        new("SimulatorReorderWaitSlotsPacketsBackIn", "the reorder wait is per stream, before any output is involved"),
+        new("SimulatorLatePacketsAreDropped", "late and doubled packets are handled per stream before any output is involved"),
+        new("SimulatorPerStreamSwitchCutsTheDelay", "the per-stream switch only matters with both kinds of output, where a smooth "
+            + "ASIO stream and a lumpy WASAPI one share an output - that is the configuration it runs"),
+        new("SimulatorRepairsLostPackets", "loss repair happens per stream at decode, before any output; Jamulus-style frames exist "
+            + "only on the ASIO lane"),
+        // The latency lab (2026-09-26).
+        new("AsioBufferSizeIsFittedToTheDriver", "the ASIO buffer size is an ASIO-only setting, and this is the arithmetic of fitting it "
+            + "to a driver's rules plus a check on NAudio's layout; no configuration is running, and the gate has no ASIO driver"),
+        new("LatencyLabRetiredSwitchesStillLoad", "a global config file read and written: the retired names include ASIO ones, but "
+            + "nothing here runs audio, and reading a file is the same in every configuration"),
+        new("TheAsioBufferSizeIsAProfileSetting", "the ASIO buffer size is an ASIO setting: a WASAPI device in shared mode has no buffer "
+            + "for a program to choose, so WASAPI only has nothing to vary; the window it drives has a (stand-in) ASIO driver, and ASIO "
+            + "only and 'both' ask the one driver the same thing at its open, which is what is checked"),
+        new("PerStreamBuffersFollowTheirOwnArrivals", "a decode-only receiver with no output device: a stream's own sizing is the same on "
+            + "any output, and the test's two streams are one peer's ASIO and WASAPI streams"),
+        new("TheAsioLaneSendsEachStreamToTheRightPeople", "the Jamulus-style stream exists only on the ASIO lane, driven here directly; "
+            + "PCM's packet per callback is checked on the ASIO lane and the WASAPI lane beside it, the two lanes of 'both'; in "
+            + "WASAPI-only there is no ASIO lane to act on"),
+        new("MetronomeThroughTheServer", "two windows on one machine, each fed on its WASAPI lane, through the real relay: what is "
+            + "checked is the server's timing, the same whichever lane is timed; which lane is timed, and with what input "
+            + "delay, is checked in all three configurations by MetronomeCaptureTimesForTheServer"),
+        new("JamulusStyleThroughTheServer", "the Jamulus-style stream exists only on the ASIO lane, driven here directly; what is "
+            + "checked is who the server may pass it to, a sending rule decided per target, and the receivers only decode - no "
+            + "output configuration is opened"),
         new("AFailedSendSourceIsTriedAgain", "the heal is in the WASAPI side of the capture, the same code with or without ASIO beside it; "
             + "'both' needs a real ASIO driver, which the gate does not have"),
         new("ADeadSendSourceIsReopenedAlone", "the heal is in the WASAPI side of the capture, the same code with or without ASIO beside it; "
-            + "what spares the ASIO stream in 'both' (only the sender's Start resets it) is pinned from source in the step"),
+            + "the step also runs the sender with an ASIO lane beside the WASAPI sources (a stand-in driver) and proves the ASIO stream carries on"),
         new("AuditPushModeReadsIntegerCapture", "pure sample-format arithmetic on the push-mode capture class, fed bytes directly; it names the class, and no output configuration or audio device is involved"),
         new("AuditServiceSendsAnApplicationStartedLater", "it names the WASAPI send mode only to choose specific applications; the service never opens ASIO and never renders, so there is no output configuration to vary"),
         new("ServiceSenderParity", "compares service and app SENDER settings; the receive configuration is not in scope"),
 
         // ---- Arithmetic and lane-independent policy. ----------------------------------------------
-        new("AutoTuneLanesIndependent", "drives AutoTuneDescent with explicit values and two separate state objects — the point is that two states do not share, which needs no device"),
         new("AutoTuneStaleStateGuards", "one headless window driving each route's baseline and evidence rules directly — Mixed, the WASAPI lane and the ASIO lane, every route any configuration can tune; what is ticked does not change those rules"),
         new("LatencyEstimateComplete", "arithmetic over supplied period values; AuditLatencyUsesDeviceReportedFigures covers the device-figure rules"),
 
@@ -146,6 +267,7 @@ internal static partial class SelfTest
         var coversAll = CoversAllConfigurationsPattern();
 
         var touching = new List<string>();      // test methods that mention the axis
+        var readsSpeakers = new HashSet<string>(StringComparer.Ordinal);   // ...and read what the speakers play
         var covering = new List<string>();      // ...and demonstrably cover all three
         var decorative = new List<string>();    // ...whose loop contains no assertion at all
         var split = new Dictionary<string, (int Inside, int Outside)>(StringComparer.Ordinal);
@@ -170,6 +292,7 @@ internal static partial class SelfTest
                 if (!body.Nullable && !registered.Contains(body.Name)) continue;
                 if (!axis.IsMatch(body.Body)) continue;
                 touching.Add(body.Name);
+                if (SpeakerReadPattern().IsMatch(CodeOnly(body.Body))) readsSpeakers.Add(body.Name);
                 // Judged on the CODE: a comment or a message that says "WASAPI only, ASIO only and both", or names
                 // AudioConfigurations.All, is not a loop over them (2026-09-24).
                 var code = CodeOnly(body.Body);
@@ -196,6 +319,19 @@ internal static partial class SelfTest
             + "which would make this guard silently useless (the exact failure it exists to prevent)");
 
         var exempt = AudioAxisExemptions.ToDictionary(e => e.Method, e => e.Reason, StringComparer.Ordinal);
+        // An exemption says one configuration is enough; a test that reads what the SPEAKERS play is exactly where the
+        // three differ (the mirror copies live there). PluginSurvivesSessionChurn read the speaker mix under an exemption
+        // saying it was "not a rendering path" (found 2026-09-28). Such an exemption stands only when the test is one
+        // configuration by its nature ("cannot be anything else"), or names the test that covers the speakers in all three.
+        var exemptButListening = exempt
+            .Where(e => readsSpeakers.Contains(e.Key)
+                        && !e.Value.Contains("cannot be anything else", StringComparison.Ordinal)
+                        && !covering.Any(c => e.Value.Contains(c, StringComparison.Ordinal)))
+            .Select(e => e.Key).OrderBy(m => m, StringComparer.Ordinal).ToList();
+        Check(exemptButListening.Count == 0,
+            $"{exemptButListening.Count} exempt test(s) read what the speakers play, which is where the three configurations differ, "
+            + $"and neither are one configuration by nature nor name the test that covers all three: {string.Join(", ", exemptButListening)}. "
+            + "Loop over AudioConfigurations.All instead of excusing them.");
         var unclaimed = touching
             .Where(m => !covering.Contains(m) && !exempt.ContainsKey(m))
             .Distinct()
@@ -396,9 +532,15 @@ internal static partial class SelfTest
 
     /// <summary>Does this method body touch the WASAPI/ASIO axis at all? Any mention of a lane, an
     /// audio mode, an ASIO driver or a per-lane latency figure counts. Deliberately generous: a false
-    /// positive costs one line in the exemption list, a false negative costs a bug Ed has to find.</summary>
-    [GeneratedRegex(@"WasapiLane|AsioLane|AudioMode\.|AsioDriver|asio|Asio|ASIO|wasapi|Wasapi|WASAPI", RegexOptions.None)]
+    /// positive costs one line in the exemption list, a false negative costs a bug Ed has to find. Since 2026-09-28 it also
+    /// counts rendering through the engine and its helpers without naming a lane (PlayoutEngine, SetLaneActive, a route,
+    /// PeakOfMix, NewEngineFor, SpeakerPeak) - a test that did that was invisible to this guard.</summary>
+    [GeneratedRegex(@"WasapiLane|AsioLane|AudioMode\.|AsioDriver|asio|Asio|ASIO|wasapi|Wasapi|WASAPI|new PlayoutEngine\(|SetLaneActive\(|RenderRoute\.Mixed|ReadForRoute\(|PeakOfMix\(|NewEngineFor\(|SpeakerPeak\(", RegexOptions.None)]
     private static partial Regex AudioAxisPattern();
+
+    /// <summary>Reading what the speakers play: the mix, a lane's own output, or the helper that reads them.</summary>
+    [GeneratedRegex(@"PeakOfMix\(|LaneOutput\.Read\(|SpeakerPeak\(", RegexOptions.None)]
+    private static partial Regex SpeakerReadPattern();
 
     /// <summary>Does this method body demonstrably cover all three? Either it loops over the canonical
     /// list, or it names all three configurations explicitly. Naming them by hand is allowed because

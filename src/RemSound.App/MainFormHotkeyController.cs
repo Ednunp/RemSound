@@ -54,6 +54,24 @@ internal sealed class MainFormHotkeyController : IDisposable
     private HotkeyInfo quickProfileSwitchHotkey;
     private HotkeyInfo speakStatusLineHotkey;
     private HotkeyInfo toggleAllPeerShapingHotkey;
+    // The push to talk key (2026-09-28): computer-wide and listed here with the others, but not a RegisterHotKey shortcut -
+    // hold to speak needs the release, so the window's keyboard hook watches it. A single key is allowed (Scroll Lock).
+    private HotkeyInfo pushToTalkHotkey;
+
+    /// <summary>The push to talk key changed here; the window re-arms its hook.</summary>
+    public Action? OnPushToTalkKeyChanged { get; set; }
+
+    /// <summary>Start or stop the metronome (mute or unmute while following a master). Set before <see cref="Initialize"/>.</summary>
+    public Action? ToggleMetronome { get; set; }
+    private HotkeyInfo metronomeHotkey;
+    private GlobalHotkey? metronomeGlobalHotkey;
+    /// <summary>The metronome's tempo up or down a beat a minute (Ed, 2026-09-29). Set before <see cref="Initialize"/>.</summary>
+    public Action? MetronomeTempoUp { get; set; }
+    public Action? MetronomeTempoDown { get; set; }
+    private HotkeyInfo metronomeTempoUpHotkey;
+    private HotkeyInfo metronomeTempoDownHotkey;
+    private GlobalHotkey? metronomeTempoUpGlobalHotkey;
+    private GlobalHotkey? metronomeTempoDownGlobalHotkey;
     private GlobalHotkey? sendMuteGlobalHotkey;
     private GlobalHotkey? receiveMuteGlobalHotkey;
     private GlobalHotkey? trayGlobalHotkey;
@@ -132,6 +150,10 @@ internal sealed class MainFormHotkeyController : IDisposable
         quickProfileSwitchHotkey = settingsStore.LoadQuickProfileSwitchHotkey();
         speakStatusLineHotkey = settingsStore.LoadSpeakStatusLineHotkey();
         toggleAllPeerShapingHotkey = settingsStore.LoadToggleAllPeerShapingHotkey();
+        pushToTalkHotkey = settingsStore.LoadPushToTalkHotkey();
+        metronomeHotkey = settingsStore.LoadMetronomeHotkey();
+        metronomeTempoUpHotkey = settingsStore.LoadMetronomeTempoUpHotkey();
+        metronomeTempoDownHotkey = settingsStore.LoadMetronomeTempoDownHotkey();
     }
 
     public void Initialize(Form ownerForm)
@@ -167,6 +189,12 @@ internal sealed class MainFormHotkeyController : IDisposable
         quickProfileSwitchGlobalHotkey.Pressed += () => InvokeOnOwner(quickProfileSwitch);
         speakStatusLineGlobalHotkey.Pressed += () => InvokeOnOwner(speakStatusLine);
         toggleAllPeerShapingGlobalHotkey.Pressed += () => InvokeOnOwner(toggleAllPeerShaping);
+        metronomeGlobalHotkey = new GlobalHotkey(ownerForm);
+        metronomeGlobalHotkey.Pressed += () => { if (ToggleMetronome is { } toggle) InvokeOnOwner(toggle); };
+        metronomeTempoUpGlobalHotkey = new GlobalHotkey(ownerForm);
+        metronomeTempoUpGlobalHotkey.Pressed += () => { if (MetronomeTempoUp is { } up) InvokeOnOwner(up); };
+        metronomeTempoDownGlobalHotkey = new GlobalHotkey(ownerForm);
+        metronomeTempoDownGlobalHotkey.Pressed += () => { if (MetronomeTempoDown is { } down) InvokeOnOwner(down); };
         RegisterSendMuteHotkey();
         RegisterReceiveMuteHotkey();
         RegisterTrayHotkey();
@@ -182,6 +210,9 @@ internal sealed class MainFormHotkeyController : IDisposable
         RegisterQuickProfileSwitchHotkey();
         RegisterSpeakStatusLineHotkey();
         RegisterToggleAllPeerShapingHotkey();
+        RegisterMetronomeHotkey();
+        RegisterMetronomeTempoUpHotkey();
+        RegisterMetronomeTempoDownHotkey();
     }
 
     /// <summary>Build the keyboard-shortcuts window WITHOUT showing it, so the accessibility, theme
@@ -193,9 +224,9 @@ internal sealed class MainFormHotkeyController : IDisposable
     /// <summary>The "press a key" window, with F1 help on its two controls. It lives in RemSound.Core, which cannot see
     /// ContextHelp (that is in RemSound.Ui, and Core references neither), so its controls are marked here, where it is
     /// made. The dialog audits build it through here too, so they see the marks.</summary>
-    internal static HotkeyCaptureForm NewHotkeyCaptureForm()
+    internal static HotkeyCaptureForm NewHotkeyCaptureForm(bool allowSingleKey = false)
     {
-        var form = new HotkeyCaptureForm();
+        var form = new HotkeyCaptureForm(allowSingleKey);
         var pending = new Stack<Control>(form.Controls.Cast<Control>());
         while (pending.Count > 0)
         {
@@ -246,13 +277,13 @@ internal sealed class MainFormHotkeyController : IDisposable
             MaximizeBox = false,
             ShowInTaskbar = false,
             KeyPreview = true, // form-level Esc handler
-            ClientSize = new Size(640, 440),
+            ClientSize = Dpi.Px(640, 440),
         };
 
         var root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(12),
+            Padding = Dpi.Pad(12),
             ColumnCount = 1,
             RowCount = 3, // 0 intro, 1 list, 2 buttons
         };
@@ -261,12 +292,17 @@ internal sealed class MainFormHotkeyController : IDisposable
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
+        const string remoteRows = "The remote-control rows send commands to connected peers; they only have an effect on peers that have 'Accept remote volume commands from peers' enabled.";
+        // Shown: what cannot be seen - that Enter changes a shortcut and Del clears it - and what the remote rows need.
+        // Arrowing through a list, Escape and the Clear button are there to see, so those words are the screen reader's
+        // alone, which reads all of it as it always has (Ed, 2026-09-28).
         var introLabel = new Label
         {
-            Text = "Arrow up and down to pick a shortcut. Press Enter to rebind it, or Del (or the Clear this shortcut button) to clear it. Escape closes the dialog.\n\n"
-                 + "The remote-control rows send commands to connected peers; they only have an effect on peers that have 'Accept remote volume commands from peers' enabled.",
+            Text = "Press Enter on a shortcut to rebind it, or Del to clear it.\n\n" + remoteRows,
+            AccessibleName = "Arrow up and down to pick a shortcut. Press Enter to rebind it, or Del (or the Clear this shortcut button) to clear it. Escape closes the dialog.\n\n"
+                             + remoteRows,
             AutoSize = true,
-            MaximumSize = new Size(600, 0),
+            MaximumSize = Dpi.Px(600, 0),
             Anchor = AnchorStyles.Left,
         };
         root.Controls.Add(introLabel, 0, 0);
@@ -286,7 +322,7 @@ internal sealed class MainFormHotkeyController : IDisposable
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.RightToLeft,
             AutoSize = true,
-            Padding = new Padding(0, 8, 0, 0),
+            Padding = Dpi.Pad(0, 8, 0, 0),
         };
         // Alt+O: C is "Clear this shortcut". Every button has an Alt key.
         var closeButton = new Button { Text = "Cl&ose", AccessibleName = "Close", AutoSize = true, DialogResult = DialogResult.OK, TabIndex = 2 };
@@ -331,6 +367,12 @@ internal sealed class MainFormHotkeyController : IDisposable
             list.Items.Add($"Quick profile switch (open a list of all profiles): {quickProfileSwitchHotkey}");
             list.Items.Add($"Speak the RemSound status information from anywhere (screen reader only): {speakStatusLineHotkey}");
             list.Items.Add($"Toggle volume, pan and EQ for all peers: {toggleAllPeerShapingHotkey}");
+            // Refreshed from the store, as the Push to talk settings window changes it too.
+            pushToTalkHotkey = settingsStore.LoadPushToTalkHotkey();
+            list.Items.Add($"Push to talk, set up in Push to talk settings on the Audio inputs and outputs tab: {pushToTalkHotkey}");
+            list.Items.Add($"Start or stop the metronome (mute or unmute while following a master metronome): {metronomeHotkey}");
+            list.Items.Add($"Metronome tempo up a beat a minute: {metronomeTempoUpHotkey}");
+            list.Items.Add($"Metronome tempo down a beat a minute: {metronomeTempoDownHotkey}");
             if (prev >= 0 && prev < list.Items.Count)
             {
                 list.SelectedIndex = prev;
@@ -370,6 +412,10 @@ internal sealed class MainFormHotkeyController : IDisposable
                 case 12: ChangeQuickProfileSwitchHotkey(dialog); break;
                 case 13: ChangeSpeakStatusLineHotkey(dialog); break;
                 case 14: ChangeToggleAllPeerShapingHotkey(dialog); break;
+                case 15: ChangePushToTalkHotkey(dialog); break;
+                case 16: ChangeMetronomeHotkey(dialog); break;
+                case 17: ChangeMetronomeTempoUpHotkey(dialog); break;
+                case 18: ChangeMetronomeTempoDownHotkey(dialog); break;
                 default: return;
             }
             RefreshList();
@@ -402,7 +448,11 @@ internal sealed class MainFormHotkeyController : IDisposable
                 case 11: ApplyUnset("send-system-mute-toggle", h => systemMuteToggleHotkey = h, RegisterSystemMuteToggleHotkey, settingsStore.SaveSystemMuteToggleHotkey); break;
                 case 12: ApplyUnset("quick-profile-switch", h => quickProfileSwitchHotkey = h, RegisterQuickProfileSwitchHotkey, settingsStore.SaveQuickProfileSwitchHotkey); break;
                 case 13: ApplyUnset("speak-status-line", h => speakStatusLineHotkey = h, RegisterSpeakStatusLineHotkey, settingsStore.SaveSpeakStatusLineHotkey); break;
+                case 15: ApplyUnset("push-to-talk", h => pushToTalkHotkey = h, () => OnPushToTalkKeyChanged?.Invoke(), settingsStore.SavePushToTalkHotkey); break;
                 case 14: ApplyUnset("toggle-all-peer-shaping", h => toggleAllPeerShapingHotkey = h, RegisterToggleAllPeerShapingHotkey, settingsStore.SaveToggleAllPeerShapingHotkey); break;
+                case 16: ApplyUnset("metronome", h => metronomeHotkey = h, RegisterMetronomeHotkey, settingsStore.SaveMetronomeHotkey); break;
+                case 17: ApplyUnset("metronome-tempo-up", h => metronomeTempoUpHotkey = h, RegisterMetronomeTempoUpHotkey, settingsStore.SaveMetronomeTempoUpHotkey); break;
+                case 18: ApplyUnset("metronome-tempo-down", h => metronomeTempoDownHotkey = h, RegisterMetronomeTempoDownHotkey, settingsStore.SaveMetronomeTempoDownHotkey); break;
                 default: return;
             }
             RefreshList();
@@ -488,6 +538,9 @@ internal sealed class MainFormHotkeyController : IDisposable
         quickProfileSwitchGlobalHotkey?.Dispose();
         speakStatusLineGlobalHotkey?.Dispose();
         toggleAllPeerShapingGlobalHotkey?.Dispose();
+        metronomeGlobalHotkey?.Dispose();
+        metronomeTempoUpGlobalHotkey?.Dispose();
+        metronomeTempoDownGlobalHotkey?.Dispose();
     }
 
     public HotkeyInfo SendMuteHotkey => sendMuteHotkey;
@@ -512,9 +565,9 @@ internal sealed class MainFormHotkeyController : IDisposable
     /// is what shows in the diagnostic log so a user / developer can see the trail of
     /// "capture send-system-volume-down: OK = Ctrl+Shift+Alt+J / register …: OK" or
     /// "capture …: cancelled (DialogResult=Cancel)" / "register …: FAILED Win32 1409".</summary>
-    private void ChangeHotkey(IWin32Window dialogOwner, string description, Action<HotkeyInfo> apply)
+    private void ChangeHotkey(IWin32Window dialogOwner, string description, Action<HotkeyInfo> apply, bool allowSingleKey = false)
     {
-        using var dialog = NewHotkeyCaptureForm();
+        using var dialog = NewHotkeyCaptureForm(allowSingleKey);
         var result = dialog.ShowDialog(dialogOwner);
         if (result == DialogResult.OK && dialog.CapturedHotkey is not null)
         {
@@ -650,6 +703,40 @@ internal sealed class MainFormHotkeyController : IDisposable
         settingsStore.SaveSpeakStatusLineHotkey(h);
     });
 
+    private void ChangePushToTalkHotkey(IWin32Window dialogOwner) => ChangeHotkey(dialogOwner, "push-to-talk", h =>
+    {
+        pushToTalkHotkey = h;
+        settingsStore.SavePushToTalkHotkey(h);
+        OnPushToTalkKeyChanged?.Invoke();
+    }, allowSingleKey: true);
+
+    public HotkeyInfo PushToTalkHotkey => pushToTalkHotkey;
+    public HotkeyInfo MetronomeHotkey => metronomeHotkey;
+
+    private void ChangeMetronomeHotkey(IWin32Window dialogOwner) => ChangeHotkey(dialogOwner, "metronome", h =>
+    {
+        metronomeHotkey = h;
+        RegisterMetronomeHotkey();
+        settingsStore.SaveMetronomeHotkey(h);
+    });
+
+    public HotkeyInfo MetronomeTempoUpHotkey => metronomeTempoUpHotkey;
+    public HotkeyInfo MetronomeTempoDownHotkey => metronomeTempoDownHotkey;
+
+    private void ChangeMetronomeTempoUpHotkey(IWin32Window dialogOwner) => ChangeHotkey(dialogOwner, "metronome-tempo-up", h =>
+    {
+        metronomeTempoUpHotkey = h;
+        RegisterMetronomeTempoUpHotkey();
+        settingsStore.SaveMetronomeTempoUpHotkey(h);
+    });
+
+    private void ChangeMetronomeTempoDownHotkey(IWin32Window dialogOwner) => ChangeHotkey(dialogOwner, "metronome-tempo-down", h =>
+    {
+        metronomeTempoDownHotkey = h;
+        RegisterMetronomeTempoDownHotkey();
+        settingsStore.SaveMetronomeTempoDownHotkey(h);
+    });
+
     private void ChangeToggleAllPeerShapingHotkey(IWin32Window dialogOwner) => ChangeHotkey(dialogOwner, "toggle-all-peer-shaping", h =>
     {
         toggleAllPeerShapingHotkey = h;
@@ -691,6 +778,11 @@ internal sealed class MainFormHotkeyController : IDisposable
     // Toggle all-peer shaping is a one-shot toggle; MOD_NOREPEAT (the default) stops a held key
     // flipping the master switch on/off/on at auto-repeat rate.
     private void RegisterToggleAllPeerShapingHotkey() => RegisterIfSet(toggleAllPeerShapingGlobalHotkey, toggleAllPeerShapingHotkey, "toggle all-peer shaping");
+    // The metronome's start/stop is a one-shot toggle; MOD_NOREPEAT (the default) stops a held key flipping it on and off.
+    private void RegisterMetronomeHotkey() => RegisterIfSet(metronomeGlobalHotkey, metronomeHotkey, "metronome start or stop");
+    // The tempo keys repeat while held, as the volume keys do: hold to keep going.
+    private void RegisterMetronomeTempoUpHotkey() => RegisterIfSet(metronomeTempoUpGlobalHotkey, metronomeTempoUpHotkey, "metronome tempo up", allowRepeat: true);
+    private void RegisterMetronomeTempoDownHotkey() => RegisterIfSet(metronomeTempoDownGlobalHotkey, metronomeTempoDownHotkey, "metronome tempo down", allowRepeat: true);
 
     private void RegisterIfSet(GlobalHotkey? globalHotkey, HotkeyInfo hotkey, string description, bool allowRepeat = false)
     {

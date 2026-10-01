@@ -5,25 +5,37 @@ namespace RemSound.Core;
 public sealed class HotkeyCaptureForm : Form
 {
     private readonly Label instructionLabel = new() { AutoSize = true };
-    private readonly TextBox hotkeyTextBox = new() { ReadOnly = true, Width = 360 };
+    private readonly TextBox hotkeyTextBox = new() { ReadOnly = true };
     // No Alt key, on purpose: this window exists to capture key combinations, and Alt+C here must be a shortcut being
     // chosen, not the Cancel button. Tab reaches it.
     private readonly Button cancelButton = new() { Text = "Cancel", AutoSize = true, UseMnemonic = false };
     private HotkeyInfo? pendingHotkey;
     private bool capturingCombination;
+    private readonly bool allowSingleKey;
 
-    public HotkeyCaptureForm()
+    public HotkeyCaptureForm() : this(allowSingleKey: false) { }
+
+    /// <summary>With <paramref name="allowSingleKey"/>, a key on its own is taken as well as a combination - the push to talk
+    /// key, whose default is Scroll Lock alone. Every other shortcut still needs Ctrl, Shift or Alt with it.</summary>
+    public HotkeyCaptureForm(bool allowSingleKey)
     {
+        this.allowSingleKey = allowSingleKey;
         Text = "Change hotkey";
-        Width = 420;
-        Height = 180;
         KeyPreview = true;
         AccessibleName = "Change hotkey";
 
-        instructionLabel.Text = "Hold the full key combination, then release it to save it automatically. Press Delete to leave this shortcut unassigned.";
-        instructionLabel.MaximumSize = new Size(360, 0);
+        instructionLabel.Text = allowSingleKey
+            ? "Press the key - on its own, or with Ctrl, Shift or Alt - then release it to save it automatically. Press Delete to leave this shortcut unassigned."
+            : "Hold the full key combination, then release it to save it automatically. Press Delete to leave this shortcut unassigned.";
+        // Sizes in this display's pixels (the sighted-user UI audit, 2026-09-28): a fixed 420 x 180 window cut its own
+        // words at 150 %. The window is sized to what it holds, below.
+        instructionLabel.MaximumSize = new Size(LogicalToDeviceUnits(360), 0);
+        hotkeyTextBox.Width = LogicalToDeviceUnits(360);
         hotkeyTextBox.AccessibleName = "Current hotkey";
         hotkeyTextBox.Text = "Press a hotkey combination.";
+        // Opens with nothing highlighted (Ed, 2026-09-28; the UI audit's finding 14): WinForms selects all of a text box on
+        // its first focus unless a selection has been set, so an empty one is.
+        hotkeyTextBox.Select(0, 0);
         hotkeyTextBox.KeyDown += CaptureKeyDown;
         hotkeyTextBox.KeyUp += CaptureKeyUp;
 
@@ -35,23 +47,66 @@ public sealed class HotkeyCaptureForm : Form
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.TopDown,
-            Padding = new Padding(12),
+            Padding = new Padding(LogicalToDeviceUnits(12)),
             AutoSize = true,
         };
         panel.Controls.Add(instructionLabel);
         panel.Controls.Add(hotkeyTextBox);
         panel.Controls.Add(cancelButton);
+        // Cancel at the right, where a dialog's buttons go; still last in the tab order.
+        cancelButton.Anchor = AnchorStyles.Right;
         Controls.Add(panel);
+        // As big as what it holds, and never dragged smaller than that.
+        ClientSize = panel.GetPreferredSize(Size.Empty);
+        MinimumSize = Size;
 
         Shown += (_, _) => hotkeyTextBox.Focus();
     }
 
     public HotkeyInfo? CapturedHotkey { get; private set; }
 
+    private static int openNow;
+    private bool counted;
+    /// <summary>True while a window for choosing a key is open anywhere in RemSound. The push to talk key's hook stands
+    /// aside meanwhile, or its key could never be chosen again. Counted from the moment the window loads (Shown comes a
+    /// message later) until it closes or is thrown away.</summary>
+    public static bool AnyOpen => Volatile.Read(ref openNow) > 0;
+
+    protected override void OnLoad(EventArgs e)
+    {
+        if (!counted) { counted = true; Interlocked.Increment(ref openNow); }
+        base.OnLoad(e);
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        Uncount();
+        base.OnFormClosed(e);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        Uncount();
+        base.Dispose(disposing);
+    }
+
+    private void Uncount()
+    {
+        if (!counted) return;
+        counted = false;
+        Interlocked.Decrement(ref openNow);
+    }
+
     /// <summary>Test seam: a key-down as Windows delivers it to the window, and whether the window took it.</summary>
     internal bool KeyDownForTest(Keys keyData)
     {
         var msg = Message.Create(Handle, 0x0100, (IntPtr)(int)(keyData & Keys.KeyCode), IntPtr.Zero);
+        return ProcessCmdKey(ref msg, keyData);
+    }
+    /// <summary>Test seam: the key coming up, as Windows delivers it - which is when a key is saved.</summary>
+    internal bool KeyUpForTest(Keys keyData)
+    {
+        var msg = Message.Create(Handle, 0x0101, (IntPtr)(int)(keyData & Keys.KeyCode), IntPtr.Zero);
         return ProcessCmdKey(ref msg, keyData);
     }
     internal TextBox BoxForTest => hotkeyTextBox;
@@ -130,7 +185,7 @@ public sealed class HotkeyCaptureForm : Form
         SawAnyNonModifier = true;
 
         var proposed = new HotkeyInfo(key, control, shift, alt);
-        if (!proposed.IsValid)
+        if (!proposed.IsValid && !(allowSingleKey && key is not Keys.None))
         {
             hotkeyTextBox.Text = "Hotkey must include a modifier and a non-modifier key.";
             return;

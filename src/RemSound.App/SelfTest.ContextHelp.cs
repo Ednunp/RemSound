@@ -316,10 +316,12 @@ internal static partial class SelfTest
         if (root is null) return Skip("the rule, the message and Preferences work; the source is not reachable to check start-up uses them");
         var text = File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "MainForm.cs"));
         var notices = SourceMethodBody(text, "private void RunStartupNotices(bool coldStart)");
-        Check(notices.TrimEnd().EndsWith("MaybeShowF1HelpMessage(coldStart);\n    }", StringComparison.Ordinal)
-              || notices.Replace("\r\n", "\n").TrimEnd().EndsWith("MaybeShowF1HelpMessage(coldStart);\n    }", StringComparison.Ordinal)
-              || notices.Contains("MaybeShowF1HelpMessage(coldStart);", StringComparison.Ordinal),
-            "the start-up notices must end with the context help message, told whether RemSound has just started");
+        // Its LAST statement, comments and blank lines aside - the message comes after every other start-up notice. A third
+        // alternative here accepted it anywhere in the method, so "must END with" was never enforced (the review, 2026-09-28).
+        var statements = notices.Replace("\r\n", "\n").Split('\n').Select(l => l.Trim())
+            .Where(l => l.Length > 0 && !l.StartsWith("//", StringComparison.Ordinal) && l != "}" && l != "{").ToList();
+        Check(statements.Count > 0 && statements[^1] == "MaybeShowF1HelpMessage(coldStart);",
+            $"the start-up notices must END with the context help message, told whether RemSound has just started (the last is: {(statements.Count > 0 ? statements[^1] : "nothing")})");
         var maybe = SourceMethodBody(text, "private void MaybeShowF1HelpMessage(bool coldStart)");
         Check(maybe.Contains("ShouldShowF1HelpMessage(AppConfig.Load().ShowF1HelpMessageAtStartup, coldStart, Windowless.NobodyToAsk)", StringComparison.Ordinal)
               && maybe.Contains("ForegroundDialog.Show(", StringComparison.Ordinal)

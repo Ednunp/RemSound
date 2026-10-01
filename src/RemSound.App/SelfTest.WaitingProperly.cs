@@ -35,7 +35,8 @@ internal static partial class SelfTest
             // A peer, selected, whose password does not match.
             var peerAddress = IPAddress.Parse("198.51.100.44");
             var peer = new PeerAnnouncement(Guid.NewGuid(), "Wrong password", RemPacket.DefaultPort, true, true, DateTime.UtcNow, peerAddress);
-            main.SelectPeerForTest(peer);
+            // Ticked by the person (2026-09-29: a peer the profile ticked on another password is held quietly, not warned about).
+            main.SelectPeerByUserForTest(peer);
             main.ReceiverForTest.SetPeerSecurityForTest(peerAddress, PeerSecurityStatus.PasswordMismatch);
 
             // 1. With somebody to read it, the warning shows - and the tick carries on under it.
@@ -48,7 +49,8 @@ internal static partial class SelfTest
                 Check(WaitFor(BoxOpen, TimeSpan.FromSeconds(5)), "premise: the password warning shows");
                 var snapshotAt = main.Invoke(() => main.LastSnapshotUtcForTest);
                 var syncsAt = main.Invoke(() => main.PeerListSyncsForTest);
-                Thread.Sleep(2500);
+                // Until the tick has run under the warning, not a fixed 2.5 s (2026-09-28).
+                WaitFor(() => main.Invoke(() => main.LastSnapshotUtcForTest > snapshotAt), TimeSpan.FromSeconds(3));
                 Check(main.Invoke(() => main.StatusTimerRunningForTest && main.LastSnapshotUtcForTest > snapshotAt),
                     "THE FROZEN TICK: while the password warning waits, the once-a-second tick must keep running - it heals outputs, sweeps the plugin and tunes");
                 Check(main.Invoke(() => main.PeerListSyncsForTest) == syncsAt,
@@ -90,7 +92,11 @@ internal static partial class SelfTest
                 main.BeginInvoke(() => main.SomeoneWantsToConnectForTest(asker, samePassword: true));
                 main.BeginInvoke(() => main.OfferRelayForTest(server));
                 main.BeginInvoke(main.CheckPeerSecurityForTest);
-                Thread.Sleep(1500);
+                // A marker queued after the three: once it has run, so have they - and anything they opened is open by then.
+                var ran = false;
+                main.BeginInvoke(() => ran = true);
+                Check(WaitFor(() => Volatile.Read(ref ran), TimeSpan.FromSeconds(5)), "premise: the window must have got round to all three");
+                Thread.Sleep(100);
                 var asked = BoxOpen();
                 if (asked) CloseBoxes();
                 Check(!asked, "THE DING: a silent copy must ask nobody anything - not whether to accept, not whether to connect to a server, and not warn");

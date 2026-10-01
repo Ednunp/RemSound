@@ -48,6 +48,11 @@ public sealed class HeartbeatService : IDisposable
     /// <summary>If the most recent Pong is older than this, the peer is unreachable.</summary>
     public static readonly TimeSpan UnreachableWindow = TimeSpan.FromSeconds(5);
 
+    /// <summary>Gate seam: the wall clock the health windows are judged by - moved on by a test past the 2 s and 5 s marks,
+    /// rather than waited out (2026-09-28). Unset, it is the real one.</summary>
+    internal Func<DateTime>? UtcNowForTest { get; set; }
+    private DateTime UtcNow => UtcNowForTest?.Invoke() ?? DateTime.UtcNow;
+
     private readonly Action<string>? onDiagnostic;
     private readonly object gate = new();
     private readonly Dictionary<string, PeerState> peers = new(StringComparer.OrdinalIgnoreCase);
@@ -66,7 +71,20 @@ public sealed class HeartbeatService : IDisposable
     // GC header). Trivial in absolute terms — ~3 small allocations/sec/peer — but the
     // SendPings thread has only one writer so a single reused array is straightforward and
     // makes the pattern explicit. Item 14 of RemSoundefficiency.md.
-    private readonly byte[] outboundPingBuffer = new byte[RemPacket.HeaderSize + RemPacket.HeartbeatPayloadSize];
+    private readonly byte[] outboundPingBuffer = new byte[RemPacket.HeaderSize + RemPacket.HeartbeatPayloadWithFlagsSize];
+
+    /// <summary>The heartbeat's flags byte: "I can take Jamulus-style Opus" while this copy plays through ASIO and the
+    /// library loaded (<see cref="JamulusStyle.CanTakeIt"/>). In EVERY ping and pong, so a copy that only listens - sending
+    /// no audio, so no Format packets - still tells the sender it can take the new frames (Ed, live test 2026-09-26: "why am
+    /// I sending from the laptop?"). Otherwise the heartbeat is the nine bytes every port has always sent.</summary>
+    private static byte LabFlags() =>
+        JamulusStyle.CanTakeIt ? AudioFormatInfo.LabFlagCanDecodeCustomOpus : (byte)0;
+
+    /// <summary>Gate seam: handle one datagram as if it had arrived.</summary>
+    internal void HandlePacketForTest(byte[] buffer, IPEndPoint remote) => HandlePacket(buffer, remote);
+
+    /// <summary>Gate seam: one round of pings now, as the timer sends them.</summary>
+    internal void SendPingsForTest() => SendPings();
 
     /// <summary>
     /// Outbound transport for heartbeat packets. REQUIRED — without it Start() succeeds but
@@ -213,7 +231,7 @@ public sealed class HeartbeatService : IDisposable
                 FirstPingSentUtc = firstPing,
                 LastPongUtc = heard ? pong.At : null,
                 RttEwmaMs = heard ? pong.RttMs : null,
-            }, DateTime.UtcNow);
+            }, UtcNow);
         }
     }
 
@@ -224,7 +242,7 @@ public sealed class HeartbeatService : IDisposable
     {
         lock (gate)
         {
-            var nowUtc = DateTime.UtcNow;
+            var nowUtc = UtcNow;
             var result = new List<PeerHealth>(peers.Count);
             foreach (var p in peers.Values)
             {
@@ -309,7 +327,7 @@ public sealed class HeartbeatService : IDisposable
         lock (gate)
         {
             targets = peers.Values.ToList();
-            var nowUtc = DateTime.UtcNow;
+            var nowUtc = UtcNow;
             foreach (var p in targets) p.FirstPingSentUtc ??= nowUtc;
             // Pinged too, once, unless it is a peer already (the relay, once the person on it is ticked).
             extra = pingOnly.Where(kv => !peers.ContainsKey(kv.Key)).Select(kv => kv.Value).ToList();
@@ -329,13 +347,13 @@ public sealed class HeartbeatService : IDisposable
         }
         var packetSpan = outboundPingBuffer.AsSpan();
         RemPacket.WriteHeader(packetSpan, RemPacketType.Heartbeat, 0xFFFF, seq);
-        RemPacket.WriteHeartbeatPayload(packetSpan[RemPacket.HeaderSize..], HeartbeatKind.Ping, tickMs);
+        var pingLength = RemPacket.HeaderSize + RemPacket.WriteHeartbeatPayload(packetSpan[RemPacket.HeaderSize..], HeartbeatKind.Ping, tickMs, LabFlags());
 
         foreach (var p in targets.Select(t => t.AudioEndpoint).Concat(extra).Select(ep => new PeerState { AudioEndpoint = ep }))
         {
             try
             {
-                var ok = transport(outboundPingBuffer, outboundPingBuffer.Length, p.AudioEndpoint);
+                var ok = transport(outboundPingBuffer, pingLength, p.AudioEndpoint);
                 // Failures only: a line per successful ping, once a second per peer, buried the log. 2026-09-13 review.
                 if (!ok) onDiagnostic?.Invoke($"send seq={seq} to={p.AudioEndpoint} FAILED");
             }
@@ -373,7 +391,8 @@ public sealed class HeartbeatService : IDisposable
         if (!RemPacket.TryReadHeader(buffer, out var type, out _, out _)) return;
         if (type != RemPacketType.Heartbeat) return;
         var payload = buffer.AsSpan(RemPacket.HeaderSize);
-        if (!RemPacket.TryReadHeartbeat(payload, out var kind, out var originatorTickMs)) return;
+        if (!RemPacket.TryReadHeartbeat(payload, out var kind, out var originatorTickMs, out var labFlags)) return;
+        if ((labFlags & AudioFormatInfo.LabFlagCanDecodeCustomOpus) != 0) CustomOpusPeers.Note(remote.Address);
 
         if (kind == HeartbeatKind.Ping)
         {
@@ -387,11 +406,11 @@ public sealed class HeartbeatService : IDisposable
             // remote source endpoint (whatever socket the ping came in on, that's where to
             // send the pong) — this works for both LAN-direct (peer's audio port) and
             // relay-return (relay's source port) without us needing to know which.
-            Span<byte> reply = stackalloc byte[RemPacket.HeaderSize + RemPacket.HeartbeatPayloadSize];
+            Span<byte> reply = stackalloc byte[RemPacket.HeaderSize + RemPacket.HeartbeatPayloadWithFlagsSize];
             var seq = Interlocked.Increment(ref sequence);
             RemPacket.WriteHeader(reply, RemPacketType.Heartbeat, 0xFFFF, seq);
-            RemPacket.WriteHeartbeatPayload(reply[RemPacket.HeaderSize..], HeartbeatKind.Pong, originatorTickMs);
-            var bytes = reply.ToArray();
+            var replyLength = RemPacket.HeaderSize + RemPacket.WriteHeartbeatPayload(reply[RemPacket.HeaderSize..], HeartbeatKind.Pong, originatorTickMs, LabFlags());
+            var bytes = reply[..replyLength].ToArray();
 
             try { SendTransport?.Invoke(bytes, bytes.Length, remote); }
             catch { /* UDP, ignore */ }
@@ -410,7 +429,7 @@ public sealed class HeartbeatService : IDisposable
         var matchAddress = relayOfMember?.Address ?? remote.Address;
         var nowMs = monotonic.ElapsedMilliseconds;
         var rttMs = (int)Math.Max(0, nowMs - originatorTickMs);
-        var nowUtc = DateTime.UtcNow;
+        var nowUtc = UtcNow;
         var matchedCount = 0;
         lock (gate)
         {

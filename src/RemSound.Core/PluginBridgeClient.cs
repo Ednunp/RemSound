@@ -89,7 +89,8 @@ public sealed class PluginBridgeClient : IDisposable
     /// for a while. The cost of the lead is that many blocks of delay on the receive path - the same
     /// few blocks the old queue held by accident, now the same for everybody.</summary>
     private static int leadBlocks = DefaultLeadBlocks;
-    private const int DefaultLeadBlocks = 3;
+    /// <summary>The lead a process starts with (the metronome places a DAW track's clicks by it: <see cref="MetronomeDaw"/>).</summary>
+    public const int DefaultLeadBlocks = 3;
     private const int MaxLeadBlocks = 12;
     private static long leadRaisedAtTicks;
     private static long leadWindowStartTicks;

@@ -560,7 +560,12 @@ public class RemSoundPlugin : AudioPluginBase
 
     public RemSoundPlugin()
     {
-        Company = "RemSound";
+        // The vendor a DAW shows beside the name, e.g. REAPER's "VST3: RemSound (Ed Pourtahmasbi)". It was "RemSound"
+        // in v6.0; changing it leaves the plugin's identity alone (PluginID below). Proved in REAPER 7.80 on 2026-09-28
+        // (D:\proj\reaper-test\vendor-proof): a project saved by the released v6.0 plugin opens with this one, every
+        // control and the saved state byte for byte as saved. REAPER keeps the old name in its plugin list until it
+        // rescans: the loader file (RemSound.PluginBridge.vst3) does not change, so it has no reason to look again.
+        Company = "Ed Pourtahmasbi";
         Website = "https://github.com/Ednunp/RemSound";
         PluginName = "RemSound";
         // AN EFFECT. Several hosts will not put an instrument on an audio track (Live, Cubase, Studio One, Reason,
@@ -827,17 +832,7 @@ public class RemSoundPlugin : AudioPluginBase
         // somebody joining, and a remembered peer reconnecting would never have come back to the track.
         // One small datagram every two seconds fixes both, and it is also how the plugin now reconnects
         // by itself after RemSound is restarted underneath it.
-        refreshTimer = new System.Threading.Timer(_ =>
-        {
-            try
-            {
-                if (deactivated) return;   // Stop said goodbye; a hello now would bring it straight back
-                bridge?.Hello();
-                RefreshPeerSet();
-                ReportSkippedFrames();
-            }
-            catch { /* a timer tick must never take the DAW down */ }
-        }, null, PeerRefreshMs, PeerRefreshMs);
+        refreshTimer = new System.Threading.Timer(_ => RefreshTick(), null, PeerRefreshMs, PeerRefreshMs);
 
         // WATCH THE PARAMETERS. A change made in our own window raises PropertyChanged above. A change made by the HOST
         // does not: AudioPlugSharp's controller writes it through NormalizedEditValue, which sets the value and tells
@@ -867,6 +862,22 @@ public class RemSoundPlugin : AudioPluginBase
     [ThreadStatic] private static bool onWatchThread;
 
     /// <summary>Gate seam: run the watch as its timer does, on this thread marked as the watch's.</summary>
+    /// <summary>The two-second tick: hello, the peer set, the skipped-frames report - never after Stop.</summary>
+    private void RefreshTick()
+    {
+        try
+        {
+            if (deactivated) return;   // Stop said goodbye; a hello now would bring it straight back
+            bridge?.Hello();
+            RefreshPeerSet();
+            ReportSkippedFrames();
+        }
+        catch { /* a timer tick must never take the DAW down */ }
+    }
+
+    /// <summary>Gate seam: the refresh timer's tick, run now rather than waited two seconds for.</summary>
+    internal void RefreshTickForTest() => RefreshTick();
+
     internal void WatchParametersAsTheTimerForTest()
     {
         onWatchThread = true;
@@ -1088,8 +1099,40 @@ public class RemSoundPlugin : AudioPluginBase
     public override void InitializeEditor()
     {
         base.InitializeEditor();
-        EditorWidth = 420;
-        EditorHeight = 300;
+        // The size the panel needs, not a guess. A fixed 420 x 300 cut the Status box in half and lost the Context help
+        // button altogether in every DAW, even at 100 % (the sighted-user UI audit, 2026-09-28, finding 1).
+        var size = EditorFrameSize();
+        EditorWidth = (uint)size.Width;
+        EditorHeight = (uint)size.Height;
+    }
+
+    /// <summary>The frame to ask the host for: what the panel needs at this display's scaling, and a few pixels over. The
+    /// panel is measured, never shown, so this costs nothing but the building of its controls.</summary>
+    internal static Size EditorFrameSize()
+    {
+        using var probe = new PluginEditorPanel();
+        var needs = probe.GetPreferredSize(Size.Empty);
+        return new Size(needs.Width + Dpi.Px(4), needs.Height + Dpi.Px(4));
+    }
+
+    /// <summary>The borderless frame the panel is parented into the host's window with, built here so the gate checks the
+    /// very frame a DAW shows. It scrolls: a host that gives the plugin less room than it asked for gets scroll bars and
+    /// every control, instead of a window with its bottom cut off.</summary>
+    internal static Form BuildEditorFrame(PluginEditorPanel panel, int width, int height)
+    {
+        var frame = new Form
+        {
+            FormBorderStyle = FormBorderStyle.None,
+            StartPosition = FormStartPosition.Manual,
+            TopLevel = false,
+            Width = width,
+            Height = height,
+            AutoScroll = true,
+            // The panel fills the frame, but never less than it needs: below that, the frame scrolls.
+            AutoScrollMinSize = panel.GetPreferredSize(Size.Empty),
+        };
+        frame.Controls.Add(panel);
+        return frame;
     }
 
     public override void ShowEditor(IntPtr parentWindow)
@@ -1111,15 +1154,7 @@ public class RemSoundPlugin : AudioPluginBase
         editorPanel.InitialStateSource = WindowInitialState;
         editorPanel.JobChanged += ApplyWindowJob;
 
-        editorForm = new Form
-        {
-            FormBorderStyle = FormBorderStyle.None,
-            StartPosition = FormStartPosition.Manual,
-            TopLevel = false,
-            Width = (int)EditorWidth,
-            Height = (int)EditorHeight,
-        };
-        editorForm.Controls.Add(editorPanel);
+        editorForm = BuildEditorFrame(editorPanel, (int)EditorWidth, (int)EditorHeight);
 
         // Parent into the host's frame. A borderless child form rather than raw child controls, so
         // WinForms keeps its own message loop and focus handling intact across the boundary — which

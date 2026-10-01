@@ -90,6 +90,10 @@ public sealed class AudioSender : IDisposable
     private AsioCaptureBackend? persistentAsio;
     private string? persistentAsioDriverName;
 
+    /// <summary>Push to talk: holds the chosen path (and the DAW track, unless bypassed) silent until you talk. Off until the
+    /// window configures it from the profile; the send-only service never does.</summary>
+    public PushToTalkGate PushToTalk { get; } = new();
+
     /// <summary>Optional diagnostic sink. Set by callers (typically the App) before Start to receive
     /// human-readable status strings ("capture started…", "capture stopped with error…", etc.).</summary>
     public Action<string>? Diagnostic
@@ -323,9 +327,9 @@ public sealed class AudioSender : IDisposable
         // construction time), the lines are silently dropped, which is acceptable for a
         // success/no-op outcome. On failure the socket keeps working without prioritisation.
         networkPriority.TryAttach(udp.Client, msg => diagnostic?.Invoke(msg));
-        defaultLane = new SenderLane(this, opusFrameSamples, OpusBitrateLan);
-        asioLane = new SenderLane(this, opusFrameSamples, OpusBitrateLan);
-        pluginLane = new SenderLane(this, opusFrameSamples, OpusBitrateLan);
+        defaultLane = new SenderLane(this, opusFrameSamples, OpusBitrateLan, SendLaneKind.WasapiCapture);
+        asioLane = new SenderLane(this, opusFrameSamples, OpusBitrateLan, SendLaneKind.AsioCapture);
+        pluginLane = new SenderLane(this, opusFrameSamples, OpusBitrateLan, SendLaneKind.Plugin);
         // WasapiOnly is the startup mode and it puts Mixed on defaultLane, so the plugin lane must
         // not be left on its Mixed default: two live streams from one endpoint sharing a lane byte
         // supersede each other on every receiver, four times a second, and both go silent. That is
@@ -343,6 +347,22 @@ public sealed class AudioSender : IDisposable
     /// off but still transmitting" (2026-08-23 audit, S1). Constructing one does not open a driver,
     /// so the gate can drive this on any machine.</summary>
     internal AsioCaptureBackend? PersistentAsioForTest => persistentAsio;
+
+    /// <summary>Gate seams: while a self-test runs, every packet sent to an address that is not this computer's own is
+    /// counted, with where it went - the gate's peers are all meant to be on loopback (2026-09-28: steps were sending to
+    /// documentation addresses, which leave the machine for the router).</summary>
+    internal static volatile bool CountOffMachineForTest;
+    private static long offMachineSends;
+    internal static long OffMachineSendsForTest => Interlocked.Read(ref offMachineSends);
+    internal static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> OffMachineTargetsForTest = new();
+    private static void NoteOffMachine(IPEndPoint to)
+    {
+        if (IPAddress.IsLoopback(to.Address)) return;
+        Interlocked.Increment(ref offMachineSends);
+        OffMachineTargetsForTest.AddOrUpdate(to.ToString(), 1, (_, n) => n + 1);
+    }
+    /// <summary>Gate seam: the capture engine the sender is running now.</summary>
+    internal ICaptureBackend EngineForTest => engine;
 
     // Held so SetTightLatency can rebuild the composite with the same mode/driver.
     private AudioMode currentAudioMode;
@@ -550,6 +570,9 @@ public sealed class AudioSender : IDisposable
 
     public bool IsRunning => engine.IsRunning;
     public long CaptureCallbacks => engine.TotalCaptureCallbacks;
+    /// <summary>How many sources the WASAPI mixer has open (null when capture is not through the mixer) - the service asks
+    /// whether its boot ear, a per-program capture, opened at all.</summary>
+    internal int? MixerSourceCount => (engine as CompositeCaptureBackend)?.MixerSourceCount;
     public long CaptureBytes => engine.TotalCaptureBytes;
     /// <summary>Largest gap between capture callbacks since the last call. Resets on read.
     /// Use this in periodic diagnostics — if it spikes well above the audio-buffer period
@@ -559,10 +582,69 @@ public sealed class AudioSender : IDisposable
     /// holes in it).</summary>
     public int TakeMaxCaptureCallbackGapMs() => engine.TakeMaxCallbackGapMs();
 
-    /// <summary>How long audio waits in the CAPTURE device, as the device itself reports it. Zero
-    /// when nothing is open or the device won't say, in which case the caller keeps its own estimate.
-    /// See <see cref="ICaptureBackend.ReportedInputLatencyMs"/> for why this replaced a constant.</summary>
-    public double ReportedInputLatencyMs => engine.ReportedInputLatencyMs;
+    /// <summary>How long audio waits in each CAPTURE lane's device, as the device itself reports it: the WASAPI capture's
+    /// engine period, and the ASIO driver's buffer. Zero when nothing is open or the device won't say, in which case the
+    /// caller keeps its own estimate. Each lane announces its own in its format packet (N7, 2026-09-28); until then every
+    /// lane announced the ASIO figure whenever ASIO ran. See <see cref="ICaptureBackend.ReportedInputLatencyMs"/> for why
+    /// this replaced a constant.</summary>
+    public double WasapiCaptureLatencyMs => WasapiCaptureLatencyMsForTest ?? (engine as CompositeCaptureBackend)?.WasapiLaneInputLatencyMs ?? engine.ReportedInputLatencyMs;
+
+    /// <inheritdoc cref="WasapiCaptureLatencyMs"/>
+    public double AsioCaptureLatencyMs => AsioCaptureLatencyMsForTest ?? (engine as CompositeCaptureBackend)?.AsioLaneInputLatencyMs ?? 0;
+
+    /// <summary>The capture figure of the lane that sends for <paramref name="output"/>: the ASIO inputs for the ASIO
+    /// output, the WASAPI capture for the others. The latency readout's own-machine fallback, per output.</summary>
+    public double CaptureLatencyMsForOutput(RenderRoute output) => output == RenderRoute.AsioLane ? AsioCaptureLatencyMs : WasapiCaptureLatencyMs;
+
+    /// <summary>A capture lane's own figure, for its format packet (the plugin lane knows its own; see SenderLane).</summary>
+    internal double CaptureLatencyMsFor(SendLaneKind kind) => kind == SendLaneKind.AsioCapture ? AsioCaptureLatencyMs : WasapiCaptureLatencyMs;
+
+    // ---- The server's metronome (2026-09-29, PLAN-metronome-server-2026-09-29.md) ----
+
+    /// <summary>Note when each packet's sound was captured, for the server's metronome: set while connected through a server.
+    /// Off, the lanes pay nothing for it.</summary>
+    public bool TimingWanted { get => timingWanted; set => timingWanted = value; }
+    private volatile bool timingWanted;
+    /// <summary>Gate seam: the clock a block's capture time is read from (null, always outside tests: MetronomeClock).</summary>
+    internal Func<long>? CaptureClockForTest { get; set; }
+
+    /// <summary>How long a lane's sound takes from the input to the block the lane is handed: the ASIO driver's own input
+    /// latency (the buffer, its safety margin and converters), or the capture's own figure when the driver does not say;
+    /// the WASAPI capture's figure for the other lane. When the first sample of a block reached the input.</summary>
+    internal double InputDelayMsFor(SendLaneKind kind) => kind == SendLaneKind.AsioCapture
+        ? ((engine as CompositeCaptureBackend)?.AsioLaneDriverInputLatencyMs is > 0 and var driver ? driver : AsioCaptureLatencyMs)
+        : WasapiCaptureLatencyMs;
+
+    /// <summary>The newest packets' capture times, for a report to the server, and forgotten: the ASIO lane's while it sends
+    /// (the instrument), else the other capture lane's.</summary>
+    public List<(ushort Stream, uint Sequence, long CapturedUs)> TakeTimingReports()
+    {
+        var asio = asioLane.TakeTiming();
+        var other = defaultLane.TakeTiming();
+        if (asio.Count > 0) timingFromAsio = true;
+        else if (other.Count > 0) timingFromAsio = false;
+        return asio.Count > 0 ? asio : other;
+    }
+
+    private bool? timingFromAsio;
+
+    /// <summary>For the log: which capture the last report timed, and the input delay it was timed with - the one figure
+    /// in the server's measure this machine takes on trust (live test 2026-09-29: a WASAPI input's own figure is only what
+    /// Windows says). Null before any report.</summary>
+    public string? TimingSourceForLog => timingFromAsio switch
+    {
+        true => (engine as CompositeCaptureBackend)?.AsioLaneDriverInputLatencyMs is > 0 and var driver
+            ? $"the ASIO input, its delay taken as {driver:0.0} ms (the driver's own figure)"
+            : $"the ASIO input, its delay taken as {AsioCaptureLatencyMs:0.0} ms (its buffer; the driver gave no figure)",
+        false => $"the WASAPI input, its delay taken as {WasapiCaptureLatencyMs:0.0} ms (Windows' figure for it)",
+        null => null,
+    };
+
+    /// <summary>Simulator and gate seams (2026-09-28): what a fake capture card says its latency is, per lane, as a real
+    /// driver or device would, so the format packets carry it the way they do in the app. Null (always, outside tests) =
+    /// ask the capture engine.</summary>
+    internal double? WasapiCaptureLatencyMsForTest { get; set; }
+    internal double? AsioCaptureLatencyMsForTest { get; set; }
 
     /// <summary>Per-source capture ring depth and applied drift ratio, so the diag line can SHOW two
     /// sources pulling apart instead of leaving it to be heard. Empty on the ASIO or push paths, which
@@ -605,6 +687,36 @@ public sealed class AudioSender : IDisposable
 
     public bool IsMuted { get => muted; set => muted = value; }
     public long PacketsSent => Interlocked.Read(ref packetsSent);
+
+    // Sends Windows refused (the socket threw), and the reason it gave for the last one. Ed's 30 Sep restarts: nothing left
+    // the computer for four seconds after the service started, and the log could not say why. The service logs these.
+    private long sendFailures;
+    private int lastSendError;
+
+    /// <summary>Sends refused since the last call, and why the last of them was (resets the count on read).</summary>
+    public (long Count, SocketError LastError) TakeSendFailures() =>
+        (Interlocked.Exchange(ref sendFailures, 0), (SocketError)Volatile.Read(ref lastSendError));
+
+    private void NoteSendFailure(SocketException ex)
+    {
+        Volatile.Write(ref lastSendError, (int)ex.SocketErrorCode);
+        Interlocked.Increment(ref sendFailures);
+    }
+
+    /// <summary>How long a sample waited to go out in a packet since the last call, on average over every lane, in ms - or
+    /// -1 when nothing was sent (SenderLane's sending-wait note). The latency readout's "sending" term.</summary>
+    public double TakeMeasuredSendWaitMs()
+    {
+        long ticks = 0, samples = 0;
+        foreach (var lane in new[] { defaultLane, asioLane, pluginLane })
+        {
+            if (lane is null) continue;
+            var (t, s) = lane.TakeSendWait();
+            ticks += t;
+            samples += s;
+        }
+        return samples == 0 ? -1 : ticks / (double)samples * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+    }
     public long BytesSent => Interlocked.Read(ref bytesSent);
 
     /// <summary>
@@ -718,6 +830,9 @@ public sealed class AudioSender : IDisposable
     /// <summary>How many capture sources the sender has been handed - what it would open on its next start.</summary>
     internal int PendingSourceCountForTest => pendingSources.Count;
 
+    /// <summary>Gate seam: the capture set the window last handed over.</summary>
+    internal IReadOnlyList<CaptureSourceSpec> PendingSourcesForTest => pendingSources;
+
     // === plugin lane (the DAW track) ===
 
     // Whether the plugin lane is armed. Volatile because SubmitPluginBlock reads it on the bridge
@@ -737,6 +852,69 @@ public sealed class AudioSender : IDisposable
     internal ushort PluginLaneStreamIdForTest => pluginLane.StreamId;
     internal RenderRoute DefaultLaneRouteForTest => defaultLane.Route;
     internal RenderRoute AsioLaneRouteForTest => asioLane.Route;
+
+    /// <summary>Simulator seam: when set, every datagram goes here instead of onto the socket.</summary>
+    internal Action<byte[], IPEndPoint>? PacketTapForTest { get; set; }
+
+    /// <summary>A datagram handed over as it lies in the lane's own scratch - copy what you keep.</summary>
+    internal delegate void PacketSpanTap(ReadOnlySpan<byte> datagram, IPEndPoint target);
+
+    /// <summary>Simulator seam (2026-09-28, the performance suite): as <see cref="PacketTapForTest"/>, but the datagram is
+    /// lent, not copied into a new array, so a benchmark of the sender's own allocations and CPU measures the sender and
+    /// not the tap. Null (the default, and always in the app): every datagram goes onto the socket as before. Checked
+    /// before <see cref="PacketTapForTest"/>.</summary>
+    internal PacketSpanTap? PacketSpanTapForTest { get; set; }
+
+    /// <summary>Gate seam (the soak's counter wrap-around check): start every lane's wire counters - the audio sequence,
+    /// the PCM frame id and the format sequence - at this value, as a sender that has been running for months would have
+    /// them, so the wrap past 2^32 comes minutes into a simulated run instead of 33 to 241 days in. Never called in the
+    /// app.</summary>
+    internal void StartWireCountersAtForTest(uint value)
+    {
+        defaultLane.StartWireCountersAtForTest(value);
+        asioLane.StartWireCountersAtForTest(value);
+        pluginLane.StartWireCountersAtForTest(value);
+    }
+
+    /// <summary>Gate seam (the stress steps' churn): every lane starts again as <see cref="Start"/> starts it - a new stream
+    /// id, its counters from zero - without a capture engine: a peer's RemSound sending again after it stopped.</summary>
+    internal void RestartLanesForTest()
+    {
+        defaultLane.ResetForStart();
+        asioLane.ResetForStart();
+        pluginLane.ResetForStart();
+    }
+
+    /// <summary>Gate seam (the soak and stress steps): what the sender keeps per peer, entry by entry - the people it sends
+    /// to, and the gate's own machine-wide off-machine record.</summary>
+    internal IReadOnlyList<(string Table, long Count)> TablesForTest() =>
+    [
+        ("sender: people sent to", Volatile.Read(ref receivers).Length),
+        ("gate's off-machine send record", OffMachineTargetsForTest.Count),
+    ];
+
+    /// <summary>Simulator seam: put the WASAPI (default) lane on a route without building a capture engine.</summary>
+    internal void UseDefaultLaneForTest(RenderRoute route) => defaultLane.SetRoute(route);
+
+    /// <summary>The simulator's view of the WASAPI capture lane: the mixing engine when several sources (or a program's
+    /// own sound) are captured, null in push mode. See <see cref="CaptureDevicesForTest"/>.</summary>
+    internal MixingEngine? WasapiMixerForTest => (engine as CompositeCaptureBackend)?.WasapiLaneForTest as MixingEngine;
+    internal bool WasapiPushModeForTest => (engine as CompositeCaptureBackend)?.WasapiLaneForTest is PushModeWasapiBackend;
+
+    /// <summary>Simulator seam: one capture block into the WASAPI (default) lane, as its mix engine's tick does.</summary>
+    internal void FeedDefaultLaneForTest(ReadOnlyMemory<float> stereo) => defaultLane.OnMixedSamples(stereo);
+
+    /// <summary>Gate seam: the plugin lane's route, as SetAudioMode would leave it, without a capture engine.</summary>
+    internal void UsePluginLaneForTest(RenderRoute route) => pluginLane.SetRoute(route);
+
+    /// <summary>Gate seam: put the ASIO lane on its own route (as BothIndependent does) without opening a driver.</summary>
+    internal void UseAsioLaneForTest() => asioLane.SetRoute(RenderRoute.AsioLane);
+
+    /// <summary>Gate seam: one ASIO callback's worth of stereo samples into the ASIO lane, as the driver's callback does.</summary>
+    internal void FeedAsioLaneForTest(ReadOnlyMemory<float> stereo) => asioLane.OnMixedSamples(stereo);
+
+    /// <summary>Gate seam: the ASIO lane's current stream id.</summary>
+    internal ushort AsioLaneStreamIdForTest => asioLane.StreamId;
     internal ushort DefaultLaneStreamIdForTest => defaultLane.StreamId;
 
     /// <summary>
@@ -830,7 +1008,46 @@ public sealed class AudioSender : IDisposable
         }
     }
 
+    // The server path's own timing (latency lab, 2026-09-26): the direct receive thread has had these for months
+    // (NetworkListener's rxNetGapMs / rxDispMs); audio arriving through a server was received here with none, so its
+    // gaps showed up only as the receiver's shared maxGapMs with nothing to say where they came from.
+    private long inboundLastTicks;
+    private long inboundMaxGapTicks;
+    private long inboundMaxDispatchTicks;
+
+    /// <summary>The worst gap between packets on the server path since the last call, in ms (0 with no traffic or with
+    /// diagnostics off).</summary>
+    public int TakeInboundMaxGapMs() => (int)(Interlocked.Exchange(ref inboundMaxGapTicks, 0) * 1000 / Stopwatch.Frequency);
+
+    /// <summary>The longest time one server-path packet took to hand on (decrypt, decode, buffer) since the last call, in ms.</summary>
+    public int TakeInboundMaxDispatchMs() => (int)(Interlocked.Exchange(ref inboundMaxDispatchTicks, 0) * 1000 / Stopwatch.Frequency);
+
+    /// <summary>Gate seam: the port this sender's socket (the server path) is bound to.</summary>
+    internal int LocalPortForTest => ((IPEndPoint)udp.Client.LocalEndPoint!).Port;
+
+    /// <summary>Gate seam: called on the server receive thread for each packet, with the boost that thread took. It lets a
+    /// test read that thread's own priority on the thread itself, rather than trust what was asked for. Null in the app,
+    /// and then never called.</summary>
+    internal Action<WindowsAudioThreadBoost>? InboundThreadSeenForTest { get; set; }
+
+    private static void RaiseMax(ref long slot, long value)
+    {
+        long seen;
+        do { seen = Volatile.Read(ref slot); }
+        while (value > seen && Interlocked.CompareExchange(ref slot, value, seen) != seen);
+    }
+
     private void InboundReceiveLoop(CancellationToken token)
+    {
+        // Real-time priority for audio arriving through a server: MMCSS Capture at Critical, as the direct receive thread
+        // (NetworkListener) has always had. It was a latency lab switch (2026-09-26) until Ed made it normal behaviour
+        // (2026-09-28). Taken on this thread, for its whole life, which is where MMCSS requires it.
+        using var boost = new WindowsAudioThreadBoost("Capture");
+        diagnostic?.Invoke($"sender: server receive thread at real-time priority ({boost.Mode})");
+        InboundReceiveLoopBody(token, boost);
+    }
+
+    private void InboundReceiveLoopBody(CancellationToken token, WindowsAudioThreadBoost boost)
     {
         var buffer = new byte[2048];
         EndPoint anyEndpoint = new IPEndPoint(IPAddress.Any, 0);
@@ -870,7 +1087,19 @@ public sealed class AudioSender : IDisposable
 
             try
             {
-                OnInboundPacket?.Invoke(buffer, received, remote);
+                InboundThreadSeenForTest?.Invoke(boost);
+                if (DiagnosticsGate.Enabled)
+                {
+                    var start = Stopwatch.GetTimestamp();
+                    var prev = Interlocked.Exchange(ref inboundLastTicks, start);
+                    if (prev != 0) RaiseMax(ref inboundMaxGapTicks, start - prev);
+                    OnInboundPacket?.Invoke(buffer, received, remote);
+                    RaiseMax(ref inboundMaxDispatchTicks, Stopwatch.GetTimestamp() - start);
+                }
+                else
+                {
+                    OnInboundPacket?.Invoke(buffer, received, remote);
+                }
             }
             catch (Exception ex)
             {
@@ -900,10 +1129,11 @@ public sealed class AudioSender : IDisposable
     {
         try
         {
+            if (CountOffMachineForTest) NoteOffMachine(destination);
             udp.Send(data, length, destination);
             return true;
         }
-        catch (SocketException) { return false; }
+        catch (SocketException ex) { NoteSendFailure(ex); return false; }
         catch (ObjectDisposedException) { return false; }
     }
 
@@ -969,6 +1199,53 @@ public sealed class AudioSender : IDisposable
     /// UDP failures per-receiver are swallowed by design — UDP is unreliable and one
     /// peer dropping shouldn't disturb the others.
     /// </summary>
+    /// <summary>The ASIO lane's Jamulus-style state, for the per-second "streams" line: sending the Jamulus-style stream,
+    /// and how many Jamulus-style frames it has sent.</summary>
+    public (bool Custom, long CustomFrames) AsioLaneLabState => (asioLane.CustomOpusActive, asioLane.CustomOpusFramesSent);
+
+    /// <summary>Whether <paramref name="target"/> takes the Jamulus-style (custom-mode Opus) stream - a RemSound that has
+    /// said, in the last few seconds, that it plays through ASIO and can decode it (<see cref="JamulusStyle"/>). Through a server too since 2026-09-29 (Ed:
+    /// "build a test copy which uses 64 opus and the metronome and put it on andre's server"), but only while EVERYONE the
+    /// server passes it to has said so - the server passes one stream to all of them - and never with a phone or older app
+    /// paired there, which reads the same audio in the ordinary form and cannot decode it.
+    /// Through a server the target is the server's own address - one copy for everyone there (MainForm.SendTargets) - which
+    /// never says it can decode anything: so it is asked of the people the server passes it to (live test 2026-09-29: it
+    /// never went through Ed's Pi, because this asked it of the server's address).</summary>
+    internal bool IsCustomOpusTarget(IPEndPoint target)
+    {
+        if (!ThroughServer(target)) return CustomOpusPeers.CanDecode(target.Address);
+        if (relayRouter is not RelayGroupClient group || group.ConnectedRelay is not { } relay || group.IsV1Paired(relay)) return false;
+        return group.EveryReceiverOn(relay, static member => CustomOpusPeers.CanDecode(member.Address));
+    }
+
+    private bool ThroughServer(IPEndPoint target) =>
+        RelayGroupClient.IsMemberAddress(target.Address) || (relayRouter is RelayGroupClient group && group.Routes(target));
+
+    /// <summary>Whether any current target takes the Jamulus-style stream.</summary>
+    internal bool AnyCustomOpusTarget()
+    {
+        foreach (var t in Volatile.Read(ref receivers)) if (IsCustomOpusTarget(t)) return true;
+        return false;
+    }
+
+    /// <summary>How many current targets take the Jamulus-style stream (for the log).</summary>
+    public int CustomOpusTargetCount => Volatile.Read(ref receivers).Count(IsCustomOpusTarget);
+
+    /// <summary>Send to part of the audience: only the Jamulus-style targets, or everyone else. Otherwise exactly
+    /// <see cref="SendToAll"/>.</summary>
+    internal void SendToSome(ReadOnlySpan<byte> packet, bool customOpusTargets)
+    {
+        var targets = Volatile.Read(ref receivers);
+        if (targets.Length == 0) return;
+        var router = relayRouter;
+        foreach (var target in targets)
+        {
+            if (IsCustomOpusTarget(target) != customOpusTargets) continue;
+            if (router is not null && router.TryRoute(packet, target, sendDatagram)) continue;
+            SendDatagram(packet, target);
+        }
+    }
+
     internal void SendToAll(ReadOnlySpan<byte> packet)
     {
         var targets = Volatile.Read(ref receivers);
@@ -993,11 +1270,27 @@ public sealed class AudioSender : IDisposable
     private void SendDatagram(ReadOnlySpan<byte> datagram, IPEndPoint target)
     {
         if (RelayGroupClient.IsMemberAddress(target.Address)) return;
+        // The simulator: every packet goes to its virtual network instead of the socket.
+        if (PacketSpanTapForTest is { } spanTap)
+        {
+            spanTap(datagram, target);
+            Interlocked.Increment(ref packetsSent);
+            Interlocked.Add(ref bytesSent, datagram.Length);
+            return;
+        }
+        if (PacketTapForTest is { } tap)
+        {
+            tap(datagram.ToArray(), target);
+            Interlocked.Increment(ref packetsSent);
+            Interlocked.Add(ref bytesSent, datagram.Length);
+            return;
+        }
         try
         {
             // Measure the kernel-side time of just the SendTo call when diagnostics are enabled. If this number
             // spikes, the bottleneck is the TX path (kernel buffer pressure, NIC, single-socket cross-thread
             // contention) rather than our encode pipeline.
+            if (CountOffMachineForTest && target is IPEndPoint to) NoteOffMachine(to);
             if (RemSound.Core.DiagnosticsGate.Enabled)
             {
                 var sendStart = Stopwatch.GetTimestamp();
@@ -1011,7 +1304,7 @@ public sealed class AudioSender : IDisposable
             Interlocked.Increment(ref packetsSent);
             Interlocked.Add(ref bytesSent, datagram.Length);
         }
-        catch (SocketException) { }
+        catch (SocketException ex) { NoteSendFailure(ex); }
         catch (ObjectDisposedException) { }
     }
 }

@@ -68,7 +68,6 @@ internal static partial class SelfTest
                 peerTap(chris, quiet.AsMemory());
                 blockDone!(loud.Length);
                 sendTap!(sent.AsMemory(), RenderRoute.Mixed);
-                Thread.Sleep(1);
             }
 
             controller.Stop();
@@ -206,6 +205,83 @@ internal static partial class SelfTest
         finally { try { Directory.Delete(temp, recursive: true); } catch { } }
     }
 
+    /// <summary>A RECORDING THAT DIES, AS THE PERSON MEETS IT (2026-09-28, from the review of every step). The step above
+    /// proves the recorder reports its death; this drives the real window: a recording started from the Record menu, its
+    /// writer made to fail, and then the window must stop it, put the menu back to "Start recording", say so ONCE with
+    /// the reason and the partly-written file, and log it.</summary>
+    private static string? ARecordingThatDiesTellsThePerson()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "remsound-recdeath-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        var restoreMuted = CuePlayer.GloballyMuted;
+        CuePlayer.GloballyMuted = true;
+        Windowless.InstallHook();
+        Windowless.SetActiveForTest(true);
+        var profile = Profile.NewBlank();
+        profile.RecordingSettings = new RecordingSettings { FileFormat = RecordingFileFormat.Wav, Source = RecordingSource.SentOnly, Folder = temp };
+        MainForm? form = null;
+        try
+        {
+            try { form = new MainForm(null, profile, null, null, headless: true); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+            _ = form.Handle;
+            var main = form;
+            var logged = new List<string>();
+            main.LogForTest.EventTapForTest = line => { lock (logged) logged.Add(line); };
+            var item = Require(FieldOf<ToolStripMenuItem>(main, "startStopRecordingMenuItem"), "the Record menu's start/stop item");
+            var controller = main.RecordingControllerForTest;
+            string? question = null;
+            DriveWhilePumping(main, () =>
+            {
+                main.Invoke(() => item.PerformClick());
+                Check(WaitFor(() => controller.IsRecording, TimeSpan.FromSeconds(5)), "Record, Start recording must start a recording");
+                Check(WaitFor(() => main.Invoke(() => item.AccessibleName) == "Stop recording", TimeSpan.FromSeconds(5)),
+                    $"and the menu must offer Stop ({main.Invoke(() => item.AccessibleName)})");
+
+                controller.FailNextWriteForTest();
+                var block = MakeBlock(0.4f);
+                for (var i = 0; i < 200 && !main.Invoke(() => Application.OpenForms.OfType<HeadlessQuestionForm>().Any()); i++)
+                {
+                    main.SenderForTest.OnSentSamples?.Invoke(block.AsMemory(), RenderRoute.Mixed);
+                    Thread.Sleep(10);
+                }
+                Check(WaitFor(() => main.Invoke(() => Application.OpenForms.OfType<HeadlessQuestionForm>().Any()), TimeSpan.FromSeconds(5)),
+                    "THE PERSON MUST BE TOLD: a recording that died must put a message in front of them");
+                main.Invoke(() =>
+                {
+                    var box = Application.OpenForms.OfType<HeadlessQuestionForm>().First();
+                    question = box.Question;
+                    Check(box.Text == "RemSound - recording stopped", $"the message must say what it is about in its title ({box.Text})");
+                    Check(!controller.IsRecording, "while it is on screen, the recording must already be stopped - not still claimed");
+                    Check(item.AccessibleName == "Start recording", $"and the Record menu must offer Start again ({item.AccessibleName})");
+                    Require(EveryFocusableUnder(box).OfType<Button>().FirstOrDefault(b => b.Text.Replace("&", "") == "OK"), "its OK button").PerformClick();
+                });
+                Check(WaitFor(() => main.Invoke(() => !Application.OpenForms.OfType<HeadlessQuestionForm>().Any()), TimeSpan.FromSeconds(5)),
+                    "and it must close when answered");
+                // More audio after the answer: a second message for the same death would be a second window.
+                for (var i = 0; i < 20; i++) main.SenderForTest.OnSentSamples?.Invoke(block.AsMemory(), RenderRoute.Mixed);
+                Thread.Sleep(200);
+                Check(main.Invoke(() => !Application.OpenForms.OfType<HeadlessQuestionForm>().Any()), "ONCE: no second message for the same death");
+            }, TimeSpan.FromSeconds(30));
+            var text = Require(question, "the message's words");
+            Check(text.Contains("simulated disk failure", StringComparison.Ordinal) && text.Contains("Partly-written file:", StringComparison.Ordinal)
+                  && text.Contains(temp, StringComparison.OrdinalIgnoreCase),
+                $"the message must give the reason and where the partly-written file is ({text.Replace(Environment.NewLine, " ")})");
+            lock (logged)
+                Check(logged.Count(l => l.StartsWith("recording: stopped by a failure - ", StringComparison.Ordinal) && l.Contains("simulated disk failure", StringComparison.Ordinal)) == 1,
+                    $"the log must say it once, with the reason ({logged.Count(l => l.Contains("stopped by a failure", StringComparison.Ordinal))} lines)");
+            return "from the Record menu to a dead writer: the window stopped the recording, put Start back on the menu, told the person once "
+                 + "with the reason and the partly-written file, and logged it";
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            Windowless.SetActiveForTest(false);
+            CuePlayer.GloballyMuted = restoreMuted;
+            try { Directory.Delete(temp, recursive: true); } catch { /* scratch */ }
+        }
+    }
+
     /// <summary>Every source mode and every channel mode, checked by what ends up in the file.
     ///
     /// <para>The old test covered SentOnly only, and judged mono by file size. A downmix that dropped
@@ -266,14 +342,16 @@ internal static partial class SelfTest
             var stereoPath = Path.Combine(temp, "stereo.wav");
             RecordTone(temp, stereoPath, new RecordingSettings { FileFormat = RecordingFileFormat.Wav, Source = RecordingSource.Both, ChannelMode = RecordingChannelMode.Stereo },
                 feedReceived: true, feedSent: false);
+            // The tone on the RIGHT channel only: a downmix that kept one side (or fed it identical sides, as this did until
+            // 2026-09-28) would pass with the tone on both.
             var monoPath = Path.Combine(temp, "mono2.wav");
             RecordTone(temp, monoPath, new RecordingSettings { FileFormat = RecordingFileFormat.Wav, Source = RecordingSource.Both, ChannelMode = RecordingChannelMode.Mono },
-                feedReceived: true, feedSent: false);
+                feedReceived: true, feedSent: false, rightOnly: true);
 
             Check(WavChannels(stereoPath) == 2, $"a stereo recording must declare two channels (got {WavChannels(stereoPath)})");
             Check(WavChannels(monoPath) == 1, $"a mono recording must declare ONE channel, not a stereo file that happens to be smaller (got {WavChannels(monoPath)})");
-            Check(PeakOfWav(monoPath) > 0.05f, $"...and must still contain audio after the downmix (peak {PeakOfWav(monoPath):0.000})");
-            findings.Add("mono really is one channel and keeps its audio");
+            CheckHoldsTheTestTone(monoPath, "a mono recording of a tone on the RIGHT channel only - the downmix must keep both sides");
+            findings.Add("mono really is one channel and keeps what was on either side");
 
             // --- Every format, in SPLIT mode too. The old coverage tested formats only as a single
             // file; the split path builds its recorders separately and could ship a format that works
@@ -341,7 +419,6 @@ internal static partial class SelfTest
             peerTap?.Invoke(peer, block.AsMemory());
             blockDone?.Invoke(block.Length);
             sendTap?.Invoke(block.AsMemory(), RenderRoute.Mixed);
-            Thread.Sleep(1);
         }
         controller.Stop();
         // AllDirectories: the controller may file a session into a dated subfolder, and a
@@ -405,10 +482,9 @@ internal static partial class SelfTest
                 if (i % 2 == 0) { tap(peer, longBlock.AsMemory()); tap(peer, shortBlock.AsMemory()); }
                 else { tap(peer, shortBlock.AsMemory()); tap(peer, longBlock.AsMemory()); }
                 blockDone(longBlock.Length);
-                Thread.Sleep(2);
             }
             controller.Stop();
-            Thread.Sleep(400);
+            WaitFor(() => Directory.GetFiles(temp, "*.wav", SearchOption.AllDirectories).Any(f => new FileInfo(f).Length > 44), TimeSpan.FromSeconds(5));
 
             // Split recordings land in a dated "multi track" subfolder, so search the tree.
             var file = Directory.GetFiles(temp, "*.wav", SearchOption.AllDirectories)
@@ -456,11 +532,8 @@ internal static partial class SelfTest
                 recorder.Faulted += reason => reported = reason;
                 var block = MakeConstantBlock(0.4f, 480);
                 for (var i = 0; i < 400 && reported is null; i++)
-                {
                     recorder.WriteReceived(block.AsMemory(), RenderRoute.Mixed);
-                    Thread.Sleep(2);
-                }
-                Thread.Sleep(300);
+                WaitFor(() => reported is not null || recorder.FaultReason is not null, TimeSpan.FromSeconds(5));
                 reported ??= recorder.FaultReason;
             }
 

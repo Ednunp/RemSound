@@ -64,7 +64,12 @@ public static class AutoTuneDescent
         int CreepIntervalTicks = 3,
         /// <summary>Clean ticks required before creeping starts at all — a longer settling period than
         /// the fast phase demands, because this is the phase that goes below the comfortable margin.</summary>
-        int CreepCleanTicks = 6);
+        int CreepCleanTicks = 6,
+        /// <summary>A setting further than this above the measured need is a silly one (Ed, 2026-09-28: "you want it to
+        /// snap back down"): the next tick goes straight to the need plus the headroom, with no waiting for evidence. The
+        /// playout then snaps the buffer to within 100 ms of it and drains the rest (SessionPlayout's descent). Closer
+        /// than this, the careful evidence-backed steps below as before.</summary>
+        int SillyAboveNeedMs = 100);
 
     public static readonly Policy Default = new();
 
@@ -211,6 +216,9 @@ public static class AutoTuneDescent
         // The floor is the measured need, raised by anything the creep has LEARNED is too thin here.
         var floor = Math.Max(recommendedMs, creep?.DiscoveredFloorMs ?? 0);
         if (currentMs <= floor) return currentMs;
+
+        // A silly setting comes straight down to the need plus its headroom (see SillyAboveNeedMs).
+        if (currentMs - floor > p.SillyAboveNeedMs) return floor + p.HeadroomMs;
 
         // Evidence: cushion the buffer never touched, minus the headroom we deliberately keep.
         var haveEvidence = lowWaterMs >= 0

@@ -50,11 +50,24 @@ public static class ProcessLoopbackId
 {
     public static string Format(int processId) => $"proc:{processId}";
 
-    public static bool TryParse(string deviceId, out int processId)
+    /// <summary>Every program EXCEPT this process and its children: <c>"procx:&lt;pid&gt;"</c>. The service's boot ear
+    /// (ServiceSendHost) - everything playing on the machine, reached per program, without RemSound's own keepalive.</summary>
+    public static string FormatExcluding(int processId) => $"procx:{processId}";
+
+    /// <summary>One program (and its children) - <c>"proc:"</c> only; an excluding id is not one program.</summary>
+    public static bool TryParse(string deviceId, out int processId) =>
+        TryParse(deviceId, out processId, out var excluding) && !excluding;
+
+    /// <summary>Either form: <paramref name="excluding"/> says which.</summary>
+    public static bool TryParse(string deviceId, out int processId, out bool excluding)
     {
         processId = -1;
+        excluding = false;
         if (string.IsNullOrEmpty(deviceId)) return false;
-        if (!deviceId.StartsWith("proc:", StringComparison.OrdinalIgnoreCase)) return false;
-        return int.TryParse(deviceId.AsSpan("proc:".Length), out processId) && processId > 0;
+        var prefix = deviceId.StartsWith("procx:", StringComparison.OrdinalIgnoreCase) ? "procx:"
+            : deviceId.StartsWith("proc:", StringComparison.OrdinalIgnoreCase) ? "proc:" : null;
+        if (prefix is null) return false;
+        excluding = prefix == "procx:";
+        return int.TryParse(deviceId.AsSpan(prefix.Length), out processId) && processId > 0;
     }
 }

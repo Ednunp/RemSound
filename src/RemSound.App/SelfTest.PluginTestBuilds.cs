@@ -74,15 +74,18 @@ internal static partial class SelfTest
         var lists = 0;
         plugin.MessageReceived += (type, _, _, _, _) => { if (type == PluginBridgeMessage.PeerList) Interlocked.Increment(ref lists); };
 
+        // The two hellos back to back on one link, and then exactly ONE peer list: the one the current hello earns. No fixed
+        // wait for a reply that must not come (2026-09-28: a Sleep(600)) - the second hello's answer is the marker that the
+        // first had its chance.
         Check(plugin.Send(hostEnd, PluginBridgeMessage.Hello, instance, null, ReadOnlySpan<byte>.Empty), "the hello without a process id must send");
-        Thread.Sleep(600);
-        Check(Volatile.Read(ref lists) == 0, "a hello without a process id must get no reply — only the plugin's test builds sent one");
-
         var pid = new byte[sizeof(int)];
         BinaryPrimitives.WriteInt32LittleEndian(pid, Environment.ProcessId);
         Check(plugin.Send(hostEnd, PluginBridgeMessage.Hello, instance, null, pid), "the current hello must send");
         Check(WaitUntil(() => Volatile.Read(ref lists) > 0, 3000),
-            "a hello carrying the process id must still get the peer list, or the silence above proves nothing");
-        return "a hello without a process id gets no reply; one carrying it gets the peer list";
+            "a hello carrying the process id must get the peer list, or the silence asked for below proves nothing");
+        Thread.Sleep(50);   // a second list, if the first hello had earned one, lands within this
+        Check(Volatile.Read(ref lists) == 1,
+            $"a hello without a process id must get no reply - only the plugin's test builds sent one ({Volatile.Read(ref lists)} peer lists for the two hellos)");
+        return "of a hello without a process id and one with it, only the second is answered";
     }
 }

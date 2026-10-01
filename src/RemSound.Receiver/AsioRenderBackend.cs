@@ -54,11 +54,14 @@ internal sealed class AsioRenderBackend : IRenderBackend
     /// the elapsed time is logged every close so we accumulate real numbers instead of guessing.</summary>
     private const int CloseTimeoutMs = 30_000;
 
-    public AsioRenderBackend(string driverName, IWaveProvider source, Action<string>? onDiagnostic = null)
+    private readonly MetronomeOutputs? metronome;
+
+    public AsioRenderBackend(string driverName, IWaveProvider source, Action<string>? onDiagnostic = null, MetronomeOutputs? metronome = null)
     {
         this.driverName = driverName;
         this.source = source;
         this.onDiagnostic = onDiagnostic;
+        this.metronome = metronome;
     }
 
     public bool IsRunning => device is not null;
@@ -186,7 +189,7 @@ internal sealed class AsioRenderBackend : IRenderBackend
                 {
                     onDiagnostic?.Invoke($"asio render: driver \"{driverName}\" only has {outputChannelCount} output channels, but spec requests pair {maxPair} (channels {maxPair * 2 + 1}/{maxPair * 2 + 2})");
                 }
-                broadcaster = new BroadcastProvider(source, outputChannelCount, activeChannelPairs);
+                broadcaster = new BroadcastProvider(source, outputChannelCount, activeChannelPairs, metronome, () => reportedOutputLatencyMs);
                 shared.AttachPlayback(broadcaster);
                 // The DRIVER'S OWN figure for how long playback takes, in samples - the one number in
                 // the latency estimate that comes from the hardware rather than from us.
@@ -259,6 +262,11 @@ internal sealed class AsioRenderBackend : IRenderBackend
     internal static void ReadThroughBroadcastForTest(IWaveProvider source, int outputChannels, byte[] buffer) =>
         new BroadcastProvider(source, outputChannels, [0, 1]).Read(buffer, 0, buffer.Length);
 
+    /// <summary>Test seam: the ASIO output's broadcast as the driver's callback reads it, with the metronome and a stated
+    /// delay - kept, so its click lane lives from call to call as a real output's does.</summary>
+    internal static IWaveProvider BroadcastForTest(IWaveProvider source, int outputChannels, MetronomeOutputs metronome, double statedLatencyMs) =>
+        new BroadcastProvider(source, outputChannels, [0], metronome, () => statedLatencyMs);
+
     private sealed class BroadcastProvider : IWaveProvider
     {
         private readonly IWaveProvider source;
@@ -268,11 +276,17 @@ internal sealed class AsioRenderBackend : IRenderBackend
 
         public WaveFormat WaveFormat { get; }
 
-        public BroadcastProvider(IWaveProvider source, int outputChannelCount, List<int> activePairs)
+        private readonly MetronomeOutputs? metronome;
+        private readonly Func<double>? statedLatencyMs;
+        private readonly MetronomeClickLane clickLane = new("ASIO output");
+
+        public BroadcastProvider(IWaveProvider source, int outputChannelCount, List<int> activePairs, MetronomeOutputs? metronome = null, Func<double>? statedLatencyMs = null)
         {
             this.source = source;
             this.outputChannelCount = outputChannelCount;
             this.activePairs = new List<int>(activePairs);
+            this.metronome = metronome;
+            this.statedLatencyMs = statedLatencyMs;
             WaveFormat = WaveFormat.CreateIeeeFloatWaveFormat(MixSampleRate, outputChannelCount);
         }
 
@@ -309,6 +323,17 @@ internal sealed class AsioRenderBackend : IRenderBackend
 
             // Interpret source bytes as float array, output bytes as float array, broadcast.
             var srcFloats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(sourceScratchBytes.AsSpan(0, sourceBytes));
+
+            // The metronome's clicks, placed by the driver's own stated delay (ASIO has no buffer of ours in between).
+            if (metronome is not null)
+            {
+                try
+                {
+                    if (metronome.Mix(clickLane, null, srcFloats, MixChannels, MixSampleRate, (statedLatencyMs?.Invoke() ?? 0) * 1000))
+                        for (var i = 0; i < srcFloats.Length; i++) srcFloats[i] = Math.Clamp(srcFloats[i], -1f, 1f);
+                }
+                catch { /* nothing may be thrown into the driver's callback */ }
+            }
             var dstFloats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(buffer.AsSpan(offset, count));
             dstFloats.Clear();
 

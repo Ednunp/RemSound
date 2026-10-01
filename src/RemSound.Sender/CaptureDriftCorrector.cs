@@ -86,16 +86,13 @@ internal sealed class CaptureDriftCorrector : ISampleProvider
         Func<long> fedBytes,
         Func<bool> correctionWanted,
         string name,
-        double measurementWindowSec = DefaultMeasurementWindowSec,
         Action<string>? onDiagnostic = null)
     {
         this.upstream = upstream;
         this.bufferedMs = bufferedMs;
         this.correctionWanted = correctionWanted;
         this.name = name;
-        // Overridable ONLY so the gate can measure a real correction in seconds rather than minutes.
-        // The shipped value is pinned by the test that uses this.
-        tracker = new DriftRatioTracker(SampleRate, measurementWindowSec);
+        tracker = new DriftRatioTracker(SampleRate, DefaultMeasurementWindowSec);
         this.onDiagnostic = onDiagnostic;
         FedBytes = fedBytes;
 

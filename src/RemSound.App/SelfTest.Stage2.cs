@@ -134,7 +134,12 @@ internal static partial class SelfTest
         foreach (var configuration in AudioConfigurations.All)
         {
             MainForm form;
-            try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+            // Sending on (with a password, so switching it on never stops to ask for one): a source ticked while not sending
+            // changes nothing that is sent, so it rightly forgets nothing.
+            var sending = Profile.NewBlank();
+            sending.SendAudioOn = true;
+            sending.Password = RemSoundCrypto.Obfuscate("tuner-readings-password");
+            try { form = new MainForm(null, sending, null, null, headless: true); }
             catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
 
             using (form)
@@ -154,10 +159,30 @@ internal static partial class SelfTest
                 var deselect = Require(typeof(MainForm).GetMethod("DeselectPeer",
                     System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic, [typeof(Guid), typeof(bool)]),
                     "MainForm.DeselectPeer(Guid, bool) not found");
+                // And a capture source ticked, through the send-output list's own handler (2026-09-28: the name promised a
+                // source change and only the peer was ever driven). A stand-in card: nothing opens.
+                _ = form.Handle;
+                var sources = Require(FieldOf<CheckedListBox>(form, "sendOutputDevicesList"), "the main window has no sendOutputDevicesList");
+                var sendSwitch = Require(FieldOf<CheckBox>(form, "sendMyAudioCheckbox"), "the main window has no sendMyAudioCheckbox");
+                var sendMode = Require(FieldOf<ListBox>(form, "sendModeList"), "the main window has no sendModeList");
+                void TickASource()
+                {
+                    // The tick box's own handler applies the change once connected; the send-mode list's applies it at once,
+                    // connected or not - so the card is ticked, then the list moved away and back, as a person would.
+                    sendSwitch.Checked = true;
+                    sources.Items.Clear();
+                    sources.Items.Add(new AudioDeviceChoice("Gate card", "gate-source-" + Guid.NewGuid().ToString("N"), CaptureKind.Loopback));
+                    sources.SetItemChecked(0, true);
+                    var devices = sendMode.SelectedIndex;
+                    sendMode.SelectedIndex = devices == 0 ? 1 : 0;
+                    sendMode.SelectedIndex = devices;
+                    for (var k = 0; k < 5; k++) Application.DoEvents();
+                }
                 foreach (var (change, act) in new (string, Action)[]
                 {
                     ("ticking a person", () => form.SelectPeerForTest(peer)),
                     ("unticking them", () => deselect.Invoke(form, [peer.InstanceId, true])),
+                    ("ticking a capture source", TickASource),
                 })
                 {
                     var floors = new Dictionary<RenderRoute, int>();
@@ -186,7 +211,7 @@ internal static partial class SelfTest
                 proven.Add(name);
             }
         }
-        return $"in {string.Join(", ", proven)}, ticking and unticking a person through the window clears every reading on every tuned lane and keeps the learned floor";
+        return $"in {string.Join(", ", proven)}, ticking and unticking a person, and ticking a capture source, through the window clears every reading on every tuned lane and keeps the learned floor";
     }
 
     /// <summary>

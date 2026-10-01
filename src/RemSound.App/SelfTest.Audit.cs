@@ -190,14 +190,11 @@ internal static partial class SelfTest
     /// by calling an internal method — the ordering bug lived in the handler, so the handler is what
     /// has to be exercised.</para>
     ///
-    /// <para><b>Honest scope.</b> What this actually discriminates is the R4 validation: break that
-    /// and this goes red on the rejected-count assertion. It does NOT independently catch the R5
-    /// re-ordering, because with R4 in place the StreamSession constructor can no longer be made to
-    /// throw from a wire format at all — every value that used to reach it is now refused earlier.
-    /// The re-ordering was kept anyway as the second line of defence (it costs nothing and makes the
-    /// failure cheap if a future format field slips through), but it is deliberately recorded here as
-    /// uncovered rather than left looking tested. Verified by breaking both fixes and watching which
-    /// assertions moved.</para>
+    /// <para>Two halves. The first is the R4 validation: a corrupt format is refused before it gets anywhere. The second
+    /// is the R5 re-ordering, which R4 had made unreachable from the wire - no format that passes R4 makes the session's
+    /// constructor throw - so for a year it was recorded as uncovered. Since 2026-09-28 a seam makes the next session fail
+    /// to build (as a format no check caught would), and a VALID change of format is sent: the old session must still be
+    /// there and still play, and the next good announcement must replace it.</para>
     /// </summary>
     private static string? AuditBadFormatKeepsTheExistingSession()
     {
@@ -234,7 +231,57 @@ internal static partial class SelfTest
         Check(final.Count == 1 && final[0].FrameSamplesPerChannel == 960,
             "a good format packet after a bad one must still take effect");
 
-        return "a corrupt format is counted and dropped; the working session survives it and still accepts the next real change";
+        // R5: a VALID change whose session cannot be built. PCM, so the old session can be heard to play afterwards.
+        var pcmPeer = new IPEndPoint(IPAddress.Parse("192.168.77.11"), 47830);
+        using var pcm = new AudioReceiver();
+        pcm.SetOutputDevices([]);
+        pcm.SetAllowedSenders([pcmPeer]);
+        pcm.SetPlaybackEnabled(true);
+        var (rawKey, fingerprint) = RemSoundCrypto.ForPlainPassword("r5-password");
+        var key = Require(rawKey, "the password must derive a key");
+        pcm.AudioKey = key;
+        pcm.AudioFingerprint = fingerprint;
+        const ushort pcmStream = 8;
+        uint sequence = 1;
+        ushort frameId = 1;
+        void Announce(AudioFormatInfo f)
+        {
+            var packet = new byte[RemPacket.HeaderSize + RemPacket.FormatPayloadWithFingerprintSize];
+            RemPacket.WriteHeader(packet, RemPacketType.Format, pcmStream, sequence++);
+            var n = RemPacket.WriteFormatPayload(packet.AsSpan(RemPacket.HeaderSize), f, fingerprint);
+            pcm.InjectExternalPacket(packet, RemPacket.HeaderSize + n, pcmPeer);
+        }
+        long Play(int frames)
+        {
+            var before = pcm.AudioBytesDecodedForTest;
+            for (var i = 0; i < 4; i++)
+            {
+                var sealedFrame = RemSoundCrypto.Encrypt(key, new byte[frames * 2 * 3]);
+                var packet = new byte[RemPacket.HeaderSize + RemPcmFrame.SubHeaderSize + sealedFrame.Length];
+                RemPacket.WriteHeader(packet, RemPacketType.Audio, pcmStream, sequence++);
+                RemPcmFrame.WriteSubHeader(packet.AsSpan(RemPacket.HeaderSize), frameId++, 0, 1);
+                sealedFrame.CopyTo(packet.AsSpan(RemPacket.HeaderSize + RemPcmFrame.SubHeaderSize));
+                pcm.InjectExternalPacket(packet, packet.Length, pcmPeer);
+            }
+            return pcm.AudioBytesDecodedForTest - before;
+        }
+        var first = new AudioFormatInfo(48000, 2, 24, 1, 6, 288_000, (int)AudioTransportCodec.Pcm, 240);
+        Announce(first);
+        Check(Play(240) > 0, "a PCM session must play before anything goes wrong");
+        pcm.FailNextSessionForTest = true;
+        Announce(new AudioFormatInfo(48000, 2, 24, 1, 6, 288_000, (int)AudioTransportCodec.Pcm, 120));
+        Check(!pcm.FailNextSessionForTest, "the seam must have been reached - the change must have tried to build a session");
+        var kept = pcm.ActiveFormatsFromAddress(pcmPeer.Address);
+        Check(kept.Count == 1 && kept[0].FrameSamplesPerChannel == 240,
+            $"R5: when the replacement cannot be built, the working session must stay exactly as it was ({string.Join(", ", kept)})");
+        Check(Play(240) > 0, "R5: and it must still PLAY - not sit there disposed, dropping every packet");
+        Announce(new AudioFormatInfo(48000, 2, 24, 1, 6, 288_000, (int)AudioTransportCodec.Pcm, 120));
+        var replaced = pcm.ActiveFormatsFromAddress(pcmPeer.Address);
+        Check(replaced.Count == 1 && replaced[0].FrameSamplesPerChannel == 120 && Play(120) > 0,
+            "R5: and the next good announcement must replace it, and play");
+
+        return "a corrupt format is counted and dropped; the working session survives it and still accepts the next real change; "
+             + "a valid change whose session cannot be built leaves the old one in place and playing, and the next announcement replaces it";
     }
 
     private static int FormatPacketLength(AudioFormatInfo format) =>
@@ -251,41 +298,6 @@ internal static partial class SelfTest
     // ---------------------------------------------------------------------------------------
     // R2 — a plugin must get a claimed peer ONCE, not once per output lane
     // ---------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// With two output lanes active, a claimed peer must reach the DAW at its real level.
-    ///
-    /// <para>The engine keeps a mirror replica of every stream per extra active output lane, so each
-    /// sound card can play it on its own clock. The speaker paths filter those by output lane.
-    /// <c>ReadClaimedPeer</c> does not filter by lane — a plugin's track has no output lane — so it
-    /// summed the primary AND its mirror and handed the DAW two copies: about 6 dB hot, and
-    /// comb-filtered as the two rings drifted apart. It only bit with both a WASAPI and an ASIO
-    /// output ticked, which is why it survived to here.</para>
-    ///
-    /// <para>Measured against the SAME peer read with one lane active, so the test is a comparison of
-    /// levels rather than a hard-coded number — it fails if the audio is doubled, and it would also
-    /// fail if a future change halved it.</para>
-    /// </summary>
-    private static string? AuditClaimedPeerIsNotDoubled()
-    {
-        var peer = new IPEndPoint(IPAddress.Parse("192.168.77.20"), 47830);
-        var instance = Guid.NewGuid();
-
-        var oneLane = ClaimedPeerPeak(peer, instance, bothLanes: false);
-        Check(oneLane > 0.2f, $"the claimed peer must reach the plugin at all (peak {oneLane:0.000})");
-
-        var twoLanes = ClaimedPeerPeak(peer, instance, bothLanes: true);
-        Check(twoLanes > 0.2f, $"the claimed peer must still reach the plugin with two outputs ticked (peak {twoLanes:0.000})");
-
-        // Doubling would land at ~2x. Allow a wide tolerance for drift-corrector differences between
-        // the two rings; anything approaching 1.5x is the bug.
-        Check(twoLanes < oneLane * 1.4f,
-            $"a claimed peer must reach the plugin ONCE however many outputs are ticked — with two lanes it "
-            + $"came out {twoLanes / oneLane:0.00}x louder, which is the primary and its mirror being summed "
-            + $"(one lane {oneLane:0.000}, two lanes {twoLanes:0.000})");
-
-        return $"a claimed peer reads at the same level with one output lane or two ({oneLane:0.000} vs {twoLanes:0.000}) — no mirror doubling";
-    }
 
     private static float ClaimedPeerPeak(IPEndPoint peer, Guid instance, bool bothLanes)
     {
@@ -349,6 +361,11 @@ internal static partial class SelfTest
 
             var calls = 0;
             engine.SetRecordTap((_, _) => { calls++; throw new InvalidOperationException("recorder blew up"); }, raw: false);
+            // And the other thing the finding named: a per-peer filter that throws, on the same read (2026-09-28).
+            var badFilter = Require(PeerDspChain.Build(new PeerShaping { Volume = 0.5f }, enabled: true), "a half-volume chain");
+            badFilter.ThrowForTest = true;
+            var throwsBefore = PeerDspChain.ThrowsForTest;
+            engine.SetPeerDsp(peer.Address, badFilter);
 
             var buffer = new byte[960 * 8];
             var peak = 0f;
@@ -364,12 +381,13 @@ internal static partial class SelfTest
             }
 
             Check(calls > 0, $"in {configuration.Describe()} the record tap must actually have been called, or this proves nothing");
-            Check(peak > 0.05f, $"in {configuration.Describe()} the audio must keep flowing through a failing recorder (peak {peak:0.000})");
+            Check(PeerDspChain.ThrowsForTest > throwsBefore, $"in {configuration.Describe()} the failing filter must actually have been run, or this proves nothing");
+            Check(peak > 0.05f, $"in {configuration.Describe()} the audio must keep flowing through a failing recorder and a failing filter (peak {peak:0.000})");
             totalCalls += calls;
         }
 
-        return $"a throwing per-peer record tap is contained in all three configurations ({totalCalls} tap calls survived); "
-             + "the mix keeps playing and the output is never reported as lost";
+        return $"a throwing per-peer record tap and a throwing per-peer filter are contained in all three configurations ({totalCalls} tap calls "
+             + "survived); the mix keeps playing and the output is never reported as lost";
     }
 
     // ---------------------------------------------------------------------------------------
@@ -410,7 +428,35 @@ internal static partial class SelfTest
         Check(MainForm.ShouldWriteReadout("stale", held, focused: false),
             "the text that arrived while the box was focused must be written as soon as focus leaves");
 
-        return "a readout is never rewritten under a reader's caret, and whatever arrived meanwhile lands the moment focus goes";
+        // And the WRITERS (2026-09-28): the rule above is only kept if each readout's writer asks it. Driven on the real window -
+        // the status readout, the peer details and the Total latency box - with the screen reader stood in for: while one is
+        // "being read" its writer must leave it alone; once it is not, what arrived must land.
+        MainForm form;
+        try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+        catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+        using (form)
+        {
+            const string Sentinel = "what the reader is on";
+            var statusCache = Require(typeof(MainForm).GetField("lastStatusReadoutText", BindingFlags.Instance | BindingFlags.NonPublic),
+                "MainForm.lastStatusReadoutText not found");
+            foreach (var (field, which) in new[] { ("statusReadout", 0), ("peerDetailsBox", 1), ("measuredLatencyReadout", 2) })
+            {
+                var box = Require(FieldOf<TextBox>(form, field), $"the main window has no {field}");
+                void Write() => form.RefreshReadoutsForTest(status: which == 0, peerDetails: which == 1, latency: which == 2);
+                box.Text = Sentinel;
+                if (which == 0) statusCache.SetValue(form, Sentinel);
+                form.FocusedForTest = c => c == box;
+                Write();
+                Write();
+                Check(box.Text == Sentinel, $"{field}: while a screen reader is on it, its writer must not rewrite it (it now reads: {box.Text})");
+                form.FocusedForTest = _ => false;
+                Write();
+                Check(box.Text != Sentinel && box.Text.Length > 0, $"{field}: once the reader moves on, what arrived meanwhile must be written at once");
+            }
+            form.FocusedForTest = null;
+        }
+        return "a readout is never rewritten under a reader's caret, and whatever arrived meanwhile lands the moment focus goes - "
+             + "asked of the status readout's, the peer details' and the Total latency box's own writers";
     }
 
     /// <summary>
@@ -514,32 +560,42 @@ internal static partial class SelfTest
                         .GetValue(form) as Control,
                     $"MainForm.{field} is not a Control — this test is comparing nothing");
 
-            var jitterBox = ByField("maxLatencyBox");
+            var jitterBoxes = new[] { ByField("maxLatencyBox"), ByField("maxLatencyAsioBox") };
             var readoutBox = ByField("measuredLatencyReadout");
             var smoothnessBox = ByField("smoothnessBox");
 
-            // Walk the whole window the way Tab does, and record where each one lands.
-            var order = new List<Control>();
-            var seen = new HashSet<Control>();
-            for (var c = form.GetNextControl(form, true); c is not null && seen.Add(c); c = form.GetNextControl(c, true))
+            // In every configuration, walking only what Tab really stops on - showing, enabled, a tab stop - since the ASIO
+            // rows come and go with the configuration and the readout reports on whichever jitter buffer is shown (2026-09-28:
+            // this walked one configuration, hidden and non-tab-stop controls included).
+            var said = new List<string>();
+            foreach (var configuration in AudioConfigurations.All)
             {
-                order.Add(c);
+                SetAudioConfigurationForTest(form, configuration);
+                InvokeWindowMethodForAltAudit(form, "UpdateBothIndependentVisibility");
+                var order = new List<Control>();
+                var seen = new HashSet<Control>();
+                for (var c = form.GetNextControl(form, true); c is not null && seen.Add(c); c = form.GetNextControl(c, true))
+                    if (IsSetVisibleForAltAudit(c) && c.Enabled && c.TabStop) order.Add(c);
+
+                var shown = jitterBoxes.Where(b => order.Contains(b)).ToList();
+                var readout = order.IndexOf(readoutBox);
+                var smoothness = order.IndexOf(smoothnessBox);
+                var name = configuration.Describe();
+                Check(readout >= 0, $"{name}: the total-latency readout must be reachable by Tab at all");
+                Check(shown.Count >= 1 && smoothness >= 0,
+                    $"{name}: a jitter-buffer control and smoothness must be in the tab walk, or this test is comparing nothing");
+                Check(shown.Contains(jitterBoxes[1]) == configuration.UsesAsio(),
+                    $"{name}: premise - the ASIO jitter buffer must be a tab stop exactly when an ASIO output is ticked");
+                var lastJitter = shown.Max(order.IndexOf);
+                Check(readout > lastJitter,
+                    $"{name}: the readout must come AFTER the jitter-buffer control(s) it reports on (jitter at {lastJitter}, readout at {readout})");
+                Check(readout < smoothness,
+                    $"{name}: the readout must come BEFORE buffer smoothness - it belongs with the jitter-buffer settings, not "
+                    + $"stranded past the unrelated controls (readout at {readout}, smoothness at {smoothness})");
+                said.Add($"{name} {lastJitter}→{readout}→{smoothness}");
             }
 
-            var jitter = order.IndexOf(jitterBox);
-            var readout = order.IndexOf(readoutBox);
-            var smoothness = order.IndexOf(smoothnessBox);
-
-            Check(readout >= 0, "the total-latency readout must be reachable by Tab at all");
-            Check(jitter >= 0 && smoothness >= 0,
-                "the jitter-buffer and smoothness controls must be in the tab walk, or this test is comparing nothing");
-            Check(readout > jitter,
-                $"the readout must come AFTER the jitter-buffer control it reports on (jitter at {jitter}, readout at {readout})");
-            Check(readout < smoothness,
-                $"the readout must come BEFORE buffer smoothness — it belongs with the jitter-buffer settings, not "
-                + $"stranded past the unrelated controls (readout at {readout}, smoothness at {smoothness})");
-
-            return $"tab order reaches the jitter buffer, then the total-latency readout, then smoothness ({jitter} → {readout} → {smoothness})";
+            return $"in all three configurations Tab reaches the jitter buffer shown, then the total-latency readout, then smoothness ({string.Join("; ", said)})";
         }
     }
 
@@ -949,7 +1005,8 @@ internal static partial class SelfTest
                 if (Field("continuousIntervalBox") is Control intervalBox)
                 {
                     var spoken = intervalBox.AccessibleName ?? "";
-                    Check(spoken == expected.Replace("&", ""),
+                    // The label's words without its colon (the colons were made consistent on 2026-09-28; the name is not).
+                    Check(spoken == expected.Replace("&", "").TrimEnd(':'),
                         $"in {configuration.Describe()} the interval combo is ANNOUNCED as \"{spoken}\" but the rule says "
                         + $"\"{expected.Replace("&", "")}\" — the spoken name is the one Ed actually gets");
                 }
@@ -1003,8 +1060,40 @@ internal static partial class SelfTest
                 + $"actually ticked — got \"{configPart}\"");
         }
 
+        // And the WIRING (2026-09-28): the real composite backend, handed ticked outputs as the app hands them - stand-in ids
+        // that open nothing, an ASIO driver that cannot exist - must write that label from what is ticked, when it starts
+        // and when the ticks change. The rule above was proven; whether the backend fed it the ticks or the mode was not.
+        const string WasapiId = "{0.0.0.00000000}.{remsound-gate-no-such-output}";
+        var asioId = AsioDeviceId.Format(0);
+        foreach (var configuration in AudioConfigurations.All)
+        {
+            var said = new List<string>();
+            using var backend = new CompositeRenderBackend(
+                configuration.UsesAsio() ? AudioMode.BothIndependent : AudioMode.WasapiOnly,
+                configuration.UsesAsio() ? "RemSound self-test — no such ASIO driver" : null,
+                new PlayoutEngine(new ReceiverDiagnostics()), line => { lock (said) said.Add(line); });
+            var ticked = new List<string>();
+            if (configuration.UsesWasapi()) ticked.Add(WasapiId);
+            if (configuration.UsesAsio()) ticked.Add(asioId);
+            backend.SetOutputDevices(ticked);
+            backend.Start();
+            string? started;
+            lock (said) started = said.FirstOrDefault(l => l.StartsWith("composite render started", StringComparison.Ordinal));
+            Check(started is not null && started.Contains(configuration.Describe(), StringComparison.Ordinal),
+                $"in {configuration.Describe()}, the render must start by naming what is ticked - it said: {started ?? "nothing"}");
+            if (configuration.HasTwoLanes())
+            {
+                backend.SetOutputDevices([asioId]);   // WASAPI unticked while it plays
+                lock (said)
+                    Check(said.Any(l => l.StartsWith("output ", StringComparison.Ordinal) && l.Contains(AudioConfiguration.AsioOnly.Describe(), StringComparison.Ordinal)),
+                        $"unticking every WASAPI output while it plays must be logged as {AudioConfiguration.AsioOnly.Describe()} ({string.Join(" | ", said)})");
+            }
+            backend.Stop();
+        }
+
         return "the render log leads with the configuration that is actually ticked, in all three, so the mode label's "
-             + "\"WASAPI + ASIO\" can no longer be read as both lanes being live";
+             + "\"WASAPI + ASIO\" can no longer be read as both lanes being live - and the real backend writes it from the ticks, "
+             + "at the start and when they change";
     }
 
     /// <summary>
@@ -1463,12 +1552,30 @@ internal static partial class SelfTest
                 Check(againW == 0 && againA == 0 && againM == 0,
                     $"in {configuration.Describe()} the per-lane render time must reset when taken, or every second "
                     + $"reports the sum of the whole session (got {againW}/{againA}/{againM})");
+
+                // With both lanes live - Ed's Roger On case - the ASIO side on its own, then both together (2026-09-28: only
+                // the WASAPI lane was ever read in "both").
+                if (configuration.HasTwoLanes())
+                {
+                    for (var i = 0; i < 40; i++) { Array.Clear(buffer); engine.AsioLaneOutput.Read(buffer, 0, buffer.Length); }
+                    var (w, a, m) = engine.TakeRenderTicksByRoute();
+                    Check(a > 0 && w == 0 && m == 0,
+                        $"in {configuration.Describe()}, reading only the ASIO lane must charge the ASIO lane alone (WASAPI {w}, ASIO {a}, mixed {m})");
+                    for (var i = 0; i < 40; i++)
+                    {
+                        Array.Clear(buffer); engine.WasapiLaneOutput.Read(buffer, 0, buffer.Length);
+                        Array.Clear(buffer); engine.AsioLaneOutput.Read(buffer, 0, buffer.Length);
+                    }
+                    (w, a, m) = engine.TakeRenderTicksByRoute();
+                    Check(w > 0 && a > 0 && m == 0,
+                        $"in {configuration.Describe()}, both lanes read in turn must each charge themselves, and nothing the mixed path (WASAPI {w}, ASIO {a}, mixed {m})");
+                }
             }
         }
         finally { RemSound.Core.DiagnosticsGate.Enabled = diagnosticsWere; }
 
         return "render time lands on the lane that actually spent it, never on the other lane or the single-lane path, "
-             + "and resets when taken — in all three configurations";
+             + "and resets when taken — in all three configurations, and with both lanes live, the ASIO side alone and both together";
     }
 
     /// <summary>
@@ -1546,71 +1653,6 @@ internal static partial class SelfTest
     }
 
     /// <summary>
-    /// AN OUTPUT WINDOWS KILLS UNDER US MUST COME BACK ON ITS OWN.
-    ///
-    /// <para>Ed, 2026-08-26: "i went into the laptops sound control panel ... messed about with some
-    /// roger level settings ... and then when i closed it, no sound. I had to uncheck and recheck the
-    /// roger for it to work." And separately, after hibernate: "something about bringing the soundcard
-    /// back did not work."</para>
-    ///
-    /// <para>Both are the same hole. An invalidated output is flagged and re-opened by the next
-    /// <c>SetOutputDevices</c> — which the hot-plug notifier fires when a device is added or removed.
-    /// Changing a device's properties does neither: the device stays present, the endpoint is
-    /// invalidated, no notification arrives, and nothing re-applies. Unticking and re-ticking fixed it
-    /// because that IS a manual SetOutputDevices — the call the recovery had been waiting for.
-    /// <c>OnPropertyValueChanged</c> is deliberately ignored by the notifier as too chatty, and that
-    /// is the right call for deciding the device SET — so the fix is to stop depending on a
-    /// notification at all and let the per-second tick notice.</para>
-    ///
-    /// <para>The second trigger covers the resume case: a device that is ticked but never opened,
-    /// because it was not back yet when the post-resume re-init ran 1.5 seconds after wake. A wireless
-    /// headset takes far longer than that. One attempt, failed, nothing tried again.</para>
-    ///
-    /// <para>Same in all three configurations, and said rather than left silent: this is the WASAPI
-    /// output path. ASIO owns its driver outright and recovers through its own park/re-open, so it
-    /// raises no faulted flag — which is why <c>CompositeRenderBackend.HasFaultedOutput</c> reports
-    /// the WASAPI side only.</para>
-    /// </summary>
-    private static string? AuditFaultedOutputReopensItself()
-    {
-        // The rule takes no configuration, so it is checked once. It was looped over the three configurations until
-        // 2026-09-13, which fed a pure function the same arguments three times. 2026-09-13 review.
-
-        // Nothing wrong: leave the audio alone. Re-applying devices for no reason would break
-        // audio every second, which is far worse than the fault being fixed.
-        Check(!MainForm.ShouldReopenOutputs(anyFaulted: false, missingCount: 0, withinRetryInterval: false),
-            "a healthy output must never be re-opened — tearing a live device down once a second "
-            + "would be a worse bug than the one this fixes");
-
-        // Ed's control-panel case: the device is still present and still ticked, but its endpoint
-        // was invalidated. Nothing external will ever ask for a re-apply.
-        Check(MainForm.ShouldReopenOutputs(anyFaulted: true, missingCount: 0, withinRetryInterval: false),
-            "an output Windows invalidated must be re-opened without waiting for a hot-plug "
-            + "notification — the device never left, so no notification is coming, and the user is sitting in "
-            + "silence until they untick and re-tick it by hand");
-
-        // The resume case: ticked, not open, nothing retrying.
-        Check(MainForm.ShouldReopenOutputs(anyFaulted: false, missingCount: 1, withinRetryInterval: false),
-            "a ticked device that is not open must be retried — after a resume a wireless device can "
-            + "come back long after the post-resume re-init has already given up");
-
-        // Rate limit: a device that is genuinely gone must not be hammered every tick.
-        Check(!MainForm.ShouldReopenOutputs(anyFaulted: true, missingCount: 2, withinRetryInterval: true),
-            "the retry must respect its interval — a device that is truly unplugged would otherwise "
-            + "be re-opened every single tick for as long as it stays away");
-
-        // The interval itself, pinned in absolute seconds rather than against its own constant: a
-        // measurement against the value that sets it proves only that SOME delay exists.
-        Check(MainForm.FaultedOutputRetryIntervalForTest == TimeSpan.FromSeconds(3),
-            $"the re-open retry must be 3 seconds — long enough not to spin on a dead card, short enough that a "
-            + $"person changing a setting in the sound panel does not notice the gap "
-            + $"(got {MainForm.FaultedOutputRetryIntervalForTest.TotalSeconds}s)");
-
-        return "an output invalidated by Windows, and a ticked output that never opened, are both re-opened by the "
-             + "app itself on a 3-second retry, with a healthy output never disturbed";
-    }
-
-    /// <summary>
     /// THE WHOLE CHAIN: a faulted output must make the per-second tick re-apply the devices.
     ///
     /// <para>Ed, 2026-08-27: "your fix for the roger did not work." His log shows the endpoint dying
@@ -1671,6 +1713,11 @@ internal static partial class SelfTest
                 form.SnapshotTickForTest();
                 Check(form.OutputReopenAttemptsForTest == 1,
                     $"inside the retry interval the next ticks must hold off - {form.OutputReopenAttemptsForTest - 1} more attempt(s) in two seconds is a dead card hammered every second");
+                // The interval itself, pinned in absolute seconds rather than against its own constant: a measurement against
+                // the value that sets it proves only that SOME delay exists (from the retired rule-only step, 2026-09-28).
+                Check(MainForm.FaultedOutputRetryIntervalForTest == TimeSpan.FromSeconds(3),
+                    $"the re-open retry must be 3 seconds - long enough not to spin on a dead card, short enough that a person "
+                    + $"changing a setting in the sound panel does not notice the gap (got {MainForm.FaultedOutputRetryIntervalForTest.TotalSeconds}s)");
                 // ...and must try again once it is up, or an output that fails its first re-open is given up on.
                 form.BackdateOutputReopenForTest(MainForm.FaultedOutputRetryIntervalForTest + TimeSpan.FromMilliseconds(100));
                 form.SnapshotTickForTest();

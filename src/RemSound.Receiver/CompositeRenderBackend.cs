@@ -50,7 +50,7 @@ internal sealed class CompositeRenderBackend : IRenderBackend
         {
             // MultiOutputPlayout reads PlayoutEngine's all-sessions Read directly, which sums every
             // stream whatever lane it is tagged with — the single-lane world.
-            wasapi = new MultiOutputPlayout(source, msg => onDiagnostic?.Invoke($"wasapi out: {msg}"));
+            wasapi = new MultiOutputPlayout(source, msg => onDiagnostic?.Invoke($"wasapi out: {msg}"), source.Metronome);
         }
         else
         {
@@ -67,8 +67,8 @@ internal sealed class CompositeRenderBackend : IRenderBackend
             // which (a) made both lanes play the combined mix instead of per-lane audio and
             // (b) added up to one WASAPI tick (~10 ms) of cache-age latency to whichever
             // consumer was the slower of the two.
-            wasapi = new MultiOutputPlayout(source.WasapiLaneOutput, msg => onDiagnostic?.Invoke($"wasapi out: {msg}"));
-            asio = new AsioRenderBackend(asioDriverName!, source.AsioLaneOutput, msg => onDiagnostic?.Invoke($"asio out: {msg}"));
+            wasapi = new MultiOutputPlayout(source.WasapiLaneOutput, msg => onDiagnostic?.Invoke($"wasapi out: {msg}"), source.Metronome);
+            asio = new AsioRenderBackend(asioDriverName!, source.AsioLaneOutput, msg => onDiagnostic?.Invoke($"asio out: {msg}"), source.Metronome);
         }
     }
 

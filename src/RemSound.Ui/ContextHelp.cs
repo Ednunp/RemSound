@@ -407,6 +407,5 @@ internal static class ContextHelp
 
     [DllImport("user32.dll")]
     internal static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
-    internal const int EM_SETSEL = 0x00B1;
     internal const int EM_GETSEL = 0x00B0;
 }

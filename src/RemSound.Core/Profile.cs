@@ -61,6 +61,12 @@ public sealed class Profile
     /// have those keys ignored on deserialisation.</summary>
     public string? AsioDriverName { get; set; }
 
+    /// <summary>The ASIO buffer size this profile asks its driver for, in frames (Ed, 2026-09-28: out of the latency lab,
+    /// beside the driver choice). 0, the default, asks for nothing: the driver's own preferred size, which is what
+    /// RemSound always used. Otherwise one of <see cref="AsioBufferSizing.Choices"/>, fitted to what the driver allows
+    /// when it opens. ASIO only: WASAPI has no buffer for an application to choose in shared mode.</summary>
+    public int AsioBufferFrames { get; set; }
+
     // === Selected devices (raw device IDs, not display names) ===
     public List<string> SelectedWasapiReceiveOutputs { get; set; } = [];
     public List<string> SelectedAsioReceiveOutputs { get; set; } = [];
@@ -101,30 +107,28 @@ public sealed class Profile
     /// persistence would silently reset the user's choice to 47830 on every save — the persistence
     /// tripwire self-test documents this and will flag any change in its behaviour.</summary>
     public int AudioPort { get; set; } = 47830;
-    public int CodecRaw { get; set; } = (int)AudioTransportCodec.Pcm;
+    /// <summary>A new profile's codec: Opus live latency (Ed, 2026-09-28 - it was PCM). Every saved profile writes its own
+    /// codec, so this changes only new ones.</summary>
+    public int CodecRaw { get; set; } = (int)AudioTransportCodec.Opus;
     /// <summary>Opus frame size in samples-per-channel at 48 kHz: 120 = 2.5 ms, 240 = 5 ms,
     /// 480 = 10 ms, 960 = 20 ms. The codec list offers only 960 ("broadcast quality") and 120 ("live
-    /// latency"), and saves one of those. The property default is still 480, from before that list; a
-    /// profile holding 480 is shown and sent as the 960 choice (MainForm.ResolveCodecIndex). Renamed
+    /// latency"), and saves one of those. A new profile has 120, live latency (2026-09-28; it was 480, from before that
+    /// list). A profile holding 480 is shown and sent as the 960 choice (MainForm.ResolveCodecIndex). Renamed
     /// from <c>OpusFrameMilliseconds</c> in the v3.0 wire-format refactor (2026-05-23); the JSON key is
     /// still <c>OpusFrameMilliseconds</c>, the name every profile file uses.</summary>
     [JsonPropertyName("OpusFrameMilliseconds")]
-    public int OpusFrameSamplesPerChannel { get; set; } = 480;
+    public int OpusFrameSamplesPerChannel { get; set; } = 120;
     public int SendRateRaw { get; set; } = (int)SendRate.Standard;
     /// <summary>"Lock to audio clock" — sender uses the WASAPI capture event for timing. As of 2026-07-17
     /// this is ALWAYS ON and no longer user-configurable (the app forces it true at startup and the
     /// service forces it per stream); the field is kept only for profile-file backward compatibility.
     /// Defaults true so any freshly created profile reflects the real behaviour.</summary>
     public bool TightLatencyMode { get; set; } = true;
-    /// <summary>True if this profile asks Windows to keep the RemSound process in
-    /// high-priority mode while it's running — CPU scheduling, power management, memory
-    /// priority, working-set lock, and MMCSS thread priority all elevated. Off by default;
-    /// the user opts in per profile when they want a "live session" feel where the
-    /// cold-start CPU ramp doesn't audibly hurt latency. On laptops that drains the
-    /// battery faster; on desktops it costs a couple of extra watts. See
-    /// <c>PerformanceMode</c> in the App project for the full lever list. Saved per
-    /// profile (not in AppConfig) because the right answer genuinely differs between
-    /// profiles.</summary>
+    /// <summary>RETIRED 2026-09-29 (Ed: "please remove it I see no need for it now honestly"): the profile's high-priority
+    /// setting. Its audible part was the fast timer while RemSound is hidden, which is always on while streaming now; the
+    /// rest mattered only on a machine running flat out (measured 2026-09-28, PLAN-fixes "OVERNIGHT"). Kept only so a profile
+    /// that says true still opens; nothing reads it, and a false is never written.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool PriorityMode { get; set; }
     /// <summary>Legacy combined "mute connect/disconnect sounds" toggle. True suppresses
     /// both connect AND disconnect cues. Superseded 2026-05-15 by the four individual
@@ -180,9 +184,18 @@ public sealed class Profile
     /// the trap where the ASIO lane auto-inflates its target while WASAPI sits fixed at
     /// its slider, producing higher ASIO latency than WASAPI in the typical session.</summary>
     public bool ContinuousAutoTuneAsioEnabled { get; set; }
-    // LoggingEnabled was retired from Profile — logging is a machine-local debug knob
-    // (AppConfig.LoggingEnabled), not a per-profile setting. Old profile JSONs that still
-    // contain "LoggingEnabled" just have the key ignored on load.
+    /// <summary>Lowest-delay auto-tune, accepting a rare dropout (Ed, 2026-09-29: the latency lab's two auto-tune
+    /// switches as one, on WASAPI as well as ASIO). Every lane whose auto-tune is on is tuned by counting its audible gaps
+    /// and keeping them rare (<see cref="DropoutTuner"/>) instead of covering the worst gap between packets, and the
+    /// auto-tune and each stream's own buffer use the leaner margins. Off by default.</summary>
+    public bool AutoTuneLowestDelay { get; set; }
+    // LoggingEnabled was retired from Profile in 2026-07 (logging became this computer's setting, AppConfig.LoggingEnabled).
+    // Old profile JSONs that still contain "LoggingEnabled" have the key ignored on load - its value is stale.
+    /// <summary>Logs for this profile (Ed, 2026-09-29: "some profiles have it others do not ... a test with andre should always
+    /// have it whereas using with my laptop probably not"). Null in a profile saved before it existed: that profile follows
+    /// this computer's setting (<see cref="AppConfig.LoggingEnabled"/>) until it is changed. A new profile (File, New profile)
+    /// starts with it off. Named apart from the retired LoggingEnabled above, whose old values must not come back.</summary>
+    public bool? EnableLogs { get; set; }
     /// <summary>Receiver-side concealment artifact, stored as raw int for JSON-stability
     /// across enum-reorderings. Defaults to <see cref="ConcealmentArtifact.NoiseBurst"/>
     /// (the cosine-tone variants were removed from the dropdown in Phase 3 cleanup —
@@ -205,6 +218,19 @@ public sealed class Profile
     /// user explicitly triggers it via the Record menu; this just holds the configuration
     /// the recorder picks up when it starts.</summary>
     public RecordingSettings RecordingSettings { get; set; } = new();
+
+    // === Push to talk ===
+    /// <summary>Push to talk, per profile, off in every new one (Ed, 2026-09-28). The key itself is computer-wide, with the
+    /// other shortcuts (<see cref="AppConfig.PushToTalkHotkey"/>). A profile saved before push to talk existed has no such
+    /// object and loads with it off.</summary>
+    public PushToTalkSettings PushToTalk { get; set; } = new();
+
+    // === Metronome ===
+    /// <summary>The metronome's settings, per profile (Ed, 2026-09-28): tempo, time signature, sound, volume, where you hear
+    /// it, whether it is recorded, and what happens when someone asks to be the master. Its start/stop key is computer-wide,
+    /// with the other shortcuts (<see cref="AppConfig.MetronomeHotkey"/>). A profile saved before the metronome existed has
+    /// no such object and loads with the defaults.</summary>
+    public MetronomeSettings Metronome { get; set; } = new();
 
     // === Peers ===
     public List<string> RememberedPeers { get; set; } = [];
@@ -272,6 +298,10 @@ public sealed class Profile
     /// <summary>Returns a defaults-only profile — same shape as the "blank template"
     /// the user picks at startup. Title is empty (caller assigns when saving).</summary>
     public static Profile NewBlank() => new();
+
+    /// <summary>A profile made with File, New profile: blank, with logs off (a blank template otherwise follows this computer's
+    /// logging, as a profile saved before per-profile logs does).</summary>
+    public static Profile NewForUser() => new() { EnableLogs = false };
 }
 
 /// <summary>JSON-serialisable hotkey representation. Mirrors <see cref="HotkeyInfo"/>
@@ -291,11 +321,14 @@ public sealed class HotkeyRecord
         Alt = hotkey.Alt,
     };
 
-    public HotkeyInfo ToHotkeyInfo()
+    /// <param name="allowSingleKey">A key on its own is kept (the push to talk key, Scroll Lock by default); every other
+    /// shortcut without Ctrl, Shift or Alt falls back to the default. Without this, a saved Scroll Lock read back as
+    /// Ctrl+Shift+Alt+M (found by the push to talk steps, 2026-09-28).</param>
+    public HotkeyInfo ToHotkeyInfo(bool allowSingleKey = false)
     {
         if (!Enum.TryParse<Keys>(Key, out var parsedKey)) return HotkeyInfo.Default;
         var hotkey = new HotkeyInfo(parsedKey, Control, Shift, Alt);
         if (hotkey.IsUnset) return HotkeyInfo.Unset;
-        return hotkey.IsValid ? hotkey : HotkeyInfo.Default;
+        return hotkey.IsValid || (allowSingleKey && parsedKey != Keys.None) ? hotkey : HotkeyInfo.Default;
     }
 }

@@ -71,32 +71,41 @@ internal static partial class SelfTest
     /// </summary>
     private static string? AuditLongRunCountsSendOnlyFrames()
     {
-        var root = FindSourceRoot();
-        if (root is null) return Skip("the source tree is not reachable from here (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
-        var main = File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "MainForm.cs"));
-        Check(CountOccurrences(main, "NoteLongRunSendFrames(sndAudFr);") == 1,
-            "the send-only branch must hand the frames it read to the long-run report");
-        Check(SourceMethodBody(main, "private void NoteLongRunSendFrames(long framesSent)").Length > 0
-              || main.Contains("private void NoteLongRunSendFrames(long framesSent) => longRunSendFrames += framesSent;", StringComparison.Ordinal),
-            "the frames must land in the same total the report divides");
-        return "the send-only branch feeds the long-run send frames";
-    }
-
-    /// <summary>
-    /// RE-OPENING AN OUTPUT FOLLOWS THE ONE PINNED RULE.
-    ///
-    /// <para>2026-09-13 review (MainForm #8). The re-open decision is a pure rule the gate pins, and the per-second heal
-    /// restated it inline, so the pinned rule and the one that ran could drift apart unnoticed.</para>
-    /// </summary>
-    private static string? AuditOutputReopenUsesTheRule()
-    {
-        var root = FindSourceRoot();
-        if (root is null) return Skip("the source tree is not reachable from here (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
-        var main = File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "MainForm.cs"));
-        var heal = SourceMethodBody(main, "private void HealFaultedOutputsIfAny()");
-        Check(heal.Contains("ShouldReopenOutputs(", StringComparison.Ordinal),
-            "the per-second heal must decide through ShouldReopenOutputs, the rule the gate pins");
-        return "the heal decides through the pinned rule";
+        // The real per-second tick on a send-only machine - a sender running, nothing received - with its frames stood in
+        // for, as a capture would give them. This was a count of one line in the source until 2026-09-28.
+        MainForm form;
+        try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+        catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+        var gateWas = DiagnosticsGate.Enabled;
+        using (form)
+        {
+            var captured = new List<string>();
+            form.LogForTest.EventTapForTest = line => { lock (captured) captured.Add(line); };
+            try
+            {
+                DiagnosticsGate.Enabled = true;   // logging on, as it has to be for the report to be read at all
+                form.SenderRunningForTest = () => true;
+                form.SenderFramesSentForTest = () => 480;
+                form.SnapshotTickForTest();   // the first report, then this second's sending noted
+                form.SnapshotTickForTest();
+                form.ForceLongRunReportForTest();
+                lock (captured) captured.Clear();
+                form.SnapshotTickForTest();
+                string? line;
+                lock (captured) line = captured.LastOrDefault(l => l.StartsWith("longrun ", StringComparison.Ordinal));
+                line = Require(line, "a forced long-run report must be written");
+                var sendFrames = System.Text.RegularExpressions.Regex.Match(line, @"send frames=(\d+)/s");
+                Check(sendFrames.Success && long.Parse(sendFrames.Groups[1].Value) > 0,
+                    $"on a send-only machine the long-run report must count the frames sent - it read \"send frames=0/s\" on every one of them (got: {line})");
+                lock (captured) Check(captured.Any(l => l.StartsWith("sender-diag ", StringComparison.Ordinal)), "premise: the tick must have taken the send-only branch");
+                return $"the real tick on a send-only machine hands its frames to the long-run report ({sendFrames.Groups[1].Value}/s)";
+            }
+            finally
+            {
+                form.LogForTest.EventTapForTest = null;
+                DiagnosticsGate.Enabled = gateWas;
+            }
+        }
     }
 
     /// <summary>
@@ -127,29 +136,34 @@ internal static partial class SelfTest
     /// </summary>
     private static string? AuditStatusLineHasNoSharedBuffer()
     {
-        var root = FindSourceRoot();
-        if (root is null) return Skip("the source tree is not reachable from here (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
-        var status = SourceMethodBody(File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "MainForm.cs")), "private void UpdateStatus()");
-        Check(status.Length > 0, "UpdateStatus must still exist to be checked");
-        Check(!status.Contains("CurrentBufferMs", StringComparison.Ordinal) && !status.Contains("TargetLatencyMs", StringComparison.Ordinal),
-            "the status line must not read out one shared buffer or target");
-        return "the status line leaves buffer figures to the per-lane boxes";
-    }
-
-    /// <summary>
-    /// THE SERVICE DIALOG STORES NOTHING FOR LOCK TO AUDIO CLOCK.
-    ///
-    /// <para>2026-09-13 review (Dialogs #10). It set a profile flag that nothing reads: the service always locks to the audio
-    /// clock.</para>
-    /// </summary>
-    private static string? AuditServiceDialogStoresNoLockToClock()
-    {
-        var root = FindSourceRoot();
-        if (root is null) return Skip("the source tree is not reachable from here (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
-        var dialog = File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "ServiceProfileDialog.cs"));
-        Check(!dialog.Contains("TightLatencyMode = ", StringComparison.Ordinal),
-            "the service dialog must not store a lock-to-clock flag that nothing reads");
-        return "no dead flag stored";
+        // The line itself, as the window writes it while receiving, in every configuration - it read the source for two words
+        // until 2026-09-28. Receiving on a port of its own, nothing ticked, so nothing plays.
+        var said = new List<string>();
+        foreach (var configuration in AudioConfigurations.All)
+        {
+            MainForm form;
+            try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+            using (form)
+            {
+                SetAudioConfigurationForTest(form, configuration);
+                form.ReceiverForTest.Start(FreeUdpPort());
+                form.ReceiverRunningForTest = () => true;   // an output would have to be open otherwise
+                try
+                {
+                    var line = form.StatusLineForTest();
+                    Check(line.Contains("receiving", StringComparison.Ordinal) && !line.Contains("not receiving", StringComparison.Ordinal),
+                        $"{configuration.Describe()}: premise - the status line must be describing a receiver that is running ({line})");
+                    Check(!line.Contains("buffer", StringComparison.OrdinalIgnoreCase) && !line.Contains("target", StringComparison.OrdinalIgnoreCase)
+                          && !System.Text.RegularExpressions.Regex.IsMatch(line, @"\d\s*ms\b"),
+                        $"{configuration.Describe()}: the status line must not read out one shared buffer or target - with two lanes it is true of "
+                        + $"neither; the jitter-buffer boxes and Total latency give them per lane ({line})");
+                    said.Add(configuration.Describe());
+                }
+                finally { form.ReceiverForTest.Stop(); }
+            }
+        }
+        return $"while receiving, in {string.Join(", ", said)}, the status line gives no shared buffer or target figure";
     }
 
     /// <summary>
@@ -253,6 +267,9 @@ internal static partial class SelfTest
             ["RemSound.App/Program.cs"] = (1, "the crash report"),
             ["RemSound.App/UpdateApplier.cs"] = (4, "the profile to resume after an update, the failed-update note, the note for an update that could not be put back, and the note for one found cut off"),
             ["RemSound.App/WhatsNewMarker.cs"] = (1, "the what's-new marker"),
+            ["RemSound.App/Simulator/SimRunner.cs"] = (1, "the simulator's report, in the folder its --out names"),
+            ["RemSound.App/Simulator/PerfBaseline.cs"] = (1, "the performance baseline, written only by --simulate perf-baseline into the source tree's tests folder"),
+            ["RemSound.App/Simulator/SimRunner.Performance.cs"] = (1, "the performance suite's report, in the folder --simulate perf names"),
         };
         var found = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (var project in new[] { "RemSound.App", "RemSound.Core", "RemSound.Sender", "RemSound.Receiver", "RemSound.Ui" })

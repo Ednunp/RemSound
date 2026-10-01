@@ -1,0 +1,41 @@
+diff --git a/AudioPlugSharpVst/AudioPlugSharpFactory.cpp b/AudioPlugSharpVst/AudioPlugSharpFactory.cpp
+index 81bd539..00b9cb2 100644
+--- a/AudioPlugSharpVst/AudioPlugSharpFactory.cpp
++++ b/AudioPlugSharpVst/AudioPlugSharpFactory.cpp
+@@ -80,7 +80,7 @@ gcroot<AudioPlugSharp::IAudioPlugin^> AudioPlugSharpFactory::GetPlugin()
+ {
+ 	if (getCount == 2)	// Both a processor and a controller have grabbed the plugin, so this must be a new instance
+ 	{
+-		Logger::Log("Creating new plugin instance");
++		Logger::Log("Creating new plugin instance (RemSound: this call counts as the new instance's first)");
+ 
+ 		System::String^ assemblyName = Path::GetFileNameWithoutExtension(Assembly::GetExecutingAssembly()->Location);
+ 
+@@ -89,7 +89,11 @@ gcroot<AudioPlugSharp::IAudioPlugin^> AudioPlugSharpFactory::GetPlugin()
+ 
+ 		plugin = PluginLoader::LoadPluginFromAssembly(assemblyName);
+ 
+-		getCount = 0;
++		// RemSound: this call is the new instance's processor taking the plugin, so it counts as one. Upstream sets 0
++		// here, which hands each plugin after the first out three times: the third instance's processor gets the second
++		// instance's plugin, and its controller a new one nobody has initialised, whose null parameter list crashes the
++		// host (REAPER, 2026-09-28).
++		getCount = 1;
+ 	}
+ 	else
+ 	{
+diff --git a/AudioPlugSharpVst/AudioPlugSharpProcessor.h b/AudioPlugSharpVst/AudioPlugSharpProcessor.h
+index d9222f2..539555c 100644
+--- a/AudioPlugSharpVst/AudioPlugSharpProcessor.h
++++ b/AudioPlugSharpVst/AudioPlugSharpProcessor.h
+@@ -35,6 +35,10 @@ public:
+ 	tresult PLUGIN_API canProcessSampleSize(int32 symbolicSampleSize) SMTG_OVERRIDE;
+ 	tresult PLUGIN_API setBusArrangements(SpeakerArrangement* inputs, int32 numIns, SpeakerArrangement* outputs, int32 numOuts);
+ 	tresult PLUGIN_API notify(Vst::IMessage* message) SMTG_OVERRIDE;
++	// RemSound: report that our sound never finishes. Hosts that go by the tail (Cubase, Bitwig and Waveform, per
++	// their docs and code) then keep calling process() on a track with nothing on it, which a receiving plugin needs.
++	// The SDK default is kNoTail. It does not help with REAPER closing its audio device when it loses focus.
++	uint32 PLUGIN_API getTailSamples() SMTG_OVERRIDE { return kInfiniteTail; }
+ 	~AudioPlugSharpProcessor(void);
+ 
+ 	gcroot<AudioPlugSharp::IAudioPlugin^> plugin;

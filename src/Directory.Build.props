@@ -1,0 +1,8 @@
+<Project>
+  <!-- Who made RemSound (Ed, 2026-09-28): Windows shows these in each program file's Properties, on the Details tab. -->
+  <PropertyGroup>
+    <Authors>Ed Pourtahmasbi</Authors>
+    <Company>Ed Pourtahmasbi</Company>
+    <Copyright>Copyright (c) 2026 Ed Pourtahmasbi</Copyright>
+  </PropertyGroup>
+</Project>

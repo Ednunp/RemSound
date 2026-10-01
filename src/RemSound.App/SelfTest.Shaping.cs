@@ -63,6 +63,13 @@ internal static partial class SelfTest
         // --- The two bypasses -----------------------------------------------------------------------
         Check(PeerDspChain.Build(new PeerShaping { Volume = 0.5f }, enabled: false) is null,
             "the master switch off must bypass shaping entirely");
+        // Nothing to do builds nothing at all, so an unshaped peer costs the render thread nothing (from the old
+        // "Per-peer shaping DSP" step, merged here 2026-09-28).
+        Check(PeerDspChain.Build(null, enabled: true) is null, "a peer with no shaping must build no chain at all");
+        Check(PeerDspChain.Build(new PeerShaping(), enabled: true) is null, "unity shaping (every control at rest) must build no chain at all");
+        PeerEqBands.ParametricToPeaking(200, 800, out var peakHz, out var peakQ);
+        Check(peakHz > 200 && peakHz < 800 && peakQ is > 0.1f and < 12f,
+            $"a parametric band's range must turn into a centre inside it ({peakHz:0} Hz) and a sane Q ({peakQ:0.00})");
 
         // The per-peer tick is combined with the master switch IN THE WINDOW, not inside Build. So it
         // is driven through the window's own decision — calling Build with a peer's tick off would be

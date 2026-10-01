@@ -144,12 +144,37 @@ public sealed class AudioReceiver : IDisposable
         }
     }
 
+    /// <summary>
+    /// The capture latency announced by the streams SENT FOR one output, the worst of them (N7, 2026-09-28): a sender's
+    /// ASIO stream (announced on the ASIO lane) for the ASIO output, its WASAPI or mixed stream for the others. Every
+    /// output plays every stream, but each of a sender's lanes is its own capture with its own delay, and each lane's
+    /// stream is the one meant for the matching output - so the ASIO output's journey starts at the far ASIO input, not
+    /// at the far WASAPI capture beside it. With nothing stated for that output (only the other kind of stream arriving,
+    /// or an older build that states nothing), the worst stated by anyone, as <see cref="AnnouncedCaptureLatencyMs"/>.
+    /// </summary>
+    public double AnnouncedCaptureLatencyMsFor(RenderRoute output)
+    {
+        var forAsio = output == RenderRoute.AsioLane;
+        double matched = 0, any = 0;
+        lock (sessionsLock)
+        {
+            foreach (var session in sessions.Values)
+            {
+                var announced = session.Format.CaptureLatencyMs;
+                if (announced <= 0) continue; // not stated
+                if (announced > any) any = announced;
+                if ((session.Format.Lane == RenderRoute.AsioLane) == forAsio && announced > matched) matched = announced;
+            }
+        }
+        return matched > 0 ? matched : any;
+    }
+
     /// <summary>True when audio from ANY peer has hit a live session within the window. The app's
     /// Priority-mode scoping reads this as its "receiving right now" signal (2026-07-26 resource
     /// audit — the power levers now engage only while audio actually moves).</summary>
     public bool AnyRecentAudio(TimeSpan within)
     {
-        var cutoff = DateTime.UtcNow - within;
+        var cutoff = AudioClock.UtcNow - within;
         lock (sessionsLock)
         {
             foreach (var session in sessions.Values)
@@ -168,7 +193,7 @@ public sealed class AudioReceiver : IDisposable
     /// sessions), so the caller falls back to the heartbeat for send-only setups. 2026-05-31.</summary>
     public bool IsAudioFlowingFrom(IPAddress address, TimeSpan within)
     {
-        var cutoff = DateTime.UtcNow - within;
+        var cutoff = AudioClock.UtcNow - within;
         lock (sessionsLock)
         {
             foreach (var session in sessions.Values)
@@ -236,6 +261,138 @@ public sealed class AudioReceiver : IDisposable
     /// need, and "the code looks like it should cope" is not the same thing as knowing it does.
     /// Nothing in the app reads this — the live count is otherwise visible only in a log line.</summary>
     internal int LiveSessionCountForTest { get { lock (sessionsLock) return sessions.Count; } }
+    /// <summary>Gate seam: each live stream's sender and codec.</summary>
+    internal List<(IPEndPoint From, AudioTransportCodec Codec)> SessionCodecsForTest
+    {
+        get { lock (sessionsLock) return sessions.Values.Select(s => (s.Endpoint, s.Codec)).ToList(); }
+    }
+
+    /// <summary>Gate seam (the soak and stress steps, 2026-09-28): everything the receiver keeps per stream or per peer,
+    /// entry by entry - its sessions and the packets their reorder waits hold, the password status and "not ticked"
+    /// tables, and the playout engine's own - so a run of days can see any of them grow.</summary>
+    internal IReadOnlyList<(string Table, long Count)> TablesForTest()
+    {
+        var tables = new List<(string Table, long Count)>();
+        lock (sessionsLock)
+        {
+            tables.Add(("receiver: stream sessions", sessions.Count));
+            var held = 0;
+            foreach (var session in sessions.Values) held += session.HeldForTest;
+            tables.Add(("receiver: packets held by a reorder wait", held));
+        }
+        lock (securityLock) tables.Add(("receiver: password status per address", peerSecurity.Count));
+        tables.Add(("receiver: senders not ticked, remembered", unselectedSenderNoted.Count));
+        tables.AddRange(playoutEngine.TablesForTest());
+        return tables;
+    }
+
+    /// <summary>Gate seam: whether a DAW track gets the pan and EQ you hear, as the engine now has it.</summary>
+    internal bool PluginShapingForTest => playoutEngine.PluginShapingForTest;
+
+    /// <summary>Gate seam: the next session built throws, as a format no check caught would (finding R5).</summary>
+    internal bool FailNextSessionForTest;
+
+    /// <summary>Simulator seam: what an output card on <paramref name="route"/> pulls from - the all-sessions mix (Mixed,
+    /// WASAPI-only), or the ASIO or WASAPI lane's own surface (both kinds of output). The same objects the real render
+    /// backends read.</summary>
+    internal NAudio.Wave.IWaveProvider SimulationOutput(RenderRoute route) => route switch
+    {
+        RenderRoute.AsioLane => playoutEngine.AsioLaneOutput,
+        RenderRoute.WasapiLane => playoutEngine.WasapiLaneOutput,
+        _ => playoutEngine,
+    };
+
+    /// <summary>Simulator seam: FEC recoveries and unrecovered gaps across the open sessions.</summary>
+    internal (long Fec, long Unrecovered, long CustomConcealed) CodecRepairsForTest
+    {
+        get
+        {
+            lock (sessionsLock)
+                return (sessions.Values.Sum(s => s.OpusFecRecoveries), sessions.Values.Sum(s => s.OpusUnrecoveredGaps),
+                        sessions.Values.Sum(s => s.CustomConcealedFrames));
+        }
+    }
+
+    /// <summary>Simulator seam: the drift loop's clock-ratio estimate of each stream copy on a route.</summary>
+    internal double[] DriftRatiosForTest(RenderRoute route) => playoutEngine.DriftRatiosForTest(route);
+
+    /// <summary>Simulator seam: every copy of every stream - the lane its sender announced it on, the output lane the copy
+    /// plays on, whether it is a mirror, its depth (the drift loop's tenth-of-a-second mean, ms) and its drift loop's
+    /// clock-ratio estimate, and whether that loop has taken its first reading yet.</summary>
+    internal List<(RenderRoute Announced, RenderRoute Plays, bool Mirror, double DepthMs, double Ratio, bool Tracking)> ReplicasForTest()
+    {
+        var copies = new List<(RenderRoute, RenderRoute, bool, double, double, bool)>();
+        lock (sessionsLock)
+        {
+            foreach (var s in sessions.Values)
+            {
+                var primary = s.Playout;
+                copies.Add((s.Format.Lane, primary.Route, false, primary.DepthMeanMsForTest, primary.DriftResamplerRatio, primary.DriftTrackingForTest));
+                foreach (var m in primary.Mirrors) copies.Add((s.Format.Lane, m.Route, true, m.DepthMeanMsForTest, m.DriftResamplerRatio, m.DriftTrackingForTest));
+            }
+        }
+        return copies;
+    }
+
+    /// <summary>Gate seam: PCM frames made up for lost packets, across the open sessions.</summary>
+    internal long PcmConcealedForTest { get { lock (sessionsLock) return sessions.Values.Sum(s => s.PcmConcealedFrames); } }
+    /// <summary>Simulator seam: times any stream's playback waited to refill after a real stop (SessionPlayout.LongGapRearmMs).</summary>
+    internal long LongGapRearmsForTest { get { lock (sessionsLock) return sessions.Values.Sum(s => s.LongGapRearmsForTest); } }
+
+    /// <summary>Gate seam: late or doubled packets dropped, across the open sessions.</summary>
+    internal long LateDroppedForTest { get { lock (sessionsLock) return sessions.Values.Sum(s => s.LateDropped); } }
+
+    /// <summary>The last minute of audio-packet arrivals, for saving and replaying in the simulator (2026-09-30).</summary>
+    public NetworkRecorder NetworkRecorder { get; } = new();
+
+    /// <summary>Once a second (the main window's tick, the simulator's): the counters a saved minute's live figures come from.</summary>
+    public void NoteNetworkSecond()
+    {
+        var (fec, unrecovered, custom) = CodecRepairsForTest;
+        NetworkRecorder.NoteSecond(new NetworkRecorder.Counters(AudioClock.GetTimestamp(), DropoutGaps, DropoutGapsFor(RenderRoute.AsioLane),
+            DropoutGapsFor(RenderRoute.WasapiLane), TuneBlockingUnderrunsFor(RenderRoute.AsioLane), TuneBlockingUnderrunsFor(RenderRoute.WasapiLane),
+            TuneBlockingUnderrunsFor(RenderRoute.Mixed), LateDroppedForTest, fec, unrecovered, custom + PcmConcealedForTest));
+    }
+
+    /// <summary>The last minute as a recording: the given facts first, then each lane's buffer, then the streams (with what
+    /// their Format packets said) and the packets.</summary>
+    public NetworkRecording TakeNetworkRecording(IEnumerable<KeyValuePair<string, string>> facts)
+    {
+        var all = facts.ToList();
+        all.Add(new("buffer ms", MaxLatencyMs.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        all.Add(new("buffer ASIO ms", MaxLatencyMsFor(RenderRoute.AsioLane).ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        all.Add(new("buffer WASAPI ms", MaxLatencyMsFor(RenderRoute.WasapiLane).ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        return NetworkRecorder.Take(all, (from, id) =>
+        {
+            lock (sessionsLock)
+            {
+                var s = sessions.Values.FirstOrDefault(x => x.StreamId == id && x.Endpoint.Equals(from))
+                        ?? sessions.Values.FirstOrDefault(x => x.StreamId == id);
+                return s is null ? null : (s.Format.Lane.ToString(), s.Format.ToString(), s.Format.Codec, s.Format.FrameSamplesPerChannel);
+            }
+        });
+    }
+
+    /// <summary>Gate seam: the reorder wait's holds, and how many were filled by the missing packet, across the sessions.</summary>
+    internal (long Waits, long Filled) ReorderForTest
+    {
+        get { lock (sessionsLock) return (sessions.Values.Sum(s => s.ReorderWaits), sessions.Values.Sum(s => s.ReorderFilled)); }
+    }
+
+    /// <summary>Gate seam: senders seen starting their count again, across the open sessions.</summary>
+    internal long SequenceRestartsForTest { get { lock (sessionsLock) return sessions.Values.Sum(s => s.SequenceRestarts); } }
+
+    /// <summary>Gate seam: one stream's arrival timing (null if there is no such session).</summary>
+    internal StreamArrivalStats? ArrivalsForTest(IPEndPoint remote, ushort streamId)
+    {
+        lock (sessionsLock) return sessions.TryGetValue((remote, streamId), out var s) ? s.Arrivals : null;
+    }
+
+    /// <summary>Gate seam: a stream's concealed Jamulus-style frames (-1 if there is no such session).</summary>
+    internal long CustomConcealedForTest(IPEndPoint remote, ushort streamId)
+    {
+        lock (sessionsLock) return sessions.TryGetValue((remote, streamId), out var s) ? s.CustomConcealedFrames : -1;
+    }
 
     /// <summary>Gate seam: audio bytes really decoded into the open sessions' buffers - the strict "audio came through",
     /// where IsAudioFlowingFrom is also briefly true for a session a format packet has only just opened.</summary>
@@ -282,6 +439,32 @@ public sealed class AudioReceiver : IDisposable
     /// <summary>Whether incoming audio is being played. Read-back for the control suite (the Receive
     /// audio control must reach this), alongside SetPlaybackEnabled which drives it.</summary>
     public bool PlaybackEnabled => playbackEnabled;
+
+    /// <summary>The metronome's clicks on this machine's outputs (see <see cref="MetronomeOutputs"/>).</summary>
+    public MetronomeOutputs Metronome => playoutEngine.Metronome;
+
+    /// <summary>The lane whose reads the recording follows.</summary>
+    public RenderRoute RecordingRoute => playoutEngine.RecordingRoute;
+
+    // The metronome holds the outputs open (2026-09-28): a solo metronome plays with nobody connected and "Receive audio"
+    // off, so the render outputs run for it alone. What arrives stays gated by playbackEnabled exactly as before.
+    private volatile bool outputsHeldForMetronome;
+
+    /// <summary>The outputs are running - for received audio, the metronome, or both. <see cref="IsRunning"/> is the
+    /// received-audio half only.</summary>
+    public bool OutputsRunning => multiOutput.IsRunning;
+
+    /// <summary>Hold the outputs open for the metronome (or let them go). Received audio is untouched: with "Receive audio"
+    /// off nothing that arrives is played, whatever this says. The caller hands the outputs over first
+    /// (<see cref="SetOutputDevices"/>), as switching receiving on does.</summary>
+    public void SetOutputsForMetronome(bool hold)
+    {
+        outputsHeldForMetronome = hold;
+        if (hold && !multiOutput.IsRunning) multiOutput.Start();
+        else if (!hold && !playbackEnabled && multiOutput.IsRunning) multiOutput.Stop();
+    }
+
+    public bool OutputsHeldForMetronome => outputsHeldForMetronome;
     /// <summary>The measured render-callback period for ONE lane. The latency estimate reads the
     /// lane the user is actually listening on: ASIO's whole point is that it is NOT penalised by
     /// WASAPI's shared-mode buffering, so quoting a single global period would hand an ASIO listener
@@ -491,7 +674,7 @@ public sealed class AudioReceiver : IDisposable
     /// The UDP listener socket is NOT covered by this flag — see <see cref="IsListenerRunning"/>.
     /// In single-port mode (post-2026-05-06) the listener stays bound for the whole connection
     /// so heartbeat packets always reach us; this flag tracks only the playback half.</summary>
-    public bool IsRunning => multiOutput.IsRunning;
+    public bool IsRunning => playbackEnabled && multiOutput.IsRunning;
     /// <summary>True when the UDP listener socket is bound. Independent of playback state.
     /// Surfaced for diagnostic/symmetry only — most callers want <see cref="IsRunning"/>.</summary>
     public bool IsListenerRunning => listener.IsRunning;
@@ -545,7 +728,136 @@ public sealed class AudioReceiver : IDisposable
     /// <summary>Queue depth for one lane — WASAPI and ASIO are separate journeys and must be reported
     /// apart (see PlayoutEngine.CurrentBufferMsFor).</summary>
     public int CurrentBufferMsFor(RenderRoute route) => playoutEngine.CurrentBufferMsFor(route);
+
+    /// <summary>One stream's reading for one second, for the log.</summary>
+    public sealed record StreamNeedReport(string Stream, long Packets, int GapMs, int GapPeakMs, int GapUsedMs, string Replicas);
+
+    /// <summary>Each stream's buffer sized from its own packet arrivals, instead of one figure shared by every stream on an
+    /// output, so a smooth ASIO stream stops paying for a bursty WASAPI one (10 ms lumps) or a phone's. The latency lab's
+    /// switch until the live test of 2026-09-29, normal behaviour since (Ed: "we leave the packet separation for wasapi and
+    /// asio on") - on an output whose auto-tune is on (see <see cref="UpdatePerStreamNeeds"/>). Only the simulator turns it
+    /// off, to measure what it gives.</summary>
+    public bool PerStreamBuffers { get => perStreamBuffers; set => perStreamBuffers = value; }
+    private volatile bool perStreamBuffers = true;
+
+    /// <summary>The leaner margins (<see cref="Profile.AutoTuneLowestDelay"/>) for each stream's own need, on every output:
+    /// a codec floor of one frame instead of one and a half, a 1 ms render floor instead of 2, and 2 ms of safety instead
+    /// of 5. Set by the window from the profile's tick box.</summary>
+    public bool LeanTuning { get => leanTuning; set => leanTuning = value; }
+    private volatile bool leanTuning;
+
+    /// <summary>
+    /// Per-stream buffers (2026-09-26), called once a second on the UI thread: close each stream's second of arrival
+    /// timing, work out what THAT stream needs on each output it plays on, and let the stream play at that depth when it
+    /// is below the output's own target. Rises take effect at once (a deeper buffer never clicks); falls are at most 1 ms
+    /// a second, from the output's target down, through the steady drift path. ASIO and WASAPI outputs alike.
+    ///
+    /// <para>Only on an output whose auto-tune is on (<paramref name="autoTuned"/>; Ed, 2026-09-29). With it off, the number
+    /// in the jitter buffer box is exactly what every stream gets - raised by hand to be safe, it is not quietly kept low
+    /// by a stream that thinks it needs less. With <see cref="PerStreamBuffers"/> off (the simulator's comparison), or the
+    /// output's auto-tune off, every stream's own need is cleared at once, so the output's target applies. Returns what it
+    /// saw, for the log.</para>
+    /// </summary>
+    public List<StreamNeedReport> UpdatePerStreamNeeds(Func<RenderRoute, int> renderCbMsFor, Func<RenderRoute, bool> autoTuned)
+    {
+        List<StreamSession> list;
+        lock (sessionsLock) list = sessions.Values.ToList();
+        var reports = new List<StreamNeedReport>(list.Count);
+        var on = perStreamBuffers;
+        var lean = leanTuning;
+        foreach (var s in list)
+        {
+            var (gapMs, packets) = s.Arrivals.TakeSecond();
+            var (peak, used) = s.Arrivals.Gaps();
+            var frameMs = Math.Max(1, (int)Math.Ceiling(s.Format.FrameDurationMs));
+            var sb = new System.Text.StringBuilder();
+            var primary = s.Playout;
+            var replicas = primary.Mirrors;
+            for (var i = -1; i < replicas.Length; i++)
+            {
+                var p = i < 0 ? primary : replicas[i];
+                var routeTarget = TargetLatencyMsFor(p.Route);
+                var need = PerStreamNeedMs(used, renderCbMsFor(p.Route), frameMs, lean);
+                // This replica's own dropouts: the arrival formula can be right about the gaps and still too thin for
+                // this output, so a dropout lifts the stream 3 ms and holds it that second.
+                var underruns = p.TuneBlockingUnderrunsTotal;
+                var newUnderruns = p.LabLastUnderrunTotal < 0 ? 0 : underruns - p.LabLastUnderrunTotal;
+                p.LabLastUnderrunTotal = underruns;
+                int own;
+                if (!on || !autoTuned(p.Route) || s.Arrivals.SecondsHeld < 3) own = 0; // the output's own, or a few seconds of evidence first
+                else
+                {
+                    var prev = p.OwnNeedMs > 0 ? p.OwnNeedMs : routeTarget;
+                    if (newUnderruns > 0) own = Math.Max(need, prev + 3);
+                    else own = need >= prev ? need : Math.Max(need, prev - 1);
+                }
+                p.OwnNeedMs = own;
+                if (sb.Length > 0) sb.Append("; ");
+                sb.Append($"{p.Route}: need={need}ms own={(own > 0 ? own + "ms" : "-")} plays-at={p.EffectiveTargetMs(routeTarget)}ms output={routeTarget}ms depth={p.BufferedMs}ms underruns={newUnderruns}");
+            }
+            reports.Add(new StreamNeedReport($"{s.Endpoint} stream={s.StreamId} {s.Format.Lane} {s.Codec} {s.Format.FrameDurationMs:0.##}ms{s.LabExtra}",
+                packets, gapMs, peak, used, sb.ToString()));
+        }
+        return reports;
+    }
+
+    /// <summary>What one stream needs on one output, by the auto-tune's own formula applied to that stream alone:
+    /// its second-worst arrival gap + the output's render period + a safety margin, never below the codec floor.
+    /// Lean (<see cref="LeanTuning"/>): a floor of one frame instead of one and a half, a 1 ms render floor instead of
+    /// 2, and 2 ms of safety instead of 5.</summary>
+    public static int PerStreamNeedMs(int gapUsedMs, int renderCbMs, int frameMs, bool lean)
+    {
+        var codecFloor = lean ? Math.Max(1, frameMs) : (int)Math.Ceiling(1.5 * frameMs);
+        var render = Math.Max(renderCbMs, lean ? 1 : 2);
+        var margin = lean ? 2 : 5;
+        return Math.Max(codecFloor, gapUsedMs + render + margin);
+    }
     public int TargetLatencyMs => playoutEngine.TargetLatencyMs;
+
+    /// <summary>One stream from a peer as it plays on one output: the buffer it plays at and the capture its sender states
+    /// (0 when it states none) - for that peer's total latency in the status line (Ed, 2026-09-29).</summary>
+    public readonly record struct PlayingStream(RenderRoute Route, int BufferMs, double CaptureMs);
+
+    /// <summary>Every stream arriving from <paramref name="endpoint"/>, on every output it plays on.</summary>
+    public List<PlayingStream> PlayingFrom(IPEndPoint endpoint)
+    {
+        List<StreamSession> list;
+        lock (sessionsLock) list = sessions.Values.Where(s => s.Endpoint.Equals(endpoint)).ToList();
+        var result = new List<PlayingStream>(list.Count);
+        foreach (var s in list)
+        {
+            var primary = s.Playout;
+            var replicas = primary.Mirrors;
+            for (var i = -1; i < replicas.Length; i++)
+            {
+                var p = i < 0 ? primary : replicas[i];
+                result.Add(new PlayingStream(p.Route, p.EffectiveTargetMs(TargetLatencyMsFor(p.Route)), s.Format.CaptureLatencyMs));
+            }
+        }
+        return result;
+    }
+
+    /// <summary>The buffer the streams on an output actually play at: the deepest of them, each at its own need where that is
+    /// below the output's target (<see cref="UpdatePerStreamNeeds"/>), else the target itself - which is also the answer with
+    /// nothing arriving. What the Total latency box counts as the jitter buffer (Ed, 2026-09-29).</summary>
+    public int PlayingTargetMsFor(RenderRoute route)
+    {
+        var target = TargetLatencyMsFor(route);
+        List<StreamSession> list;
+        lock (sessionsLock) list = sessions.Values.ToList();
+        var deepest = -1;
+        foreach (var s in list)
+        {
+            var primary = s.Playout;
+            var replicas = primary.Mirrors;
+            for (var i = -1; i < replicas.Length; i++)
+            {
+                var p = i < 0 ? primary : replicas[i];
+                if (p.Route == route) deepest = Math.Max(deepest, p.EffectiveTargetMs(target));
+            }
+        }
+        return deepest < 0 ? target : deepest;
+    }
 
     /// <summary>
     /// Frame duration of the active streams (PCM frames are 233 samples, just under 5 ms, from a current
@@ -715,6 +1027,11 @@ public sealed class AudioReceiver : IDisposable
     /// validated. Both are per-route for BothIndependent, mirroring <see cref="UnderrunsFor"/>.</summary>
     public long TuneBlockingUnderruns => playoutEngine.AggregateTuneBlockingUnderruns;
     public long TuneBlockingUnderrunsFor(RenderRoute route) => playoutEngine.AggregateTuneBlockingUnderrunsFor(route);
+
+    /// <summary>Audible gaps on an output so far (one per run of short reads, however many callbacks it spans).</summary>
+    public long DropoutGapsFor(RenderRoute route) => playoutEngine.AggregateDropoutGapsFor(route);
+    /// <summary>The same, every stream: the one output with no ASIO driver chosen.</summary>
+    public long DropoutGaps => playoutEngine.AggregateDropoutGaps;
     public long DeviceGulpUnderruns => playoutEngine.AggregateDeviceGulpUnderruns;
     public long DeviceGulpUnderrunsFor(RenderRoute route) => playoutEngine.AggregateDeviceGulpUnderrunsFor(route);
 
@@ -726,6 +1043,8 @@ public sealed class AudioReceiver : IDisposable
     public long TrimDropBytes => playoutEngine.AggregateTrimDropBytes;
     public long DrainDropBytes => playoutEngine.AggregateDrainDropBytes;
     public long TrimFireCount => playoutEngine.AggregateTrimFireCount;
+    public long SnapCount => playoutEngine.AggregateSnapCount;
+    public long SnapSkippedBytes => playoutEngine.AggregateSnapSkippedBytes;
     /// <summary>Cumulative count of FULL-empty playout reads (framesRead == 0) — the audible
     /// underrun events that trigger noise-burst concealment + fade-in. Separated from
     /// <see cref="Underruns"/> (which conflates full and partial short reads) so the diag
@@ -908,7 +1227,7 @@ public sealed class AudioReceiver : IDisposable
     /// </summary>
     public void SetPlaybackEnabled(bool enabled)
     {
-        if (enabled == multiOutput.IsRunning)
+        if (enabled == IsRunning)
         {
             playbackEnabled = enabled;
             return;
@@ -918,16 +1237,16 @@ public sealed class AudioReceiver : IDisposable
             // Reset packet handlers' gate before starting the backend, so packets that arrive
             // between multiOutput.Start and the next handler invocation aren't misrouted.
             playbackEnabled = true;
-            multiOutput.Start();
+            if (!multiOutput.IsRunning) multiOutput.Start();
         }
         else
         {
             // Flip the gate first so HandleFormat/HandleAudio stop opening new sessions, then
             // tear down the backend and any in-flight sessions. Order matters — if we stopped
             // the backend first, in-flight packets could open a fresh session that nothing
-            // would ever drain.
+            // would ever drain. The outputs stay open while the metronome holds them.
             playbackEnabled = false;
-            multiOutput.Stop();
+            if (!outputsHeldForMetronome) multiOutput.Stop();
             lock (sessionsLock)
             {
                 DisposeAllSessionsLocked();
@@ -940,7 +1259,7 @@ public sealed class AudioReceiver : IDisposable
     {
         listener.Stop();
         playbackEnabled = false;
-        multiOutput.Stop();
+        if (!outputsHeldForMetronome) multiOutput.Stop();
         lock (sessionsLock)
         {
             DisposeAllSessionsLocked();
@@ -963,7 +1282,7 @@ public sealed class AudioReceiver : IDisposable
     /// </summary>
     public void PruneIdleSessions()
     {
-        var now = DateTime.UtcNow;
+        var now = AudioClock.UtcNow;
         lock (sessionsLock)
         {
             var toRemove = new HashSet<(IPEndPoint Endpoint, ushort StreamId)>();
@@ -1030,7 +1349,7 @@ public sealed class AudioReceiver : IDisposable
     /// </summary>
     public bool IsReceivingFromAddress(IPAddress address)
     {
-        var now = DateTime.UtcNow;
+        var now = AudioClock.UtcNow;
         foreach (var sp in playoutEngine.ActiveSessions)
         {
             if (!playoutEngine.SamePerson(sp.Endpoint.Address, address)) continue;
@@ -1045,7 +1364,7 @@ public sealed class AudioReceiver : IDisposable
     /// </summary>
     public AudioFormatInfo? ActiveFormatFromAddress(IPAddress address)
     {
-        var now = DateTime.UtcNow;
+        var now = AudioClock.UtcNow;
         SessionPlayout? freshest = null;
         foreach (var sp in playoutEngine.ActiveSessions)
         {
@@ -1072,7 +1391,7 @@ public sealed class AudioReceiver : IDisposable
     /// </summary>
     public IReadOnlyList<AudioFormatInfo> ActiveFormatsFromAddress(IPAddress address)
     {
-        var now = DateTime.UtcNow;
+        var now = AudioClock.UtcNow;
         var fresh = new List<SessionPlayout>();
         foreach (var sp in playoutEngine.ActiveSessions)
         {
@@ -1101,7 +1420,7 @@ public sealed class AudioReceiver : IDisposable
     {
         get
         {
-            var now = DateTime.UtcNow;
+            var now = AudioClock.UtcNow;
             SessionPlayout? freshest = null;
             foreach (var sp in playoutEngine.ActiveSessions)
             {
@@ -1147,6 +1466,10 @@ public sealed class AudioReceiver : IDisposable
     /// Handed up raw, as remote control is - the app checks the seal against its own key. Raised on the network thread.</summary>
     public Action<byte[], IPEndPoint>? OnTickProofReceived { get; set; }
 
+    /// <summary>A metronome message arrived (<see cref="MetronomeWire"/>), raw. Raised on the network thread, the moment it
+    /// is read: a clock reading is answered from here, stamped as it came in.</summary>
+    public Action<byte[], IPEndPoint>? OnMetronomeReceived { get; set; }
+
     private void HandleRawPacket(byte[] packet, int length, IPEndPoint remote)
     {
         Interlocked.Increment(ref packetsReceived);
@@ -1166,6 +1489,7 @@ public sealed class AudioReceiver : IDisposable
                 HandleFormat(remote, streamId, payload);
                 break;
             case RemPacketType.Audio:
+                NetworkRecorder.Note(remote, streamId, sequence, length);
                 HandleAudio(remote, streamId, sequence, payload);
                 break;
             case RemPacketType.KeepAlive:
@@ -1209,6 +1533,12 @@ public sealed class AudioReceiver : IDisposable
             case RemPacketType.TickProof:
                 // Crypto-dumb here too: the size is the only gate, and the app does the rest.
                 if (payload.Length == TickProof.SealedPayloadBytes) OnTickProofReceived?.Invoke(payload.ToArray(), remote);
+                else Interlocked.Increment(ref packetsDropped);
+                break;
+            case RemPacketType.Metronome:
+                // Crypto-dumb, as the tick proof: the size range every kind can have is the only gate here.
+                if (payload.Length >= MetronomeWire.MinSealedBytes && payload.Length <= MetronomeWire.MaxSealedBytes)
+                    OnMetronomeReceived?.Invoke(payload.ToArray(), remote);
                 else Interlocked.Increment(ref packetsDropped);
                 break;
             default:
@@ -1268,6 +1598,10 @@ public sealed class AudioReceiver : IDisposable
             return;
         }
 
+        // A ticked RemSound that plays through ASIO says so in every Format packet (JamulusStyle.CanTakeIt), and only
+        // then may this machine send it custom-mode Opus.
+        if ((format.LabFlags & AudioFormatInfo.LabFlagCanDecodeCustomOpus) != 0) CustomOpusPeers.Note(remote.Address);
+
         // Record whether this (selected) peer's profile password matches ours, from the
         // fingerprint they advertised in this format packet. The app reads this to tell the user
         // about a password mismatch (or an out-of-date peer) instead of leaving silence a mystery.
@@ -1325,6 +1659,7 @@ public sealed class AudioReceiver : IDisposable
                 // engine-wide one — in BothIndependent those differ, and arming to the wrong one
                 // starts playback at the wrong depth. In single-slider mode every route resolves to
                 // the same shared value, so this is identical to the old call there.
+                if (FailNextSessionForTest) { FailNextSessionForTest = false; throw new InvalidOperationException("the gate made this session fail to build"); }
                 newSession = new StreamSession(remote, streamId, format, sp, diagnostics,
                     _ => sp.NoteFramesQueued(
                         playoutEngine.TargetLatencyMsFor(sp.Route),

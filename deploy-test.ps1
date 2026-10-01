@@ -15,11 +15,13 @@
 #
 # Run:  powershell -ExecutionPolicy Bypass -File deploy-test.ps1
 # Add -SkipGate to skip the build-and-test gate (e.g. when you just ran it) - by default a binary
-# deploy runs run-tests.ps1 first and refuses to deploy a build that didn't pass.
+# deploy runs run-tests.ps1 first and refuses to deploy a build that didn't pass. A test deploy runs the FEATURE pack
+# (the core checks and the areas the change touches, a few minutes); add -FullGate for the full run a release gets.
+# -Areas names areas to run on top of the ones worked out from the changed files (e.g. -Areas latency-lab,simulator).
 # Add -ProjOnly to deploy to publish\ alone and leave D:\Dropbox\remsound as it is (Ed, 2026-09-24: "you can
 # deploy to the proj folder but not dropbox").
 
-param([switch]$SkipGate, [switch]$ProjOnly)
+param([switch]$SkipGate, [switch]$ProjOnly, [switch]$FullGate, [string]$Areas = 'auto')
 
 $ErrorActionPreference = 'Stop'
 $repo      = $PSScriptRoot
@@ -56,7 +58,7 @@ else {
         $gate = Join-Path $repo 'run-tests.ps1'
         if (Test-Path -LiteralPath $gate) {
             Write-Host "Running the build-and-test gate before deploying..." -ForegroundColor Cyan
-            & $gate
+            if ($FullGate) { & $gate -Pack Full } else { & $gate -Pack Feature -Areas $Areas }
             if ($LASTEXITCODE -ne 0) { throw "build-and-test gate FAILED - not deploying. Fix the failures above, or re-run with -SkipGate to override." }
         }
         else { Write-Host "WARNING: run-tests.ps1 not found - deploying WITHOUT the test gate." -ForegroundColor Yellow }
@@ -83,12 +85,13 @@ foreach ($loc in $runLocations) {
     }
     # THE point of this script: the whole source 'default sounds' folder, force-copied over THIS
     # location's copy, every time. /IS = copy even files robocopy thinks are identical; /IT = copy
-    # "tweaked" files. No /XO (don't skip on timestamp) and no /MIR (don't delete files).
+    # "tweaked" files. /S = its folders too (the metronome's clicks live in 'default sounds\metronome',
+    # 2026-09-29). No /XO (don't skip on timestamp) and no /MIR (don't delete files).
     $locSounds = Join-Path $loc 'default sounds'
     Write-Host "Force-syncing 'default sounds' -> $locSounds (source wins, every time) ..." -ForegroundColor Cyan
     New-Item -ItemType Directory -Path $locSounds -Force | Out-Null
-    Invoke-Robocopy @($srcSounds, $locSounds, '*.wav', '/IS', '/IT')
+    Invoke-Robocopy @($srcSounds, $locSounds, '*.wav', '/S', '/IS', '/IT')
 }
 
-$count = @(Get-ChildItem $srcSounds -Filter *.wav).Count
+$count = @(Get-ChildItem $srcSounds -Filter *.wav -Recurse).Count
 Write-Host "Done. $count default sounds force-synced to $($runLocations -join " and "). Tweak away - the next run always takes them all." -ForegroundColor Green

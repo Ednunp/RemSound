@@ -51,7 +51,9 @@ internal sealed class ProfileSelectionDialog : Form
         MinimizeBox = false;
         MaximizeBox = false;
         ShowInTaskbar = true;
-        ClientSize = new Size(480, 420);
+        // The house 12-pixel margin all round, and room for the four buttons on one row (UI audit 2026-09-28, finding 6).
+        ClientSize = Dpi.Px(560, 420);
+        Padding = Dpi.Pad(12);
         // Esc is deliberately ignored (no CancelButton). Alt+F4 routes through the
         // window manager to FormClosing → DialogResult.Cancel, which the caller treats
         // as "user wants to quit".
@@ -62,18 +64,12 @@ internal sealed class ProfileSelectionDialog : Form
             Dock = DockStyle.Fill,
             IntegralHeight = false,
             AccessibleName = "Profiles",
+            // How to use it, for the screen reader alone: it was a line of text above the list, which a sighted person does
+            // not need - "New profile" is in the list, and OK is below it (Ed, 2026-09-28).
+            AccessibleDescription = "Select a profile and press Enter, or pick \"" + NewProfileLabel + "\" to start a new one.",
         };
         listBox.KeyDown += OnListKeyDown;
         listBox.DoubleClick += (_, _) => Accept();
-
-        var instructions = new Label
-        {
-            Text = "Select a profile and press Enter, or pick \"" + NewProfileLabel + "\" to start a new one.",
-            Dock = DockStyle.Top,
-            AutoSize = false,
-            Height = 36,
-            Padding = new Padding(8, 8, 8, 4),
-        };
 
         // Folder status + Browse button row at the bottom. Browse opens a folder picker;
         // on OK we save AppConfig, rebuild the store, and refresh the list. Status label
@@ -84,8 +80,7 @@ internal sealed class ProfileSelectionDialog : Form
             Text = "Profiles folder: " + store.BaseDirectory,
             Dock = DockStyle.Top,
             AutoSize = false,
-            Height = 28,
-            Padding = new Padding(8, 4, 8, 4),
+            Padding = Dpi.Pad(0, 0, 0, 8),
             AccessibleName = "Profiles folder: " + store.BaseDirectory,
         };
 
@@ -97,24 +92,28 @@ internal sealed class ProfileSelectionDialog : Form
         browseButton.Click += (_, _) => BrowseForFolder();
         var resetFolderButton = new Button { Text = "&Reset to default folder", AutoSize = true };
         resetFolderButton.Click += (_, _) => ResetToDefaultFolder();
+        // One row at the bottom right, in the order they have always had (the tab order is unchanged). It used to wrap,
+        // leaving "Reset to default folder" alone on a second row.
         var buttonRow = new FlowLayoutPanel
         {
             Dock = DockStyle.Bottom,
             FlowDirection = FlowDirection.LeftToRight,
-            Height = 80,
-            AutoSize = false,
-            Padding = new Padding(8),
-            WrapContents = true,
+            AutoSize = true,
+            WrapContents = false,
         };
         buttonRow.Controls.Add(okButton);
         buttonRow.Controls.Add(deleteButton);
         buttonRow.Controls.Add(browseButton);
         buttonRow.Controls.Add(resetFolderButton);
+        // Pushed to the right by a left padding the width of the space the buttons leave (the window does not resize), and
+        // a gap above it so the list does not touch it.
+        var rowWidth = buttonRow.GetPreferredSize(Size.Empty).Width;
+        buttonRow.Padding = new Padding(Math.Max(0, ClientSize.Width - Padding.Horizontal - rowWidth), Dpi.Px(8), 0, 0);
 
         Controls.Add(listBox);
         Controls.Add(buttonRow);
         Controls.Add(folderLabel);
-        Controls.Add(instructions);
+        FitLabels();
 
         AcceptButton = okButton; // makes Enter work in the form context too
         ContextHelp.Mark(listBox, "dialog.profile-selection.profiles");
@@ -165,6 +164,15 @@ internal sealed class ProfileSelectionDialog : Form
         // Keep the folder label in sync so it always reflects what the listbox is reading.
         folderLabel.Text = "Profiles folder: " + store.BaseDirectory;
         folderLabel.AccessibleName = folderLabel.Text;
+        FitLabels();
+    }
+
+    /// <summary>The line above the list, as tall as its words wrapped to the window's width: a long folder path wrapped onto a
+    /// hidden second line of a fixed 28-pixel label, and showed only "Profiles folder:".</summary>
+    private void FitLabels()
+    {
+        var width = ClientSize.Width - Padding.Horizontal;
+        folderLabel.Height = folderLabel.GetPreferredSize(new Size(width, 0)).Height;
     }
 
     /// <summary>Returns the currently-selected profile title, unwrapping the ProfileListItem if

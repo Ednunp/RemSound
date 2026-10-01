@@ -48,8 +48,14 @@ internal static partial class SelfTest
                 var ping = Ping();
                 heartbeat.HandleInjectedPacket(ping, ping.Length, new IPEndPoint(phone.Address, 50001));
                 heartbeat.HandleInjectedPacket(ping, ping.Length, new IPEndPoint(hers.Address, 50002));
+                // Each ping's decision is queued on the window; a marker queued after them has run once they have (2026-09-28:
+                // a fixed two seconds of pumping, five times).
+                var decided = false;
+                form.BeginInvoke(() => decided = true);
                 var until = DateTime.UtcNow.AddSeconds(2);
-                while (DateTime.UtcNow < until) { Application.DoEvents(); Thread.Sleep(10); }
+                while (!decided && DateTime.UtcNow < until) { Application.DoEvents(); Thread.Sleep(1); }
+                for (var i = 0; i < 5; i++) Application.DoEvents();   // and whatever those decisions queued in turn
+                Check(decided, "premise: the window must have got round to the pings");
                 var sending = form.SelectedSendEndpointsForTest();
                 phoneIn = sending.Any(e => e.Address.Equals(phone.Address));
                 hersIn = sending.Any(e => e.Address.Equals(hers.Address));
@@ -73,15 +79,22 @@ internal static partial class SelfTest
             Session(_ => { }, out var phoneIn, out var hersIn);
             Check(!phoneIn && !hersIn, "a device never ticked must not be let in by a ping - pings prove nothing");
 
-            // Ticked once, by hand, in the Discovered list.
+            // Ticked once, by hand, in the Discovered list - through that list's own tick handler (2026-09-28: it called
+            // EnsurePeerRemembered by reflection, so a list that stopped remembering would have passed).
             MainForm? tickForm = null;
             try
             {
                 tickForm = new MainForm(null, Profile.NewBlank(), null, null, headless: true);
+                _ = tickForm.Handle;
                 var discovery = (PeerDiscoveryService)Require(typeof(MainForm).GetField("discovery", BindingFlags.Instance | BindingFlags.NonPublic), "MainForm.discovery not found").GetValue(tickForm)!;
                 discovery.RecordForTest(phone);
-                var remember = Require(typeof(MainForm).GetMethod("EnsurePeerRemembered", BindingFlags.Instance | BindingFlags.NonPublic), "MainForm.EnsurePeerRemembered not found");
-                remember.Invoke(tickForm, [phone]);   // what ticking a device in the Discovered list does
+                Require(typeof(MainForm).GetMethod("RefreshKnownPeers", BindingFlags.Instance | BindingFlags.NonPublic), "MainForm.RefreshKnownPeers not found").Invoke(tickForm, null);
+                Require(typeof(MainForm).GetMethod("SyncAllPeerLists", BindingFlags.Instance | BindingFlags.NonPublic), "MainForm.SyncAllPeerLists not found").Invoke(tickForm, null);
+                var discovered = Require(FieldOf<CheckedListBox>(tickForm, "discoveredPeersList"), "the main window has no discoveredPeersList");
+                var at = discovered.Items.Cast<object>().ToList().FindIndex(i => i is PeerListItem p && p.Peer.InstanceId == phone.InstanceId);
+                Check(at >= 0, "premise: the phone must be listed in Discovered peers");
+                discovered.SetItemChecked(at, true);
+                for (var i = 0; i < 5; i++) Application.DoEvents();   // its handler acts on the window's next turn
             }
             finally { try { tickForm?.Dispose(); } catch { /* teardown */ } }
             Check(AppConfig.Load().TickedDeviceIds.Contains(phone.InstanceId.ToString("D")), "a device you tick must be remembered by its own identity");

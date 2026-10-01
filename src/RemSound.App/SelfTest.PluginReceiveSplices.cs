@@ -46,7 +46,7 @@ internal static partial class SelfTest
             using var host = new PluginBridgeHost(Ramp, port: 0);
             using var client = new PluginBridgeClient(host.Port);
             client.Hello();
-            Thread.Sleep(100);
+            Check(WaitFor(() => client.Connected, TimeSpan.FromSeconds(3)), $"{name}: the app must answer the plugin's hello");
             client.SetReceivedPeers([IPAddress.Parse("10.9.9.9")]);
             var render = new PeerRenderBridge(client);
             render.PrepareForBlockSize(1024, rate);
@@ -54,18 +54,25 @@ internal static partial class SelfTest
             var output = new List<double>(1_500_000);
             var left = new double[2048];
             var right = new double[2048];
-            // 800 blocks, the bridge given a turn every second one: long enough that the old cut showed ~120 splices at 44.1 kHz,
-            // short enough for the gate (a Sleep(1) is ~15 ms on Windows).
+            // 800 blocks, every reply on time: long enough that the old cut showed ~120 splices at 44.1 kHz. Each block waits for
+            // the reply to its own ask to land, as a DAW's next callback comes long after it would have (2026-09-28: this slept
+            // a Sleep(1) - ~15 ms on Windows - every second block, 25 s in all).
             const int Blocks = 800, Warmup = 60;
+            var clock = System.Diagnostics.Stopwatch.StartNew();
             for (var b = 0; b < Blocks; b++)
             {
                 var n = blockSize(b);
                 Array.Clear(left);
                 Array.Clear(right);
+                var asked = client.BytesReceived;
                 render.FillHostBlock(left.AsSpan(0, n), right.AsSpan(0, n), 1f, mixInto: false);
                 if (b >= Warmup) for (var i = 0; i < n; i++) output.Add(left[i]);
-                if (b % 2 == 1) Thread.Sleep(1);
+                var until = clock.ElapsedMilliseconds + 50;
+                while (client.BytesReceived == asked && clock.ElapsedMilliseconds < until) Thread.SpinWait(100);
             }
+            // Premise: the plugin was fed - a track that was mostly silence would show no splices and no gaps and prove nothing.
+            var sounding = output.Count(v => v != 0);
+            Check(sounding > output.Count * 0.9, $"{name}: premise - the track must carry the peer nearly all the way ({sounding} of {output.Count} samples)");
 
             var expected = 1e-5 * 48000.0 / rate;
             int jumps = 0, gaps = 0;

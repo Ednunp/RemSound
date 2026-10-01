@@ -74,6 +74,7 @@ internal static partial class SelfTest
             // Everybody on the server answers every ping the window sends there, each as themselves - as the server
             // delivers them - unless they have gone quiet.
             var answering = 1;
+            var pongsHandled = 0;
             var quiet = new System.Collections.Concurrent.ConcurrentDictionary<IPAddress, bool>();
             var lines = new List<string>();
             form.LogForTest.EventTapForTest = line => { lock (lines) lines.Add(line); };
@@ -86,13 +87,26 @@ internal static partial class SelfTest
                     {
                         if (quiet.ContainsKey(member.Address.Address)) continue;
                         var from = member.Address;
-                        ThreadPool.QueueUserWorkItem(_ => hb?.HandleInjectedPacket(pong, pong.Length, from));
+                        ThreadPool.QueueUserWorkItem(_ => { hb?.HandleInjectedPacket(pong, pong.Length, from); Interlocked.Increment(ref pongsHandled); });
                     }
                 }
                 return true;
             });
             // What connecting does (ApplyAudioRuntime); a headless window never starts its network.
             hb.SetTrackedPeers(form.SelectedSendEndpointsForTest());
+            // The heartbeat's clock, moved on past its 2 s and 5 s marks instead of waiting them out (2026-09-28: 10 s).
+            var ahead = TimeSpan.Zero;
+            hb.UtcNowForTest = () => DateTime.UtcNow + ahead;
+            void MoveOn(TimeSpan by, bool answer)
+            {
+                ahead += by;
+                var answeredBefore = Volatile.Read(ref pongsHandled);
+                if (answer)
+                {
+                    hb.SendPingsForTest();   // a round at the new time, so whoever answers is heard at it
+                    WaitFor(() => Volatile.Read(ref pongsHandled) >= answeredBefore + 2, TimeSpan.FromSeconds(3));
+                }
+            }
 
             List<PeerListItem> Rows()
             {
@@ -120,6 +134,7 @@ internal static partial class SelfTest
             // One of them goes quiet - leaves, or unticks us. Only they go, with a cue of their own; the others stay.
             var jonathan = form.RelayGroupForTest.Members.Single(m => m.Name == "JONATHAN_LT").Address.Address;
             quiet[jonathan] = true;
+            MoveOn(HeartbeatService.HealthyWindow + TimeSpan.FromMilliseconds(500), answer: true);
             Check(WaitFor(() =>
                 {
                     var now = Rows();
@@ -130,6 +145,7 @@ internal static partial class SelfTest
                 }, TimeSpan.FromSeconds(10)),
                 $"THE SERVER'S WORD: one person going quiet must show as offline on their own, while the others stay connected ({Names(Rows())})");
             // The cue waits for five seconds of silence, as it does for anybody, where the tag goes at two.
+            MoveOn(HeartbeatService.UnreachableWindow - HeartbeatService.HealthyWindow, answer: true);
             Check(WaitFor(() => { form.DetectPeerHealthTransitionsForTest(); return Logged("peer disconnected: JONATHAN_LT on the server"); }, TimeSpan.FromSeconds(10)),
                 "THE SILENT LEAVING: somebody on the server going must get a disconnect cue of their own");
             Check(!Logged("peer disconnected: ED_DT on the server") && !Logged("peer disconnected: ANDRE_PC on the server"),
@@ -138,6 +154,7 @@ internal static partial class SelfTest
 
             // And the tag still works: once the server stops answering, they are gone by every measure.
             Volatile.Write(ref answering, 0);
+            MoveOn(HeartbeatService.UnreachableWindow + TimeSpan.FromMilliseconds(500), answer: false);
             Check(WaitFor(() => Rows().All(r => r.Peer.Name.Contains(" (offline)", StringComparison.Ordinal)), TimeSpan.FromSeconds(8)),
                 $"once the server stops answering, everybody on it must be tagged offline ({Names(Rows())})");
             Check(WaitFor(() => { Rows(); var t = form.TrayTooltipForTest(); return t.Contains("not connected", StringComparison.Ordinal) || t.Contains("no peers", StringComparison.Ordinal); },

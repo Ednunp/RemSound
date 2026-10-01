@@ -87,6 +87,8 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
     private readonly Dictionary<IPEndPoint, MemberState> memberByAddress = new();
     private HashSet<IPEndPoint> targets = [];
     private readonly HashSet<Guid> ticked = [];
+    /// <summary>A copy of <see cref="ticked"/>, replaced whole on each change: read on the audio thread without the lock.</summary>
+    private volatile HashSet<Guid> tickedNow = [];
     private bool pairPartnerTicked;
     private volatile bool pairTickedFlag;
     private string displayName = Environment.MachineName;
@@ -202,6 +204,7 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
             foreach (var r in relays.Keys.ToList()) ForgetRelayLocked(r);
             targets = [];
             ticked.Clear();
+            tickedNow = [];
             pairPartnerTicked = false;
         }
         foreach (var r in leaving) SendBye(r);
@@ -224,6 +227,7 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
             if (!changed) return;
             ticked.Clear();
             foreach (var id in wanted) ticked.Add(id);
+            tickedNow = wanted;
             pairPartnerTicked = pairPartner;
             pairTickedFlag = pairPartner;
             foreach (var r in relays.Values) r.LastHelloUtc = DateTime.MinValue;   // tell the relay at once
@@ -237,6 +241,32 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
     {
         rawSend = send;
         timer ??= new System.Threading.Timer(_ => Tick(), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+        // A relay connected before there was a way to send (the service connects, then starts) has its first hello now,
+        // not a turn of the timer later: Connect's own went nowhere. Measured 1,054 and 1,056 ms late before 2026-09-28.
+        bool connected;
+        lock (gate) connected = relays.Count > 0;
+        if (connected) Tick();
+    }
+
+    /// <summary>The server's metronome (ServerMetronomeWire): a message from the relay we are in a group on - its body, and
+    /// the relay it came from. Raised on the network thread.</summary>
+    public Action<byte[], IPEndPoint>? TimingReceived { get; set; }
+
+    private uint timingSequence;
+
+    /// <summary>A message for the server's metronome, to the relay we are in a group on, group-framed with our id. False
+    /// when we are in no group (nothing to send it to).</summary>
+    public bool SendTiming(ReadOnlySpan<byte> body)
+    {
+        var send = rawSend;
+        var relay = ConnectedRelay;
+        if (send is null || relay is null || !IsInGroup(relay)) return false;
+        var packet = new byte[GroupHeaderSize + body.Length];
+        RemPacket.WriteHeader(packet, (RemPacketType)ServerMetronomeWire.TypeTiming, 0, ++timingSequence);
+        packet[4] = GroupVersion;
+        clientId.CopyTo(packet.AsSpan(RemPacket.HeaderSize));
+        body.CopyTo(packet.AsSpan(GroupHeaderSize));
+        return send(packet, packet.Length, relay);
     }
 
     /// <summary>Say goodbye to every relay we are in a group on and forget them all.</summary>
@@ -276,6 +306,24 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
     /// phone or an older app), so our audio goes to it in ordinary form as well.</summary>
     public bool IsV1Paired(IPEndPoint relay) => snapshot.GroupRelays.TryGetValue(relay, out var paired) && paired;
 
+    /// <summary>Whether everyone the relay passes our sound to - each member there who has ticked us and whom we have
+    /// ticked, since it passes sound only between two who have ticked each other - passes <paramref name="test"/> (given
+    /// the member's address here), and there is at least one. Asked on the audio thread, so it allocates nothing.</summary>
+    public bool EveryReceiverOn(IPEndPoint relay, Func<IPEndPoint, bool> test)
+    {
+        var ours = tickedNow;
+        var members = snapshot.Members;
+        var any = false;
+        for (var i = 0; i < members.Count; i++)
+        {
+            var m = members[i];
+            if (!m.TicksUs || !m.Relay.Equals(relay) || !ours.Contains(m.Id)) continue;
+            if (!test(m.Address)) return false;
+            any = true;
+        }
+        return any;
+    }
+
     /// <summary>Everyone in every group we are in, us excepted.</summary>
     public IReadOnlyList<Member> Members => snapshot.Members;
 
@@ -298,21 +346,6 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
     }
 
     // ------- inbound ----------------------------------------------------------------------------------------------------
-
-    /// <summary>An address check arrived from this endpoint: only a relay sends one. If we send to it, join its group.</summary>
-    public void NoteRelay(IPEndPoint endpoint)
-    {
-        bool isNew;
-        lock (gate)
-        {
-            if (!targets.Contains(endpoint)) return;
-            isNew = !relays.ContainsKey(endpoint);
-            if (isNew) relays[endpoint] = new RelayState(endpoint);
-        }
-        if (!isNew) return;
-        Log?.Invoke($"{endpoint} is a relay — joining the group for our password");
-        Tick();
-    }
 
     /// <summary>
     /// A packet arrived on the sending socket. If it is a group packet from a relay we know, put it into ordinary form
@@ -340,6 +373,12 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
             return RelayInbound.Consumed;
         }
         if (type is TypeHello or TypeBye) return RelayInbound.Consumed;
+        if (type == ServerMetronomeWire.TypeTiming)
+        {
+            // The relay's own message (its beat grid for us): for the metronome, never a member's sound.
+            TimingReceived?.Invoke(buffer.AsSpan(GroupHeaderSize, length - GroupHeaderSize).ToArray(), remote);
+            return RelayInbound.Consumed;
+        }
 
         var idSpan = buffer.AsSpan(RemPacket.HeaderSize, ClientIdSize);
         if (idSpan.SequenceEqual(clientId)) return RelayInbound.Consumed;   // our own packet: never expected, never played
@@ -438,6 +477,16 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
     }
 
     // ------- outbound ---------------------------------------------------------------------------------------------------
+
+    /// <summary>Whether a packet for <paramref name="destination"/> would go through a relay group rather than straight
+    /// to it - a group relay, a member behind one, or a member address. Asks, sends nothing. (The latency lab's
+    /// Jamulus-style Opus goes only straight to a RemSound that asked for it, never through a server, where phones may
+    /// be listening.)</summary>
+    public bool Routes(IPEndPoint destination)
+    {
+        var snap = snapshot;
+        return snap.MemberRelay.ContainsKey(destination) || IsMemberAddress(destination.Address) || snap.GroupRelays.ContainsKey(destination);
+    }
 
     public bool TryRoute(ReadOnlySpan<byte> packet, IPEndPoint destination, DatagramSender send)
     {

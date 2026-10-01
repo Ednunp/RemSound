@@ -13,6 +13,10 @@ namespace RemSound.App;
 /// the interactive app — while a normal RemSound is open it suspends (stops capturing, drops the send),
 /// resuming when the app closes or crashes (see <see cref="InteractivePresence"/>).
 ///
+/// <para>Not in the service, deliberately: push to talk (Ed: "not part of the service full stop") and the metronome
+/// (2026-09-28) - the service plays no audio, so it has no clicks to place, and it never answers a master metronome's
+/// offer (nothing reads packet type 12 here; a master logs it as never answering).</para>
+///
 /// <para>Send-only and WASAPI-only by design: ASIO can't run in a service, and receive is impossible on
 /// Windows 11 with no user logged in, so neither is attempted. It sends to the profile's configured
 /// peer addresses, and <see cref="ServiceNetworkPresence"/> gives it the same discovery, heartbeat,
@@ -151,6 +155,156 @@ public sealed class ServiceSendHost : IDisposable
     private const int ReopenSpacingMs = 2_000;     // don't thrash between attempts
     private const int CapturePulseIntervalMs = 15_000; // diagnostic log cadence (NOT the trigger)
 
+    // ---- The boot ear (2026-09-28) --------------------------------------------------------------------
+    // Ed: "no matter how hard we tried, we were never able to get the service to play the windows startup sound. it always
+    // came in late." It is not the service starting late: at the 14 Sep cold boot its capture was open 4 s before the tune
+    // began, the output's own meter read the tune (0.45) and the capture heard none of it, through three re-opens. So until
+    // somebody signs in, the service listens another way: Windows' per-program capture (the process-loopback API applications
+    // mode uses) of every program but RemSound - the audio engine reached program by program, not through the output's mix
+    // that an early loopback taps. The meter still judges it: if the boot ear is deaf too, the output's own capture takes
+    // over (the re-open ladder as before) for the rest of the boot. The moment somebody signs in, or five minutes after
+    // Windows started, the chosen output's capture comes back: it works from then on, and the boot ear hears every program,
+    // not only the chosen output. Windows 10 19041+ (the API); elsewhere boot is as it was. Whether it hears the tune is for
+    // the next boot's log to say ("first sound heard ... through the boot ear").
+    internal const long BootPhaseMs = 5 * 60_000;
+    private volatile bool bootEar;       // the capture is the boot ear right now
+    private volatile bool bootEarDeaf;   // it was deaf this boot: the output's own capture from then on
+    private bool loggedBootFacts;
+    /// <summary>Gate seams: how long ago Windows started, and whether somebody is signed in at the console.</summary>
+    internal Func<long>? UptimeForTest { get; set; }
+    internal Func<bool>? SignedInForTest { get; set; }
+    /// <summary>Gate seam: how many capture sources opened (the mixer's count otherwise).</summary>
+    internal Func<int?>? OpenSourcesForTest { get; set; }
+    private long UptimeMs => UptimeForTest?.Invoke() ?? Environment.TickCount64; // milliseconds since Windows started
+    private bool SomeoneSignedIn => SignedInForTest?.Invoke() ?? ConsoleSession.SomeoneSignedIn();
+
+    /// <summary>Pure: listen through the boot ear? Devices mode only (applications mode already captures per program), only
+    /// where the API exists, only in the first minutes after Windows started, only while nobody is signed in, and not once it
+    /// has been deaf this boot.</summary>
+    internal static bool WantBootEar(bool applicationsMode, bool processLoopbackSupported, long uptimeMs, bool someoneSignedIn, bool deafThisBoot) =>
+        !applicationsMode && processLoopbackSupported && uptimeMs < BootPhaseMs && !someoneSignedIn && !deafThisBoot;
+
+    internal static CaptureSourceSpec BootEarSpec() =>
+        new(ProcessLoopbackId.FormatExcluding(Environment.ProcessId), CaptureKind.ProcessLoopback, "every program but RemSound (boot)");
+
+    /// <summary>What this apply or re-open captures: the profile's sources, or the boot ear in their place. The profile's own
+    /// outputs are what the meters watch either way.</summary>
+    private List<CaptureSourceSpec> CaptureSpecs(Profile profile, List<CaptureSourceSpec> profileSpecs)
+    {
+        var ear = profileSpecs.Count > 0
+                  && WantBootEar(IsApplicationsMode(profile), ProcessLoopbackCapture.IsSupported, UptimeMs, SomeoneSignedIn, bootEarDeaf);
+        if (ear && !bootEar)
+            log?.Invoke($"service: nobody has signed in yet ({UptimeMs / 1000.0:0.0} s after Windows started) — listening through the "
+                + "boot ear (every program but RemSound), with the output's own meter as the judge");
+        bootEar = ear;
+        return ear ? [BootEarSpec()] : profileSpecs;
+    }
+
+    /// <summary>Back to the chosen output's capture: somebody signed in, or the boot minutes are over. A fresh capture, so a
+    /// fresh self-heal ladder.</summary>
+    private void LeaveBootEar(string why)
+    {
+        lock (gate)
+        {
+            if (!running || disposed || !bootEar) return;
+            var profile = loadProfile();
+            if (profile is null) return;
+            log?.Invoke($"service: {why} — back to capturing the chosen output");
+            everHeardAudio = false;
+            reopenAttempts = 0;
+            deafSinceTick = 0;
+            RebuildCaptureLocked(profile);
+        }
+    }
+
+    /// <summary>Test seams: what the last apply or re-open gave the sender, and whether that is the boot ear.</summary>
+    internal IReadOnlyList<CaptureSourceSpec> AppliedSpecsForTest { get; private set; } = [];
+    internal bool BootEarForTest => bootEar;
+
+    // ---- Sending at boot (2026-09-30) ----------------------------------------------------------------
+    // Ed's second 30 Sep restart: the service heard the output from 9.9 s after Windows started, but nothing reached the laptop
+    // until about 14.4 s. Every send failed for four seconds, and the log could not say why (the next restart showed it: no
+    // network address until the router's answer at 13.4 s). Now it says, only when sends are refused: the reason Windows
+    // gives and the network then; again if the reason changes; and when packets go out again.
+    private SocketError? sendFailingWith;   // null while sending works
+    private long sendFailedCount;
+    private long sendFailingSinceMs;
+    private long sentBefore = -1;
+    /// <summary>Gate seams: the sender's packets out so far and the sends refused since the last look, and the network.</summary>
+    internal Func<(long SentSoFar, long Failed, SocketError Why)>? SendCountsForTest { get; set; }
+    internal Func<string>? NetworkForTest { get; set; }
+    internal void WatchSendingForTest() => WatchSending();
+    private string Network() => NetworkForTest?.Invoke() ?? DescribeNetwork();
+
+    private void WatchSending()
+    {
+        long sentSoFar, failed;
+        SocketError why;
+        if (SendCountsForTest is { } fake) (sentSoFar, failed, why) = fake();
+        else { sentSoFar = sender.PacketsSent; (failed, why) = sender.TakeSendFailures(); }
+        var sent = sentBefore < 0 ? 0 : sentSoFar - sentBefore;
+        sentBefore = sentSoFar;
+        if (failed > 0)
+        {
+            if (sendFailingWith is null) { sendFailingSinceMs = UptimeMs; sendFailedCount = 0; }
+            sendFailedCount += failed;
+            if (sendFailingWith != why)
+            {
+                log?.Invoke($"service: sending FAILS {UptimeMs / 1000.0:0.0} s after Windows started — Windows says {why} ({(int)why}); "
+                    + $"this computer's network: {Network()}");
+                sendFailingWith = why;
+            }
+            return;
+        }
+        // Working again only once packets really go out: none refused could also be none sent.
+        if (sendFailingWith is null || sent == 0) return;
+        log?.Invoke($"service: sending works again {UptimeMs / 1000.0:0.0} s after Windows started, after {sendFailedCount} refused "
+            + $"over {(UptimeMs - sendFailingSinceMs) / 1000.0:0.0} s; this computer's network: {Network()}");
+        sendFailingWith = null;
+    }
+
+    /// <summary>This computer's network as Windows has it now: each connection that is up, and its IPv4 addresses with
+    /// whether each is usable yet (a new address is "tentative" while Windows checks nobody else has it).</summary>
+    internal static string DescribeNetwork()
+    {
+        try
+        {
+            var parts = new List<string>();
+            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (nic.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel) continue;
+                if (nic.OperationalStatus != OperationalStatus.Up) continue;
+                var v4 = nic.GetIPProperties().UnicastAddresses
+                    .Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork)
+                    .Select(a => $"{a.Address} ({a.DuplicateAddressDetectionState.ToString().ToLowerInvariant()})")
+                    .ToList();
+                parts.Add($"\"{nic.Name}\" up, " + (v4.Count == 0 ? "no IPv4 address yet" : string.Join(", ", v4)));
+            }
+            return parts.Count == 0 ? "no connection up" : string.Join("; ", parts);
+        }
+        catch (Exception ex) { return $"unreadable ({ex.GetType().Name})"; }
+    }
+
+    /// <summary>Every active output's own meter, as "name=level" - where the sound actually is when the capture hears none.</summary>
+    private static string EveryOutputMeter()
+    {
+        try
+        {
+            using var enumerator = new MMDeviceEnumerator();
+            var parts = new List<string>();
+            foreach (var dev in enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
+            {
+                using (dev)
+                {
+                    try { parts.Add($"{dev.FriendlyName}={dev.AudioMeterInformation.MasterPeakValue:F3}"); }
+                    catch { parts.Add($"{dev.FriendlyName}=?"); }
+                }
+            }
+            return parts.Count == 0 ? "no active outputs" : string.Join(", ", parts);
+        }
+        catch (Exception ex) { return $"unreadable ({ex.GetType().Name})"; }
+    }
+
     /// <summary>Pure decision core of the issue-#23 boot self-heal, split out so the self-test can pin
     /// it: re-open when the capture is provably deaf (the endpoint meter shows the device audibly
     /// playing while the capture has heard nothing since it opened) or its callbacks froze — but never
@@ -159,27 +313,43 @@ public sealed class ServiceSendHost : IDisposable
     internal static bool ShouldReopenCapture(bool captureDeaf, bool everHeardAudio, bool stalled, int attemptsSoFar) =>
         (stalled || (captureDeaf && !everHeardAudio)) && attemptsSoFar < MaxReopens;
 
+    // Gate seams for the self-heal, so the real ladder runs in a test without a real boot or real seconds: the watch's
+    // clock, the device meter, what the capture hears and its callback count (2026-09-28; it was tested as a truth table). The
+    // same clock times how long a server by name has been silent (FollowRelayIfMoved), so that wait passes without real seconds.
+    internal Func<long>? NowForTest { get; set; }
+    internal Func<float>? MeterForTest { get; set; }
+    internal Func<float>? CapturePeakForTest { get; set; }
+    internal Func<long>? CaptureCallbacksForTest { get; set; }
+    internal void WatchCaptureHealthForTest() => WatchCaptureHealth();
+    internal void AudioSessionStartedForTest(int pid) => OnAudioSessionCreated(pid);
+    internal bool WantSendingForTest { set => wantSending = value; }
+    private long Now => NowForTest?.Invoke() ?? Environment.TickCount64;
+
     private void WatchCaptureHealth()
     {
-        var now = Environment.TickCount64;
+        var now = Now;
 
         // What is the CAPTURE hearing? (Resets on read — this watch is the only reader; the pulse log
         // uses the accumulated maxima.) Callbacks alone can't distinguish real sound from our own
         // silence keepalive feeding back, which is why the peak matters.
-        var peak = sender.TakeMaxSenderPreEncodePeak();
+        var peak = CapturePeakForTest?.Invoke() ?? sender.TakeMaxSenderPreEncodePeak();
         if (peak > pulsePeakMax) pulsePeakMax = peak;
+        if (peak >= SilentPeak && !everHeardAudio)
+            log?.Invoke($"service: first sound heard {UptimeMs / 1000.0:0.0} s after Windows started (capture peak {peak:F3}), through "
+                + (bootEar ? "the boot ear (every program but RemSound)" : "the output's own capture"));
         // Real audio proves the capture works — refund the self-heal ladder so a LATER hiccup (hours or
         // days into an always-on stream) gets fresh re-open attempts instead of finding the budget spent.
         if (peak >= SilentPeak) { everHeardAudio = true; deafSinceTick = 0; reopenAttempts = 0; }
         pulseFramesSent += sender.TakeSenderAudioFramesSent();
 
         // What is the DEVICE playing? The endpoint's own meter, independent of our capture stream.
-        var meter = 0f;
-        foreach (var dev in meterDevices)
-        {
-            try { var v = dev.AudioMeterInformation.MasterPeakValue; if (v > meter) meter = v; }
-            catch { /* endpoint invalidated mid-read — the device watcher / next reopen re-resolves */ }
-        }
+        var meter = MeterForTest?.Invoke() ?? 0f;
+        if (MeterForTest is null)
+            foreach (var dev in meterDevices)
+            {
+                try { var v = dev.AudioMeterInformation.MasterPeakValue; if (v > meter) meter = v; }
+                catch { /* endpoint invalidated mid-read — the device watcher / next reopen re-resolves */ }
+            }
         if (meter > pulseMeterMax) pulseMeterMax = meter;
 
         // Deafness evidence: device audibly playing while the capture stays silent-since-open. Track
@@ -194,13 +364,41 @@ public sealed class ServiceSendHost : IDisposable
         }
 
         // Callback stall: frozen for 2s while sending = the stream is broken regardless of loudness.
-        var callbacks = sender.CaptureCallbacks;
+        var callbacks = CaptureCallbacksForTest?.Invoke() ?? sender.CaptureCallbacks;
         if (callbacks != lastCallbacks) { lastCallbacks = callbacks; lastCallbacksChangeTick = now; }
-        var stalled = now - lastCallbacksChangeTick > StallMsToReopen;
+        // Not on the boot ear: a per-program capture may deliver nothing while nothing plays, and a broken one shows as deaf
+        // (the meter hears the machine, the capture does not), which hands over to the output's own capture.
+        var stalled = !bootEar && now - lastCallbacksChangeTick > StallMsToReopen;
+
+        // The boot ear's minutes are over, or somebody signed in: the chosen output's capture works from here. And a boot ear
+        // Windows would not open at all hears nothing: the output's own capture at once, not at the first sound (the tune).
+        if (bootEar)
+        {
+            if ((OpenSourcesForTest?.Invoke() ?? sender.MixerSourceCount) == 0)
+            {
+                bootEarDeaf = true;
+                LeaveBootEar("the boot ear could not be opened (Windows refused the per-program capture)");
+                return;
+            }
+            var signedIn = SomeoneSignedIn;
+            if (signedIn || UptimeMs >= BootPhaseMs)
+            {
+                LeaveBootEar(signedIn ? "somebody signed in" : $"{BootPhaseMs / 60_000} minutes since Windows started");
+                return;
+            }
+        }
 
         var deaf = deafSinceTick != 0 && now - deafSinceTick >= DeafMsToReopen;
         if (ShouldReopenCapture(deaf, everHeardAudio, stalled, reopenAttempts))
         {
+            if (deaf && !stalled && MeterForTest is null) log?.Invoke($"service: every output's meter now: {EveryOutputMeter()}");
+            if (deaf && !stalled && bootEar)
+            {
+                // The boot ear heard nothing either: the output's own capture for the rest of this boot.
+                bootEarDeaf = true;
+                ReopenCapture($"the boot ear is DEAF too — endpoint meter reads {meter:F3} (audible) but every program but RemSound gave nothing");
+                return;
+            }
             ReopenCapture(stalled
                 ? "capture STALLED — callbacks frozen"
                 : $"capture is DEAF — endpoint meter reads {meter:F3} (audible) but the capture has heard nothing since it opened");
@@ -211,7 +409,11 @@ public sealed class ServiceSendHost : IDisposable
         if (now - lastCapturePulseTick >= CapturePulseIntervalMs)
         {
             lastCapturePulseTick = now;
-            log?.Invoke($"service: capture pulse — callbacks={callbacks} bytes={sender.CaptureBytes} capPeak={pulsePeakMax:F3} meterPeak={pulseMeterMax:F3} framesSent={pulseFramesSent}"
+            // maxSendGapMs: the longest wait between two packets leaving in these 15 s - what a listener's buffer has to ride
+            // out. WASAPI loopback leaves in 10 ms blocks, so about 10 is healthy; much more is the service stalling (2026-09-28,
+            // Ed: "the service crackles quite a lot").
+            log?.Invoke($"service: capture pulse — callbacks={callbacks} bytes={sender.CaptureBytes} capPeak={pulsePeakMax:F3} meterPeak={pulseMeterMax:F3} framesSent={pulseFramesSent} maxSendGapMs={sender.TakeMaxEmitGapMsWasapiLane()}"
+                + (bootEar ? " ear=boot" : "")
                 + (pulsePeakMax < SilentPeak && pulseMeterMax >= AudiblePeak ? " (DEVICE AUDIBLE BUT CAPTURE SILENT)" : "")
                 + (pulsePeakMax < SilentPeak && pulseMeterMax < AudiblePeak ? " (machine quiet — both sides silent)" : ""));
             pulsePeakMax = 0f;
@@ -356,7 +558,7 @@ public sealed class ServiceSendHost : IDisposable
         lock (gate)
         {
             if (!running || disposed) return;
-            var now = Environment.TickCount64;
+            var now = Now;
             if (reopenAttempts >= MaxReopens || now - lastReopenTick < ReopenSpacingMs) return;
             reopenAttempts++;
             lastReopenTick = now;
@@ -377,7 +579,8 @@ public sealed class ServiceSendHost : IDisposable
         try
         {
             sender.Stop();
-            var specs = BuildSendSpecs(profile); // re-resolve (the default device may have moved)
+            var profileSpecs = BuildSendSpecs(profile); // re-resolve (the default device may have moved)
+            var specs = CaptureSpecs(profile, profileSpecs);
             var appsMode = IsApplicationsMode(profile);
             appliedAppSignature = appsMode ? AppCaptureSignature(specs) : null;
             if (specs.Count == 0)
@@ -398,8 +601,9 @@ public sealed class ServiceSendHost : IDisposable
                 return;
             }
             sender.Configure(specs);
+            AppliedSpecsForTest = specs;
             sender.Start();
-            SwapMeterDevices(specs);
+            SwapMeterDevices(profileSpecs);
             captureWatchStartTick = Environment.TickCount64;
             loggedFirstCallback = false;
             loggedZeroCallbacks = false;
@@ -427,15 +631,29 @@ public sealed class ServiceSendHost : IDisposable
     internal bool IsNetworkPresenceUpForTest => presence.IsUp;
     internal bool IsNetworkListenerBoundForTest => presence.ListenerBound;
 
+    /// <summary>Test seam: the network presence itself, so a test can ask it what it knows (its relay group, its peers'
+    /// health) while the real host runs it. Read only; nothing here is changed through it.</summary>
+    internal ServiceNetworkPresence PresenceForTest => presence;
+
+    /// <summary>Gate seam: called once at the end of every turn of the service loop. A test waits on turns rather than on
+    /// time to know the loop has looked again. Null in the service, and then never called.</summary>
+    internal Action? LoopTurnedForTest { get; set; }
+
     /// <summary>Gate seam: the port the network presence binds instead of the well-known one. A gate run must never take
     /// 47830 - with RemSound open the bind failed silently and the step still passed; with it closed, the test's
     /// service sat on the real port.</summary>
     internal static int PresencePortForTest;
 
+    /// <summary>Test seams: push to talk is not part of the service (Ed, 2026-09-28) - its sender's gate stays off and
+    /// open, whatever the profile says.</summary>
+    internal bool PushToTalkEnabledForTest => sender.PushToTalk.Enabled;
+    internal bool PushToTalkOpenForTest => sender.PushToTalk.IsOpen;
+
     /// <summary>Test seam: the crypto material the host pushed to the sender + the codec/frame it set, so
     /// a self-test can prove the service configures the sender exactly like the main app.</summary>
-    internal (byte[]? Key, byte[]? Fingerprint, AudioTransportCodec Codec, int Frame) SenderConfigForTest =>
-        (sender.AudioKey, sender.AudioFingerprint, sender.Codec, sender.OpusFrameSamplesPerChannel);
+    internal (byte[]? Key, byte[]? Fingerprint, AudioTransportCodec Codec, int Frame, int PcmFrame, bool TightLatency) SenderConfigForTest =>
+        (sender.AudioKey, sender.AudioFingerprint, sender.Codec, sender.OpusFrameSamplesPerChannel, sender.PcmFrameSamplesPerChannel,
+         sender.IsTightLatencyEnabled);
 
     /// <summary>Builds the send sources, peer endpoints and encryption key from a profile and starts the
     /// sender. Idempotent-ish: call <see cref="Suspend"/> before re-applying a different profile. Returns
@@ -447,7 +665,15 @@ public sealed class ServiceSendHost : IDisposable
         // network/audio stack is fully up. Doing that while holding `gate` would stall Suspend() (yielding
         // to the interactive app), the RunLoop tick and the self-heal for the whole timeout.
         if (disposed) return false;
-        var specs = BuildSendSpecs(profile);
+        var profileSpecs = BuildSendSpecs(profile);
+        if (!loggedBootFacts)
+        {
+            loggedBootFacts = true;
+            var signIn = SignedInForTest is null ? ConsoleSession.Describe() : SomeoneSignedIn ? "yes" : "no";
+            log?.Invoke($"service: Windows started {UptimeMs / 1000.0:0.0} s ago; somebody signed in: {signIn}; "
+                + $"per-program capture (the boot ear): {(ProcessLoopbackCapture.IsSupported ? "available" : "not on this Windows")}");
+        }
+        var specs = CaptureSpecs(profile, profileSpecs);
         var unresolved = new List<string>();
         var endpoints = BuildEndpoints(profile, unresolved);
         // The relay the profile is connected to, and the people ticked there. One copy goes up to the relay and the relay
@@ -501,6 +727,7 @@ public sealed class ServiceSendHost : IDisposable
             armedSignature = null;
             sender.SetReceivers(endpoints);
             sender.Configure(specs);
+            AppliedSpecsForTest = specs;
             // A device-open failure at Start must NOT throw out of the service loop. With lock-to-clock
             // always on, the WASAPI lane uses push-mode, which opens the endpoint synchronously and throws
             // (e.g. ArgumentException) if the device id is invalid or the device has vanished. Swallow it:
@@ -508,19 +735,19 @@ public sealed class ServiceSendHost : IDisposable
             // good device appears. Without this guard a disappeared device would crash the whole service.
             try { sender.Start(); }
             catch (Exception ex) { log?.Invoke($"service: capture start failed ({ex.GetType().Name}: {ex.Message}) — presence up; will re-open when a device is available"); }
-            SwapMeterDevices(specs); // endpoint-meter readers for the deaf-capture detector
+            SwapMeterDevices(profileSpecs); // endpoint-meter readers for the deaf-capture detector: the chosen outputs, whatever the ear
             // Instant self-heal trigger: session-created notification on the default render device.
             // Recreated per apply so it re-points at the current default after a device change.
             try { sessionKick?.Dispose(); } catch { /* ignore */ }
             sessionKick = new AudioSessionStartWatcher(OnAudioSessionCreated, msg => log?.Invoke($"service: {msg}"));
-            captureWatchStartTick = Environment.TickCount64;
+            captureWatchStartTick = Now;
             loggedFirstCallback = false;
             loggedZeroCallbacks = false;
-            lastCapturePulseTick = Environment.TickCount64; // first pulse lands one interval after start
+            lastCapturePulseTick = Now; // first pulse lands one interval after start
             // Fresh capture instance — restart the per-capture watch state so a new stream isn't
             // misread as stalled or deaf on its very first ticks.
             lastCallbacks = -1;
-            lastCallbacksChangeTick = Environment.TickCount64;
+            lastCallbacksChangeTick = Now;
             deafSinceTick = 0;
             pulsePeakMax = 0f;
             pulseMeterMax = 0f;
@@ -635,19 +862,25 @@ public sealed class ServiceSendHost : IDisposable
         catch (Exception ex) { log?.Invoke($"service: device-change watcher unavailable ({ex.GetType().Name}) — relying on app-transition re-opens"); }
 
         // Windows says when the network changes (an address comes or goes, the network becomes available): the cue to look
-        // up again any name that failed, rather than waiting for the next NameRetryInterval.
+        // up again any name that failed, rather than waiting for the next NameRetryInterval. Only after the first start: at
+        // boot every moment before the capture opens is startup sound lost (Ed's 30 Sep restart). A change in the moment
+        // between is caught by the regular retry.
         NetworkAddressChangedEventHandler onAddressChanged = (_, _) => OnNetworkChanged();
         NetworkAvailabilityChangedEventHandler onAvailabilityChanged = (_, e) => { if (e.IsAvailable) OnNetworkChanged(); };
-        try
+        void WatchTheNetwork()
         {
-            NetworkChange.NetworkAddressChanged += onAddressChanged;
-            NetworkChange.NetworkAvailabilityChanged += onAvailabilityChanged;
+            try
+            {
+                NetworkChange.NetworkAddressChanged += onAddressChanged;
+                NetworkChange.NetworkAvailabilityChanged += onAvailabilityChanged;
+                (AddressChangedHandlerForTest, AvailabilityChangedHandlerForTest) = (onAddressChanged, onAvailabilityChanged);
+            }
+            catch (Exception ex)
+            {
+                log?.Invoke($"service: network-change watcher unavailable ({ex.GetType().Name}) — names that fail are still looked up again every {NameRetryInterval.TotalSeconds:0} s");
+            }
         }
-        catch (Exception ex)
-        {
-            log?.Invoke($"service: network-change watcher unavailable ({ex.GetType().Name}) — names that fail are still looked up again every {NameRetryInterval.TotalSeconds:0} s");
-        }
-        try { RunLoopTicks(ct, isAppPresent, pollMs, resumeSettleMs); }
+        try { RunLoopTicks(ct, isAppPresent, pollMs, resumeSettleMs, WatchTheNetwork); }
         finally
         {
             try
@@ -656,10 +889,11 @@ public sealed class ServiceSendHost : IDisposable
                 NetworkChange.NetworkAvailabilityChanged -= onAvailabilityChanged;
             }
             catch { /* never subscribed */ }
+            (AddressChangedHandlerForTest, AvailabilityChangedHandlerForTest) = (null, null);
         }
     }
 
-    private void RunLoopTicks(CancellationToken ct, Func<bool> isAppPresent, int pollMs, int resumeSettleMs)
+    private void RunLoopTicks(CancellationToken ct, Func<bool> isAppPresent, int pollMs, int resumeSettleMs, Action? afterFirstStart = null)
     {
         var appWasPresent = true; // force an initial evaluation
         var absentSince = Environment.TickCount64;
@@ -692,6 +926,8 @@ public sealed class ServiceSendHost : IDisposable
                     if (!triedThisAbsence && !IsSending) { Resume(); triedThisAbsence = true; }
                 }
             }
+            afterFirstStart?.Invoke(); // the capture is open (or an app has it): the rest of the setup can wait until now
+            afterFirstStart = null;
             // While streaming, re-arm to only the reachable peers (drop dead ones, pick up recovered ones)
             // and watch capture health (issue #23: open-but-starved loopback). Piggybacks this existing
             // tick — no extra timer, no background pile-up.
@@ -699,12 +935,14 @@ public sealed class ServiceSendHost : IDisposable
             {
                 RefreshSendArming();
                 WatchCaptureHealth();
+                WatchSending();
             }
             // A name that did not look up is tried again, whether or not the service is sending to anybody else yet.
             if (wantSending && unresolvedNames.Length > 0) RetryUnresolvedNames();
             // A server by name that has gone quiet may have moved.
             if (wantSending && relayName is not null) FollowRelayIfMoved();
             appWasPresent = appPresent;
+            LoopTurnedForTest?.Invoke();
             ct.WaitHandle.WaitOne(pollMs);
         }
         wantSending = false;
@@ -880,7 +1118,9 @@ public sealed class ServiceSendHost : IDisposable
             ApplyProfile(profile);
             return;
         }
-        var now = Environment.TickCount64;
+        // The watch's clock (Environment.TickCount64 unless a test stands in for it), so a test can let RelayMovedAfter pass
+        // without sitting through it.
+        var now = Now;
         if (presence.RelayAnswering) Interlocked.Exchange(ref relaySilentSinceTick, 0);
         else if (Interlocked.Read(ref relaySilentSinceTick) == 0) Interlocked.Exchange(ref relaySilentSinceTick, now);
         var silentSince = Interlocked.Read(ref relaySilentSinceTick);
@@ -911,6 +1151,11 @@ public sealed class ServiceSendHost : IDisposable
     }
 
     internal void NetworkChangedForTest() => OnNetworkChanged();
+
+    /// <summary>Gate seam: the very handlers the running loop gave Windows' network-change events, so a test can raise
+    /// them as Windows would. Null while no loop runs.</summary>
+    internal NetworkAddressChangedEventHandler? AddressChangedHandlerForTest { get; private set; }
+    internal NetworkAvailabilityChangedEventHandler? AvailabilityChangedHandlerForTest { get; private set; }
     internal IReadOnlyList<string> UnresolvedNamesForTest => unresolvedNames;
     internal IPEndPoint? RelayAtForTest => relayAt;
 

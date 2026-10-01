@@ -16,6 +16,26 @@ internal static class Program
     private static bool HasArg(string[] args, string flag) =>
         Array.Exists(args, a => string.Equals(a, flag, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>The word after <paramref name="flag"/>, when there is one.</summary>
+    private static string? ArgAfter(string[] args, string flag)
+    {
+        var i = Array.FindIndex(args, a => string.Equals(a, flag, StringComparison.OrdinalIgnoreCase));
+        return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
+    }
+
+    /// <summary>The display scaling a layout check's own self-test process emulates (--selftest --layout-scale 1.5), or 1.
+    /// Read here rather than in SelfTest so a normal start never touches the self-test's code. See SelfTest.Layout.cs.</summary>
+    private static float LayoutScaleFromArgs(string[] args) =>
+        HasArg(args, "--selftest")
+        && float.TryParse(ArgAfter(args, "--layout-scale"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var k)
+        && k is >= 1f and <= 3f ? k : 1f;
+
+    /// <summary>The colour theme a layout check's own self-test process checks (--selftest --layout-theme dark), or null.</summary>
+    private static string? LayoutThemeFromArgs(string[] args) =>
+        HasArg(args, "--selftest") && ArgAfter(args, "--layout-theme")?.Trim().ToLowerInvariant() is "light" or "dark"
+            ? ArgAfter(args, "--layout-theme")!.Trim().ToLowerInvariant()
+            : null;
+
     /// <summary>True when any Windows-service verb is present. Uses only the inlined const verb strings, so
     /// it references no service type and loads no service assembly — see the dispatch call in <see cref="Main"/>
     /// for why that matters on older Windows. When this is false (every normal launch) the service code is
@@ -72,6 +92,38 @@ internal static class Program
         }
     }
 
+    /// <summary>
+    /// What <c>--silent</c> and <c>--headless</c> switch off. Returns whether this is a headless run. The gate's step
+    /// SILENT checks it.
+    ///
+    /// <para><c>--silent</c>: no cue sounds at all (startup, connect, checkbox, tab-switch, ...), no front-most "missing
+    /// sound file" warning, and no speech. The automated test harness passes it so its throwaway launches stay completely
+    /// quiet. Speech is a noise like any other: the gate's cold start is a --silent launch, and it went on speaking
+    /// through the screen reader - "Connected to ...", "Password changed ..." - while its sounds were off (Ed, 2026-09-27:
+    /// the gate "should be silent and invisible").</para>
+    ///
+    /// <para><c>--headless</c>: the whole app with no window, no sound and no speech, driven through the control channel
+    /// (Windowless, RemoteControl). Ed, 2026-09-24: "a way of driving remsound entirely without a window".</para>
+    /// </summary>
+    internal static bool ApplyQuietFlags(string[] args)
+    {
+        if (Array.Exists(args, a => string.Equals(a, "--silent", StringComparison.OrdinalIgnoreCase)))
+        {
+            CuePlayer.GloballyMuted = true;
+            Windowless.SilentLaunch = true;
+            ScreenReader.Suppressed = true;
+        }
+        var headlessRun = Array.Exists(args, a => string.Equals(a, "--headless", StringComparison.OrdinalIgnoreCase));
+        if (headlessRun)
+        {
+            CuePlayer.GloballyMuted = true;
+            ScreenReader.Suppressed = true;
+        }
+        return headlessRun;
+    }
+
+    // STA, right on Main: Windows' file and folder pickers, the clipboard and drag-and-drop need it. A method put between
+    // this attribute and Main took it (2026-09-27) and every picker then hung - the step START-UP checks it.
     [STAThread]
     private static void Main(string[] args)
     {
@@ -142,26 +194,16 @@ internal static class Program
             AppConfig.SetMachineIdentityOverride(Path.Combine(configDir, "machine"));
         }
 
-        // --silent: make this launch play no cue sounds at all (startup, connect, checkbox,
-        // tab-switch, ...) and skip the front-most "missing sound file" warning. The automated test
-        // harness passes it so its throwaway launches stay completely quiet instead of chiming a
-        // startup cue (or popping a dialog) onto whoever happens to be at the screen. Set up front,
-        // before consolidation or the startup cue can fire.
-        if (Array.Exists(args, a => string.Equals(a, "--silent", StringComparison.OrdinalIgnoreCase)))
+        // A copy the gate starts keeps off the real ports and leaves the lock-screen service alone (GateIsolation).
+        var gatePorts = GateIsolation.Read(Environment.GetEnvironmentVariable(GateIsolation.Variable));
+        if (gatePorts is { } gp)
         {
-            CuePlayer.GloballyMuted = true;
-            Windowless.SilentLaunch = true;
+            MainForm.LocalAudioPortForTest = gp.Audio;
+            MainForm.PluginLinkPortForTest = gp.PluginLink;
         }
 
-        // --headless: the whole app with no window, no sound and no speech, driven through the control channel
-        // (Windowless, RemoteControl). Ed, 2026-09-24: "a way of driving remsound entirely without a window". The
-        // sounds and the screen reader are switched off here, before anything can make either.
-        var headlessRun = Array.Exists(args, a => string.Equals(a, "--headless", StringComparison.OrdinalIgnoreCase));
-        if (headlessRun)
-        {
-            CuePlayer.GloballyMuted = true;
-            ScreenReader.Suppressed = true;
-        }
+        // --silent and --headless: set up front, before consolidation, the startup cue or any speech can happen.
+        var headlessRun = ApplyQuietFlags(args);
 
         // SustainedLowLatency tells the GC to avoid full (gen 2) collections while audio is streaming.
         // Gen 0/1 collections still happen but are sub-millisecond; the long pauses that were causing
@@ -171,6 +213,16 @@ internal static class Program
         GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
 
         ApplicationConfiguration.Initialize();
+
+        // The layout checks' own self-test processes only (SelfTest.Layout.cs, --selftest with --layout-scale): a display at
+        // 150 % or 200 % emulated on this one - the app font at 13.5 or 18 pt, and every size set in code grown to match.
+        // Before the first window, as SetDefaultFont requires. Never reached by a normal launch.
+        var layoutScale = LayoutScaleFromArgs(args);
+        if (layoutScale != 1f)
+        {
+            Application.SetDefaultFont(new Font("Segoe UI", 9f * layoutScale));
+            Dpi.EmulatedScaleForTest = layoutScale;
+        }
 
         // Before the first window of any kind: from here every window this thread makes is kept out of sight and focus.
         if (headlessRun) Windowless.Start();
@@ -187,7 +239,8 @@ internal static class Program
         // rather than stopping RemSound launching. Colours only — no effect on the screen reader.
         try
         {
-            var mode = (AppConfig.Load().ThemeMode ?? "system").Trim().ToLowerInvariant();
+            // A layout check's own process may be told which theme to check (--selftest --layout-theme dark).
+            var mode = (LayoutThemeFromArgs(args) ?? AppConfig.Load().ThemeMode ?? "system").Trim().ToLowerInvariant();
 #pragma warning disable WFO5001
             Application.SetColorMode(mode switch
             {
@@ -330,7 +383,8 @@ internal static class Program
         // interactive RemSound is open. Windows releases the token automatically when this process
         // exits or crashes, so the service resumes on its own. Best-effort: null if it couldn't be
         // taken, in which case we simply run without announcing our presence.
-        using var presenceHold = InteractivePresence.AcquireHold();
+        // Not by a copy the gate started: that one leaves the service sending (GateIsolation).
+        using var presenceHold = gatePorts is null ? InteractivePresence.AcquireHold() : null;
 
         // Best-effort: clear leftover update temp stages.
         // We hold the single-instance lock here, so only the live copy does this — no sibling race.
@@ -501,6 +555,7 @@ internal static class Program
                 // copy choosing "switch to the running copy" signals us to surface this form).
                 activeMainForm = form;
                 if (retiredScripts is not null) { RemSoundLog.Current?.Event("startup: " + retiredScripts); retiredScripts = null; }
+                if (gatePorts is { } isolated) RemSoundLog.Current?.Event(GateIsolation.Describe(isolated));
                 if (headlessRun)
                     RemSoundLog.Current?.Event($"headless: running with no window, sound or speech; driven through the control channel "
                         + @"\\.\pipe\" + RemoteControl.DefaultPipeName + " (RemSound --control help)");
@@ -513,8 +568,8 @@ internal static class Program
                 var nextTitle = form.NextProfileTitleToLoad;
                 if (form.LoadBlankTemplateNext)
                 {
-                    // File → New profile: rebuild on a fresh blank template, no saved profile.
-                    profile = Profile.NewBlank();
+                    // File → New profile: rebuild on a fresh blank template, no saved profile - logs off (2026-09-29).
+                    profile = Profile.NewForUser();
                     title = null;
                     nextPath = null;
                 }

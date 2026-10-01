@@ -43,7 +43,7 @@ internal sealed class LaneActivity
     /// <summary>This lane was just read. Called at the top of every per-route render read; a couple of
     /// nanoseconds on the audio thread and no lock.</summary>
     public void Note(RenderRoute route)
-        => Volatile.Write(ref lastReadTicks[(int)route & 7], Stopwatch.GetTimestamp());
+        => Volatile.Write(ref lastReadTicks[(int)route & 7], AudioClock.GetTimestamp());
 
     /// <summary>Is this lane still taking audio? True if it has been read within the stall window, or
     /// if it has never been read at all — see the class note on not killing a lane before it starts.</summary>
@@ -51,7 +51,9 @@ internal sealed class LaneActivity
     {
         var stamp = Volatile.Read(ref lastReadTicks[(int)route & 7]);
         if (stamp == 0) return true;   // never read yet — give it its chance
-        return Stopwatch.GetTimestamp() - stamp <= stallTicks;
+        // The audio clock (the Stopwatch, except inside the simulator): which lane plays a stream's copies changes what is
+        // heard, so a simulated output that stops being read must be noticed after three simulated seconds (2026-09-28).
+        return AudioClock.GetTimestamp() - stamp <= stallTicks;
     }
 
     /// <summary>Forget this lane's history, so it is treated as never-read and gets a clean chance
@@ -62,5 +64,5 @@ internal sealed class LaneActivity
     /// to the assembly only so the gate can drive a stall without sleeping for the real window.</summary>
     internal void RewindForTest(RenderRoute route, double seconds)
         => Volatile.Write(ref lastReadTicks[(int)route & 7],
-            Stopwatch.GetTimestamp() - (long)(seconds * Stopwatch.Frequency));
+            AudioClock.GetTimestamp() - (long)(seconds * Stopwatch.Frequency));
 }

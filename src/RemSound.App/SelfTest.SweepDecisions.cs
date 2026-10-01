@@ -89,7 +89,13 @@ internal static partial class SelfTest
                 DriveWhilePumping(main, () =>
                 {
                     main.BeginInvoke(main.OfferServiceFolderRepairForTest);
-                    if (WaitFor(() => main.Invoke(() => Application.OpenForms.OfType<HeadlessQuestionForm>().Any()), TimeSpan.FromSeconds(3)))
+                    // A marker queued after the offer: once it has run, a question the offer was going to ask is open (2026-09-28:
+                    // "told once" waited out a full 3 s for a question that must not come).
+                    var ran = false;
+                    main.BeginInvoke(() => ran = true);
+                    WaitFor(() => Volatile.Read(ref ran) || main.Invoke(() => Application.OpenForms.OfType<HeadlessQuestionForm>().Any()), TimeSpan.FromSeconds(3));
+                    if (main.Invoke(() => Application.OpenForms.OfType<HeadlessQuestionForm>().Any())
+                        || WaitFor(() => main.Invoke(() => Application.OpenForms.OfType<HeadlessQuestionForm>().Any()), TimeSpan.FromMilliseconds(100)))
                     {
                         main.Invoke(() =>
                         {
@@ -167,6 +173,10 @@ internal static partial class SelfTest
             Check(atStart >= 1 && form.AsioSendDevicesListForTest.Items.Count == 0, $"premise: the interface is off, so its list is empty ({atStart} probes, {form.AsioSendDevicesListForTest.Items.Count} items)");
             form.RefreshAudioDeviceListsForTest();
             Check(probes == atStart, "a refresh with nothing changed must not try the driver again - it is never tried on a timer");
+            // Said, not left silent (2026-09-29, the live test): the empty lists name the driver, the likely cause and the way back.
+            Check(form.AsioSendEmptyTextForTest.Contains("Self-test interface that starts switched off could not be read", StringComparison.Ordinal)
+                  && form.AsioSendEmptyTextForTest.Contains("choose (none) under ASIO driver", StringComparison.Ordinal),
+                $"an ASIO driver that cannot be read must say so under its empty list, and how to try again (it says \"{form.AsioSendEmptyTextForTest}\")");
 
             // Switched on: Windows says a device came.
             readable = true;
@@ -176,6 +186,8 @@ internal static partial class SelfTest
                 "THE EMPTY LIST: a device arriving must try a driver that could not be read once more - its lists stayed empty all session");
             Check(form.AsioSendDevicesListForTest.CheckedItems.Count == 1,
                 "THE LOST TICK: once the interface can be read, the channels the profile ticked must be ticked again");
+            Check(!form.AsioSendEmptyTextForTest.Contains("could not be read", StringComparison.Ordinal),
+                "and once it can be read, the words about it go");
             now += MainForm.FailedProbeRetryInterval + TimeSpan.FromSeconds(1);   // well past the wait: only "it works" can stop a probe
             var working = probes;
             form.DeviceChangedForTest();

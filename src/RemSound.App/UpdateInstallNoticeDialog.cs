@@ -63,7 +63,7 @@ internal sealed class UpdateInstallNoticeDialog : Form
         MaximizeBox = false;
         ShowInTaskbar = false;
         KeyPreview = true;
-        ClientSize = new Size(500, 220);
+        ClientSize = Dpi.Px(500, 220);
         AccessibleName = "Installing RemSound update";
 
         headingLabel = new Label
@@ -71,8 +71,9 @@ internal sealed class UpdateInstallNoticeDialog : Form
             Text = $"RemSound {info.Tag} is ready to install.",
             AccessibleName = $"RemSound {info.Tag} is ready to install",
             AutoSize = true,
-            Font = new Font(Font, FontStyle.Bold),
-            Padding = new Padding(0, 0, 0, 8),
+            // The house heading: Semibold at the type ramp's subtitle size, not a doubled bold (UI audit, finding 13).
+            Font = Theme.HeadingFont(),
+            Padding = Dpi.Pad(0, 0, 0, 8),
         };
 
         // Body — explains what's about to happen so the user isn't surprised by the exit.
@@ -83,17 +84,17 @@ internal sealed class UpdateInstallNoticeDialog : Form
             Text = "RemSound will install the update and restart automatically. Your session will pick up again once the new version is running.",
             AccessibleName = "RemSound will install the update and restart automatically. Your session will pick up again once the new version is running.",
             AutoSize = false,
-            Width = 460,
-            Height = 50,
-            Padding = new Padding(0, 0, 0, 8),
+            Width = Dpi.Px(460),
+            Height = Dpi.Px(50),
+            Padding = Dpi.Pad(0, 0, 0, 8),
         };
 
         countdownLabel = new Label
         {
-            Text = FormatCountdownText(secondsRemaining),
-            AccessibleName = FormatCountdownText(secondsRemaining),
+            Text = CountdownShown(secondsRemaining),
+            AccessibleName = CountdownSpoken(secondsRemaining),
             AutoSize = true,
-            Padding = new Padding(0, 0, 0, 8),
+            Padding = Dpi.Pad(0, 0, 0, 8),
         };
 
         installNowButton = new Button
@@ -130,7 +131,7 @@ internal sealed class UpdateInstallNoticeDialog : Form
         var body = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(16, 14, 16, 12),
+            Padding = Dpi.Pad(16, 14, 16, 12),
             ColumnCount = 1,
             RowCount = 4,
         };
@@ -148,12 +149,13 @@ internal sealed class UpdateInstallNoticeDialog : Form
             Dock = DockStyle.Bottom,
             FlowDirection = FlowDirection.RightToLeft,
             AutoSize = true,
-            Padding = new Padding(0, 0, 16, 12),
+            Padding = Dpi.Pad(0, 0, 16, 12),
         };
-        // RightToLeft fills back to front, so add the rightmost button (Install now) first.
-        buttonRow.Controls.Add(installNowButton);
+        // Install now first and Postpone last, as Windows orders a dialog's buttons (Ed, 2026-09-28) - the order Tab already
+        // took. RightToLeft fills back to front, so the rightmost (Postpone) goes in first.
         buttonRow.Controls.Add(postponeButton);
         buttonRow.Controls.Add(skipButton);
+        buttonRow.Controls.Add(installNowButton);
 
         Controls.Add(body);
         Controls.Add(buttonRow);
@@ -193,8 +195,8 @@ internal sealed class UpdateInstallNoticeDialog : Form
                 Close();
                 return;
             }
-            countdownLabel.Text = FormatCountdownText(secondsRemaining);
-            countdownLabel.AccessibleName = countdownLabel.Text;
+            countdownLabel.Text = CountdownShown(secondsRemaining);
+            countdownLabel.AccessibleName = CountdownSpoken(secondsRemaining);
         };
 
         // Start the countdown when the dialog appears, not when it's constructed —
@@ -211,10 +213,11 @@ internal sealed class UpdateInstallNoticeDialog : Form
         FormClosed += (_, _) => countdownTimer.Stop();
     }
 
-    private static string FormatCountdownText(int seconds)
-    {
-        return seconds == 1
-            ? "Installing in 1 second... Press Skip or Postpone to choose otherwise."
-            : $"Installing in {seconds} seconds... Press Skip or Postpone to choose otherwise.";
-    }
+    /// <summary>The countdown as it is shown. The buttons are on screen beside it, so it no longer says to press them
+    /// (Ed, 2026-09-28: sentences a sighted person does not need come off the screen).</summary>
+    internal static string CountdownShown(int seconds) =>
+        seconds == 1 ? "Installing in 1 second..." : $"Installing in {seconds} seconds...";
+
+    /// <summary>The countdown as a screen reader reads it, word for word as it always has.</summary>
+    internal static string CountdownSpoken(int seconds) => CountdownShown(seconds) + " Press Skip or Postpone to choose otherwise.";
 }

@@ -35,6 +35,13 @@ public sealed record AudioFormatInfo(
     /// falls back to its own estimate. See RemPacket.FormatPayloadWithCaptureSize. 2026-08-24.</summary>
     double CaptureLatencyMs = 0)
 {
+    /// <summary>Format payload byte 33 (2026-09-26): <see cref="LabFlagCanDecodeCustomOpus"/> while the sending copy can take
+    /// Jamulus-style frames (<see cref="JamulusStyle.CanTakeIt"/>), else zero. Named for the latency lab it came from.</summary>
+    public byte LabFlags { get; init; }
+
+    /// <summary>"This copy of RemSound can decode Jamulus-style (custom-mode) Opus" - set only while its switch is on.</summary>
+    public const byte LabFlagCanDecodeCustomOpus = 1;
+
     /// <summary>Human-friendly frame duration in milliseconds, derived from
     /// <see cref="FrameSamplesPerChannel"/> and <see cref="SampleRate"/>. May be a fraction
     /// (2.5 ms at 48 kHz / 120 samples). For string formatting only — the encoder/decoder
@@ -92,12 +99,27 @@ public sealed record AudioFormatInfo(
             reason = $"frame size {FrameSamplesPerChannel} samples (must be 1-{MaxFrameSamplesPerChannel})";
             return false;
         }
-        // Codec: only the two we can decode. An unknown value already produced no audio — it just
+        // Codec: only the ones we can decode. An unknown value already produced no audio — it just
         // did so after opening a session and then dropping every packet.
-        if (Codec is not ((int)AudioTransportCodec.Pcm or (int)AudioTransportCodec.Opus))
+        if (Codec is not ((int)AudioTransportCodec.Pcm or (int)AudioTransportCodec.Opus or (int)AudioTransportCodec.OpusCustom))
         {
             reason = $"unknown codec {Codec}";
             return false;
+        }
+        // Jamulus-style custom-mode Opus: 48 kHz, the three frame sizes our build makes, and only if the library that
+        // decodes it is here.
+        if (Codec == (int)AudioTransportCodec.OpusCustom)
+        {
+            if (SampleRate != 48000 || !OpusCustomNative.IsSupportedFrameSize(FrameSamplesPerChannel) || Channels is < 1 or > 2)
+            {
+                reason = $"Jamulus-style Opus at {SampleRate} Hz, {FrameSamplesPerChannel} samples, {Channels} channels (needs 48000 Hz, 64/128/256 samples)";
+                return false;
+            }
+            if (!OpusCustomNative.TryLoad())
+            {
+                reason = $"Jamulus-style Opus, but {OpusCustomNative.LoadMessage}";
+                return false;
+            }
         }
         // Opus is stricter than the general case: libopus accepts only these rates and its decoder
         // constructor throws on anything else. Fail here rather than in a constructor.
@@ -121,6 +143,7 @@ public sealed record AudioFormatInfo(
         var codecName = (AudioTransportCodec)Codec switch
         {
             AudioTransportCodec.Opus => $" over Opus ({FrameDurationMs:0.##} ms)",
+            AudioTransportCodec.OpusCustom => $" over Jamulus-style Opus ({FrameDurationMs:0.##} ms)",
             _ => ""
         };
         var laneName = Lane == RenderRoute.Mixed ? "" : $" [{Lane}]";

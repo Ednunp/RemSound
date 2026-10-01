@@ -44,7 +44,7 @@ internal sealed class RecordingSettingsDialog : Form
     {
         Text = "Recording &source (Alt+S):",
         AutoSize = true,
-        Padding = new Padding(0, 0, 0, 4),
+        Padding = Dpi.Pad(0, 0, 0, 4),
     };
 
     private readonly ListBox sourceList = new()
@@ -52,14 +52,14 @@ internal sealed class RecordingSettingsDialog : Form
         AccessibleName = "Recording source",
         SelectionMode = SelectionMode.One,
         IntegralHeight = false,
-        Height = 120,
+        Height = Dpi.Px(120),
     };
 
     private readonly Label formatLabel = new()
     {
         Text = "File &format (Alt+F):",
         AutoSize = true,
-        Padding = new Padding(0, 0, 0, 4),
+        Padding = Dpi.Pad(0, 0, 0, 4),
     };
 
     private readonly ListBox formatList = new()
@@ -67,14 +67,14 @@ internal sealed class RecordingSettingsDialog : Form
         AccessibleName = "File format",
         SelectionMode = SelectionMode.One,
         IntegralHeight = false,
-        Height = 120,
+        Height = Dpi.Px(120),
     };
 
     private readonly Label attributesLabel = new()
     {
         Text = "Audio format &attributes (Alt+A):",
         AutoSize = true,
-        Padding = new Padding(0, 0, 0, 4),
+        Padding = Dpi.Pad(0, 0, 0, 4),
     };
 
     private readonly ListBox attributesList = new()
@@ -82,7 +82,7 @@ internal sealed class RecordingSettingsDialog : Form
         AccessibleName = "Audio format attributes",
         SelectionMode = SelectionMode.One,
         IntegralHeight = false,
-        Height = 200,
+        Height = Dpi.Px(200),
     };
 
     // FLAC compression level. Wrapped in its own column that toggles visibility on the
@@ -93,7 +93,7 @@ internal sealed class RecordingSettingsDialog : Form
     {
         Text = "FLAC compression &level (Alt+L):",
         AutoSize = true,
-        Padding = new Padding(0, 0, 0, 4),
+        Padding = Dpi.Pad(0, 0, 0, 4),
     };
 
     private readonly ListBox flacCompressionList = new()
@@ -101,7 +101,7 @@ internal sealed class RecordingSettingsDialog : Form
         AccessibleName = "FLAC compression level",
         SelectionMode = SelectionMode.One,
         IntegralHeight = false,
-        Height = 200,
+        Height = Dpi.Px(200),
     };
 
     // Channel mode (Stereo / Mono) extracted out of the per-format attributes so the
@@ -113,7 +113,7 @@ internal sealed class RecordingSettingsDialog : Form
         // up (it's on Alt+N) so the mnemonic is unambiguous.
         Text = "&Channels (Alt+C):",
         AutoSize = true,
-        Padding = new Padding(0, 0, 0, 4),
+        Padding = Dpi.Pad(0, 0, 0, 4),
     };
 
     private readonly ListBox channelList = new()
@@ -121,7 +121,7 @@ internal sealed class RecordingSettingsDialog : Form
         AccessibleName = "Channels",
         SelectionMode = SelectionMode.One,
         IntegralHeight = false,
-        Height = 80,
+        Height = Dpi.Px(80),
     };
 
     // The compression column is wrapped in a Panel held here so its Visible can be
@@ -186,7 +186,8 @@ internal sealed class RecordingSettingsDialog : Form
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterParent;
         KeyPreview = true;
-        ClientSize = new Size(900, 380);
+        // Lists about six rows tall, not 200 pixels of white under two to four items (UI audit 2026-09-28, finding 15).
+        ClientSize = Dpi.Px(900, 300);
 
         PopulateSourceList();
         PopulateFormatList();
@@ -249,7 +250,7 @@ internal sealed class RecordingSettingsDialog : Form
         grid = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(12),
+            Padding = Dpi.Pad(12),
             ColumnCount = 5,
             RowCount = 2,
         };
@@ -282,7 +283,7 @@ internal sealed class RecordingSettingsDialog : Form
             Dock = DockStyle.Bottom,
             FlowDirection = FlowDirection.RightToLeft,
             AutoSize = true,
-            Padding = new Padding(0, 0, 12, 12),
+            Padding = Dpi.Pad(0, 0, 12, 12),
         };
         buttonRow.Controls.Add(cancelButton);
         buttonRow.Controls.Add(okButton);
@@ -299,7 +300,7 @@ internal sealed class RecordingSettingsDialog : Form
             FlowDirection = FlowDirection.TopDown,
             AutoSize = true,
             WrapContents = false,
-            Padding = new Padding(12, 12, 12, 0),
+            Padding = Dpi.Pad(12, 12, 12, 0),
         };
         optionsRow.Controls.Add(splitTracksBox);
         optionsRow.Controls.Add(bypassShapingBox);

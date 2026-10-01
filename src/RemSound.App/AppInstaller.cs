@@ -37,6 +37,9 @@ internal static class AppInstaller
     private const string ExeName = "RemSound.exe";
     private const string ManualName = "readme.html";
 
+    /// <summary>The publisher Windows' installed apps list shows (Ed, 2026-09-28; it was "RemSound").</summary>
+    internal const string Publisher = "Ed Pourtahmasbi";
+
     /// <summary>Windows "Installed apps" registration lives under the per-user hive (no admin).</summary>
     private const string UninstallRegistryPath =
         @"Software\Microsoft\Windows\CurrentVersion\Uninstall\RemSound";
@@ -269,7 +272,7 @@ internal static class AppInstaller
             ShowInTaskbar = false,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Padding = new Padding(24),
+            Padding = Dpi.Pad(24),
             AccessibleName = statusText,
         };
         wait.Controls.Add(new Label
@@ -579,17 +582,69 @@ internal static class AppInstaller
     {
         using var key = Registry.CurrentUser.CreateSubKey(UninstallRegistryPath, writable: true);
         if (key is null) return;
-        key.SetValue("DisplayName", "RemSound");
-        key.SetValue("DisplayVersion", CommandLine.AppVersion);
-        key.SetValue("Publisher", "RemSound");
-        key.SetValue("InstallLocation", installFolder);
-        key.SetValue("DisplayIcon", installedExe);
-        key.SetValue("UninstallString", $"\"{installedExe}\" --uninstall");
-        key.SetValue("QuietUninstallString", $"\"{installedExe}\" --uninstall");
-        key.SetValue("NoModify", 1, RegistryValueKind.DWord);
-        key.SetValue("NoRepair", 1, RegistryValueKind.DWord);
+        foreach (var (name, value) in InstalledAppValues(installFolder, installedExe, CommandLine.AppVersion))
+            key.SetValue(name, value);
         try { key.SetValue("EstimatedSize", (int)(FolderSizeBytes(installFolder) / 1024), RegistryValueKind.DWord); }
         catch { /* size is cosmetic in the Apps list — skip if it can't be measured */ }
+    }
+
+    /// <summary>The installed apps entry as an install writes it (the numbers are DWORDs).</summary>
+    internal static Dictionary<string, object> InstalledAppValues(string installFolder, string installedExe, string version) => new()
+    {
+        ["DisplayName"] = "RemSound",
+        ["DisplayVersion"] = version,
+        ["Publisher"] = Publisher,
+        ["InstallLocation"] = installFolder,
+        ["DisplayIcon"] = installedExe,
+        ["UninstallString"] = $"\"{installedExe}\" --uninstall",
+        ["QuietUninstallString"] = $"\"{installedExe}\" --uninstall",
+        ["NoModify"] = 1,
+        ["NoRepair"] = 1,
+    };
+
+    /// <summary>The entry values a start of an installed copy looks at: the two that go out of date.</summary>
+    internal static readonly string[] RefreshedEntryValues = ["Publisher", "DisplayVersion"];
+
+    /// <summary>What an installed copy's start must write (Ed, 2026-09-28): the publisher and version when they are out of
+    /// date - an update swaps the files but never re-registers, so the entry said the first version installed for good,
+    /// and "RemSound" as the publisher - or the whole entry when it has gone. Null when all is right.</summary>
+    internal static Dictionary<string, object>? InstalledAppEntryChanges(IReadOnlyDictionary<string, object?>? current,
+        string installFolder, string installedExe, string version)
+    {
+        var want = InstalledAppValues(installFolder, installedExe, version);
+        if (current is null) return want;
+        var changes = RefreshedEntryValues
+            .Where(name => !string.Equals(current.GetValueOrDefault(name) as string, want[name] as string, StringComparison.Ordinal))
+            .ToDictionary(name => name, name => want[name]);
+        return changes.Count == 0 ? null : changes;
+    }
+
+    /// <summary>At every start of an installed copy (the window's first showing, so never a headless or self-test one): the
+    /// installed apps entry put right. A portable copy leaves Windows alone. Logged only when something changed.</summary>
+    internal static void RefreshInstalledAppEntryAtStart(Action<string> log)
+    {
+        try
+        {
+            if (!IsInstalledCopy) return;
+            var folder = Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory);
+            var exe = Path.Combine(folder, ExeName);
+            using var key = Registry.CurrentUser.OpenSubKey(UninstallRegistryPath, writable: true);
+            var current = key is null ? null : RefreshedEntryValues.ToDictionary(name => name, name => key.GetValue(name));
+            var changes = InstalledAppEntryChanges(current, folder, exe, CommandLine.AppVersion);
+            if (changes is null) return;
+            if (key is null)
+            {
+                RegisterInstalledApp(folder, exe);
+                log("installer: the installed apps entry had gone - written again");
+                return;
+            }
+            foreach (var (name, value) in changes) key.SetValue(name, value);
+            log("installer: installed apps entry brought up to date (" + string.Join(", ", changes.Select(c => $"{c.Key} {c.Value}")) + ")");
+        }
+        catch (Exception ex)
+        {
+            log($"installer: could not bring the installed apps entry up to date: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private static void UnregisterInstalledApp()
@@ -832,21 +887,25 @@ internal static class AppInstaller
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 1,
-            Padding = new Padding(14),
+            Padding = Dpi.Pad(14),
         };
 
         var heading = Theme.Heading(dialog.Text);
 
+        var where = (updating
+                        ? "RemSound is already installed. This will update the installed copy in:"
+                        : "RemSound will be installed for you in:")
+                    + Environment.NewLine + target + Environment.NewLine + Environment.NewLine
+                    + "No administrator rights are needed.";
         var intro = new Label
         {
             AutoSize = true,
-            MaximumSize = new Size(520, 0),
-            Margin = new Padding(3, 3, 3, 10),
-            Text = (updating
-                    ? "RemSound is already installed. This will update the installed copy in:"
-                    : "RemSound will be installed for you in:")
-                   + Environment.NewLine + target + Environment.NewLine + Environment.NewLine
-                   + "No administrator rights are needed. Choose what to set up, then select Install.",
+            MaximumSize = Dpi.Px(520, 0),
+            Margin = Dpi.Pad(3, 3, 3, 10),
+            Text = where,
+            // The tick boxes and the Install button are on screen, so saying to use them is for the screen reader alone,
+            // which reads it as it always has (Ed, 2026-09-28).
+            AccessibleName = where + " Choose what to set up, then select Install.",
         };
 
         var desktopBox = MakeCheck("Create a &desktop shortcut", "Create a desktop shortcut", true);
@@ -867,7 +926,7 @@ internal static class AppInstaller
             AccessibleName = updating ? "Update" : "Install",
             DialogResult = DialogResult.OK,
             AutoSize = true,
-            Margin = new Padding(3, 12, 3, 3),
+            Margin = Dpi.Pad(3, 12, 3, 3),
         };
         var cancelButton = new Button
         {
@@ -875,14 +934,16 @@ internal static class AppInstaller
             AccessibleName = "Cancel",
             DialogResult = DialogResult.Cancel,
             AutoSize = true,
-            Margin = new Padding(3, 12, 3, 3),
+            Margin = Dpi.Pad(3, 12, 3, 3),
         };
 
+        // At the bottom right, in the order they always had (UI audit 2026-09-28, finding 11).
         var buttons = new FlowLayoutPanel
         {
             FlowDirection = FlowDirection.LeftToRight,
             AutoSize = true,
-            Dock = DockStyle.Fill,
+            Anchor = AnchorStyles.Right,
+            WrapContents = false,
             Margin = Padding.Empty,
         };
         buttons.Controls.Add(installButton);
@@ -934,7 +995,7 @@ internal static class AppInstaller
         AccessibleName = accessibleName,
         Checked = @checked,
         AutoSize = true,
-        Margin = new Padding(3, 2, 3, 2),
+        Margin = Dpi.Pad(3, 2, 3, 2),
     };
 
     /// <summary>The uninstall confirmation. Two independent opt-ins — remove profiles/config/logs, and
@@ -986,7 +1047,7 @@ internal static class AppInstaller
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 1,
-            Padding = new Padding(14),
+            Padding = Dpi.Pad(14),
         };
 
         var heading = Theme.Heading("Uninstall RemSound from this PC");
@@ -994,8 +1055,8 @@ internal static class AppInstaller
         var intro = new Label
         {
             AutoSize = true,
-            MaximumSize = new Size(520, 0),
-            Margin = new Padding(3, 3, 3, 10),
+            MaximumSize = Dpi.Px(520, 0),
+            Margin = Dpi.Pad(3, 3, 3, 10),
             Text = "This will remove the installed RemSound from this PC:" + Environment.NewLine + target +
                    Environment.NewLine + Environment.NewLine +
                    "RemSound will close when the uninstall starts.",
@@ -1013,16 +1074,17 @@ internal static class AppInstaller
         var okButton = new Button
         {
             Text = "&OK", AccessibleName = "OK",
-            DialogResult = DialogResult.OK, AutoSize = true, Margin = new Padding(3, 12, 3, 3),
+            DialogResult = DialogResult.OK, AutoSize = true, Margin = Dpi.Pad(3, 12, 3, 3),
         };
         var cancelButton = new Button
         {
             Text = "&Cancel", AccessibleName = "Cancel",
-            DialogResult = DialogResult.Cancel, AutoSize = true, Margin = new Padding(3, 12, 3, 3),
+            DialogResult = DialogResult.Cancel, AutoSize = true, Margin = Dpi.Pad(3, 12, 3, 3),
         };
         var buttons = new FlowLayoutPanel
         {
-            FlowDirection = FlowDirection.LeftToRight, AutoSize = true, Dock = DockStyle.Fill, Margin = Padding.Empty,
+            // At the bottom right, in the order they always had (UI audit 2026-09-28, finding 11).
+            FlowDirection = FlowDirection.LeftToRight, AutoSize = true, Anchor = AnchorStyles.Right, WrapContents = false, Margin = Padding.Empty,
         };
         buttons.Controls.Add(okButton);
         buttons.Controls.Add(cancelButton);

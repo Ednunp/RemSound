@@ -106,17 +106,27 @@ internal static partial class SelfTest
         using var throwawaySettings = CommandLine.TryGetConfigDir(args, out _)
             ? null
             : AppConfig.UseThrowawayUserDataDirectory(Path.Combine(Path.GetTempPath(), "remsound-selftest-" + Guid.NewGuid().ToString("N")));
-        var seconds = int.TryParse(ValueAfter(args, "--seconds"), out var s) && s is > 0 and <= 30 ? s : 3;
+        // One second: the checks are met well inside it (the review, 2026-09-28); what the sound is like is the simulator's job.
+        var seconds = int.TryParse(ValueAfter(args, "--seconds"), out var s) && s is > 0 and <= 30 ? s : 1;
         // Before any step can write it: the file every DAW's plugin reads. The last step proves it untouched.
         realPluginPointerAtStart = ReadRealPluginPointer();
         // --only <words>: run just the steps whose names contain them, to iterate on a few. Never a pass: the result
         // says PARTIAL and the exit code is 3, so a partial run can't be taken for the gate.
         onlyStepsContaining = ValueAfter(args, "--only");
+        // --pack feature | full (the default), and --areas: which of the two packs to run (SelfTest.Packs.cs).
+        ConfigurePack(args);
+        // --layout-scale, --layout-theme and --ui-pictures: the layout checks' own processes, and pictures (SelfTest.Layout.cs).
+        ConfigureLayout(args);
 
         // Not a word out loud for the whole run. Driving the window drives the code that speaks, and a gate run
         // must never make a noise on the machine it is running on — Ed, 2026-09-20, hearing it through NVDA.
         var restoreSpeech = ScreenReader.Suppressed;
         ScreenReader.Suppressed = true;
+        // Nor an accessibility event: a tick box toggled by a step tells the screen reader its new state, and focus moved by
+        // a step says where it went (2026-09-27, the review of every step). Held for the whole run - see QuietForRun.
+        var restoreEvents = WinEventNotifier.Quiet;
+        Windowless.QuietForRun = true;
+        WinEventNotifier.Quiet = true;
         // And not a sound: the cues are muted for the whole run, not step by step. A step that forgot to mute them
         // played them at whoever was at the screen (2026-09-24). Steps that change it put it back.
         var restoreCues = CuePlayer.GloballyMuted;
@@ -143,6 +153,7 @@ internal static partial class SelfTest
         // discovery announcement to the LAN from two steps until 2026-09-24.
         PeerDiscoveryService.NoNetworkForTest = true;
         PeerDiscoveryService.RealStartsForTest = 0;
+        RemSound.Sender.AudioSender.CountOffMachineForTest = true;
         // Nor does anything in it ask the real router to open a port: a Preferences tick reaching the live mapper would.
         RouterPortMapper.NoNetworkForTest = true;
         // Nor open a browser: the help window's manual button, pressed by the dialog suite, would (2026-09-25). And the
@@ -165,8 +176,7 @@ internal static partial class SelfTest
         RunStep(results, "The main window can be built (the ordinary Windows 10 and 11 path)", TheMainWindowCanBeBuilt);
         RunStep(results, "GATE GUARD: a step that cannot build the main window fails, it never quietly skips", NoStepSkipsAWindowThatCannotBeBuilt);
         RunStep(results, "Encryption round-trip", Encryption);
-        RunStep(results, "Packet framing and rejection", PacketFraming);
-        RunStep(results, "Server wire-format compatibility", ServerWireCompat);
+        RunStep(results, "Packet framing and rejection (unknown types and cut-short payloads too)", PacketFraming);
         RunStep(results, "Audio ring buffer integrity (wrap, drop-oldest, underrun fill)", RingBufferIntegrity);
         RunStep(results, "24-bit PCM pack/unpack (sign, clamp, 1-LSB accuracy)", Pcm24RoundTrip);
         RunStep(results, "Updater tag filtering (client vs server releases, version order)", UpdaterTagFiltering);
@@ -182,20 +192,19 @@ internal static partial class SelfTest
         RunStep(results, "ASIO per-driver tick memory (snapshot/restore round-trip)", AsioTickMemory);
         RunStep(results, "Encoder-boundary sample clamp (shared rule, exact count)", SampleClampRule);
         RunStep(results, "App settings save and reload", SettingsRoundTrip);
-        RunStep(results, "Per-peer shaping DSP", PeerShapingDsp);
         RunStep(results, "Volume and pan actually move the sound (measured)", ShapingVolumeAndPan);
         RunStep(results, "All three EQ modes actually change the sound (measured, every band)", ShapingEqModes);
         RunStep(results, "The pan and EQ tab's real controls reach the live sound (measured through the window)", ShapingControlsReachTheLiveSound);
         RunStep(results, "Multi-output fan-out (both lanes)", FanOutToBothOutputs);
         RunStep(results, "Per-application send enumeration", AppSendEnumeration);
         RunStep(results, "Per-application capture lifecycle", AppSendCaptureLifecycle);
-        RunStep(results, "Lifecycle churn (modes, sources, pan/EQ, send/receive)", LifecycleChurn);
+        RunStep(results, "Lifecycle churn (WASAPI and ASIO modes - a stand-in ASIO driver unless one is named - sources, pan/EQ, send/receive)", LifecycleChurn);
         RunStep(results, "Service app-yield token", ServiceInteractivePresence);
-        RunStep(results, "Service sender parity (crypto + Opus frame)", ServiceSenderParity);
+        RunStep(results, "Service sender parity (crypto, Opus frame, Small packets, lock to clock - whatever the profile says)", ServiceSenderParity);
         RunStep(results, "Elevated helper: no pipe deadlock on flooded output", ServiceProcessCaptureNoDeadlock);
         RunStep(results, "No-admin service restart fails safe (missing service)", ServiceRestartNoAdminFailsSafe);
         RunStep(results, "Default-output follower (service follows Windows default)", DefaultOutputFollower);
-        RunStep(results, "Default follower exclusivity (locks out specific cards)", DefaultFollowerExclusivity);
+        RunStep(results, "Default follower exclusivity (locks out specific cards, in the window's three device lists)", DefaultFollowerExclusivity);
         RunStep(results, "Service profile isolation (location + hidden from pickers)", ServiceProfileIsolation);
         RunStep(results, "A send source that failed is tried again until it opens", AFailedSendSourceIsTriedAgain);
         RunStep(results, "A send source that dies is re-opened alone; the rest, and ASIO, carry on", ADeadSendSourceIsReopenedAlone);
@@ -205,7 +214,9 @@ internal static partial class SelfTest
         RunStep(results, "The service follows a server by name that moves to a new address", ServiceFollowsAServerThatMoves);
         RunStep(results, "Service network presence (reachable + shell teardown)", ServiceNetworkPresenceReachable);
         RunStep(results, "Service reachability-gated sending (drop dead peers, re-arm recovered)", ServiceReachabilityGating);
-        RunStep(results, "Service silent-capture self-heal (issue #23 boot re-open ladder)", ServiceSilentCaptureSelfHeal);
+        RunStep(results, "The service stops sending to a peer that stops answering, and starts again when it answers", TheServiceDropsAndRearmsAPeer);
+        RunStep(results, "Service silent-capture self-heal (issue #23 boot re-open ladder, driven through the real host)", ServiceSilentCaptureSelfHeal);
+        RunStep(results, "SERVICE BOOT EAR: before anyone signs in, the service listens to every program but itself; back to the chosen output at sign-in, after five minutes, or at once if that is deaf too", ServiceBootEar);
         RunStep(results, "Send-app capture change-detection (catch an app the instant it opens)", SendAppCaptureChangeDetection);
         RunStep(results, "Remembered applications list is global + clearable", RememberedApplicationsGlobal);
         RunStep(results, "Remembered peers migrate once (cleared list not resurrected)", RememberedPeersMigrationOnce);
@@ -214,45 +225,73 @@ internal static partial class SelfTest
         RunStep(results, "Send-app lists semantics (ticked → Active, out of Remembered)", SendAppListSemantics);
         RunStep(results, "Service registration args", ServiceRegistrationArgs);
         RunStep(results, "Service self-contained install (own bin + user stop rights)", ServiceSelfContainedInstall);
-        RunStep(results, "Recording engine (every file format writes real content)", RecordingEngine);
+        RunStep(results, "Recording engine (every file format writes real content, and nothing leaks)", RecordingEngine);
         RunStep(results, "Recording: two peers, each track holds its OWN audio", RecordingMultiPeerSplit);
         RunStep(results, "Recording reports its own death (never silently stops)", RecordingReportsItsOwnDeath);
+        RunStep(results, "RECORDING DIES: the window stops it, puts Start back and tells the person once, with the reason", ARecordingThatDiesTellsThePerson);
         RunStep(results, "Recording: every source and channel mode, judged by the file contents", RecordingModesByContent);
-        RunStep(results, "Recording churn / soak", RecordingChurn);
         RunStep(results, "v5 settings and shaping round-trip", V5ConfigRoundTrip);
         RunStep(results, "Profile save and reload", ProfileRoundTrip);
         RunStep(results, "What's-new update marker", WhatsNewMarkerRoundTrip);
         RunStep(results, "Diagnostics report privacy", DiagnosticsPrivacy);
         RunStep(results, "Bundled resources present", ResourcesPresent);
-        RunStep(results, "Dialog accessibility (names + mnemonics)", AccessibilityAudit);
+        RunStep(results, "GATE COPIES: a copy the gate starts keeps off the real ports and leaves the lock-screen service sending", GateCopiesLeaveTheServiceAlone);
+        RunStep(results, "INSTALLED APPS ENTRY: an installed copy puts its publisher and version right at every start, and leaves a right one alone", InstalledAppsEntryKeptUpToDate);
+        RunStep(results, "WHO MADE IT: Ed Pourtahmasbi in the About box, every program file's details, installed apps, the plugin's vendor, the licence and the readme", AuthorIsNamedEverywhere);
+        RunStep(results, "Tick boxes: a spacebar toggle fires the state change, then focus, so NVDA reads the new state", AccessibilityAudit);
         RunStep(results, "Main window coverage (all tabs + controls)", MainWindowCoverage);
         RunStep(results, "Main window profile round-trip (controls load + save)", MainWindowProfileRoundTrip);
-        RunStep(results, "Auto-save non-read-only profiles (options + guard + silent timer)", AutoSaveNonReadOnlyProfiles);
+        RunStep(results, "Auto-save non-read-only profiles (options, guard, timer - and no cue, counted)", AutoSaveNonReadOnlyProfiles);
         RunStep(results, "A global hotkey's send/receive switch survives the auto-save", HotkeySwitchesSurviveTheAutoSave);
         RunStep(results, "Service verb gate (normal launch stays load-safe)", ServiceVerbGate);
         RunStep(results, "Main window builds where process-loopback is unsupported (Win7 launch, issue #22)", Win7SendModeConstruction);
-        RunStep(results, "Menu shortcuts don't clash with controls", MenuShortcutsDontClashWithControls);
         RunStep(results, "Service log discovery (newest activity log)", ServiceLogDiscovery);
         RunStep(results, "Sealed remote control (auth + replay + skew) + nonce discipline", SealedRemoteControl);
         RunStep(results, "Service folder lockdown args (cross-user LPE hardening)", ServiceDirHardeningArgs);
         RunStep(results, "Service folder repair (reproduce wrong-owner lockout → detect → repair → verify)", ServiceAccessRepairLoop);
         RunStep(results, "Elevated verbs carry the real user (SID pass-through) + logs stay readable", ElevatedIdentityPassThrough);
-        RunStep(results, "About box shows only the newest releases (screen-reader-safe size)", AboutBoxNotesTrimmed);
+        RunStep(results, "About box shows only the newest releases (screen-reader-safe size, the rest kept in the repository)", AboutBoxNotesTrimmed);
         RunStep(results, "Latency slider reaches the streams it governs (one slider = one value)", LatencySliderReachesSessions);
         RunStep(results, "Auto-tune descends on evidence (never below the measured need)", AutoTuneDescentPolicy);
-        RunStep(results, "The two auto-tunes stay independent (WASAPI vs ASIO)", AutoTuneLanesIndependent);
         RunStep(results, "Every control is specified (no control escapes the suite)", EveryControlIsSpecified);
+        RunStep(results, "MAIN WINDOW ALT KEYS: no Alt key that opens a menu is also a control's, on any tab", MainWindowAltKeys);
+        RunStep(results, "POP-UPS AND MENUS: a pop-up that comes by itself closes any open menu first, and gives the keyboard back to the window that had it", PopUpsCloseMenusAndGiveTheKeyboardBack);
+        RunStep(results, "LISTS: Ctrl+A selects every row where several can be chosen; Manage named peers deletes every selected name at once", ListsSelectAllAndDeleteSeveral);
+        RunStep(results, "PREFERENCES LOG: a save that changes nothing logs nothing, and a changed hotkey is logged by its keys", PreferencesLogOnlyWhatChanged);
+        RunStep(results, "LOGS PER PROFILE: each profile logs by its own choice, this computer's setting following; never chosen follows the computer; new profiles off", LogsPerProfile);
         RunStep(results, "Every window is reachable by the audits (no unaudited dialog)", EveryDialogIsAudited);
-        RunStep(results, "Dialog control suite (every dialog: accessibility + theme + driven)", DialogControlSuite);
+        RunStep(results, "Dialog control suite (every dialog: names, mnemonics, tab order, theme, driven)", DialogControlSuite);
+        // LAYOUT FOR SIGHTED PEOPLE (2026-09-28, SelfTest.Layout.cs): every window measured, at 100 % here and at 150 % and
+        // 200 % in a process each (E), in both colour themes (I). Each check proves it can fail on a canary first.
+        RunStep(results, "LAYOUT A: nothing is clipped by its container, in any window, tab or the plugin frame", LayoutNothingClipped);
+        RunStep(results, "LAYOUT B: every window fits the screen - 1366 x 768 at 100 %, 1920 x 1080 at 150 and 200 %", LayoutWindowsFitTheScreen);
+        RunStep(results, "LAYOUT C: no two controls overlap", LayoutNoOverlaps);
+        RunStep(results, "LAYOUT D: text fits its control - labels, buttons, tick boxes, menus, tabs, lists with long device names, drop-downs, number and read-only boxes", LayoutTextFits);
+        RunStep(results, "LAYOUT E: A to D, F, G, H and J hold at 150 % and 200 % (emulated, a process each)", LayoutAtLargerScaling);
+        RunStep(results, "LAYOUT F: the plugin asks its host for the frame its panel needs, and the frame scrolls if a host gives less", LayoutPluginFrameFitsItsPanel);
+        RunStep(results, "LAYOUT G: every label is shown or hidden with its control", LayoutLabelsHaveTheirControls);
+        RunStep(results, "LAYOUT H: a label beside a tall control is level with its top", LayoutLabelsLevelWithTallControls);
+        RunStep(results, "LAYOUT I: text contrast in both colour themes, a greyed out list's selected row included", LayoutContrastInBothThemes);
+        RunStep(results, "LAYOUT J: every resizable window is usable at its minimum size", LayoutUsableAtMinimumSize);
+        RunStep(results, "LAYOUT K: a dialog's commit buttons share one row at the bottom right, OK before Cancel (margins advisory)", LayoutCommitButtons);
+        RunStep(results, "LAYOUT L: pictures of every window for a sighted reviewer (only with --ui-pictures, only on a hidden desktop)", LayoutPicturesForAReviewer);
+        RunStep(results, "LAYOUT M: the help page's stylesheet - line length, contents in reach, option names whole, code font, dark theme, contrast", LayoutHelpPageStylesheet);
+        RunStep(results, "NOTICES: About, the server notice, the plugin updates notice, context help and press a key open with nothing selected, on the same box with the same name", NoticesOpenWithNothingSelected);
+        RunStep(results, "MAIN WINDOW PLACE: remembered only when asked - off opens as always, on is kept and restored, pulled onto a screen there is, never below its minimum", MainWindowRemembersItsPlaceWhenAsked);
+        RunStep(results, "SHOWN TEXT: nothing is shown that only the screen reader needs - a checklist's line only when it is empty - and NVDA keeps every word", ShownTextIsForSightedPeople);
+        RunStep(results, "COLONS: a label for a box, list, drop-down, number or slider ends with a colon after its Alt key; tick boxes, buttons, headings and tabs have none", LabelsEndWithAColon);
+        RunStep(results, "EQ MODE LIST: greyed out it is drawn readably by RemSound, enabled by Windows, and read the same by a screen reader", EqModeListReadableWhileGreyedOut);
         RunStep(results, "Every sound is pinned (registry, custom paths, muting, checkbox suppression)", CueCoverage);
+        RunStep(results, "CUES: a profile's own sound wins, then the machine's; a cue switched off plays nothing", CuesPlayTheChosenSoundOrNothing);
+        RunStep(results, "SHIPPED SOUNDS: every default sound is 16-bit stereo 44.1 kHz and credits Ed Pourtahmasbi and the RemSound default sound pack, nothing else", ShippedSoundsCreditEd);
         RunStep(results, "Latency estimate counts every stage (no silently-missing term)", LatencyEstimateComplete);
-        RunStep(results, "Auto-tune never acts on state from while it was not running", AutoTuneStaleStateGuards);
+        RunStep(results, "Auto-tune: each lane learns only from itself, and never acts on state from while it was not running", AutoTuneStaleStateGuards);
         RunStep(results, "Auto-tune interval: every offered value survives a save", AutoTuneIntervalRoundTrips);
         RunStep(results, "Auto-tune climbs out of trouble (underruns raise, never freeze)", AutoTuneClimbsOutOfTrouble);
         RunStep(results, "Measured-latency readout keeps WASAPI and ASIO separate", MeasuredLatencyReadout);
         RunStep(results, "Plugin double-audio guard (a claimed peer leaves the speakers)", PluginDoubleAudioGuard);
         RunStep(results, "Plugin install/remove is per-user and exact (other plugins untouched)", PluginInstallRoundTrip);
-        RunStep(results, "DAW plugin menu (install, remove, pan/EQ choice)", DawPluginMenu);
+        RunStep(results, "DAW plugin menu (install, remove, and both ticks - clicked, they change what they govern)", DawPluginMenu);
         RunStep(results, "App-plugin link: framing, loopback-only, and its measured latency cost", PluginBridgeLinkTest);
         RunStep(results, "Plugin end to end (peer reaches the DAW track and leaves the speakers)", PluginBridgeEndToEnd);
         RunStep(results, "Plugin survives the peer's session being pruned and reopened", PluginSurvivesSessionChurn);
@@ -275,7 +314,8 @@ internal static partial class SelfTest
         RunStep(results, "The plugin keeps its choices when Active or Receive is switched off", ThePluginKeepsItsChoicesWhenSwitchedOff);
         RunStep(results, "A plugin removed from its track stops taking part", APluginRemovedFromItsTrackStopsTakingPart);
         RunStep(results, "The parameter watch never calls the host from its own thread", TheParameterWatchNeverCallsTheHostFromItsThread);
-        RunStep(results, "Plugin rate conversion (a 44.1k DAW must not transpose anyone)", PluginRateConversion);
+        RunStep(results, "Plugin rate conversion (a 44.1, 88.2 or 96 kHz DAW must not transpose anyone - to the cent, no gap, no click)", PluginRateConversion);
+        RunStep(results, "PLUGIN RATE CHANGE: a DAW that moves from 44.1 to 96 kHz mid-session still sends its track in tune", PluginSurvivesAHostRateChange);
         RunStep(results, "The plugin actually ships in this build (and installs from it)", PluginPayloadPresent);
         RunStep(results, "The shipped plugin folder loads on its own (as a DAW loads it)", PluginFolderLoadsOnItsOwn);
         RunStep(results, "Plugin host contract (the properties without which no DAW loads it)", PluginHostContract);
@@ -289,6 +329,7 @@ internal static partial class SelfTest
         RunStep(results, "A remembered peer the DNS got wrong still follows discovery", RememberedPeerFollowsDiscovery);
         RunStep(results, "One stream from a peer’s two addresses is one session", OneStreamFromTwoAddressesIsOneSession);
         RunStep(results, "ASIO: one driver instance carries both directions (real hardware, when named)", AsioOneDriverBothDirections);
+        RunStep(results, "SHARED ASIO DEVICE: one per driver, shared by every holder, let go by the last - without hardware", SharedAsioDeviceIsSharedAndLetGoByTheLast);
         RunStep(results, "Plugin: levels in decibels, and a nudge that costs no audio", PluginLevelsInDecibels);
         RunStep(results, "Plugin: who is on the track survives the peer list changing", PluginPeerSetSurvivesTheListChanging);
         RunStep(results, "Plugin: a track saved by a test build opens with nobody chosen", PluginTestBuildTrackOpensWithNobodyChosen);
@@ -302,11 +343,11 @@ internal static partial class SelfTest
         RunStep(results, "Every audio-axis test covers all THREE configurations (or says why not)", AudioConfigurationCoverage);
         foreach (var cfg in SuiteConfigs)
             RunStep(results, $"Control suite - {cfg.Name} (UI + accessibility + theme + effect)", () => RunControlSuite(cfg));
-        RunStep(results, "Long-run hygiene (log rotation, crash-report cap, priority-mode scope)", LongRunHygiene);
+        RunStep(results, "Long-run hygiene (log rotation, crash-report cap, the fast timer only while streaming)", LongRunHygiene);
+        RunStep(results, "PRIORITY MODE ON WINDOWS 10: a Windows that refuses the timer flag still gets full speed", PriorityModeOnWindows10);
         RunStep(results, "Service startup volume (boot-once decision + settings round-trip)", ServiceStartupVolume);
         RunStep(results, "Update install window (same-day, wraparound, retry timing)", UpdateInstallWindow);
-        RunStep(results, "Update checks are armed at start-up from the frequency setting", AuditUpdateCheckArmedAtStartup);
-        RunStep(results, "Each update frequency sets its interval (hourly, 6-hourly, daily, never)", AuditUpdateCheckFrequencies);
+        RunStep(results, "Each update frequency, chosen in Preferences, sets its interval - and a tick of the timer really checks", AuditUpdateCheckFrequencies);
         RunStep(results, "Release signing (verify, tamper, key-embed match)", ReleaseSigning);
         RunStep(results, "No copy of RemSound carries the signing key's folder", AuditNoCopyCarriesTheSigningKeyFolder);
         RunStep(results, "The release script hands RemSound the signing key", AuditReleaseScriptHandsOverTheSigningKey);
@@ -343,6 +384,7 @@ internal static partial class SelfTest
         RunStep(results, "A session is never freed while it decodes", ASessionIsNeverFreedWhileItDecodes);
         RunStep(results, "GATE GUARD: a run makes no noise, including out loud", AGateRunMakesNoNoise);
         RunStep(results, "What happens when somebody else ticks you", WhatHappensWhenSomebodyTicksYou);
+        RunStep(results, "ACCEPT ASK: answered Yes, that person is connected; answered No, left alone and not asked again", AcceptAskAnsweredYesAndNo);
         RunStep(results, "The send-only service, and somebody ticking it on a relay", TheServiceAndSomebodyTickingItOnARelay);
         RunStep(results, "One computer is one person on a server: the app, the service and every copy", OneComputerIsOnePersonOnAServer);
         RunStep(results, "Removing a peer while you are on a relay", RemovingAPeerWhileOnARelay);
@@ -361,7 +403,7 @@ internal static partial class SelfTest
         RunStep(results, "The per-person timing correction settles on the sender's clock", AuditPerPersonTimingSettlesOnTheSendersClock);
         RunStep(results, "The per-person timing correction ignores a wildly wrong reading", AuditPerPersonTimingIgnoresAWildReading);
         RunStep(results, "The per-person timing correction starts after one reading, used as it is", AuditPerPersonTimingStartsAfterOneReading);
-        RunStep(results, "The per-person timing correction never brings a lowered target down faster than today", AuditPerPersonTimingBringsALoweredTargetDownNoFasterThanToday);
+        RunStep(results, "The per-person timing correction brings a lowered target down at the descent pace, and arrives", AuditPerPersonTimingBringsALoweredTargetDownNoFasterThanToday);
         RunStep(results, "The per-person timing correction never brings a backlog down faster than today", AuditPerPersonTimingBringsABacklogDownNoFasterThanToday);
         RunStep(results, "CROSS-PORT CONTRACT (the values other RemSounds depend on)", CrossPortContract);
         RunStep(results, "CROSS-PORT CONTRACT: the relay server and the app agree", CrossPortServerAgreesWithTheApp);
@@ -373,8 +415,7 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT S5: the audio loops are not async (they keep their Pro Audio thread)", AuditAudioLoopsAreNotAsync);
         RunStep(results, "AUDIT R4: Format packets fail closed, and every real sender format still passes", AuditFormatValidation);
         RunStep(results, "AUDIT R5: a malformed Format packet doesn't cost a working peer its session", AuditBadFormatKeepsTheExistingSession);
-        RunStep(results, "AUDIT R2: a plugin gets a claimed peer once, not once per output lane", AuditClaimedPeerIsNotDoubled);
-        RunStep(results, "AUDIT R3: a throwing recorder tap can't be reported as a lost output device", AuditRecorderCannotKillTheOutput);
+        RunStep(results, "AUDIT R3: a throwing recorder tap or per-peer filter can't be reported as a lost output device", AuditRecorderCannotKillTheOutput);
         RunStep(results, "AUDIT: a read-only readout holds still while a screen reader reads it", AuditReadoutHoldsStillWhileRead);
         RunStep(results, "AUDIT: the latency readout doesn't redraw (and speak) for wobble", AuditLatencyReadoutIgnoresWobble);
         RunStep(results, "AUDIT: the total-latency readout sits with the jitter-buffer controls in tab order", AuditLatencyReadoutSitsWithItsControls);
@@ -388,7 +429,6 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT: the render period is read ONCE per tick and shared (auto-tune starvation)", AuditRenderPeriodIsReadOncePerTick);
         RunStep(results, "AUDIT: render time is attributed to the lane that spent it", AuditRenderWorkIsAttributedPerLane);
         RunStep(results, "AUDIT: the readout says NOT RECEIVING once the last stream goes", AuditReadoutSaysNotReceivingWhenStreamsGo);
-        RunStep(results, "AUDIT: an output Windows invalidated re-opens itself (no untick/retick)", AuditFaultedOutputReopensItself);
         RunStep(results, "AUDIT: the faulted-output heal actually runs in the per-second tick", AuditFaultedOutputHealRunsInTheTick);
         RunStep(results, "AUDIT: the tuner's learned floor is not self-justifying (and relaxes)", AuditTunerFloorIsNotSelfJustifying);
         RunStep(results, "AUDIT: buffer depth is the deepest LANE, not primaries plus mirrors", AuditBufferDepthIsNotDoubleCounted);
@@ -400,13 +440,12 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT: adding a capture source cannot freeze sending (a mix read never waits on the engine's lock)", AuditMixerNeverWaitsOnItsLockFromTheAudioThread);
         RunStep(results, "AUDIT: a 44.1 kHz mono 16-bit capture source is drift-corrected (fed audio counted in the mixer's units)", AuditCaptureDriftCountsInTheMixersUnits);
         RunStep(results, "Recording: every sending lane keeps its own ring, the DAW plugin's included (all three configurations)", RecordingKeepsEverySendingLaneApart);
-        RunStep(results, "Keyboard: every Alt key goes where it says, in every tab, dialog and configuration", KeyboardShortcutsGoWhereTheySay);
+        RunStep(results, "Keyboard: every Alt key goes where it says, and none takes a menu's, in every tab, dialog and configuration", KeyboardShortcutsGoWhereTheySay);
         RunStep(results, "Keyboard: a recording that cannot start says so in front, not behind", AuditRecordingStartFailureComesToTheFront);
         RunStep(results, "Keyboard: Additional service options can be cancelled and saves nothing until the service dialog's OK", AuditServiceAdditionalOptionsCanBeCancelled);
         RunStep(results, "Screen reader: choosing a sound changes what you hear, and your own file can be chosen back", AuditChoosingASoundIsWhatYouHear);
         RunStep(results, "AUDIT: changing a hotkey does not claim the profile has unsaved changes", AuditHotkeyChangeLeavesTheProfileClean);
         RunStep(results, "AUDIT: \"connected\" means the same in the connect cue, the status readout and the peer list", AuditConnectedMeansTheSameEverywhere);
-        RunStep(results, "Screen reader: the peer details box holds still while it is being read", AuditPeerDetailsHoldStillWhileRead);
         RunStep(results, "AUDIT: a missing password fingerprint names both causes, the likelier first", AuditMissingFingerprintNamesBothCauses);
         RunStep(results, "AUDIT: the long-run report says what could creep, in every configuration", AuditLongRunReportSaysWhatCreeps);
         RunStep(results, "AUDIT: the long-run report is actually WRITTEN when the old line goes silent", AuditLongRunReportIsActuallyWritten);
@@ -437,10 +476,8 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT: the plugin files are gathered after the plugin builds, and --help is current", AuditPluginFilesAreGatheredAfterThePluginBuilds);
         RunStep(results, "AUDIT: settings changed in a dialog are all recorded, and the checks never touch this PC's start-up entry", AuditDialogChangesAreRecorded);
         RunStep(results, "AUDIT: the long-run report counts frames sent on a send-only machine", AuditLongRunCountsSendOnlyFrames);
-        RunStep(results, "AUDIT: re-opening an output follows the one pinned rule", AuditOutputReopenUsesTheRule);
         RunStep(results, "AUDIT: the plugin log line has one writer", AuditPluginLogLineHasOneWriter);
         RunStep(results, "AUDIT: the status line gives no shared buffer figure", AuditStatusLineHasNoSharedBuffer);
-        RunStep(results, "AUDIT: the service dialog stores nothing for lock to audio clock", AuditServiceDialogStoresNoLockToClock);
         RunStep(results, "AUDIT: a failed service query reads as not installed only when it is not", AuditServiceQueryFailureMapping);
         RunStep(results, "AUDIT: profile and service files are written crash-safely", AuditProfileWritesAreCrashSafe);
         RunStep(results, "AUDIT: heartbeats log failures, not every ping", AuditHeartbeatLogsOnlyWhatMatters);
@@ -448,15 +485,14 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT: the post-decode step probe is fed for Opus streams", AuditOpusStepProbeIsFed);
         RunStep(results, "AUDIT: tight-latency capture reads integer PCM", AuditPushModeReadsIntegerCapture);
         RunStep(results, "AUDIT: a gate run touches no real settings and opens no real output", AuditGateRunTouchesNoRealSettingsOrOutputs);
-        RunStep(results, "AUDIT: the About box carries only recent notes, and the history is kept in the repository", AuditAboutCarriesOnlyRecentNotes);
         RunStep(results, "AUDIT: the About box's newest notes cover the whole release", AuditAboutNewestNotesCoverTheRelease);
-        RunStep(results, "AUDIT: the About notes call the jitter buffer by its name", AuditAboutNotesCallTheJitterBufferByItsName);
         RunStep(results, "AUDIT: the colour theme's next-launch hint reaches a screen reader", AuditThemeHintReachesAScreenReader);
         RunStep(results, "AUDIT: the missing-manual message speaks to users, not builders", AuditHelpMessageSpeaksToUsers);
         RunStep(results, "AUDIT: Preferences messages name controls that exist", AuditPreferencesMessagesNameRealControls);
         RunStep(results, "AUDIT: the jitter buffer box has one name, whatever it starts as", AuditJitterBufferHasOneName);
         RunStep(results, "AUDIT: an old profile with retired settings still opens, and saving drops them", AuditOldProfileWithRetiredSettingsStillOpens);
         RunStep(results, "AUDIT: an old global config with retired settings still opens", AuditOldConfigWithRetiredSettingsStillOpens);
+        RunStep(results, "OLD FILES: a profile and a global config saved by v5.9 and by v6.0 open field for field as they were saved", OldFilesOpenFieldForField);
         RunStep(results, "AUDIT: re-opening an output is not network jitter (both output kinds)", AuditOutputReopenIsNotJitter);
         RunStep(results, "AUDIT: a settling WASAPI endpoint is not taken as a clock", AuditSettlingEndpointIsNotTakenAsAClock);
         RunStep(results, "AUDIT: after a wake the report bursts and splits network gaps from render gaps", AuditPostWakeBurstSplitsNetworkFromRender);
@@ -477,7 +513,6 @@ internal static partial class SelfTest
         RunStep(results, "REMOTE CONTROL: the channel is this Windows account's alone, and never the network's", RemoteControlChannelIsThisAccountsAlone);
         RunStep(results, "HEADLESS: a window stays off-screen and out of focus until it is handed over", HeadlessWindowsStayOutOfSightUntilHandedOver);
         RunStep(results, "HEADLESS: the tray menu still opens for the person at the keyboard, and no update check at start-up", HeadlessTrayMenuOpensAndNoUpdateCheck);
-        RunStep(results, "PLUGIN MENU: Install and Remove, chosen from the real menu, use the run's own folder and never the real VST3 folder", PluginMenuInstallsAndRemovesInTheRunsOwnFolder);
         // 2026-09-25, Ed: a choice of where the plugin goes, remembered, and updated there.
         RunStep(results, "PLUGIN FOLDER: installed where chosen, remembered, moved, updated and removed there, Windows asked only when needed", PluginFolderIsRememberedMovedUpdatedAndRemoved);
         RunStep(results, "PLUGIN FOLDER: the menu asks where, and Ed's message says where updates go", PluginFolderMenuAsksWhereAndSaysWhereUpdatesGo);
@@ -489,20 +524,152 @@ internal static partial class SelfTest
         RunStep(results, "UPNP: unticking it holds, even while a renewal is waiting on the router", UnTickingUpnpHoldsEvenMidRenewal);
         RunStep(results, "NETWORK TIDY: discovery's list capped, server lists quiet, the tick list keeps who is there", NetworkTidyHolds);
         RunStep(results, "WAITING: the password warning keeps the tick running, the quick switch waits, a silent copy asks nobody", WarningsAndQuestionsWaitProperly);
+        RunStep(results, "PASSWORDS: auto-connecting and prompts only on the same password; a peer the profile ticked on another is held quietly, one you tick is warned about", PasswordsDecideConnecting);
         RunStep(results, "KEY CLICKS: the output open only while clicks are on, and opened again after its device goes", KeyClicksOpenOnlyWhileOnAndComeBack);
         RunStep(results, "SPLASH: the audio-driver splash never sticks on screen", TheAsioSplashNeverSticks);
         RunStep(results, "UPDATE NOTE: \"could not be put back fully\" can be answered", TheUpdateNoteCanBeAnswered);
         RunStep(results, "SERVICE UPDATE: no copy over an unsettled app folder, and a failed copy tried again and checked", TheServiceCopiesOnlyWhatItCanCheck);
         RunStep(results, "START AND TRAY: F1 in the uninstall window, the picker in front, the tray menu back after help", StartupWindowsAndTrayHelp);
-        RunStep(results, "TIDY-UPS: Ctrl+S, press a key, passwords, stream ids, the ASIO callback, the ticked-us table", SweepTidyUpsHold);
+        RunStep(results, "TIDY-UPS: a \"don't show again\" that cannot be saved is not a failed profile save", TidyDontShowAgainIsNotASaveFailure);
+        RunStep(results, "TIDY-UPS: in \"press a key\", Tab moves on and Cancel can be pressed", TidyPressAKeyTabAndCancel);
+        RunStep(results, "TIDY-UPS: the password manager names what it could not save", TidyPasswordManagerNamesWhatItCouldNotSave);
+        RunStep(results, "TIDY-UPS: a claimed peer's stream ids go with their streams, in all three configurations", TidyClaimedStreamIdsGoWithTheirStreams);
+        RunStep(results, "TIDY-UPS: the ASIO output gives the driver silence, never an exception", TidyTheAsioOutputNeverThrowsIntoTheDriver);
+        RunStep(results, "TIDY-UPS: the \"someone ticked us\" table stays bounded", TidyTheTickedUsTableStaysBounded);
         RunStep(results, "INSTALL AND UNINSTALL: changes offered for saving first, then the window's normal close", InstallAndUninstallLeaveProperly);
         RunStep(results, "UPDATE LEFTOVERS: a cut-off update said and held, the note cleared once whole, old files removed", UpdateLeftoversArePutRight);
+        RunStep(results, "UPDATER END TO END: a signed release found, fetched, verified, staged and swapped in; one byte changed and it is refused", TheUpdaterEndToEnd);
         RunStep(results, "PREFERENCES: closing it keeps the keyboard where it was", PreferencesClosingKeepsYourPlace);
         RunStep(results, "IDENTITY: one person on a server per Windows account, and the service is whoever set it up", OneServerIdentityPerWindowsAccount);
         RunStep(results, "SERVICE FOLDER: repaired only by the account it belongs to; another is told once", TheServiceFolderIsRepairedOnlyByItsAccount);
         RunStep(results, "AWAY DEVICES: a device not here when a profile is saved keeps its tick", ADeviceAwayKeepsItsTickInTheProfile);
         RunStep(results, "ASIO LATE: an interface switched on after RemSound started is tried once more and its ticks come back", AnAsioInterfaceSwitchedOnLateComesBack);
         RunStep(results, "TICKED BEFORE: a device you have ticked is let back in when it connects to listen", ADeviceTickedBeforeIsLetBackIn);
+        RunStep(results, "DISCOVERY LOG: a peer appearing, moving and leaving the discovered list is logged once, with where it was heard", DiscoveryIsLogged);
+        // The simulator (Ed, 2026-09-26): the real sender and receiver between fake sound cards and a fake network, LISTENED to.
+        RunStep(results, "CROSS-PORT KNOWN ANSWERS: the exact bytes of the header, format, heartbeat and sealed payloads, both ways", CrossPortKnownAnswers);
+        RunStep(results, "CROSS-PORT KNOWN ANSWERS: the plugin's identity, and a project saved by v6.0 opens as it was saved", PluginIdentityAndSavedStateHold);
+        RunStep(results, "CROSS-PORT KNOWN ANSWERS: the plugin link's messages, 24-bit samples and the stored password, byte for byte", PluginLinkSamplesAndPasswordBytesHold);
+        RunStep(results, "START-UP: the program's main thread is STA, as Windows' pickers and the clipboard need", StartUpThreadIsSta);
+        RunStep(results, "OPUS: the native libopus is the one in use, beside the exe, and the log says so", NativeOpusIsInUse);
+        RunStep(results, "START TO TRAY: never on screen or in front on the way, and whole again from the tray", StartToTrayIsQuiet);
+        RunStep(results, "CODEC LIST: Opus live latency first and the default, then broadcast quality, then PCM; saved choices open as saved", CodecListOrderAndDefault);
+        RunStep(results, "OPEN RECORDINGS FOLDER: Ctrl+Shift+O opens it from anywhere in the main window, as on the Mac", OpenRecordingsFolderShortcut);
+        RunStep(results, "SILENT: a --silent or --headless start says nothing, and every word goes through the one switch", SilentStartsSayNothing);
+        RunStep(results, "INVISIBLE: a hidden window stays off every screen and is never always-on-top, however it is moved", HiddenWindowsStayOutOfSight);
+        RunStep(results, "SIMULATOR ANALYSER: a planted gap, click, pitch shift and noise are each heard", SimulatorAnalyserHearsPlantedFaults);
+        RunStep(results, "SIMULATOR REPEATS ITSELF: the same scenario twice gives the same sound, sample for sample", SimulatorRepeatsItself);
+        RunStep(results, "SIMULATOR REPLAY: a recorded network plays back packet for packet, and a hand-made minute's stall, loss, overtaking and doubling are each met where they were made", SimulatorReplaysARecordedNetwork);
+        RunStep(results, "THE NETWORK RECORDER: the last minute of arrivals kept, and Record > Save the last minute of the network writes it to the logs folder with what a replay needs", TheNetworkRecorderKeepsTheLastMinute);
+        RunStep(results, "SIMULATOR CALIBRATION: a recording replayed as it was made hears what its own receiver heard, and every kept recording agrees", SimulatorAgreesWithLiveRecordings);
+        RunStep(results, "SIMULATOR BURSTS AND QUEUES: loss in bursts is heard where single losses are repaired, and a queue that builds and drains breaks a buffer below its peak", SimulatorBurstsAndQueues);
+        RunStep(results, "SIMULATOR SERVER HOP: people playing to one listener through a server - each a stream of their own, whole; sound only between two who have ticked each other; two legs need a buffer for both", SimulatorServerHop);
+        RunStep(results, "SIMULATOR WALL CLOCK: the same sender and receiver on real threads, the machine's clock and a loopback socket - heard whole, where virtual time says, and it sees Windows' timer", SimulatorWallClock);
+        RunStep(results, "SIMULATOR MUSIC: a music-like signal beside the tone - each fault placed (a loud passage, a quiet one, a rest, a note's attack) and weighed (how deep, how audible)", SimulatorMusic);
+        RunStep(results, "SIMULATOR GUARD: the simulator's main window still does what the app's own once-a-second tick and auto-tune tick do, in the same order", SimulatorFollowsTheMainWindow);
+        RunStep(results, "SIMULATOR CAPTURE SIDE: the real capture code from simulated devices - push mode, the mixing engine, two clocks, lumps and a stall - each clean and in tune", SimulatorCaptureSide);
+        RunStep(results, "SIMULATOR SAMPLE RATES: inputs from 22.05 to 192 kHz through the mixing engine, and 96 to 192 kHz through push mode, come through whole, clean and in tune", SimulatorSampleRates);
+        RunStep(results, "SIMULATOR PUSH MODE RATES: a single input at 16, 22.05, 32, 44.1 or 88.2 kHz comes through push mode whole and in tune", SimulatorPushModeRates);
+        RunStep(results, "SIMULATOR DRIFT AFTER A STALL: a sending card that stops for 150 ms near a drift window's end must not leave two cards at the same rate read as 2,500 ppm apart", SimulatorDriftAfterAStall);
+        RunStep(results, "UNDERRUN NOISE BURST: each channel's gap-filling hiss at its own level - a silent channel stays silent, in ASIO only, WASAPI only and both", UnderrunNoiseBurstKeepsEachChannelsLevel);
+        RunStep(results, "INPUT STOPS AND COMES BACK: after the sender's sound stops for 200 ms the receiver refills to its buffer before playing on, in WASAPI only, ASIO only and both; momentary empties play on as before", InputStopsAndComesBack);
+        RunStep(results, "PCM IN EQUAL PIECES: a block too big for one packet goes out in equal pieces, so a lost one is made up at its own length - in tune with no dropout, WASAPI only, ASIO only and both", PcmBlocksGoOutInEqualPieces);
+        RunStep(results, "SIMULATOR ASIO: two desktops on a wired network, every way of sending clean and in tune", SimulatorAsioLinkIsClean);
+        RunStep(results, "SIMULATOR THREE CONFIGURATIONS: WASAPI only, ASIO only and both each play clean", SimulatorThreeConfigurationsPlayClean);
+        RunStep(results, "SIMULATOR SERVICE STREAM: the service's untagged WASAPI stream plays clean into an ASIO, a both and a WASAPI listener, on a wired network and home wifi", SimulatorServiceStream);
+        RunStep(results, "SIMULATOR TOO SMALL: a buffer below the network's need breaks up and is heard to", SimulatorHearsATooSmallBuffer);
+        RunStep(results, "SIMULATOR LOSS: lost packets are repaired or concealed and the tone survives", SimulatorRepairsLostPackets);
+        RunStep(results, "SIMULATOR DRIFT: two sound cards 200 ppm apart - clean, in tune, delay holding", SimulatorHoldsTwoDriftingCards);
+        RunStep(results, "SIMULATOR EVERYDAY: WASAPI only, plain PCM and 10 ms Opus, over home wifi and the internet", SimulatorEverydaySetupHolds);
+        RunStep(results, "RING BUFFER SKIP: a held note skipped without a jump or a dip, unrelated sounds blended equal-power, a plain drop when too little", RingBufferSkipsWithoutAClick);
+        RunStep(results, "SIMULATOR SNAP AND DRAIN: from 500 and 200 ms one skip per stream then the descent pace, down within 50 s; from 100 drained; by hand at once", SimulatorSnapsDownAndDrains);
+        RunStep(results, "SIMULATOR DESCENT: the auto-tune lowers the buffer, and it drains at the descent pace - no click, 0.4 % at most, down in 25 s", SimulatorDescentKeepsTheHousePace);
+        RunStep(results, "SIMULATOR PER-STREAM: each stream's own buffer brings a smooth stream's delay down, clean", SimulatorPerStreamSwitchCutsTheDelay);
+        RunStep(results, "SIMULATOR LATE PACKETS: overtaken and doubled packets are dropped - no click, no creeping delay", SimulatorLatePacketsAreDropped);
+        RunStep(results, "RECEIVE RESTART: a sender that starts counting again on the same stream keeps playing", ASenderThatStartsCountingAgainKeepsPlaying);
+        RunStep(results, "SIMULATOR REORDER WAIT: overtaken packets slot back in, and a thin buffer is never made worse", SimulatorReorderWaitSlotsPacketsBackIn);
+        RunStep(results, "SIMULATOR DROPOUT TUNER: finds the edge on a lumpy laptop, climbs fast on a stalling machine", SimulatorDropoutTunerFindsTheEdge);
+        // 2026-09-28, the review of every test: the everyday auto-tune in the loop, both outputs listened to, the readout
+        // against the true delay, the step probe, a night and a stall, and the WASAPI output stage.
+        RunStep(results, "SIMULATOR AUTO-TUNE FROM 500: the tuner everyone uses settles within 12 ticks, at or above the need, and comes down at the descent pace", SimulatorAutoTuneComesDownFrom500);
+        RunStep(results, "SIMULATOR AUTO-TUNE FROM 5 ON HOME WIFI: reaches the need within two ticks, the break-ups stop, and it never climbs after", () => SimulatorAutoTuneClimbsFrom5(Simulator.SimNetwork.Wifi));
+        RunStep(results, "SIMULATOR AUTO-TUNE FROM 5 ON THE ROUGH INTERNET: reaches the need within two ticks, the break-ups stop, and it never climbs after", () => SimulatorAutoTuneClimbsFrom5(Simulator.SimNetwork.Rough));
+        RunStep(results, "SIMULATOR BOTH OUTPUTS: each output listened to at its own buffer, and a stalled WASAPI card leaves the ASIO one clean", SimulatorBothOutputsAreEachListenedTo);
+        RunStep(results, "SIMULATOR LATENCY READOUT: the Total latency box against the true delay, every configuration and way of sending", SimulatorLatencyReadoutMatchesTheTrueDelay);
+        RunStep(results, "SIMULATOR STEP PROBE: the post-decode probe is fed and flags a click planted at the sender", SimulatorStepProbeFlagsAPlantedClick);
+        RunStep(results, "SIMULATOR OVERNIGHT: WASAPI only for an hour over the laptop's lumps and home wifi, with and without the output stage - no creep, gaps rare", SimulatorHoldsOvernight);
+        RunStep(results, "SIMULATOR STALL RECOVERY: after a 4 s card stall or a 1.5 s network stall the delay comes back and the pitch holds on the way", SimulatorRecoversFromAStall);
+        RunStep(results, "SIMULATOR WASAPI OUTPUT STAGE: the stage before a WASAPI card never breaks up, whatever the card's pulls do against the producer's feeds, and reads its clock true - WASAPI only and both", SimulatorWasapiOutputStageHoldsItsCushion);
+        RunStep(results, "SIMULATOR LANES APART: with both kinds of output a slider moved on one lane leaves the other's output sample for sample, and every copy of a stream reads its own clock", SimulatorLanesStayApart);
+        RunStep(results, "SIMULATOR OUTPUT HICCUP: an output that stops for a moment is not taken for a slow clock - ASIO hiccups of 20 to 450 ms and WASAPI card stalls of 50 to 200 ms, clean at once", SimulatorOutputHiccupIsNotAClock);
+        // 2026-09-28, Ed: "this is supposed to be a very light weight program that runs for days sometimes weeks at a time with very
+        // little load on the computer" - the performance, soak and stress suite (SelfTest.Performance.cs).
+        RunStep(results, "PERFORMANCE CPU: what a second of sound costs, every configuration and way of sending, one to eight peers - within budget and this machine's baseline", PerformanceCpu);
+        RunStep(results, "PERFORMANCE ALLOCATIONS: nothing allocated per audio packet or output read once a stream runs, every configuration and way of sending", PerformanceAllocations);
+        RunStep(results, "PERFORMANCE SOAK: a simulated day in all three configurations - heap, handles, threads and every table hold, and the counters wrap cleanly", PerformanceSoak);
+        RunStep(results, "PERFORMANCE STRESS MANY SENDERS: sixteen peers at once, then everything back where it was", PerformanceStressManySenders);
+        RunStep(results, "PERFORMANCE STRESS CHURN: a thousand joins and leaves in each configuration, every session pruned, everything back where it was", PerformanceStressChurn);
+        RunStep(results, "PERFORMANCE STRESS NETWORK FLAPS: drops, a stall and a rough spell, and the call back clean", PerformanceStressNetworkFlaps);
+        RunStep(results, "PERFORMANCE STRESS FLOODS: doubled, overtaken, junk and wrong-password packets and a burst of format packets, and the call unharmed", PerformanceStressFloods);
+        RunStep(results, "PERFORMANCE STRESS CARD STALLS: an output hiccup, an output stop, a late driver and a stopped capture, and the call back clean", PerformanceStressCardStalls);
+        RunStep(results, "PUSH TO TALK KEYS: tap, hold, double tap and both, press by press", PushToTalkKeyLogic);
+        RunStep(results, "PUSH TO TALK OFF: a profile with it off sends exactly what it always did, sample for sample", PushToTalkOffChangesNothing);
+        RunStep(results, "PUSH TO TALK THE AIRLOCK: nothing before the key, the sound the ordinary delay after it, a 5 ms fade, and stopping as quickly", PushToTalkKeyOpensAndClosesAtOnce);
+        RunStep(results, "PUSH TO TALK KEY BEHAVIOURS: a tap, a double tap and both, each heard exactly when it should be", PushToTalkKeyBehavioursReachTheWire);
+        RunStep(results, "PUSH TO TALK PATH: only the chosen path is held, the other goes out as normal", PushToTalkHoldsOnlyItsPath);
+        RunStep(results, "PUSH TO TALK DOUBLE TAP SPEED: slow, medium and fast, to the millisecond press by press and on the wire in every setup", PushToTalkDoubleTapSpeeds);
+        RunStep(results, "PUSH TO TALK DOUBLE TAP PREVIEW: moving along the speed list taps a key twice exactly that far apart, and nothing else sounds it", PushToTalkDoubleTapPreview);
+        RunStep(results, "PUSH TO TALK SOUND LEVEL: under the level never goes out, at it opens at once, shut half a second after, the slider honoured", PushToTalkOpensOnItsLevel);
+        RunStep(results, "PUSH TO TALK RECORDING: silence while not talking, everything with the bypass", PushToTalkRecordsAsHeard);
+        RunStep(results, "PUSH TO TALK DAW PLUGIN: the track waits for talking, and goes regardless with the bypass", PushToTalkHoldsTheDawTrack);
+        RunStep(results, "PUSH TO TALK WINDOW: opened from its button, changed control by control, OK keeps it in the profile, Cancel changes nothing", PushToTalkWindowSavesToTheProfile);
+        RunStep(results, "PUSH TO TALK KEY IN THE WINDOW: the key opens and shuts the gate, cues in key mode only, logged, in the status, and by the control channel", PushToTalkKeyThroughTheWindow);
+        RunStep(results, "PUSH TO TALK KEY HOOK: Scroll Lock taken and nothing else, left alone while choosing a key, never hooked in a headless copy", PushToTalkKeyHookTakesOnlyItsKey);
+        RunStep(results, "PUSH TO TALK PROFILE: off in a new profile, kept with it, v6.0 profiles load with it off, the key kept on this computer", PushToTalkInTheProfile);
+        RunStep(results, "PUSH TO TALK SERVICE: not part of the send-only service", PushToTalkIsNotInTheService);
+        // 2026-09-28, Ed: "the main thing is making the design rock solid so it all lines up" - the metronome (SelfTest.Metronome.cs).
+        RunStep(results, "METRONOME TIMELINE: start 400 ms ahead, a change at the next bar line with the count carried on, a late joiner on the master's beat, 6/8 and 7/8 accents", MetronomeTimelineRules);
+        RunStep(results, "METRONOME CLOCK ESTIMATE: 1234.567 ms apart and 50 ppm, jittery and lopsided - within half the asymmetry plus 0.2 ms, the rate within 5 ppm, a late burst ignored", MetronomeClockEstimate);
+        RunStep(results, "METRONOME MESSAGES: type 12 sealed with the password, every kind opened exactly, replays and strangers refused", MetronomeMessagesSealed);
+        RunStep(results, "METRONOME CLICK PLACEMENT: each onset on its exact sample from the output's ear time - ASIO, WASAPI and both", MetronomeClickPlacement);
+        RunStep(results, "METRONOME SOUNDS: five shipped pairs starting on their first sample, and a person's own offered beside them", MetronomeSoundsLoad);
+        RunStep(results, "SIMULATOR METRONOME: two machines, clocks and cards drifting, a jittery path 2 ms slower one way - every heard click within half the asymmetry plus 0.5 ms, WASAPI, ASIO and both; nothing ever sent", SimulatorMetronomeLinesUp);
+        RunStep(results, "METRONOME SOLO: nothing connected and receiving off - the outputs open for the metronome alone, what arrives stays unplayed, and they close when it stops", MetronomeSoloHoldsTheOutputs);
+        RunStep(results, "METRONOME OUTPUTS: through the real WASAPI stage and ASIO output, each click on its exact sample by that output's own delay - WASAPI, ASIO and both", MetronomeThroughTheRealOutputs);
+        RunStep(results, "METRONOME NEVER SENT: an output this profile sends a loopback of never plays the click, the others do, and the window and the log say so", MetronomeNeverOnALoopbackSentOutput);
+        RunStep(results, "METRONOME WINDOW: opened from the menu, changed control by control, OK keeps it in the profile and the log, Cancel changes nothing, the sound list previews", MetronomeWindowSavesToTheProfile);
+        RunStep(results, "METRONOME MENU: Start and Stop from the menu, the hotkey and the control channel, logged with the configuration and in the status", MetronomeMenuHotkeyAndControl);
+        RunStep(results, "METRONOME PROFILE: the defaults in a new profile, kept with it, v6.0 profiles load the defaults, the key kept on this computer", MetronomeInTheProfile);
+        RunStep(results, "METRONOME TEMPO KEYS: up and down a beat a minute from anywhere, kept in the profile, held at 30 and 300, a follower's left alone", MetronomeTempoKeys);
+        RunStep(results, "METRONOME HANDOVER: leading, told who follows and who said no; asked when another would take over - no is sent, yes hands over", MetronomeHandoverBothWays);
+        RunStep(results, "METRONOME THROUGH THE SERVER: the real relay and two windows - followed, the server's metronome claimed and started, each playing its own measured grid, the lead handed over", MetronomeThroughTheServer);
+        RunStep(results, "METRONOME SERVER RULES: claim and setting at once and each second, each machine its own grid, silent until timed, the follower's timeout, giving way", MetronomeServerRules);
+        RunStep(results, "METRONOME CAPTURE TIMES: each packet's time for the server - its own lane's input delay, its place in the block, its sequence, the instrument's lane first", MetronomeCaptureTimesForTheServer);
+        RunStep(results, "METRONOME WITHOUT A SERVER: it clicks for you alone and says so until hidden; being the master needs a server", MetronomeWithoutAServer);
+        RunStep(results, "JAMULUS-STYLE THROUGH THE SERVER: the real relay - sent through it while everyone there can decode it, the ordinary stream for all when someone cannot", JamulusStyleThroughTheServer);
+        RunStep(results, "METRONOME SERVICE: not part of the send-only service", MetronomeIsNotInTheService);
+        RunStep(results, "METRONOME IN THE DAW: offered only with In the DAW and last, 0.0.0.1 refused as a peer, a track's clicks within one DAW block of the beat, RemSound's outputs silent of them", MetronomeInTheDaw);
+        RunStep(results, "METRONOME RECORDING: ticked, the click on the exact sample it was heard - single file shaped or raw, a track of its own when split; off, none - WASAPI, ASIO and both", MetronomeInTheRecording);
+        RunStep(results, "METRONOME PROTOCOL: offers every 2 s for 10 s, the timeline thrice then every second, clock readings at 250 ms then 1 s, beats within half the asymmetry plus 0.2 ms, mute, Leave, Release and a 5 s silence", MetronomeProtocolRules);
+        RunStep(results, "METRONOME MASTER: two windows over loopback, one clock 1234.567 ms off and 50 ppm fast - offered, accepted, started, muted and stopped together, the clicks within 1 ms", MetronomeMasterOverLoopback);
+        RunStep(results, "METRONOME ASKED: a master asked about by name, No sent and not asked again, Yes followed, a silent master left after 5 s, an old peer offered and sent nothing else", MetronomeAskedDeclinedAndOldPeers);
+        RunStep(results, "METRONOME AT THE DOOR: type 12 handed up whole, runts and oversize dropped, only the window's own password opened, a replay refused", MetronomeReachesTheWindow);
+        RunStep(results, "STREAM BUFFERS: on from the start, and a stream's own need by the auto-tune's formula", StreamBuffersStartOnAndSizeByFormula);
+        RunStep(results, "STREAM BUFFERS PER STREAM: each sized from its own arrivals from the start, down 1 ms a second, leaner with the lowest-delay tune", PerStreamBuffersFollowTheirOwnArrivals);
+        RunStep(results, "ASIO BUFFER SIZE: the size asked for is fitted to what the driver allows", AsioBufferSizeIsFittedToTheDriver);
+        RunStep(results, "ASIO BUFFER SIZE PER PROFILE: beside the ASIO driver, saved with the profile, asked of the driver at its open, nothing for the driver's own", TheAsioBufferSizeIsAProfileSetting);
+        RunStep(results, "JAMULUS-STYLE OPUS: 64 and 128-sample frames encode, decode and conceal", JamulusStyleOpusRoundTrips);
+        RunStep(results, "JAMULUS-STYLE SENDING: PCM as picked is a packet per callback, and the 64-sample stream goes in place of Opus only to whoever plays through ASIO", TheAsioLaneSendsEachStreamToTheRightPeople);
+        RunStep(results, "SERVER PATH: audio through a server is received at real-time priority from the first packet, gaps timed", TheServerPathIsAlwaysBoosted);
+        RunStep(results, "SERVER WINDOW: remembered servers first, closes without a word on connecting, stays open when a server is not found; the server's list only while on one", ServerWindowAndList);
+        RunStep(results, "FAST TIMER: while streaming, a hidden RemSound's 10 ms tick keeps time (measured), and lets go when streaming stops", TheFastTimerHoldsWhileStreaming);
+        RunStep(results, "CAPTURE DELAY PER LANE: each lane's format says its own capture, and the far end's readout counts the right one per output", EachLaneAnnouncesItsOwnCaptureDelay);
+        RunStep(results, "JAMULUS-STYLE HEARTBEAT: a copy that only listens through ASIO still asks for the frames", TheHeartbeatCarriesTheJamulusFlag);
+        RunStep(results, "LOWEST-DELAY TUNER: halving from far above until its first gap, then down 1 ms after 5 quiet seconds, up 2 (then doubling) when gaps come", TheDropoutTunerKeepsItsRules);
+        RunStep(results, "LOWEST-DELAY AUTO-TUNE: one tick box beside the interval, kept with the profile; every lane with audio tuned by its gaps, the usual tune aside, in all three configurations", LowestDelayTuneOnEveryLane);
+        RunStep(results, "PEER LATENCY: each connected peer's total latency beside its ping in the status, from its own stream, in all three configurations", PeerLatencyInTheStatus);
+        RunStep(results, "JAMULUS-STYLE AUTOMATIC: no Latency lab in Preferences; asked for while receiving through ASIO, in all three configurations, and logged", JamulusStyleIsAutomatic);
+        RunStep(results, "LATENCY LAB RETIRED SWITCHES: an old config naming them still opens, and nothing reads them", LatencyLabRetiredSwitchesStillLoad);
         // 2026-09-25 sweep, Ed: "yes all 7" - the audio and plugin faults.
         RunStep(results, "PLUGIN RECEIVE: every frame asked for is played, in order, at 44.1 kHz and with the block size changing", ThePluginPlaysEveryFrameItAskedFor);
         RunStep(results, "PEER EQ: a person's streams each have their own, so two streams are not distorted", APeersEqIsNotSharedBetweenTheirStreams);
@@ -512,7 +679,11 @@ internal static partial class SelfTest
         RunStep(results, "PLUGIN STATUS: says plainly when Receive audio is off in RemSound", APluginSaysWhenReceiveIsOffInRemSound);
         RunStep(results, "ASIO: an input or output that failed to open is tried again", AFailedAsioOpenIsTriedAgain);
         // 2026-09-25 sweep, Ed: "fix them all please" - five small ones.
-        RunStep(results, "SWEEP FIXES: Save as unlocks, Browse switches a sound on, speech finds NVDA later, the Server window speaks, the repair's answer is in front", SweepSmallFixesHold);
+        RunStep(results, "SWEEP FIXES: Save as from a locked profile writes an editable copy", SaveAsFromALockedProfileIsEditable);
+        RunStep(results, "SWEEP FIXES: choosing a sound with Browse switches it on", BrowseSwitchesASoundOn);
+        RunStep(results, "SWEEP FIXES: speech finds a screen reader that starts after RemSound", SpeechFindsTheScreenReaderLater);
+        RunStep(results, "SWEEP FIXES: the Server window closes quietly on a connect, and says Connecting and a name it cannot find, once", TheServerWindowSaysWhatHappens);
+        RunStep(results, "SWEEP FIXES: the start-up repair's answer opens in front of everything", TheRepairAnswerIsInFront);
         // 2026-09-25 sweep, Ed: "yes fix those 2" - a profile saved over, and one lost track of by renaming.
         RunStep(results, "PROFILES: one that can't be read is never saved over, and a renamed one is still found", AProfileIsNeverSavedOverOrLostByRenaming);
         // 2026-09-25, the live phone test: Ed's phone was accepted and his wife's phone got the stream.
@@ -535,8 +706,13 @@ internal static partial class SelfTest
         // LAST, so every step before it has had its chance to write the real pointer, or reach the real RemSound.
         RunStep(results, "GATE GUARD: no plugin in the run talked to the RemSound you have open", NoPluginInTheRunReachedTheRealApp);
         RunStep(results, "GATE GUARD: nothing in the run announced this computer on the network", NothingInTheRunAnnouncedItself);
+        RunStep(results, "GATE GUARD: no packet the run sent left this computer", NoPacketLeftThisComputer);
+        RunStep(results, "GATE GUARD: nothing in the run reached the screen reader - not a word, not an event", NothingInTheRunReachedTheScreenReader);
         RunStep(results, "GATE GUARD: the run never touches the real plugin pointer every DAW reads", TheGateLeavesTheRealPluginPointerAlone);
         RunStep(results, "SCRIPTS: the old scripts folder is tidied away, and nobody else's files go with it", OldScriptsFolderIsTidiedAway);
+        // The very last: it needs every step's name, and every step has been asked about by now.
+        RunStep(results, "PACKS: git's answer is read whole while it floods its warnings", PackGitAnswerUnderWarnings);
+        RunStep(results, "GATE GUARD: every step says which pack it belongs in, and changed files map onto areas", EveryStepIsInAPack);
 
         var failed = results.Count(r => r.Status == "FAIL");
         var skipped = results.Count(r => r.Status == "SKIP");
@@ -549,6 +725,24 @@ internal static partial class SelfTest
         }
 
         Console.WriteLine();
+        if (featurePack)
+        {
+            // Never mistaken for the release gate: it says what it is, why it chose what it ran, and what it left.
+            Console.WriteLine($"FEATURE PACK: the core steps, the areas {(packAreas.Count == 0 ? "(none changed)" : string.Join(", ", packAreas.OrderBy(a => a)))}, "
+                + $"{packChangedTestFiles.Count} changed test file(s) and the steps new since the last release ({packWhy}).");
+            Console.WriteLine($"LEFT FOR THE FULL RUN ({leftForFullRun.Count} steps): run --selftest without --pack feature before a release.");
+            if (skipped > 0)
+                Console.WriteLine($"SKIPPED STEPS ({skipped}): {string.Join(", ", results.Where(r => r.Status == "SKIP").Select(r => r.Name))}");
+            if (failed == 0)
+            {
+                Console.WriteLine($"RESULT: FEATURE PACK PASS - {passed} passed{(skipped > 0 ? $", {skipped} skipped" : "")} of {results.Count}; "
+                    + $"{leftForFullRun.Count} left for the full run. Not a release gate.");
+                return 0;
+            }
+            Console.WriteLine($"RESULT: FEATURE PACK FAIL - {failed} failed, {passed} passed{(skipped > 0 ? $", {skipped} skipped" : "")} of {results.Count}.");
+            Console.WriteLine($"        Failed: {string.Join(", ", results.Where(r => r.Status == "FAIL").Select(r => r.Name))}");
+            return 1;
+        }
         // Skips must be LOUD: a skipped step is coverage that did not run, and a gate that quietly
         // passes with steps skipped reads as "everything was checked" when it wasn't. Name them so
         // run-tests.ps1 (and a human reading the log) can see exactly what went unexercised.
@@ -566,6 +760,8 @@ internal static partial class SelfTest
         }
         finally
         {
+            Windowless.QuietForRun = false;
+            WinEventNotifier.Quiet = restoreEvents;
             ScreenReader.Suppressed = restoreSpeech;
             CuePlayer.GloballyMuted = restoreCues;
             CuePlayer.NoDeviceForTest = false;
@@ -584,7 +780,14 @@ internal static partial class SelfTest
 
     private static void RunStep(List<Result> results, string name, Func<string?> body)
     {
+        var inPack = InPack(name);
         if (onlyStepsContaining is not null && !name.Contains(onlyStepsContaining, StringComparison.OrdinalIgnoreCase)) return;
+        if (onlyStepsContaining is null && !inPack) return;
+        // Every step starts with nobody asking for Jamulus-style frames, this copy included - how a fresh RemSound starts -
+        // whatever the step before did (a window's tick says whether this copy plays through ASIO). A step that tests the
+        // frames asks for them itself.
+        JamulusStyle.Reset();
+        CustomOpusPeers.Clear();
         var sw = Stopwatch.StartNew();
         var r = new Result { Name = name };
         // GUARD B: a step that asserts nothing cannot pass. Snapshot the assertion counter, and if a
@@ -592,6 +795,7 @@ internal static partial class SelfTest
         // reporting safety it never established, which is the exact disease this gate exists to
         // cure. A SKIP is exempt — it declares up front that it did not run. 2026-08-24.
         var assertionsBefore = assertionsRun;
+        var stuck = new StuckDialogWatch();
         try
         {
             r.Message = body() ?? "";
@@ -619,6 +823,13 @@ internal static partial class SelfTest
             var frame = (ex.StackTrace ?? "").Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() ?? "";
             r.Message = $"{ex.GetType().Name}: {ex.Message}{(frame.Length > 0 ? $" [{frame}]" : "")}";
         }
+        finally { stuck.Dispose(); }
+        if (stuck.Closed is { } dialog)
+        {
+            r.Status = "FAIL";
+            r.Message = $"a dialog nobody could answer stayed open {StuckDialogLimit.TotalSeconds:0} s and the gate closed it: {dialog} - "
+                      + $"on the hidden desktop it would have hung the run. What the step said after: {r.Message}";
+        }
         sw.Stop();
         r.Ms = sw.ElapsedMilliseconds;
         results.Add(r);
@@ -641,7 +852,11 @@ internal static partial class SelfTest
         var perPacket = r.BytesReceived / Math.Max(1, r.PacketsReceived);
         Check(opus ? perPacket < 400 : perPacket > 500,
             $"the {r.Codec} run must carry {r.Codec} - {perPacket} bytes a packet is {(perPacket < 400 ? "Opus-sized" : "PCM-sized")}");
-        return $"sent={r.PacketsSent}, received={r.PacketsReceived} ({r.BytesReceived / Math.Max(1, r.PacketsReceived)} bytes each), audio decoded into the playout buffer";
+        // And it keeps coming: 48,000 frames a second, give or take a tenth, once it has started.
+        Check(r.DecodedFramesPerSecond is > 43_200 and < 52_800,
+            $"once started, the {r.Codec} audio must keep being decoded at 48,000 frames a second, within a tenth (it was {r.DecodedFramesPerSecond:0})");
+        return $"sent={r.PacketsSent}, received={r.PacketsReceived} ({r.BytesReceived / Math.Max(1, r.PacketsReceived)} bytes each), "
+             + $"decoded at {r.DecodedFramesPerSecond:0} frames a second";
     }
 
     /// <summary>Audio encryption: the right password decrypts to the original, the wrong one fails
@@ -718,83 +933,67 @@ internal static partial class SelfTest
         RemPcmFrame.WriteSubHeader(sub, frameId: 12345, partIndex: 1, totalParts: 3);
         Check(RemPcmFrame.TryReadSubHeader(sub, out var fid, out var pi, out var tp) && fid == 12345 && pi == 1 && tp == 3,
             "PCM sub-header round-trip failed");
-        return "header + PCM sub-header round-trip, malformed rejected";
-    }
 
-    /// <summary>
-    /// Client-to-server compatibility guard. The Pi relay (<c>server/remsound-relay.py</c>)
-    /// forwards packets by reading ONLY the wire header at fixed byte offsets — it never looks at
-    /// the audio. These are the exact field positions and values it assumes. If RemSound's header
-    /// ever changes shape, this step FAILS, which is the reminder that the relay must be updated
-    /// and a new <c>server-*</c> release cut before shipping. Ideally we never touch the server —
-    /// this check is how we keep proving that, in case the network stack changes underneath us.
-    /// </summary>
-    private static string? ServerWireCompat()
-    {
-        // Golden contract the relay parses (see remsound-relay.py: MAGIC, V1_VERSION, header offsets).
-        Check(RemPacket.HeaderSize == 12, "the relay reads a 12-byte header; RemPacket.HeaderSize must stay 12");
-        Check(RemPacket.Version == 1, "the relay matches version byte 1 (V1_VERSION); RemPacket.Version must stay 1");
-        Check(RemPacket.DefaultPort == 47830, "the relay listens on UDP 47830; RemPacket.DefaultPort must stay 47830");
+        // The header reader takes any type byte, so what a type this build does not speak meets is the RECEIVER: dropped,
+        // counted, and no session - the relay's lobby types (6-9) included, which reach a peer only by mistake.
+        var peer = new IPEndPoint(IPAddress.Parse("192.168.77.20"), 47830);
+        using var receiver = new RemSound.Receiver.AudioReceiver();
+        receiver.SetOutputDevices([]);
+        receiver.SetAllowedSenders([peer]);
+        receiver.SetPlaybackEnabled(true);
+        var tickProofs = 0;
+        var controls = 0;
+        receiver.OnTickProofReceived += (_, _) => tickProofs++;
+        receiver.OnRemoteControlReceived += (_, _) => controls++;
+        void Inject(RemPacketType type, int payloadBytes)
+        {
+            var packet = new byte[RemPacket.HeaderSize + payloadBytes];
+            RemPacket.WriteHeader(packet, type, streamId: 9, sequence: 1);
+            receiver.InjectExternalPacket(packet, packet.Length, peer);
+        }
+        foreach (var unknown in new byte[] { 0, 6, 7, 8, 9, 13, 255 })
+        {
+            var dropped = receiver.PacketsRejectedMalformed;
+            Inject((RemPacketType)unknown, 40);
+            Check(receiver.PacketsRejectedMalformed == dropped + 1 && receiver.LiveSessionCountForTest == 0,
+                $"a packet of type {unknown}, which this build does not speak, must be dropped and counted, opening nothing");
+        }
 
-        // Packet-type values both ends agree on — changing any breaks interop with the relay/peers.
-        Check((byte)RemPacketType.Format == 1 && (byte)RemPacketType.Audio == 2
-              && (byte)RemPacketType.KeepAlive == 3 && (byte)RemPacketType.Heartbeat == 4
-              && (byte)RemPacketType.Control == 5,
-            "packet type values must stay Format=1, Audio=2, KeepAlive=3, Heartbeat=4, Control=5");
+        // Cut-short payloads, each one byte short of the least its reader takes.
+        Check(!RemPacket.TryReadFormat(new byte[RemPacket.FormatPayloadSize - 1], out _, out _), "a 31-byte format announcement must be refused");
+        Check(!RemPacket.TryReadHeartbeat(new byte[RemPacket.HeartbeatPayloadSize - 1], out _, out _), "an 8-byte heartbeat must be refused");
+        var before = receiver.PacketsRejectedMalformed;
+        Inject(RemPacketType.Format, RemPacket.FormatPayloadSize - 1);
+        Check(receiver.PacketsRejectedMalformed == before + 1 && receiver.LiveSessionCountForTest == 0,
+            "a cut-short format announcement must be dropped and counted, opening no session");
+        Inject(RemPacketType.Control, 1);
+        Inject(RemPacketType.Control, ControlSealing.SealedPayloadBytes - 1);
+        Inject(RemPacketType.TickProof, TickProof.SealedPayloadBytes - 1);
+        Check(controls == 0 && tickProofs == 0 && receiver.PacketsRejectedMalformed == before + 4,
+            $"cut-short remote-control and tick-proof payloads must be dropped and counted, never handed up ({controls} controls, {tickProofs} proofs handed up)");
+        Inject(RemPacketType.Control, ControlSealing.SealedPayloadBytes);
+        Inject(RemPacketType.TickProof, TickProof.SealedPayloadBytes);
+        Check(controls == 1 && tickProofs == 1, "the same packets at their full size must be handed up (a control and a proof)");
 
-        // Build a real header and assert the byte-level layout the relay reads.
-        Span<byte> h = stackalloc byte[RemPacket.HeaderSize];
-        RemPacket.WriteHeader(h, RemPacketType.Audio, streamId: 0x1234, sequence: 0xAABBCCDD);
-        Check(h[0] == (byte)'R' && h[1] == (byte)'M' && h[2] == (byte)'N' && h[3] == (byte)'D',
-            "magic must be ASCII 'RMND' at offset 0 (the relay's first-four-byte check)");
-        Check(h[4] == 1, "version byte must be at offset 4");
-        Check(h[5] == (byte)RemPacketType.Audio, "type byte must be at offset 5");
-        Check(BinaryPrimitives.ReadUInt16LittleEndian(h.Slice(6, 2)) == 0x1234,
-            "streamId must be a little-endian uint16 at offset 6 (the relay's pairing key)");
-        Check(BinaryPrimitives.ReadUInt32LittleEndian(h.Slice(8, 4)) == 0xAABBCCDD,
-            "sequence must be a little-endian uint32 at offset 8");
-
-        // Stream id 0 never reaches the wire. The relay PAIRS peers on this field (see the comment
-        // above), so a zero would give every such stream the same pairing key and let the relay pair
-        // the wrong two people. WriteHeader normalises it to 1; nothing tested that, and removing the
-        // normalisation left the whole gate green (2026-08-24). Our own TryReadHeader normalises on
-        // read too, which is why no in-process test could see it — the relay does not read through
-        // our parser.
-        Span<byte> zero = stackalloc byte[RemPacket.HeaderSize];
-        RemPacket.WriteHeader(zero, RemPacketType.Audio, streamId: 0, sequence: 1);
-        Check(BinaryPrimitives.ReadUInt16LittleEndian(zero.Slice(6, 2)) == 1,
-            "a stream id of 0 must be written to the wire as 1 — the relay pairs on this field, and a shared zero would "
-            + "let it pair the wrong two peers. Reading it back through our own parser cannot show this: that normalises "
-            + "on read as well, so the check has to look at the BYTES");
-
-        return "12-byte 'RMND' header; relay-visible fields unchanged; stream id 0 never reaches the wire";
-    }
-
-    /// <summary>Per-peer volume/pan/EQ DSP: nothing-to-do builds a null chain, the master-off state
-    /// bypasses, a real volume actually attenuates the signal, and the parametric range→peaking maths
-    /// is sane. This is the receive-side shaping that also feeds recordings.</summary>
-    private static string? PeerShapingDsp()
-    {
-        Check(PeerDspChain.Build(null, enabled: true) is null, "no shaping must build a null (do-nothing) chain");
-        Check(PeerDspChain.Build(new PeerShaping(), enabled: true) is null, "default (unity) shaping must build a null chain");
-
-        var half = new PeerShaping { Volume = 0.5f };
-        Check(PeerDspChain.Build(half, enabled: false) is null, "master switch off must bypass shaping (null chain)");
-
-        var chain = PeerDspChain.Build(half, enabled: true);
-        Check(chain is { IsNoOp: false }, "a 50% volume must build a real chain");
-        var buf = new float[8];
-        Array.Fill(buf, 1.0f);
-        chain!.Process(buf, buf.Length / 2);   // 4 stereo frames
-        Check(buf.All(v => Math.Abs(v - 0.5f) < 0.001f), $"volume 50% must halve the signal (got {buf[0]:0.000})");
-
-        var para = new PeerShaping { EqMode = PeerEqMode.Parametric16Band };
-        para.ParametricBands.Add(new ParametricBand { StartHz = 200, EndHz = 800, GainDb = 6 });
-        Check(PeerDspChain.Build(para, enabled: true) is { IsNoOp: false }, "a parametric band must build a real chain");
-        PeerEqBands.ParametricToPeaking(200, 800, out var centre, out var q);
-        Check(centre > 200 && centre < 800 && q is > 0.1f and < 12f,
-            $"parametric range→peaking must give a sane centre ({centre:0} Hz) and Q ({q:0.00})");
-        return "unity→null, master-off→null, volume, parametric";
+        // Audio shorter than its encryption tag, on a session that is open: dropped and counted, and the session lives.
+        var (rawKey, fingerprint) = RemSoundCrypto.ForPlainPassword("framing-password");
+        receiver.AudioKey = Require(rawKey, "the password must derive a key");
+        receiver.AudioFingerprint = fingerprint;
+        var format = new AudioFormatInfo(48000, 2, 24, 1, 6, 288_000, (int)AudioTransportCodec.Pcm, 240);
+        var announce = new byte[RemPacket.HeaderSize + RemPacket.FormatPayloadWithFingerprintSize];
+        RemPacket.WriteHeader(announce, RemPacketType.Format, 9, 2);
+        var announced = RemPacket.WriteFormatPayload(announce.AsSpan(RemPacket.HeaderSize), format, fingerprint);
+        receiver.InjectExternalPacket(announce, RemPacket.HeaderSize + announced, peer);
+        Check(receiver.LiveSessionCountForTest == 1, "a good format announcement must open the session");
+        var drops = receiver.Drops;
+        var shortAudio = new byte[RemPacket.HeaderSize + RemPcmFrame.SubHeaderSize + RemSoundCrypto.EncryptionOverheadBytes - 1];
+        RemPacket.WriteHeader(shortAudio, RemPacketType.Audio, 9, 3);
+        RemPcmFrame.WriteSubHeader(shortAudio.AsSpan(RemPacket.HeaderSize), 1, 0, 1);
+        receiver.InjectExternalPacket(shortAudio, shortAudio.Length, peer);
+        Check(receiver.Drops > drops && receiver.LiveSessionCountForTest == 1 && receiver.AudioBytesDecodedForTest == 0,
+            $"audio shorter than its encryption tag must be dropped and counted, and the session kept (drops {drops} -> {receiver.Drops})");
+        return "header and PCM sub-header round-trip, malformed headers refused; seven unknown types dropped and counted with no session; "
+             + "cut-short format, heartbeat, control, tick-proof and audio payloads refused, counted and never handed up";
     }
 
     /// <summary>Proves the "every received stream plays to EVERY active output" fan-out: with both output
@@ -977,6 +1176,7 @@ internal static partial class SelfTest
 
         var handlesBefore = SafeHandleCount();
         var transitions = 0;
+        var warmedUpGrowth = 0;
         Check(handlesBefore > 0, "the handle count could not be read, so a leak would read as growth of a negative number and pass");
 
         using (var receiver = new AudioReceiver())
@@ -996,8 +1196,15 @@ internal static partial class SelfTest
             sender.SetReceivers(new[] { new IPEndPoint(IPAddress.Loopback, port) });
             sender.Start();
 
-            var modes = new List<(AudioMode mode, string? driver)> { (AudioMode.WasapiOnly, null) };
-            if (asioDriver is not null) modes.Add((AudioMode.BothIndependent, asioDriver));
+            // Both modes every run: the ASIO lanes on a driver name that cannot exist when no real one is named, which builds
+            // and tears down the lanes and their threads without touching hardware (as AUDIT S1 does). Until 2026-09-28 the
+            // gate churned WASAPI only, as the real driver is opt-in.
+            const string StandInDriver = "RemSound self-test — no such ASIO driver";
+            var modes = new List<(AudioMode mode, string? driver)>
+            {
+                (AudioMode.WasapiOnly, null),
+                (AudioMode.BothIndependent, asioDriver ?? StandInDriver),
+            };
             var codecs = new[] { AudioTransportCodec.Pcm, AudioTransportCodec.Opus };
 
             // Soak: with REMSOUND_TEST_SOAK=<seconds> set, repeat the whole transition matrix until the
@@ -1006,7 +1213,7 @@ internal static partial class SelfTest
             var deadline = Environment.TickCount64 + Math.Max(0, soakSeconds) * 1000L;
 
             var i = 0;
-            do
+            void Matrix()
             {
                 foreach (var (mode, driver) in modes)
                 {
@@ -1029,7 +1236,16 @@ internal static partial class SelfTest
                     }
                 }
             }
+            do Matrix();
             while (Environment.TickCount64 < deadline);
+
+            // The first pass warms up what is made once and kept (device enumerators, audio threads, the stand-in driver's
+            // apartment). From here on, every transition must leave the handle count where it found it: counted over the
+            // second pass and the rapid loop below, under one handle a transition.
+            SettleForLeakCheck();
+            var handlesWarm = SafeHandleCount();
+            var transitionsWarm = transitions;
+            Matrix();
 
             // Rapid WASAPI-only reconfigure loop: hammer the process-loopback capture teardown/rebuild —
             // the mechanism that actually crashed. No mode changes here, so it never abuses real hardware.
@@ -1043,6 +1259,13 @@ internal static partial class SelfTest
                 Thread.Sleep(10);
                 transitions++;
             }
+
+            SettleForLeakCheck();
+            var warmGrowth = SafeHandleCount() - handlesWarm;
+            Check(warmGrowth < transitions - transitionsWarm,
+                $"after the first pass, {transitions - transitionsWarm} more transitions grew the handle count by {warmGrowth} - "
+                + "more than one a transition: a transition is leaking");
+            warmedUpGrowth = warmGrowth;
 
             // Gentle ASIO on/off cycling (opt-in only), with a process-loopback source live across the
             // toggle — the exact Ed repro. Generous settle time between toggles: some ASIO drivers
@@ -1087,8 +1310,10 @@ internal static partial class SelfTest
         var handleGrowth = handlesAfter - handlesBefore;
         Check(handleGrowth < 400, $"handle growth across the churn is too high ({handleGrowth}) — a transition may be leaking");
 
-        return $"{transitions} transitions; specSets={specSets.Count}, dsp={dspStates.Length}, "
-             + $"asio={(asioDriver ?? "skipped (set REMSOUND_TEST_ASIO)")}, proc={procOk}, handles+{handleGrowth}" + (loop is null ? "; no output to capture, so audio after the churn was not checked" : "; audio still decoded after it");
+        return $"{transitions} transitions across WASAPI only and WASAPI with ASIO; specSets={specSets.Count}, dsp={dspStates.Length}, "
+             + $"asio={(asioDriver ?? "a stand-in driver (REMSOUND_TEST_ASIO names a real one)")}, proc={procOk}, handles+{handleGrowth} "
+             + $"(+{warmedUpGrowth} once warmed up)"
+             + (loop is null ? "; no output to capture, so audio after the churn was not checked" : "; audio still decoded after it");
     }
 
     private static int SafeHandleCount()
@@ -1139,48 +1364,36 @@ internal static partial class SelfTest
                 // And that content is the tone, read back through a decoder: a file of silence the right size passed "200 bytes".
                 summary.Add($"{ext}={len}B ({CheckHoldsTheTestTone(path, ext.ToUpperInvariant())})");
             }
+            // Then every format again, with the handles counted around it: the first round loaded the encoders, so what this
+            // one adds is what a recording leaks (the old "Recording churn / soak" step, merged in 2026-09-28).
+            // REMSOUND_TEST_SOAK=<seconds> keeps going for that long - a real soak, run by hand.
+            SettleForLeakCheck();
+            var handlesBefore = SafeHandleCount();
+            int.TryParse(Environment.GetEnvironmentVariable("REMSOUND_TEST_SOAK"), out var soakSeconds);
+            var deadline = Environment.TickCount64 + Math.Max(0, soakSeconds) * 1000L;
+            var cycles = 0;
+            do
+                foreach (var fmt in new[] { RecordingFileFormat.Wav, RecordingFileFormat.Mp3, RecordingFileFormat.Ogg, RecordingFileFormat.Flac })
+                {
+                    var path = Path.Combine(temp, $"soak{cycles++}.{AudioRecorder.ExtensionFor(fmt)}");
+                    RecordTone(temp, path, new RecordingSettings { FileFormat = fmt, Source = RecordingSource.Both }, feedReceived: true, feedSent: true);
+                    try { File.Delete(path); } catch { /* best-effort */ }
+                }
+            while (Environment.TickCount64 < deadline || cycles < 8);   // two rounds at least, so one handle a recording shows
+            SettleForLeakCheck();
+            var growth = SafeHandleCount() - handlesBefore;
+            Check(growth < cycles, $"handle growth across {cycles} more recordings is too high ({growth}; the bar is under one a recording) - a recorder may be leaking");
+            summary.Add($"handles +{growth} over {cycles} recordings" + (soakSeconds > 0 ? $" (soak {soakSeconds}s)" : ""));
             return string.Join(", ", summary);
         }
         finally { try { Directory.Delete(temp, recursive: true); } catch { /* best-effort */ } }
     }
 
-    /// <summary>Load/soak: rapidly start, feed, stop and dispose recordings across every format, checking
-    /// nothing leaks handles across the churn — catches recorder/encoder lifecycle leaks and races that a
-    /// single recording wouldn't surface. Set the env var REMSOUND_TEST_SOAK=&lt;seconds&gt; to keep
-    /// hammering for that long (a real soak run); unset it does one quick round in the normal gate.</summary>
-    private static string? RecordingChurn()
-    {
-        var temp = Path.Combine(Path.GetTempPath(), "remsound-recchurn-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(temp);
-        try
-        {
-            int.TryParse(Environment.GetEnvironmentVariable("REMSOUND_TEST_SOAK"), out var soakSeconds);
-            var deadline = Environment.TickCount64 + Math.Max(0, soakSeconds) * 1000L;
-            var formats = new[] { RecordingFileFormat.Wav, RecordingFileFormat.Mp3, RecordingFileFormat.Ogg, RecordingFileFormat.Flac };
-            var handlesBefore = SafeHandleCount();
-            var cycles = 0;
-            do
-            {
-                foreach (var fmt in formats)
-                {
-                    var path = Path.Combine(temp, $"c{cycles}.{AudioRecorder.ExtensionFor(fmt)}");
-                    RecordTone(temp, path, new RecordingSettings { FileFormat = fmt, Source = RecordingSource.Both }, feedReceived: true, feedSent: true);
-                    try { File.Delete(path); } catch { /* best-effort */ }
-                    cycles++;
-                }
-            }
-            while (Environment.TickCount64 < deadline);
-            SettleForLeakCheck();
-            var growth = SafeHandleCount() - handlesBefore;
-            Check(growth < 500, $"handle growth across {cycles} record cycles is too high ({growth}) — a recorder may be leaking");
-            return $"{cycles} record start/stop/dispose cycles; handles+{growth}" + (soakSeconds > 0 ? $"; soak={soakSeconds}s" : "");
-        }
-        finally { try { Directory.Delete(temp, recursive: true); } catch { /* best-effort */ } }
-    }
-
     // Records ~0.4s of a 440 Hz tone with the given settings to an explicit path and returns the file
-    // size. Feeds the recorder's audio-thread taps directly, pacing so the writer thread drains the ring.
-    private static long RecordTone(string temp, string path, RecordingSettings settings, bool feedReceived, bool feedSent)
+    // size. Feeds the recorder's audio-thread taps directly, all at once: the recorder holds about five seconds for the
+    // writer, and Stop drains it (the per-chunk pause this had cost ~0.6 s a recording - review 2026-09-28). rightOnly puts
+    // the tone on the right channel alone, for the mono downmix.
+    private static long RecordTone(string temp, string path, RecordingSettings settings, bool feedReceived, bool feedSent, bool rightOnly = false)
     {
         long finishedBytes = -1;
         using (var rec = new AudioRecorder(settings, null, (_, b) => finishedBytes = b, path))
@@ -1197,13 +1410,12 @@ internal static partial class SelfTest
                 {
                     var s = (float)(0.2 * Math.Sin(phase));
                     phase += 2 * Math.PI * 440 / rate;
-                    chunk[i * 2] = s; chunk[i * 2 + 1] = s;
+                    chunk[i * 2] = rightOnly ? 0f : s; chunk[i * 2 + 1] = s;
                 }
                 var mem = chunk.AsMemory(0, frames * 2);
                 if (feedReceived) rec.WriteReceived(mem, RenderRoute.Mixed);
                 if (feedSent) rec.WriteSent(mem, RenderRoute.Mixed);
                 done += frames;
-                Thread.Sleep(2);
             }
             rec.Stop();
         }
@@ -1406,36 +1618,66 @@ internal static partial class SelfTest
     /// a card, and the follower entry itself, are never vetoed. (Ed, 2026-07-17.)</summary>
     private static string? DefaultFollowerExclusivity()
     {
-        using var list = new System.Windows.Forms.CheckedListBox();
-        list.Items.Add(AudioDefaultFollower.LoopbackSendChoice());                       // 0 = follower
-        list.Items.Add(new AudioDeviceChoice("Card A", "id-a", CaptureKind.Loopback));   // 1
-        list.Items.Add(new AudioDeviceChoice("Card B", "id-b", CaptureKind.Loopback));   // 2
+        // Driven through the real window's three device lists and their own tick handlers (2026-09-28: this used to call
+        // the veto helpers on a bare list, so a window that stopped calling them passed). Send and receive are off, so
+        // nothing is opened; the cards are stand-ins, as the machine's own cards vary.
+        var restoreMuted = CuePlayer.GloballyMuted;
+        CuePlayer.GloballyMuted = true;
+        Windowless.InstallHook();
+        Windowless.SetActiveForTest(true);
+        var profile = Profile.NewBlank();
+        profile.SendAudioOn = false;
+        profile.ReceiveAudioOn = false;
+        MainForm? form = null;
+        var said = new List<string>();
+        try
+        {
+            try { form = new MainForm(null, profile, null, null, headless: true); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+            _ = form.Handle;
+            foreach (var (field, what, kind) in new[]
+                     {
+                         ("sendOutputDevicesList", "send outputs", CaptureKind.Loopback),
+                         ("sendInputDevicesList", "send inputs", CaptureKind.Input),
+                         ("receiveOutputDevicesList", "receive outputs", CaptureKind.Loopback),
+                     })
+            {
+                var list = Require(FieldOf<CheckedListBox>(form, field), $"the main window has no {field} any more");
+                list.Items.Clear();
+                list.Items.Add(new AudioDeviceChoice("Use Windows default audio device", "__gate-follower__", kind) { IsDefaultFollower = true });
+                list.Items.Add(new AudioDeviceChoice("Card A", "gate-card-a", kind));
+                list.Items.Add(new AudioDeviceChoice("Card B", "gate-card-b", kind));
+                void Settle() { for (var k = 0; k < 5; k++) Application.DoEvents(); }
 
-        // Follower OFF: a specific card may be ticked (no veto).
-        var offCheck = new System.Windows.Forms.ItemCheckEventArgs(1, System.Windows.Forms.CheckState.Checked, System.Windows.Forms.CheckState.Unchecked);
-        Check(!AudioDefaultFollower.VetoRealDeviceCheck(list, offCheck), "with the follower off, a specific card must be checkable");
-        Check(offCheck.NewValue == System.Windows.Forms.CheckState.Checked, "no veto must leave the pending check intact");
-
-        // Tick the follower plus both cards, then clearing must leave ONLY the follower.
-        list.SetItemChecked(0, true);
-        list.SetItemChecked(1, true);
-        list.SetItemChecked(2, true);
-        Check(AudioDefaultFollower.IsFollowerChecked(list), "the follower must read as checked");
-        Check(AudioDefaultFollower.UncheckRealDevices(list), "clearing must report a change when cards were ticked");
-        Check(list.GetItemChecked(0), "the follower must stay ticked");
-        Check(!list.GetItemChecked(1) && !list.GetItemChecked(2), "every specific card must be cleared");
-
-        // With the follower ON, a fresh attempt to tick a specific card is vetoed back to unticked.
-        var onCheck = new System.Windows.Forms.ItemCheckEventArgs(1, System.Windows.Forms.CheckState.Checked, System.Windows.Forms.CheckState.Unchecked);
-        Check(AudioDefaultFollower.VetoRealDeviceCheck(list, onCheck), "with the follower on, ticking a specific card must be vetoed");
-        Check(onCheck.NewValue == System.Windows.Forms.CheckState.Unchecked, "the vetoed check must be forced back to unticked");
-
-        // Unticking a card, and the follower entry itself, are never vetoed.
-        var untick = new System.Windows.Forms.ItemCheckEventArgs(1, System.Windows.Forms.CheckState.Unchecked, System.Windows.Forms.CheckState.Checked);
-        Check(!AudioDefaultFollower.VetoRealDeviceCheck(list, untick), "unticking a card must never be vetoed");
-        var followerToggle = new System.Windows.Forms.ItemCheckEventArgs(0, System.Windows.Forms.CheckState.Checked, System.Windows.Forms.CheckState.Unchecked);
-        Check(!AudioDefaultFollower.VetoRealDeviceCheck(list, followerToggle), "the follower entry itself must never be vetoed");
-        return "follower on clears + locks specific cards; off frees them; follower/untick never vetoed";
+                list.SetItemChecked(1, true);
+                Settle();
+                Check(list.GetItemChecked(1), $"{what}: with the follower off, a card must tick");
+                list.SetItemChecked(0, true);
+                Settle();
+                Check(list.GetItemChecked(0) && !list.GetItemChecked(1) && !list.GetItemChecked(2),
+                    $"{what}: ticking the follower must untick every card and keep itself ticked");
+                list.SetItemChecked(2, true);
+                Settle();
+                Check(!list.GetItemChecked(2), $"{what}: THE VETO - with the follower on, a card must refuse its tick");
+                list.SetItemChecked(0, false);
+                Settle();
+                list.SetItemChecked(2, true);
+                Settle();
+                Check(!list.GetItemChecked(0) && list.GetItemChecked(2), $"{what}: with the follower off again, the card must tick");
+                list.SetItemChecked(2, false);
+                Settle();
+                Check(!list.GetItemChecked(2), $"{what}: and unticking a card is never refused");
+                said.Add(what);
+            }
+            return $"through the window's own handlers, on {string.Join(", ", said)}: the follower on clears and locks every card, off frees them, "
+                 + "and unticking is never refused";
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            Windowless.SetActiveForTest(false);
+            CuePlayer.GloballyMuted = restoreMuted;
+        }
     }
 
     /// <summary>The "Use Windows default output" follower (Christopher's request) must be the SAME shared
@@ -1715,7 +1957,7 @@ internal static partial class SelfTest
             var t = p.PropertyType;
             object? v =
                 p.Name == "WasapiSendMode" ? "applications" :
-                p.Name == "CodecRaw" ? (int)AudioTransportCodec.Opus :
+                p.Name == "CodecRaw" ? (int)AudioTransportCodec.Pcm : // a new profile is Opus since 2026-09-28
                 p.Name == "OpusFrameSamplesPerChannel" ? 960 :
                 p.Name == "SendRateRaw" ? (int)SendRate.Tight :
                 t == typeof(bool) ? !(bool)p.GetValue(target)! :
@@ -1726,6 +1968,10 @@ internal static partial class SelfTest
                 t == typeof(Dictionary<string, string>) ? new Dictionary<string, string> { ["connect"] = @"C:\drift.wav" } :
                 t == typeof(Dictionary<string, PeerShaping>) ? new Dictionary<string, PeerShaping> { ["drift-peer"] = new PeerShaping() } :
                 t == typeof(RecordingSettings) ? new RecordingSettings { Source = RecordingSource.SentOnly } :
+                t == typeof(PushToTalkSettings) ? new PushToTalkSettings { Enabled = true, Path = PushToTalkPath.Asio, LevelDb = -55,
+                    DoubleTapSpeed = PushToTalkDoubleTapSpeed.Slow } :
+                t == typeof(MetronomeSettings) ? new MetronomeSettings { Bpm = 97, BeatsPerBar = 7, BeatUnit = 8, Sound = "Rim", Volume = 33,
+                    HearIn = MetronomeHearIn.Daw, IncludeInRecordings = true, WhenAsked = MetronomeMasterAnswer.AcceptAutomatically } :
                 t == typeof(HotkeyRecord) ? new HotkeyRecord { Key = "F9", Control = true } :
                 null;
             if (v is not null) p.SetValue(target, v);
@@ -2169,6 +2415,7 @@ internal static partial class SelfTest
             Codec = AudioTransportCodec.Pcm,
             OpusFrameSamplesPerChannel = 960,
             SendRate = SendRate.Standard,
+            TightLatencyMode = false,
             WasapiSendMode = "devices",
         };
         profile.SelectedWasapiSendOutputs.Add("fake-device-id");     // a source so ApplyProfile proceeds
@@ -2176,6 +2423,10 @@ internal static partial class SelfTest
         const string pw = "hunter2horse42stable"; // must pass the 5.6 strength rule or ForPlainPassword refuses it
         profile.Password = RemSoundCrypto.Obfuscate(pw);
 
+        // A spare port for the service's network presence: RemSound's own (47830) may be the real service's, on this machine.
+        var restorePresencePort = ServiceSendHost.PresencePortForTest;
+        ServiceSendHost.PresencePortForTest = FreeUdpPort();
+        using var restorePort = new Disposer(() => ServiceSendHost.PresencePortForTest = restorePresencePort);
         using var host = new ServiceSendHost(() => profile);
         // ApplyProfile sets the sender's crypto + codec BEFORE it opens the (fake) device; a device-open
         // failure is now swallowed inside ApplyProfile, so this returns and the config is readable.
@@ -2190,6 +2441,15 @@ internal static partial class SelfTest
             $"the service must FORCE Opus regardless of the profile codec (got {cfg.Codec})");
         Check(cfg.Frame == 120,
             $"the service must force the 2.5 ms live Opus frame (120 samples), regardless of the profile (got {cfg.Frame})");
+        Check(cfg.PcmFrame == 120,
+            $"the service must force Small packets (the Tight send rate), regardless of the profile's Standard (PCM frame {cfg.PcmFrame})");
+        Check(cfg.TightLatency, "the service must lock to the audio clock, though the profile says not to");
+        // Whatever the profile holds for lock-to-clock: the service dialog stores no such choice (absorbed from the old
+        // "service dialog stores nothing for lock to audio clock" source check, 2026-09-28) and the service ignores it.
+        profile.TightLatencyMode = true;
+        host.ApplyProfile(profile);
+        Check(host.SenderConfigForTest.TightLatency && host.SenderConfigForTest.PcmFrame == 120,
+            "and with the profile saying yes to lock-to-clock, the same: the service decides, not the profile");
 
         // Applications-mode parity with the main app: specific apps only. Even with the legacy
         // SendAllApplications flag set true, the service must NOT emit a whole-system "all applications"
@@ -2208,7 +2468,7 @@ internal static partial class SelfTest
             Check(!appSpecs.Any(s => s.Kind == CaptureKind.Input),
                 "the service must never send WASAPI inputs, even if a legacy profile still lists one");
         }
-        return "service forces Opus + 2.5ms frame + lock-to-clock; apps mode is specific-apps-only; crypto matches";
+        return "service forces Opus, the 2.5 ms frame, Small packets and lock-to-clock whatever the profile says; apps mode is specific-apps-only; crypto matches";
     }
 
     /// <summary>The lock-screen service's app-yield token: while a hold is active the service must see an
@@ -2356,7 +2616,8 @@ internal static partial class SelfTest
             "and its listener must really be bound - 'up' alone is only 'Start ran', true even when the port was taken");
         bool PortFree(int p) { try { using var probe = new System.Net.Sockets.UdpClient(new IPEndPoint(IPAddress.Any, p)); return true; } catch { return false; } }
         Check(!PortFree(ownPresencePort), $"and bound on the test's own port {ownPresencePort}, never the well-known one");
-        Thread.Sleep(500);
+        // Waiting for the audio itself, not a fixed half second (the review, 2026-09-28).
+        WaitFor(() => receiver.AudioBytesDecodedForTest > 0, TimeSpan.FromSeconds(3));
         var afterStart = receiver.PacketsReceived;
         Check(afterStart > 0, $"packets must flow from the service host (got {afterStart})");
         Check(receiver.AudioBytesDecodedForTest > 0,
@@ -2365,15 +2626,14 @@ internal static partial class SelfTest
         host.Suspend();
         Check(!host.IsSending, "host should report not sending after Suspend");
         Check(!host.IsNetworkPresenceUpForTest, "the network presence must drop to a shell on Suspend (nothing left on the network for the app to fight)");
-        Thread.Sleep(200);
+        Thread.Sleep(100);   // anything already on its way lands
         var atSuspend = receiver.PacketsReceived;
-        Thread.Sleep(400);
+        Thread.Sleep(250);   // a window in which nothing may arrive: a sender still running sends ~50 packets in it
         Check(receiver.PacketsReceived == atSuspend, "no packets must flow while suspended");
 
         var decodedAtSuspend = receiver.AudioBytesDecodedForTest;
         Check(host.Resume(), "Resume should restart streaming");
-        Thread.Sleep(500);
-        Check(receiver.PacketsReceived > atSuspend, "packets must flow again after Resume");
+        Check(WaitFor(() => receiver.PacketsReceived > atSuspend, TimeSpan.FromSeconds(3)), "packets must flow again after Resume");
         var decodedAgain = false;
         for (var w = 0; w < 60 && !decodedAgain; w++) { decodedAgain = receiver.AudioBytesDecodedForTest > decodedAtSuspend; if (!decodedAgain) Thread.Sleep(50); }
         Check(decodedAgain, $"and audio must decode again after Resume (packets {atSuspend} -> {receiver.PacketsReceived}, sessions {receiver.LiveSessionCountForTest})");
@@ -2384,7 +2644,9 @@ internal static partial class SelfTest
         var loopResult = RunLoopYieldCheck(host, receiver, tokenName);
         Check(loopResult is null, loopResult ?? "");
 
-        return $"streamed headless on a port of its own; audio decoded, not just packets; start/suspend/resume verified; {afterStart} pkts; yield loop ok";
+        // WASAPI only, by design: the service has no ASIO path (it runs as SYSTEM with nobody signed in, where ASIO drivers do not).
+        return $"streamed headless on a port of its own; audio decoded, not just packets; start/suspend/resume verified; {afterStart} pkts; "
+             + "yield loop ok; WASAPI only - the service has no ASIO path by design";
         }
         finally { ServiceSendHost.PresencePortForTest = previousPresencePort; }
     }
@@ -2401,10 +2663,10 @@ internal static partial class SelfTest
         loop.Start();
         try
         {
-            Thread.Sleep(500);
+            Thread.Sleep(300);   // three of the loop's 100 ms looks at the token, any of which would have started it
             if (host.IsSending) return "host must stay suspended while the interactive token is held";
             var held = receiver.PacketsReceived;
-            Thread.Sleep(300);
+            Thread.Sleep(200);
             if (receiver.PacketsReceived != held) return "no packets must flow while the token is held";
 
             hold.Dispose(); hold = null; // app "closes" — host should resume after the settle
@@ -2412,8 +2674,7 @@ internal static partial class SelfTest
             for (var i = 0; i < 40 && !resumed; i++) { Thread.Sleep(50); if (host.IsSending) resumed = true; }
             if (!resumed) return "host must resume after the token is released";
             var before = receiver.PacketsReceived;
-            Thread.Sleep(400);
-            if (receiver.PacketsReceived <= before) return "packets must flow after the host resumes";
+            if (!WaitFor(() => receiver.PacketsReceived > before, TimeSpan.FromSeconds(3))) return "packets must flow after the host resumes";
             return null;
         }
         finally
@@ -2697,7 +2958,7 @@ internal static partial class SelfTest
         {
             "connect.wav", "disconnect.wav", "start up.wav",
             "send on.wav", "send off.wav", "recieve on.wav", "recieve off.wav", "minimise.wav", "maximise.wav",
-            "check.wav", "uncheck.wav",
+            "check.wav", "uncheck.wav", "push talk on.wav", "push talk off.wav",
         })
         {
             Check(CueSounds.Variants(cue).Count > 0,
@@ -2710,7 +2971,10 @@ internal static partial class SelfTest
         // Native Opus (Concentus.Native) keeps the encoder off the allocation-heavy managed fallback.
         var nativeOpus = Path.Combine(root, "runtimes", "win-x64", "native", "opus.dll");
         Check(File.Exists(nativeOpus), "native opus.dll must ship under runtimes\\win-x64\\native\\");
-        return "manual, cue sounds, native Opus";
+        // The custom-modes Opus for Jamulus-style frames (2026-09-26), with its licence, beside the exe.
+        Check(File.Exists(Path.Combine(root, "remsound-opus.dll")), "remsound-opus.dll (the Jamulus-style Opus library) must ship beside the exe");
+        Check(File.Exists(Path.Combine(root, "LICENSE-remsound-opus.txt")), "and its licence, LICENSE-remsound-opus.txt");
+        return "manual, cue sounds, native Opus, the Jamulus-style Opus library and its licence";
     }
 
     /// <summary>A checkbox that reports itself focused, so the gate can drive the focus half of the
@@ -2774,25 +3038,8 @@ internal static partial class SelfTest
                 + "for each would drag a screen reader around the window");
         }
         finally { AccessibleCheckBox.RaisedWinEventsForTest = null; }
-
-        var factories = DialogFactories();
-
-        var audited = new List<string>();
-        var skipped = new List<string>();
-        var violations = new List<string>();
-
-        foreach (var (name, make) in factories)
-        {
-            Form? form = null;
-            try { form = make(); }
-            catch (Exception ex) { skipped.Add($"{name} ({ex.GetType().Name}: {ex.Message})"); continue; }
-            try { AuditForm(name, form, violations); audited.Add(name); }
-            finally { try { form.Dispose(); } catch { /* ignore */ } }
-        }
-
-        Check(skipped.Count == 0, $"a dialog that will not even open cannot pass an accessibility audit: {string.Join("; ", skipped)}");
-        Check(violations.Count == 0, string.Join("; ", violations));
-        return $"audited {audited.Count} ({string.Join(", ", audited)})";
+        // Every dialog's names, mnemonics and tab order: audited by the Dialog control suite, as it builds each one.
+        return "a focused tick box fires the state change and then focus, so NVDA reads the new state; an unfocused one fires only the state change";
     }
 
     /// <summary>Constructs the ENTIRE main window in headless mode (no audio backend, no hotkeys, no
@@ -2980,8 +3227,9 @@ internal static partial class SelfTest
 
     /// <summary>The "auto save non-read only profiles" preference (2026-07-13): the exact option list Ed
     /// asked for, the guard that only auto-saves a real non-read-only dirty profile, the AppConfig
-    /// persistence, and that the timer turns on/off from the interval. The silence guarantee (no save cue)
-    /// is structural — the sole auto-save caller passes playCue: false — so we assert the guard, not audio.</summary>
+    /// persistence, and that the timer turns on/off from the interval. And that it is SILENT: an auto-save through the real
+    /// tick plays no cue, counted, where the same save by hand plays the save cue (2026-09-28 - this used to be claimed
+    /// from the code, not measured).</summary>
     private static string? AutoSaveNonReadOnlyProfiles()
     {
         // 1. The option rows are exactly Never / 2 / 5 / 10 / 15 / 20 / 30 minutes, in order.
@@ -3027,7 +3275,50 @@ internal static partial class SelfTest
             mf.ApplyAutoSaveTimer(0);
             Check(!mf.AutoSaveTimerEnabledForTest, "Never (0) must stop the auto-save timer");
         }
-        return "options, persistence, guard (read-only/blank/unchanged skipped), and silent timer all verified";
+
+        // 5. SILENT, counted: cues unmuted (and kept off every device), an auto-save plays nothing; a save by hand plays one.
+        var dir = Path.Combine(Path.GetTempPath(), "remsound-autosave-cue-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var restoreMuted = CuePlayer.GloballyMuted;
+        var restoreNoDevice = CuePlayer.NoDeviceForTest;
+        MainForm? form = null;
+        try
+        {
+            var store = new ProfileStore(dir);
+            var profile = Profile.NewBlank();
+            profile.Title = "Auto-save cue";
+            profile.Password = RemSoundCrypto.Obfuscate("a password for the gate");
+            profile.EnableSaveCue = true;
+            store.Save(profile);
+            try { form = new MainForm(store, profile, profile.Title, null, headless: true); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+            form.RememberSaveConfirmationSuppressedForTest();
+            CuePlayer.NoDeviceForTest = true;
+            CuePlayer.GloballyMuted = false;
+
+            form.MarkProfileDirtyForTest();
+            var before = CuePlayer.PlaysStartedForTest;
+            form.RunAutoSaveTickForTest();
+            Check(!form.UnsavedChangesForTest, "the auto-save must have saved - or its silence proves nothing");
+            Check(CuePlayer.PlaysStartedForTest == before,
+                $"SILENT: an auto-save must play no cue - it happens while somebody is playing ({CuePlayer.PlaysStartedForTest - before} played)");
+
+            form.MarkProfileDirtyForTest();
+            before = CuePlayer.PlaysStartedForTest;
+            var save = Require(form.MainMenuStrip?.Items.OfType<ToolStripMenuItem>().SelectMany(m => m.DropDownItems.OfType<ToolStripMenuItem>())
+                .FirstOrDefault(i => i.AccessibleName == "Save profile"), "the File menu's Save item");
+            save.PerformClick();
+            Check(!form.UnsavedChangesForTest && CuePlayer.PlaysStartedForTest == before + 1,
+                $"the same save by hand must play the save cue once, or the count above could never have seen one ({CuePlayer.PlaysStartedForTest - before} played)");
+        }
+        finally
+        {
+            CuePlayer.GloballyMuted = restoreMuted;
+            CuePlayer.NoDeviceForTest = restoreNoDevice;
+            try { form?.Dispose(); } catch { /* teardown */ }
+            try { Directory.Delete(dir, recursive: true); } catch { /* temp */ }
+        }
+        return "options, persistence, guard (read-only/blank/unchanged skipped), the timer; and an auto-save plays no cue where a save by hand plays one";
     }
 
     /// <summary>Guards the fix for the 2026-07-14 Win7 launch crash: RemSoundService derives from ServiceBase,
@@ -3176,46 +3467,6 @@ internal static partial class SelfTest
         Check(!IsAssemblyLoaded(svcAsm),
             "constructing the main window must NOT load System.ServiceProcess (Service menu is version-gated, not probed) — this is what keeps the app launching on Windows 7");
         return "the main window builds without loading the Windows-service assembly (Win7 launch-safe)";
-    }
-
-    /// <summary>A top-level menu opens on Alt+&lt;its mnemonic&gt; — but a VISIBLE control that owns the same
-    /// Alt key steals it, so the menu never opens (this is exactly why Alt+S didn't open the Service menu:
-    /// the "Send my audio" checkbox owns Alt+S). Since the user could be on any tab when they press Alt, a
-    /// top-level menu's mnemonic must avoid EVERY control mnemonic in the window. This is invisible to the
-    /// main coverage audit because menu items are ToolStripItems, not Controls.</summary>
-    private static string? MenuShortcutsDontClashWithControls()
-    {
-        Form form;
-        try { form = new MainForm(null, RemSound.Core.Profile.NewBlank(), null, null, headless: true); }
-        catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
-
-        using (form)
-        {
-            var all = new List<Control>();
-            void Walk(Control p) { foreach (Control c in p.Controls) { all.Add(c); Walk(c); } }
-            Walk(form);
-
-            var menu = form.MainMenuStrip ?? all.OfType<MenuStrip>().FirstOrDefault();
-            Check(menu is not null, "the main window must have a menu strip to audit");
-
-            // Top-level menu mnemonics (the Alt+letter that should open each menu).
-            var menuMnemonics = new Dictionary<char, string>();
-            foreach (ToolStripItem item in menu!.Items)
-                if (TryMnemonic(item.Text, out var m)) menuMnemonics[m] = item.Text ?? "";
-            Check(menuMnemonics.Count >= 3, $"expected several top-level menu shortcuts (found {menuMnemonics.Count})");
-
-            // Every control mnemonic anywhere in the window (any tab could be showing when Alt is pressed).
-            var controlMnemonics = new Dictionary<char, string>();
-            foreach (var c in all)
-                if (TryMnemonic(c.Text, out var m)) controlMnemonics.TryAdd(m, string.IsNullOrWhiteSpace(c.Text) ? c.GetType().Name : c.Text!);
-
-            var clashes = menuMnemonics.Keys.Where(controlMnemonics.ContainsKey)
-                .Select(k => $"Alt+{char.ToUpperInvariant(k)} — menu \"{menuMnemonics[k]}\" vs control \"{controlMnemonics[k]}\"")
-                .ToList();
-            Check(clashes.Count == 0, "top-level menu shortcuts must not collide with control shortcuts (the control steals the key): " + string.Join("; ", clashes));
-
-            return $"{menuMnemonics.Count} top-level menu shortcuts, none stolen by a control";
-        }
     }
 
     /// <summary>The service's network presence (what makes it discoverable + connectable, not just a blind
@@ -3808,14 +4059,18 @@ internal static partial class SelfTest
         }
         finally { try { Directory.Delete(tmp, recursive: true); } catch { } }
 
-        // 3. Priority-mode scope decision (the pure core the 1 Hz tick drives).
+        // 3. The streaming scope (the pure core the 1 Hz tick drives): the fast timer only while audio moves. (The profile's
+        // high-priority setting that shared it was removed 2026-09-29.)
         var now = new DateTime(2026, 7, 26, 4, 0, 0, DateTimeKind.Utc);
-        Check(MainForm.PriorityModeShouldEngage(true, now.AddSeconds(-1), now), "streaming + toggle on → engaged");
-        Check(MainForm.PriorityModeShouldEngage(true, now.AddSeconds(-20), now), "a quiet spell inside the hold-down must NOT release (no lever flapping)");
-        Check(!MainForm.PriorityModeShouldEngage(true, now.AddMinutes(-5), now), "idle past the hold-down → released (idle-in-tray no longer holds the machine awake)");
-        Check(!MainForm.PriorityModeShouldEngage(false, now.AddSeconds(-1), now), "toggle off → never engaged, even while streaming");
+        Check(MainForm.FastTimerShouldHold(now.AddSeconds(-1), now), "streaming → held");
+        Check(MainForm.FastTimerShouldHold(now.AddSeconds(-20), now), "a quiet spell inside the hold-down must NOT release (no flapping)");
+        Check(!MainForm.FastTimerShouldHold(now.AddMinutes(-5), now), "idle past the hold-down → released (idle in the tray asks nothing of Windows)");
+        Check(typeof(Profile).GetProperty(nameof(Profile.PriorityMode)) is { } retired
+              && retired.GetCustomAttributes(typeof(System.Text.Json.Serialization.JsonIgnoreAttribute), false).Length == 1,
+            "the retired high-priority field is kept only to read old profiles, never written as false");
+        Check(typeof(RemSoundSettingsStore).GetMethod("LoadPriorityMode") is null, "nothing may read the retired high-priority setting");
 
-        return "log rolls at cap into a file chain; crash pile capped at newest 10; levers scoped to streaming";
+        return "log rolls at cap into a file chain; crash pile capped at newest 10; the fast timer scoped to streaming; high priority retired";
     }
 
     /// <summary>The icacls contract for the service-folder lockdown (cross-user LPE fix): inheritance
@@ -4034,7 +4289,18 @@ internal static partial class SelfTest
         var versions = shown.Split('\n').Count(l => l.TrimEnd('\r').StartsWith("RemSound v", StringComparison.Ordinal));
         Check(versions == 5, $"the shipped About text must show exactly 5 versions (got {versions})");
         Check(shown.Length < 10_000, $"the shipped About text must stay well under screen-reader-crashing size (got {shown.Length} chars)");
-        return $"shipped About text: 5 versions, {shown.Length} chars (was ~70,000 — the screen-reader crash)";
+        // What it shows calls the jitter buffer by its name: "latency control" was renamed on 2026-08-23, because Total latency
+        // is a different number (merged here from its own step, 2026-09-28).
+        Check(!shown.Contains("latency control", StringComparison.OrdinalIgnoreCase),
+            "the About box must not call the jitter buffer the \"latency control\" - Total latency is a different number");
+        // Only the newest releases are compiled in; the history lives in the repository (merged here, 2026-09-28).
+        var compiled = AboutDialog.ReleaseNotesForTest.Split('\n').Count(l => l.TrimEnd('\r').StartsWith("RemSound v", StringComparison.Ordinal));
+        Check(compiled <= 6, $"the app must carry only the newest releases' notes (it carries {compiled}); older ones belong in RELEASE_HISTORY.md");
+        if (FindSourceRoot() is { } root)
+            Check(File.Exists(Path.Combine(root, "RELEASE_HISTORY.md")) && File.ReadAllText(Path.Combine(root, "RELEASE_HISTORY.md")).Contains("RemSound v1.0", StringComparison.Ordinal),
+                "the older release notes must be kept in the repository once they leave the exe");
+        return $"shipped About text: 5 versions, {shown.Length} chars (was ~70,000 — the screen-reader crash); no \"latency control\"; "
+             + $"{compiled} releases compiled in, the rest in RELEASE_HISTORY.md";
     }
 
     /// <summary>The auto-tune's descent policy. The safety property matters more than the speed one:
@@ -4054,14 +4320,19 @@ internal static partial class SelfTest
         Check(AutoTuneDescent.NextTarget(30, 90, lowWaterMs: 5, sampleCount: 15, consecutiveCleanTicks: 9) == 30,
             "a RAISE is not this function's job — it must hand back unchanged");
 
-        // EVIDENCE GATING — a big step needs history AND a clean run; otherwise step gently.
-        var noHistory = AutoTuneDescent.NextTarget(500, 20, lowWaterMs: 480, sampleCount: 2, consecutiveCleanTicks: 9);
-        var dirtyRun = AutoTuneDescent.NextTarget(500, 20, lowWaterMs: 480, sampleCount: 15, consecutiveCleanTicks: 0);
-        var confident = AutoTuneDescent.NextTarget(500, 20, lowWaterMs: 480, sampleCount: 15, consecutiveCleanTicks: 9);
+        // A SILLY SETTING — more than 100 ms over the need — goes straight to the need and its headroom, evidence or none
+        // (Ed, 2026-09-28: "you want it to snap back down"; AutoTuneDescent.SillyAboveNeedMs).
+        var silly = AutoTuneDescent.NextTarget(500, 20, lowWaterMs: -1, sampleCount: 0, consecutiveCleanTicks: 0);
+        Check(silly == 20 + AutoTuneDescent.Default.HeadroomMs, $"500 ms against a need of 20 must go straight to the need and its headroom ({silly})");
+
+        // EVIDENCE GATING — within 100 ms of the need, a big step needs history AND a clean run; otherwise step gently.
+        var noHistory = AutoTuneDescent.NextTarget(110, 20, lowWaterMs: 90, sampleCount: 2, consecutiveCleanTicks: 9);
+        var dirtyRun = AutoTuneDescent.NextTarget(110, 20, lowWaterMs: 90, sampleCount: 15, consecutiveCleanTicks: 0);
+        var confident = AutoTuneDescent.NextTarget(110, 20, lowWaterMs: 90, sampleCount: 15, consecutiveCleanTicks: 9);
         Check(confident < dirtyRun && confident < noHistory,
             $"confident evidence must move further than thin evidence (confident={confident}, dirty={dirtyRun}, noHistory={noHistory})");
-        Check(dirtyRun < 500 && noHistory < 500, "even without evidence it must still make progress, not stall");
-        Check(AutoTuneDescent.NextTarget(500, 20, lowWaterMs: -1, sampleCount: 15, consecutiveCleanTicks: 9) < 500,
+        Check(dirtyRun < 110 && noHistory < 110, "even without evidence it must still make progress, not stall");
+        Check(AutoTuneDescent.NextTarget(110, 20, lowWaterMs: -1, sampleCount: 15, consecutiveCleanTicks: 9) < 110,
             "an unknown low-water mark must fall back to a gentle step, not a stall");
 
         // SPEED — from a silly value, a confident descent converges in a handful of ticks, not ~100.
@@ -4141,6 +4412,21 @@ internal static partial class SelfTest
               + "sharing them let ASIO be sized by WASAPI's much slower callback period, which is the opposite of "
               + "what independently-tuned lanes are for");
 
+            // --- ...and what one lane learns stays on that lane, in the window's own memory (merged from the old "The two
+            // auto-tunes stay independent", which compared two fresh objects and so could only fail if the type went static).
+            form.CreepForTest(RenderRoute.AsioLane).NoteShortfallAt(60, 60);
+            var asioFloor = form.CreepForTest(RenderRoute.AsioLane).DiscoveredFloorMs;
+            Check(asioFloor > 60, $"the ASIO lane, short at 60 ms, must learn a floor above it ({asioFloor} ms)");
+            Check(form.CreepForTest(RenderRoute.WasapiLane).DiscoveredFloorMs == 0,
+                $"and the WASAPI lane must learn nothing from it (it has a floor of {form.CreepForTest(RenderRoute.WasapiLane).DiscoveredFloorMs} ms)");
+            var asioNext = AutoTuneDescent.NextTarget(80, 20, lowWaterMs: 60, sampleCount: 15, consecutiveCleanTicks: 30, policy: null, creep: form.CreepForTest(RenderRoute.AsioLane));
+            var wasapiNext = AutoTuneDescent.NextTarget(80, 20, lowWaterMs: 60, sampleCount: 15, consecutiveCleanTicks: 30, policy: null, creep: form.CreepForTest(RenderRoute.WasapiLane));
+            Check(asioNext >= asioFloor && wasapiNext < asioNext,
+                $"so the untroubled lane may still descend past the troubled one's floor (WASAPI {wasapiNext} ms, ASIO {asioNext} ms)");
+            var probesBefore = form.CreepForTest(RenderRoute.AsioLane).TicksSinceProbe;
+            for (var i = 0; i < 3; i++) AutoTuneDescent.NextTarget(45, 30, 15, 15, 30, policy: null, creep: form.CreepForTest(RenderRoute.WasapiLane));
+            Check(form.CreepForTest(RenderRoute.AsioLane).TicksSinceProbe == probesBefore, "one lane's creep probes must not move the other's schedule");
+
             // --- A fresh lane owes a baseline before it may act ----------------------------------
             foreach (var route in new[] { RenderRoute.WasapiLane, RenderRoute.AsioLane, RenderRoute.Mixed })
             {
@@ -4165,8 +4451,9 @@ internal static partial class SelfTest
                   + "whole time it was off, and that backlog is not this tick's evidence");
 
             tuneBox.Checked = false;   // leave the form as it was found
-            return "each lane owns its evidence and its learned floor; a reset lane owes a baseline reading before it acts; "
-                 + "switching the tuner on re-arms all three lanes through the real enable path";
+            return "each lane owns its evidence and its learned floor - a shortfall on ASIO teaches WASAPI nothing, in the window's "
+                 + "own memory; a reset lane owes a baseline reading before it acts; switching the tuner on re-arms all three lanes "
+                 + "through the real enable path";
         }
         finally { try { form?.Dispose(); } catch { } }
     }
@@ -4732,52 +5019,6 @@ internal static partial class SelfTest
              + $"a realistic WASAPI setup estimates {realistic:0.0}ms; ASIO reads its own period ({asioPeriod}ms vs WASAPI's {wasapiPeriod}ms)";
     }
 
-    /// <summary>The WASAPI and ASIO auto-tunes must follow exactly the SAME rules — one policy, no
-    /// second implementation to drift — while keeping entirely SEPARATE memory. Different hardware,
-    /// different natural latency, different distress: one lane running short must never set the other
-    /// lane's floor, and one lane's quiet spell must never earn the other lane a bold step.
-    ///
-    /// Ed asked the question directly (2026-08-15: "do the 2 auto tunes work in exactly the same way
-    /// but independent of each other?") and it found a real bug in unshipped code — the creep's
-    /// clean-tick counter and learned floor were single shared fields, so the lanes would have
-    /// corrupted each other's evidence. Hence this test.</summary>
-    private static string? AutoTuneLanesIndependent()
-    {
-        // SAME RULES needs no check of its own: there is one AutoTuneDescent.NextTarget and both lanes call it. A loop
-        // that fed it the same numbers twice compared the function with itself. 2026-09-13 review.
-
-        // INDEPENDENT MEMORY: a shortfall on one lane must not touch the other's floor.
-        var wasapiMem = new AutoTuneDescent.CreepState();
-        var asioMem = new AutoTuneDescent.CreepState();
-        asioMem.NoteShortfallAt(60, 60);                       // the ASIO lane got into trouble at 60ms
-        Check(asioMem.DiscoveredFloorMs > 60, "the lane that ran short must learn a floor");
-        Check(wasapiMem.DiscoveredFloorMs == 0,
-            $"the OTHER lane must learn nothing from it (it picked up a floor of {wasapiMem.DiscoveredFloorMs}ms)");
-
-        // ...and that separation must show in the actual decision, not just the field.
-        var asioNext = AutoTuneDescent.NextTarget(80, 20, lowWaterMs: 60, sampleCount: 15, consecutiveCleanTicks: 30, policy: null, creep: asioMem);
-        var wasapiNext = AutoTuneDescent.NextTarget(80, 20, lowWaterMs: 60, sampleCount: 15, consecutiveCleanTicks: 30, policy: null, creep: wasapiMem);
-        Check(asioNext >= asioMem.DiscoveredFloorMs, "the troubled lane must respect the floor it learned");
-        Check(wasapiNext < asioNext,
-            $"the untroubled lane must still be free to descend past it (WASAPI {wasapiNext}ms vs ASIO {asioNext}ms)");
-
-        // Each lane's creep interval is its own: probing one must not consume the other's wait.
-        var a = new AutoTuneDescent.CreepState();
-        var b = new AutoTuneDescent.CreepState();
-        for (var i = 0; i < 3; i++) AutoTuneDescent.NextTarget(45, 30, 15, 15, 30, policy: null, creep: a);
-        Check(b.TicksSinceProbe == 0, "one lane's creep probes must not advance the other lane's schedule");
-
-        // Forgetting is per-lane too — a new stream on one lane doesn't wipe the other's lesson.
-        asioMem.Reset();
-        Check(asioMem.DiscoveredFloorMs == 0, "a reset lane forgets its floor");
-        var kept = new AutoTuneDescent.CreepState();
-        kept.NoteShortfallAt(50, 50);
-        asioMem.Reset();
-        Check(kept.DiscoveredFloorMs > 50, "...without wiping another lane's memory");
-
-        return "one policy for both lanes; floors, clean runs, creep schedules and resets all per-lane";
-    }
-
     /// <summary>The latency slider must actually govern the streams that are playing. THE 2026-08-14
     /// FIELD BUG: incoming sessions are tagged with an output LANE (WasapiLane/AsioLane — never Mixed
     /// while a device is ticked), but the single slider writes RenderRoute.Mixed, and the render path
@@ -4840,8 +5081,8 @@ internal static partial class SelfTest
                 $"in {where} the target the render path reads for this stream must BE the slider's value (got {engine.TargetLatencyMsFor(session.Route)}ms for a 330ms slider)");
             Check(engine.MaxLatencyMsFor(session.Route) == 330, $"in {where} the max must follow the slider too");
 
-            // A LOWER must reach the session (disarm + drain). Arm it first, then lower and prove the
-            // very next read returns nothing — that IS the disarm, and it's what refills to the new depth.
+            // A LOWER must reach the session: straight down to the new target, the excess skipped with a crossfade, and still
+            // playing (2026-09-28; it used to disarm, so the next read returned nothing - a moment's silence).
             var block = new byte[48000 * 8 / 2]; // 500ms stereo float — must exceed the 330ms target, or it never arms
             session.Write(block);
             session.NoteFramesQueued(engine.TargetLatencyMsFor(session.Route));
@@ -4849,8 +5090,9 @@ internal static partial class SelfTest
             Check(session.ReadFloats(scratch, 960, 330, 330) > 0,
                 $"in {where} the session must be armed and producing before the lower");
             engine.SetMaxLatencyMs(RenderRoute.Mixed, 30);
-            Check(session.ReadFloats(scratch, 960, 30, 30) == 0,
-                $"in {where} lowering the slider must disarm+drain this stream — matching on the slider's route is what made 'lower' inert");
+            var drainedBefore = session.DrainDropBytes;
+            Check(session.ReadFloats(scratch, 960, 30, 30) > 0 && session.DrainDropBytes > drainedBefore,
+                $"in {where} lowering the slider must bring this stream down to it, still playing — matching on the slider's route is what made 'lower' inert");
 
             // The hidden ASIO slider must not touch the visible one. It only exists in BothIndependent,
             // but the app pushes its persisted value at startup in EVERY configuration (and its auto-tune
@@ -4906,7 +5148,78 @@ internal static partial class SelfTest
             "once real audio has been heard, later silence must not re-open a healthy capture");
         Check(!ServiceSendHost.ShouldReopenCapture(captureDeaf: true, everHeardAudio: false, stalled: false, attemptsSoFar: 3),
             "the re-open ladder must stop at the attempt cap");
-        return "deaf and stalled captures re-open; quiet or heard-audio captures don't; capped at 3";
+
+        // And the real host, its watch driven tick by tick on a clock of the test's own (2026-09-28): the device's meter and
+        // what the capture hears are stood in for; the re-opens are the host's own, counted from its log.
+        var profile = new Profile { Title = "self-heal", WasapiSendMode = "devices" };
+        profile.SelectedWasapiSendOutputs.Add("fake-device-id");
+        profile.SelectedConnectedPeers.Add("127.0.0.1:47999");
+        profile.Password = RemSoundCrypto.Obfuscate("hunter2horse42stable");
+        var logged = new List<string>();
+        var restorePresencePort = ServiceSendHost.PresencePortForTest;
+        ServiceSendHost.PresencePortForTest = FreeUdpPort();
+        try
+        {
+            using var host = new ServiceSendHost(() => profile, line => { lock (logged) logged.Add(line); });
+            var clock = 10_000_000L;
+            var meter = 0f;
+            var heard = 0f;
+            var callbacks = 0L;
+            var frozen = false;
+            host.NowForTest = () => clock;
+            host.MeterForTest = () => meter;
+            host.CapturePeakForTest = () => heard;
+            host.CaptureCallbacksForTest = () => frozen ? callbacks : ++callbacks;
+            Check(host.ApplyProfile(profile), "the service must come up (on a device that cannot open) for its watch to run");
+            int Reopens(string kind) { lock (logged) return logged.Count(l => l.Contains("re-opening capture", StringComparison.Ordinal) && l.Contains(kind, StringComparison.Ordinal)); }
+            void Ticks(int n) { for (var i = 0; i < n; i++) { host.WatchCaptureHealthForTest(); clock += 500; } }
+
+            Ticks(20);   // ten seconds of a quiet machine: silent on both sides
+            Check(Reopens("DEAF") + Reopens("STALLED") == 0, "a quiet machine - silent on both sides - must never re-open the capture");
+
+            meter = 0.05f;   // the device plays; the capture hears nothing
+            Ticks(2);
+            Check(Reopens("DEAF") == 1, $"device audible and the capture silent for half a second: the host must re-open it (attempt 1) - it did {Reopens("DEAF")} times");
+            Ticks(3);
+            Check(Reopens("DEAF") == 1, "and not again within two seconds - no thrashing");
+            Ticks(20);
+            Check(Reopens("DEAF") == 3, $"it must keep trying, two seconds apart, up to three times, then stop ({Reopens("DEAF")} re-opens)");
+            lock (logged) Check(logged.Any(l => l.Contains("attempt 3/3", StringComparison.Ordinal)), "each rung must be logged with its number");
+
+            heard = 0.05f;   // the capture hears real audio: it works - the ladder is refilled, and later silence is just silence
+            Ticks(1);
+            heard = 0f;
+            Ticks(20);
+            Check(Reopens("DEAF") == 3, "once the capture has heard real audio, a later silence must not re-open it");
+
+            frozen = true;   // its callbacks freeze: a broken stream, heard audio or not
+            Ticks(6);
+            Check(Reopens("STALLED") == 1, $"callbacks frozen for two seconds must re-open the capture, with a fresh ladder ({Reopens("STALLED")})");
+
+            // The other way in: Windows says a new audio session started (at the lock screen, NVDA or the sign-in sound)
+            // while a fresh capture has heard nothing. The same ladder: three re-opens at most, and never for our own.
+            using var fresh = new ServiceSendHost(() => profile, line => { lock (logged) logged.Add(line); });
+            fresh.NowForTest = () => clock;
+            fresh.MeterForTest = () => 0f;
+            fresh.CapturePeakForTest = () => 0f;
+            Check(fresh.ApplyProfile(profile), "a second service must come up too");
+            fresh.WantSendingForTest = true;
+            int SessionReopens() { lock (logged) return logged.Count(l => l.Contains("new audio session", StringComparison.Ordinal) && l.Contains("re-opening capture", StringComparison.Ordinal)); }
+            fresh.AudioSessionStartedForTest(Environment.ProcessId);
+            Thread.Sleep(100);
+            Check(SessionReopens() == 0, "our own silence keepalive's session must never set it off");
+            for (var i = 0; i < 5; i++)
+            {
+                var before = SessionReopens();
+                clock += 2_500;
+                fresh.AudioSessionStartedForTest(4242);
+                WaitFor(() => SessionReopens() > before, TimeSpan.FromMilliseconds(i < 3 ? 3_000 : 300));
+            }
+            Check(SessionReopens() == 3, $"a new audio session re-opens a deaf capture - three times at most ({SessionReopens()} for five sessions)");
+        }
+        finally { ServiceSendHost.PresencePortForTest = restorePresencePort; }
+        return "deaf and stalled captures re-open; quiet or heard-audio captures don't; capped at 3 - and the real host, tick by tick: "
+             + "quiet leaves it alone, deaf re-opens two seconds apart three times and stops, heard audio ends it, a stall re-opens again";
     }
 
     /// <summary>The fix for "a saved app that launches later never gets captured": the send engine
@@ -4938,7 +5251,66 @@ internal static partial class SelfTest
         // A second instance of a ticked app (another PID) also changes it.
         pids["vlc"] = new[] { 100, 101 };
         Check(MainForm.ComputeSendAppPidSignature(names, Lookup) != s1, "a second process of a ticked app must change the signature too");
-        return "signature stable when unchanged; changes when a ticked app opens/closes (drives instant capture)";
+
+        // Through the window (2026-09-28, from the review of every step: the name promised capture, and only the signature
+        // was checked). A remembered app, not running; then it opens - raised as the session-start watcher raises it - and
+        // its capture must be handed to the sender at once; an app nobody ticked opening must not re-apply anything; and
+        // it closing must drop the capture, on the three-second backstop timer. The "app" is this process, stood in by
+        // name, so nothing else on the machine is captured. App capture is WASAPI's process loopback: there is no ASIO
+        // form of it, so the one configuration is the whole of it.
+        if (!RemSound.Sender.ProcessLoopbackCapture.IsSupported) return "signature checks only - this Windows has no process loopback";
+        var running = new List<int>();
+        RemSound.Sender.AudioAppEnumerator.PidsForTest = name =>
+            string.Equals(name, "gate-remembered-app", StringComparison.OrdinalIgnoreCase) ? running.ToArray() : Array.Empty<int>();
+        try
+        {
+            var profile = Profile.NewBlank();
+            profile.WasapiSendMode = "applications";
+            profile.SelectedSendApplications = ["gate-remembered-app"];
+            profile.Password = RemSoundCrypto.Obfuscate("a password for the gate");   // or ticking "Send my audio" asks for one
+            using var form = new MainForm(null, profile, null, null, headless: true);
+            _ = form.Handle;
+            _ = form.ApplyThenCaptureForTest(profile);   // what showing the window does with the profile: the send mode and apps
+            Require(FieldOf<CheckBox>(form, "receiveAudioCheckbox"), "the main window has no receiveAudioCheckbox").Checked = false;
+            Require(FieldOf<CheckBox>(form, "sendMyAudioCheckbox"), "the main window has no sendMyAudioCheckbox").Checked = true;
+            var sender = Require(FieldOf<RemSound.Sender.AudioSender>(form, "sender"), "the main window has no sender");
+            var logged = new List<string>();
+            form.LogForTest.EventTapForTest = line => { lock (logged) logged.Add(line); };
+            form.MarkConnectedForTest();
+            void Pump() { for (var k = 0; k < 10; k++) Application.DoEvents(); }
+            string Captured() => string.Join(",", sender.PendingSourcesForTest.Where(s => s.Kind == CaptureKind.ProcessLoopback).Select(s => s.DeviceId));
+
+            var sendMode = Require(FieldOf<ListBox>(form, "sendModeList"), "the main window has no sendModeList");
+            Check(sendMode.SelectedIndex == 1, $"premise: the profile's send mode must be applications ({sendMode.SelectedIndex})");
+            form.AppSessionStartedForTest(4);
+            Pump();
+            Check(Captured() == "", $"premise: the remembered app is not running, so nothing is captured ({Captured()})");
+            string Why() => $"sources handed over: {sender.PendingSourcesForTest.Count} [{string.Join(", ", sender.PendingSourcesForTest.Select(s => s.Kind + " " + s.DeviceId))}]; "
+                + $"log: {string.Join(" | ", logged.TakeLast(6))}";
+
+            var own = Environment.ProcessId;
+            running.Add(own);
+            form.AppSessionStartedForTest(own);
+            Pump();
+            Check(Captured() == ProcessLoopbackId.Format(own),
+                $"the remembered app opening must be captured AT ONCE, from the session-start callback ({(Captured() == "" ? "nothing captured" : Captured())}; {Why()})");
+
+            var handedOver = sender.PendingSourcesForTest;
+            form.AppSessionStartedForTest(own + 1);
+            Pump();
+            Check(ReferenceEquals(sender.PendingSourcesForTest, handedOver), "an app nobody ticked opening must not re-apply the capture");
+
+            running.Clear();
+            var backstop = Require(FieldOf<System.Windows.Forms.Timer>(form, "sendAppsReconcileTimer"), "the main window has no sendAppsReconcileTimer");
+            var onTick = Require(typeof(System.Windows.Forms.Timer).GetMethod("OnTick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic),
+                "Timer.OnTick not found");
+            onTick.Invoke(backstop, [EventArgs.Empty]);
+            Pump();
+            Check(Captured() == "", $"the app closing must drop its capture on the backstop timer ({Captured()})");
+        }
+        finally { RemSound.Sender.AudioAppEnumerator.PidsForTest = null; }
+        return "signature stable when unchanged, changes when a ticked app opens or closes; through the window, the remembered app is "
+             + "captured the moment it opens, an unticked app changes nothing, and closing drops it on the backstop timer";
     }
 
     /// <summary>Remembered applications are a GLOBAL, machine-wide list (like remembered peers), not
@@ -5163,6 +5535,12 @@ internal static partial class SelfTest
         finally { store.SaveRememberedApplications(original); }
     }
 
+    /// <summary>Puts something back when a using block ends, however it ends.</summary>
+    private sealed class Disposer(Action dispose) : IDisposable
+    {
+        public void Dispose() => dispose();
+    }
+
     private static int FreeUdpPort()
     {
         using var s = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork,
@@ -5273,6 +5651,8 @@ internal static partial class SelfTest
     internal static (string Name, Func<Form> Make)[] DialogFactories(RemSoundSettingsStore? settings = null) => new (string Name, Func<Form> Make)[]
         {
             ("Recording settings", () => new RecordingSettingsDialog(new RecordingSettings())),
+            ("Push to talk settings", () => new PushToTalkDialog(new PushToTalkSettings(), RemSoundSettingsStore.PushToTalkDefaultKey, _ => null)),
+            ("Metronome settings", () => new MetronomeSettingsDialog(new MetronomeSettings(), null, [])),
             // A REAL profile store with a saved profile: with an empty one, ticking "Start with a
             // specific profile" correctly shows "you have no saved profiles yet" — a modal that hangs
             // a headless run forever. The fix is an honest environment, not skipping the control.

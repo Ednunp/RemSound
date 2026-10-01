@@ -15,9 +15,15 @@ namespace RemSound.App;
 /// </summary>
 internal static class ForegroundDialog
 {
-    /// <summary>Run <paramref name="show"/> with a foreground 1×1 owner; returns its result.</summary>
+    /// <summary>Run <paramref name="show"/> with a foreground 1×1 owner; returns its result.
+    /// <para>No menu of RemSound's is left open under it, and the window that had the keyboard gets it back after
+    /// (2026-09-29, the live test with Andre: the wrong-password warning, which pops up by itself, left the menu bar dead
+    /// even after OK). A menu open when a pop-up is forced to the front keeps the keyboard in menu mode while the pop-up
+    /// waits, and the pop-up's own owner closing hands activation to whatever Windows picks next - not the main window.</para></summary>
     public static T Show<T>(Func<IWin32Window, T> show)
     {
+        var returnTo = ActiveFormForTest is { } active ? active() : Form.ActiveForm;
+        CloseOpenMenus();
         var area = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 800, 600);
         using var owner = new Form
         {
@@ -26,14 +32,61 @@ internal static class ForegroundDialog
             StartPosition = FormStartPosition.Manual,
             Size = new Size(1, 1),
             Location = new Point(area.X + area.Width / 2, area.Y + area.Height / 2),
+            // In front of everything - but never for a hidden copy: Windowless takes always-on-top away from every window
+            // it hides, since a screen reader takes every event from one, and from every window it owns.
             TopMost = true,
         };
         owner.Show();
         // A --headless copy keeps every window out of sight and focus (Windowless), and pulling one to the front
-        // would also lower the system-wide foreground lock. Its dialogs wait, hidden, for the control channel.
-        if (!Windowless.Hiding) ForceForeground(owner.Handle);
+        // would also lower the system-wide foreground lock. Its dialogs wait, hidden, for the control channel. Nor a
+        // --silent launch or the self-test: in front is where a screen reader reads it.
+        if (!Windowless.KeepBehind) ForceForeground(owner.Handle);
         try { return show(owner); }
-        finally { try { owner.Close(); } catch { /* ignore */ } }
+        finally
+        {
+            try { owner.Close(); } catch { /* ignore */ }
+            GiveBackTheKeyboard(returnTo);
+        }
+    }
+
+    /// <summary>Close every menu open on RemSound's windows (each window's menu bar); returns how many were open.</summary>
+    internal static int CloseOpenMenus()
+    {
+        var closed = 0;
+        try
+        {
+            foreach (var form in Application.OpenForms.Cast<Form>().ToList())
+            {
+                if (form.IsDisposed || form.MainMenuStrip is not { } strip) continue;
+                foreach (var item in strip.Items.OfType<ToolStripDropDownItem>())
+                {
+                    if (!item.DropDown.Visible) continue;
+                    item.HideDropDown();
+                    closed++;
+                }
+            }
+        }
+        catch { /* best effort: the pop-up still shows */ }
+        return closed;
+    }
+
+    /// <summary>Gate seam: which window counts as having the keyboard when a pop-up comes (Windows' own answer otherwise).</summary>
+    internal static Func<Form?>? ActiveFormForTest;
+
+    /// <summary>Gate seam: stands in for activating the window the keyboard goes back to (a hidden copy never takes it).</summary>
+    internal static Action<Form>? ActivateForTest;
+
+    /// <summary>The window that had the keyboard before the pop-up has it again - if it is still there, shown and not
+    /// minimised. When another program was in front (RemSound in the tray), nothing is taken back.</summary>
+    private static void GiveBackTheKeyboard(Form? returnTo)
+    {
+        if (returnTo is null || returnTo.IsDisposed || !returnTo.Visible || returnTo.WindowState == FormWindowState.Minimized) return;
+        try
+        {
+            if (ActivateForTest is { } stand) stand(returnTo);
+            else if (!Windowless.KeepBehind) returnTo.Activate();
+        }
+        catch { /* best effort */ }
     }
 
     /// <summary>Void convenience overload.</summary>

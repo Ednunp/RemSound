@@ -43,6 +43,36 @@ internal sealed class StreamSession : IDisposable
     /// the session forever — a reconnecting peer never reuses its old (endpoint, streamId)
     /// key, so its previous session is always an orphan that must be reaped by idle age.</summary>
     public DateTime LastWriteUtc => sessionPlayout.LastWriteUtc;
+
+    /// <summary>This stream's own packet-arrival gaps (the latency lab's per-stream buffers).</summary>
+    internal StreamArrivalStats Arrivals { get; } = new();
+
+    /// <summary>The primary replica this stream decodes into (mirrors hang off it).</summary>
+    internal SessionPlayout Playout => sessionPlayout;
+    /// <summary>Times this stream's playback waited to refill after a real stop (SessionPlayout.LongGapRearmMs).</summary>
+    internal long LongGapRearmsForTest => sessionPlayout.LongGapRearmsForTest;
+
+    private uint? highestSequence;
+    private int lateInARow;
+
+    /// <summary>A jump back further than this many packets is a sender that started counting again, not a late packet.</summary>
+    internal const uint SequenceRestartJump = 1000;
+
+    /// <summary>This many "late" packets in a row is a sender that started counting again - an overtaken packet is always
+    /// followed by newer ones.</summary>
+    internal const int SequenceRestartRun = 8;
+
+    /// <summary>Doubled or overtaken packets dropped because they were no newer than the newest already handled.</summary>
+    public long LateDropped { get; private set; }
+
+    /// <summary>Times the sender was seen to start counting again on this stream (followed, not dropped).</summary>
+    public long SequenceRestarts { get; private set; }
+
+    /// <summary>For the lab line: late or doubled packets dropped, restarts followed, and concealed frames on a
+    /// Jamulus-style stream.</summary>
+    internal string LabExtra => (LateDropped > 0 ? $" late-dropped={LateDropped}" : "") + (SequenceRestarts > 0 ? $" restarts={SequenceRestarts}" : "")
+        + (ReorderWaits > 0 ? $" reorder-waits={ReorderWaits} filled={ReorderFilled}" : "")
+        + (Codec == AudioTransportCodec.OpusCustom ? $" concealed={CustomConcealedFrames}" : "");
     internal long AudioBytesWrittenForTest => sessionPlayout.AudioBytesWrittenForTest;
 
     /// <summary>For PCM streams: number of incoming packets the assembler rejected outright.</summary>
@@ -105,6 +135,60 @@ internal sealed class StreamSession : IDisposable
         {
             opusDecoder = OpusCodecFactory.CreateDecoder(format.SampleRate, format.Channels, TextWriter.Null);
         }
+        else if (Codec == AudioTransportCodec.OpusCustom)
+        {
+            // AudioFormatInfo.IsUsable has already checked the frame size and that remsound-opus.dll loads.
+            customDecoder = new OpusCustomDecoder(format.FrameSamplesPerChannel, format.Channels);
+        }
+    }
+
+    // Jamulus-style Opus: its own decoder, and packet-loss concealment for missing frames.
+    private OpusCustomDecoder? customDecoder;
+    private uint? customExpectedSequence;
+    /// <summary>Frames made up by Opus concealment because their packets never came (Jamulus-style streams only).</summary>
+    public long CustomConcealedFrames { get; private set; }
+
+    /// <summary>
+    /// One Jamulus-style packet. A gap of up to a few packets is filled with Opus concealment first, one made-up frame per
+    /// missing packet, so the audio stays continuous and in time the way Jamulus does it; a longer gap is a stream that
+    /// stopped, and the buffer's own handling applies.
+    /// </summary>
+    private bool HandleOpusCustom(uint sequence, ReadOnlySpan<byte> payload)
+    {
+        var expected = customExpectedSequence;
+        customExpectedSequence = sequence + 1U;
+        var decoder = customDecoder;
+        if (decoder is null) return false;
+        payload = decryptor.TryDecrypt(payload);
+        if (payload.IsEmpty) return false;
+        var frame = decoder.FrameSamplesPerChannel;
+        var floats = frame * decoder.Channels;
+        Span<float> pcm = floats <= 1024 ? stackalloc float[floats] : new float[floats];
+        if (expected is uint want)
+        {
+            var missing = sequence - want;
+            if (missing is >= 1 and <= 8)
+            {
+                for (var i = 0u; i < missing; i++)
+                {
+                    var made = decoder.Conceal(pcm);
+                    if (made <= 0) break;
+                    WriteDecodedFloats(pcm[..(made * decoder.Channels)], made);
+                    CustomConcealedFrames++;
+                }
+            }
+        }
+        var got = decoder.Decode(payload, pcm);
+        if (got <= 0) return false;
+        WriteDecodedFloats(pcm[..(got * decoder.Channels)], got);
+        return true;
+    }
+
+    private void WriteDecodedFloats(ReadOnlySpan<float> interleaved, int samplesPerChannel)
+    {
+        postDecodeStepProbe.ScanStereo(interleaved);
+        sessionPlayout.Write(MemoryMarshal.AsBytes(interleaved));
+        onFramesQueued(samplesPerChannel);
     }
 
     /// <summary>Returns true if this session matches the given format identity (codec/rate/channels/frame).</summary>
@@ -142,14 +226,99 @@ internal sealed class StreamSession : IDisposable
         // make a healthy merged session look like a lossy one. See AlreadyDelivered.
         if (AlreadyDelivered(sequence)) return true;
         diagnostics.RecordPacketArrived();
+        Arrivals.Record();
         TrackWireSequence(sequence);
+        // A packet no newer than the newest already handled is a doubled copy, or was overtaken on the way, and its
+        // moment has passed: the gap it left was repaired or concealed when the newer one arrived. Playing it anyway was
+        // heard as a click and a jump in the delay (found by the simulator, 2026-09-26; up to 22 ms of creep in a run).
+        // So it is dropped - handled, not failed, so not counted as a drop. Signed difference, so wrap-around is fine.
+        //
+        // The one thing that looks the same and is not: a sender that starts counting again on the same stream. The Pi
+        // sender does exactly that when its program restarts (stream 1, sequence from 0). A jump back of more than
+        // SequenceRestartJump packets, or SequenceRestartRun "late" packets in a row (an overtaken packet is followed by
+        // newer ones; a restarted sender never is), means it started again: follow it and play on.
+        // (highestSequence is the newest packet PLAYED; a packet held by the reorder wait below is not played yet.)
+        if (held is { } copy && sequence == copy.Sequence) { LateDropped++; return true; } // a copy of the one being held
+        if (highestSequence is uint newest && (int)(sequence - newest) <= 0)
+        {
+            lateInARow++;
+            if (newest - sequence > SequenceRestartJump || lateInARow >= SequenceRestartRun)
+            {
+                SequenceRestarts++;
+                held = null; // it belonged to the old count
+                return Play(sequence, payload);
+            }
+            LateDropped++;
+            return true;
+        }
+
+        // THE REORDER WAIT (2026-09-26; a latency lab switch until the simulator found it never worse on any network, codec
+        // or buffer, and better in 12 places - all of them Ed's laptop pattern). A packet that arrives with a gap before it may just have
+        // overtaken the missing one. Hold it until the next packet arrives: if that is the missing one, both play in order
+        // and nothing was lost; if it is a newer one, the held packet plays and the gap is repaired exactly as it always
+        // was. The wait is only taken while the buffer holds enough sound to cover it (two frames and a millisecond), so a
+        // real loss never runs the buffer dry waiting; and never for more than two arrivals.
+        if (held is { } waiting)
+        {
+            if ((int)(sequence - waiting.Sequence) < 0)
+            {
+                // One of the missing ones: it plays now, in order.
+                var ok = Play(sequence, payload);
+                if (sequence + 1 == waiting.Sequence) { ReorderFilled++; ReleaseHeld(); }
+                else if (++heldArrivals >= 2) ReleaseHeld();
+                return ok;
+            }
+            ReleaseHeld(); // the missing one did not come in time
+        }
+        var missing = highestSequence is uint last ? (int)(sequence - last) - 1 : 0;
+        if (!ReorderWaitOffForTest && missing is >= 1 and <= 3 && CanAffordReorderWait())
+        {
+            held = (sequence, payload.ToArray());
+            heldArrivals = 0;
+            ReorderWaits++;
+            return true;
+        }
+        return Play(sequence, payload);
+    }
+
+    /// <summary>Play one packet: it becomes the newest played, and goes to its codec.</summary>
+    private bool Play(uint sequence, ReadOnlySpan<byte> payload)
+    {
+        highestSequence = sequence;
+        lateInARow = 0;
         return Codec switch
         {
             AudioTransportCodec.Pcm => HandlePcm(payload),
             AudioTransportCodec.Opus => HandleOpus(sequence, payload),
+            AudioTransportCodec.OpusCustom => HandleOpusCustom(sequence, payload),
             _ => false,
         };
     }
+
+    /// <summary>Simulator seam: switch the reorder wait off, to compare with how RemSound was before it.</summary>
+    internal static volatile bool ReorderWaitOffForTest;
+
+    private (uint Sequence, byte[] Payload)? held;
+    private int heldArrivals;
+
+    /// <summary>Gate seam (the soak and stress steps): a packet held by the reorder wait right now - 0 or 1.</summary>
+    internal int HeldForTest => held is null ? 0 : 1;
+
+    private void ReleaseHeld()
+    {
+        if (held is not { } h) return;
+        held = null;
+        Play(h.Sequence, h.Payload);
+    }
+
+    /// <summary>Whether this stream's buffer holds enough to wait one packet: two frames and a millisecond.</summary>
+    private bool CanAffordReorderWait() =>
+        sessionPlayout.BufferedMs >= 2 * Math.Max(1, (int)Math.Ceiling(Format.FrameDurationMs)) + 1;
+
+    /// <summary>Packets held by the reorder wait, and of those, how many had their missing packet arrive and slot back
+    /// in (the rest were covered as a loss, as always).</summary>
+    public long ReorderWaits { get; private set; }
+    public long ReorderFilled { get; private set; }
 
     /// <summary>
     /// Classify each arriving packet against the expected next wire sequence:
@@ -278,6 +447,8 @@ internal sealed class StreamSession : IDisposable
             disposed = true;
             (opusDecoder as IDisposable)?.Dispose();
             opusDecoder = null;
+            customDecoder?.Dispose();
+            customDecoder = null;
         }
     }
 
@@ -315,9 +486,66 @@ internal sealed class StreamSession : IDisposable
         // for the post-ring-read probe in SessionPlayout.
         postDecodeStepProbe.ScanStereo(floatSpan);
 
+        // Frames the network lost, made up before this one so the audio stays in time - see ConcealLostPcmFrames.
+        var framesPerChannel = sampleCount / Format.Channels;
+        if (lastPcmFrameId is uint previousFrame)
+        {
+            var lost = (long)frameId - previousFrame - 1;
+            if (lost is >= 1 and <= MaxPcmFramesConcealed) ConcealLostPcmFrames((int)lost * framesPerChannel, floatSpan);
+        }
+        lastPcmFrameId = frameId;
+        if (Format.Channels == 2 && floatSpan.Length >= 2)
+        {
+            lastPcmLeft = floatSpan[^2];
+            lastPcmRight = floatSpan[^1];
+        }
+
         sessionPlayout.Write(floatScratch);
-        onFramesQueued(sampleCount / Format.Channels);
+        onFramesQueued(framesPerChannel);
         return true;
+    }
+
+    // === PCM lost-frame concealment (2026-09-28) ===
+
+    /// <summary>The most lost PCM frames made up in one go (about 40 ms at 233-sample frames). A longer gap is a stream
+    /// that stopped, and is left to the buffer, as before.</summary>
+    internal const int MaxPcmFramesConcealed = 8;
+
+    /// <summary>Frames made up for lost PCM packets, for the gate and the simulator.</summary>
+    public long PcmConcealedFrames { get; private set; }
+
+    private uint? lastPcmFrameId;
+    private float lastPcmLeft, lastPcmRight;
+
+    /// <summary>
+    /// A lost PCM packet left no samples behind, so the buffer's clock-matching - samples written against samples played,
+    /// over ten seconds - saw the sender as slow by the loss and played everything that much slower: 0.5 % lost, about 9
+    /// cents flat; 1 %, 17 to 23, on the ASIO output and the WASAPI one alike (found by the simulator, 2026-09-27). Opus
+    /// never had it: its repair writes a frame for every lost one. This does the same for PCM: the missing time is written,
+    /// the last sample fading to silence over a millisecond and then silence, and the frame that did arrive fades back in,
+    /// so the loss is the same short gap it always was - only now in time and in tune.
+    /// </summary>
+    private void ConcealLostPcmFrames(int frames, Span<float> arrived)
+    {
+        const int Fade = 48; // 1 ms at 48 kHz
+        var made = new float[frames * 2];
+        var fadeOut = Math.Min(Fade, frames);
+        for (var i = 0; i < fadeOut; i++)
+        {
+            var g = (float)(0.5 * (1 + Math.Cos(Math.PI * (i + 1) / fadeOut)));
+            made[2 * i] = lastPcmLeft * g;
+            made[2 * i + 1] = lastPcmRight * g;
+        }
+        sessionPlayout.Write(MemoryMarshal.AsBytes(made.AsSpan()));
+        onFramesQueued(frames);
+        PcmConcealedFrames += frames;
+        var fadeIn = Math.Min(Fade, arrived.Length / 2);
+        for (var i = 0; i < fadeIn; i++)
+        {
+            var g = (float)(0.5 * (1 - Math.Cos(Math.PI * (i + 1) / fadeIn)));
+            arrived[2 * i] *= g;
+            arrived[2 * i + 1] *= g;
+        }
     }
 
     // === Opus ===

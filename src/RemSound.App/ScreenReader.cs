@@ -24,6 +24,10 @@ internal static class ScreenReader
     /// </summary>
     internal static bool Suppressed { get; set; }
 
+    /// <summary>Gate seam: how many times speech or a spoken notification really went out. The gate's end-of-run guard
+    /// wants none.</summary>
+    internal static long ReachedForTest;
+
     private static IScreenReaderOutput Backend
     {
         get { lock (sync) { return backend ??= CreateBackend(); } }
@@ -43,7 +47,9 @@ internal static class ScreenReader
     {
         // A headless copy says nothing, but whoever drives it can read what it would have said (the speech command).
         HeadlessRecords.Note(HeadlessRecords.Speech, text);
-        return !Suppressed && Backend.Speak(text, interrupt);
+        if (Suppressed) return false;
+        Interlocked.Increment(ref ReachedForTest);
+        return Backend.Speak(text, interrupt);
     }
 
     /// <summary>Have the screen reader read <paramref name="text"/> for a control, through Windows' own notification
@@ -53,6 +59,7 @@ internal static class ScreenReader
     {
         HeadlessRecords.Note(HeadlessRecords.Speech, text);
         if (Suppressed || Windowless.Hiding) return;
+        Interlocked.Increment(ref ReachedForTest);
         control.AccessibilityObject.RaiseAutomationNotification(
             System.Windows.Forms.Automation.AutomationNotificationKind.ActionCompleted,
             System.Windows.Forms.Automation.AutomationNotificationProcessing.MostRecent,

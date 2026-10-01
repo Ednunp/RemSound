@@ -89,6 +89,10 @@ internal static class CommandLine
                     return WithConsole(ListNamedPeers);
                 case "--selftest": case "--self-test": case "--smoke-test": case "--smoketest":
                     return WithConsole(() => SelfTest.Run(args));
+                case "--simulate": case "--simulator":
+                    // The simulator (2026-09-26): the real sender and receiver between fake sound cards and a fake network,
+                    // in virtual time. Writes a report (and WAVs) to --out. See Simulator\Simulation.cs.
+                    return WithConsole(() => Simulator.SimRunner.Run(args));
                 case "--perftest": case "--perf-test":
                     return WithConsole(() => RunPerfTest(args));
                 case "--plugin-window":
@@ -344,6 +348,8 @@ internal static class CommandLine
         Console.WriteLine("  --selftest [--seconds N]  Run the built-in self-test - a localhost audio");
         Console.WriteLine("  (or --smoke-test)     round-trip plus checks of encryption, the wire format,");
         Console.WriteLine("                        settings, profiles, dialog accessibility and bundled files.");
+        Console.WriteLine("                        --pack feature runs only the core checks and those for what");
+        Console.WriteLine("                        has changed (for developers; never a full pass).");
         Console.WriteLine("  --perftest [--seconds N]  Run repeated audio cycles and report whether handle,");
         Console.WriteLine("                        memory and thread counts stay bounded (leak sanity check).");
         Console.WriteLine("  --diagnostics [path]  Write a diagnostics report (version, config, profiles,");
@@ -373,7 +379,8 @@ internal static class CommandLine
         Console.WriteLine("                        and logs, instead of the usual location. Lets a test");
         Console.WriteLine("                        exercise RemSound without touching your real settings.");
         Console.WriteLine("                        Works with any command (e.g. --selftest --config-dir ...).");
-        Console.WriteLine("  --silent              Play no cue sounds, and show none of the messages or");
+        Console.WriteLine("  --silent              Play no cue sounds, say nothing through the screen reader,");
+        Console.WriteLine("                        and show none of the messages or");
         Console.WriteLine("                        questions RemSound raises by itself (someone asking to");
         Console.WriteLine("                        connect, a password that doesn't match, start-up notices);");
         Console.WriteLine("                        they go to the log. For automated / unattended launches.");
@@ -506,7 +513,8 @@ internal static class CommandLine
         cfg.LoggingEnabled = on;
         try { cfg.Save(); }
         catch (Exception ex) { Console.WriteLine($"Could not save the setting: {ex.Message}"); return 1; }
-        Console.WriteLine($"RemSound logging is now {(on ? "ON" : "OFF")}. The change takes effect next time RemSound starts.");
+        Console.WriteLine($"This computer's RemSound logging is now {(on ? "ON" : "OFF")}: RemSound's start and any profile that has not chosen "
+            + "its own follow it, from the next time RemSound starts. A profile's own setting is in Preferences, on the Logging tab.");
         return 0;
     }
 

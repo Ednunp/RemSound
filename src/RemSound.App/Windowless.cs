@@ -46,6 +46,13 @@ internal static class Windowless
     /// <summary>Windows are being kept out of sight and out of focus right now.</summary>
     internal static bool Hiding => Active && !HandedOver;
 
+    /// <summary>Nothing may be pulled to the front or made always-on-top: the windows are hidden, or nothing may be heard
+    /// (a --silent launch, the self-test). A screen reader ignores a window that is behind, but takes every event from
+    /// one that is always-on-top - NVDA's own rule (eventHandler.shouldAcceptEvent) - and Windows makes every window it
+    /// owns always-on-top too. The 1x1 always-on-top owner ForegroundDialog gives a dialog is exactly that, so a hidden
+    /// password dialog was read out while Ed worked (2026-09-26, found with the gate's screen-reader watch 2026-09-27).</summary>
+    internal static bool KeepBehind => Hiding || ScreenReader.Suppressed;
+
     /// <summary>Where a hidden window is put. Far enough off every monitor that no layout reaches it.</summary>
     internal static readonly Point OffScreen = new(-32000, -32000);
 
@@ -54,6 +61,8 @@ internal static class Windowless
 
     private static HookProc? hookProc;   // held so the GC never collects the delegate the hook calls
     private static IntPtr hook;
+    private static HookProc? pinProc;    // likewise, for the hook that keeps hidden windows off-screen once made
+    private static IntPtr pinHook;
 
     /// <summary>Turn it on, on the UI thread, before any window exists. Idempotent.</summary>
     internal static void Start()
@@ -73,6 +82,8 @@ internal static class Windowless
         if (hook != IntPtr.Zero) return;
         hookProc = HookCallback;
         hook = SetWindowsHookEx(WH_CBT, hookProc, IntPtr.Zero, UiThreadId);
+        pinProc = PinCallback;
+        pinHook = SetWindowsHookEx(WH_CALLWNDPROCRET, pinProc, IntPtr.Zero, UiThreadId);
     }
 
     /// <summary>The person at the keyboard asked for the window (Show RemSound in the tray). From here windows behave
@@ -82,7 +93,7 @@ internal static class Windowless
     {
         if (!Hiding) return;
         HandedOver = true;
-        WinEventNotifier.Quiet = false;
+        WinEventNotifier.Quiet = QuietForRun;
         // A person is at it now: they hear it, as they would any RemSound. Speech, the cues (unless it was started
         // --silent) and the key clicks all stayed off after a hand-over, so the speak-status hotkey said nothing and a
         // deletion was never announced (2026-09-25).
@@ -128,13 +139,18 @@ internal static class Windowless
 
     internal static void TrayMenuClosed() => TrayMenuOpen = false;
 
+    /// <summary>The self-test is running: the screen reader is told nothing for the whole run, whatever a step switches.
+    /// Each step that hid its windows used to switch the telling back on as it finished, so every tick box the steps after
+    /// it toggled went out to NVDA (review of every step, 2026-09-27).</summary>
+    internal static bool QuietForRun { get; set; }
+
     /// <summary>Gate seam: switch the hiding on or off without a real <c>--headless</c> start.</summary>
     internal static void SetActiveForTest(bool active)
     {
         Active = active;
         HandedOver = false;
         TrayMenuOpen = false;
-        WinEventNotifier.Quiet = active;
+        WinEventNotifier.Quiet = active || QuietForRun;
     }
 
     private static IntPtr HookCallback(int code, IntPtr wParam, IntPtr lParam)
@@ -151,7 +167,7 @@ internal static class Windowless
                     {
                         cs.x = OffScreen.X;
                         cs.y = OffScreen.Y;
-                        cs.dwExStyle = (cs.dwExStyle & ~WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW;
+                        cs.dwExStyle = (cs.dwExStyle & ~WS_EX_APPWINDOW & ~WS_EX_TOPMOST) | WS_EX_TOOLWINDOW;
                         Marshal.StructureToPtr(cs, cbt.lpcs, false);
                     }
                 }
@@ -169,6 +185,42 @@ internal static class Windowless
             catch { /* never let a hook failure take the UI thread down */ }
         }
         return CallNextHookEx(hook, code, wParam, lParam);
+    }
+
+    /// <summary>
+    /// Keeps a hidden window where the CBT hook put it. WinForms centres a form (on its owner, or on the screen) after
+    /// creating it and before showing it, and a message box centres itself as it opens, so every dialog of a headless copy
+    /// was on screen for a moment before activation put it back - the gate's screen-reader watch saw the profile picker,
+    /// the password dialog and Preferences there (2026-09-27). This sees every move the moment it has happened, on the
+    /// UI thread, and sends a top-level window that landed where a monitor can see it straight back off-screen - before
+    /// it is shown, for the centring - and takes away always-on-top, from which a screen reader takes every event.
+    /// Once the window is handed over, it does nothing.
+    ///
+    /// <para>Only the app's own WinForms windows. Windows' own file and folder pickers keep putting themselves back where
+    /// they can be seen, and a pin that answered every move with another move had the two fighting on the UI thread for
+    /// ever - the picker never finished opening (2026-09-27). The watcher never saw a native dialog on screen: the CBT
+    /// hook's placement and refused activation are enough for those.</para>
+    /// </summary>
+    private static IntPtr PinCallback(int code, IntPtr wParam, IntPtr lParam)
+    {
+        if (code >= 0 && Hiding && !TrayMenuOpen && lParam != IntPtr.Zero)
+        {
+            try
+            {
+                var msg = Marshal.PtrToStructure<CWPRETSTRUCT>(lParam);
+                if (msg.message == WM_WINDOWPOSCHANGED && (GetWindowLong(msg.hwnd, GWL_STYLE) & WS_CHILD) == 0
+                    && ClassOf(msg.hwnd).StartsWith("WindowsForms10.", StringComparison.Ordinal))
+                {
+                    var wp = Marshal.PtrToStructure<WINDOWPOS>(msg.lParam);
+                    if ((wp.flags & SWP_NOMOVE) == 0 && (wp.x > OffScreen.X / 2 || wp.y > OffScreen.Y / 2))
+                        SetWindowPos(msg.hwnd, IntPtr.Zero, OffScreen.X, OffScreen.Y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    if ((GetWindowLong(msg.hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0)
+                        SetWindowPos(msg.hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+                }
+            }
+            catch { /* never let the pin take the UI thread down */ }
+        }
+        return CallNextHookEx(pinHook, code, wParam, lParam);
     }
 
     // ---------------- native dialogs (a MessageBox is not a Form) ----------------
@@ -250,14 +302,25 @@ internal static class Windowless
     private const int WS_CHILD = 0x40000000;
     private const int WS_EX_TOOLWINDOW = 0x00000080;
     private const int WS_EX_APPWINDOW = 0x00040000;
+    private const int WS_EX_TOPMOST = 0x00000008;
+    private const int WH_CALLWNDPROCRET = 12;
+    private const int GWL_STYLE = -16;
+    private const uint WM_WINDOWPOSCHANGED = 0x0047;
+    private static readonly IntPtr HWND_NOTOPMOST = new(-2);
     private const int GWL_EXSTYLE = -20;
     private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
     private const uint SWP_NOZORDER = 0x0004;
     private const uint SWP_NOACTIVATE = 0x0010;
     private const uint WM_COMMAND = 0x0111;
     private const uint WM_SETTEXT = 0x000C;
 
     private delegate IntPtr HookProc(int code, IntPtr wParam, IntPtr lParam);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CWPRETSTRUCT { public IntPtr lResult; public IntPtr lParam; public IntPtr wParam; public uint message; public IntPtr hwnd; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WINDOWPOS { public IntPtr hwnd; public IntPtr hwndInsertAfter; public int x; public int y; public int cx; public int cy; public uint flags; }
     private delegate bool EnumProc(IntPtr h, IntPtr l);
 
     [StructLayout(LayoutKind.Sequential)]

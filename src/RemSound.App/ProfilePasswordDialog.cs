@@ -40,7 +40,10 @@ internal static class ProfilePasswordDialog
             MinimizeBox = false,
             MaximizeBox = false,
             ShowInTaskbar = false,
-            ClientSize = new Size(460, 150),
+            // Sized to what it holds (UI audit 2026-09-28, finding 2): a fixed 460 x 150 with an unstyled column that grew
+            // to the hint's one long line put OK and Cancel off the window altogether.
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             AccessibleName = "Change profile password",
         };
 
@@ -53,7 +56,7 @@ internal static class ProfilePasswordDialog
         {
             Text = currentPassword,
             Dock = DockStyle.Top,
-            Width = 400,
+            Width = Dpi.Px(420),
             AccessibleName = $"Password for profile {profileTitle}",
             // Mark as a password field so the key-click hook layers in the passkey sound.
             Tag = KeyClickService.PasswordFieldTag,
@@ -64,6 +67,9 @@ internal static class ProfilePasswordDialog
             Text = "Both you and the person you're connecting to must use the same password. "
                  + "A longer one — three unrelated words with a number, like kettle9tiger42moon — is best.",
             AutoSize = true,
+            // Wraps to the column instead of running off the window as one line.
+            MaximumSize = new Size(Dpi.Px(420), 0),
+            Margin = Dpi.Pad(3, 6, 3, 6),
         };
 
         var okButton = new Button { Text = "&OK", AutoSize = true };
@@ -111,13 +117,17 @@ internal static class ProfilePasswordDialog
             }
         };
 
-        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), RowCount = 4, ColumnCount = 1 };
+        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = Dpi.Pad(12), RowCount = 4, ColumnCount = 1, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         panel.Controls.Add(label, 0, 0);
         panel.Controls.Add(textBox, 0, 1);
         panel.Controls.Add(hint, 0, 2);
         var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill };
-        buttons.Controls.Add(okButton);
+        // OK then Cancel, as Windows orders them (Ed, 2026-09-28): right to left, so Cancel goes in first; OK first for Tab too.
         buttons.Controls.Add(cancelButton);
+        buttons.Controls.Add(okButton);
+        okButton.TabIndex = 0;
+        cancelButton.TabIndex = 1;
         panel.Controls.Add(buttons, 0, 3);
         dialog.Controls.Add(panel);
         dialog.AcceptButton = okButton;

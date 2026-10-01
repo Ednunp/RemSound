@@ -43,7 +43,7 @@ internal sealed class AsioLoadingSplash
     /// <summary>Test seam: run on the splash's own thread just before its window is shown.</summary>
     internal static Action? BeforeShowForTest;
 
-    private AsioLoadingSplash(string message, bool quiet = false)
+    private AsioLoadingSplash(string message, bool quiet = false, TimeSpan? showWait = null)
     {
         this.message = message;
         this.quiet = quiet;
@@ -57,11 +57,15 @@ internal sealed class AsioLoadingSplash
         // Wait (briefly, capped) for the window to actually be on screen before the caller
         // begins the slow ASIO work — so the user sees the splash, not a blank moment. The
         // cap means a splash hiccup can never stall startup.
-        shown.Wait(TimeSpan.FromSeconds(2));
+        shown.Wait(showWait ?? TimeSpan.FromSeconds(2));
     }
 
-    /// <summary>Test seam: a splash with a message of the test's own, whatever the profile.</summary>
-    internal static AsioLoadingSplash StartForTest(string message) => new(message, quiet: true);
+    /// <summary>Test seam: a splash with a message of the test's own, whatever the profile. The caller is not kept waiting
+    /// for the window (the app waits up to two seconds, so the person sees it before the slow driver work).</summary>
+    internal static AsioLoadingSplash StartForTest(string message) => new(message, quiet: true, showWait: TimeSpan.Zero);
+
+    /// <summary>Test seam: the splash's window has been shown.</summary>
+    internal bool ShownForTest(TimeSpan wait) => shown.Wait(wait) && form is { IsHandleCreated: true };
 
     /// <summary>Test seam: the splash's thread has finished - its window closed, or never shown.</summary>
     internal bool EndedForTest(TimeSpan wait) => thread.Join(wait);
@@ -89,8 +93,9 @@ internal sealed class AsioLoadingSplash
     {
         if (string.IsNullOrWhiteSpace(asioDriverName)) return null;
         // Never in a --headless copy. The splash runs on a thread of its own, which the hook that keeps a headless copy's
-        // windows out of sight does not watch: it came up on screen, always on top, after every wake (2026-09-25).
-        if (Windowless.Hiding) return null;
+        // windows out of sight does not watch: it came up on screen, always on top, after every wake (2026-09-25). Nor in
+        // a --silent launch or the self-test: always on top is where a screen reader hears it (Windowless.KeepBehind).
+        if (Windowless.KeepBehind) return null;
         try
         {
             return new AsioLoadingSplash(message ?? DefaultMessage);
@@ -117,7 +122,7 @@ internal sealed class AsioLoadingSplash
                 MaximizeBox = false,
                 ShowInTaskbar = false,
                 TopMost = true,
-                ClientSize = new Size(380, 96),
+                ClientSize = Dpi.Px(380, 96),
                 AccessibleName = "RemSound is starting",
             };
             if (quiet)

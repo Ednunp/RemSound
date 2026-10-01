@@ -32,6 +32,10 @@ public enum RemPacketType : byte
     /// has ticked, whatever it sends or receives, so a peer that only listens can still be offered or accepted. The payload
     /// is sealed with the audio key - see <see cref="TickProof"/> for the layout. Older peers drop it as an unknown type.</summary>
     TickProof = 11,
+    /// <summary>The master metronome (2026-09-28): offers, answers, the shared timeline and the clock readings that keep every
+    /// follower's clicks in step - timing only, never sound. Sealed with the audio key - see <see cref="MetronomeWire"/> for
+    /// the layout. Older peers drop it as an unknown type, and a master sends them nothing but its offer.</summary>
+    Metronome = 12,
 }
 
 public enum HeartbeatKind : byte
@@ -142,6 +146,12 @@ public static class RemPacket
     /// clock, so no clock sync is needed between peers (RFC 3550 RTCP DLSR pattern, simplified).
     /// </summary>
     public const int HeartbeatPayloadSize = 9;
+
+    /// <summary>A heartbeat with a flags byte after the timestamp (2026-09-26, from the latency lab): sent only while this
+    /// copy can take Jamulus-style frames (<see cref="JamulusStyle.CanTakeIt"/>). Every reader takes a MINIMUM of <see cref="HeartbeatPayloadSize"/> - Windows, the iPhone and Android apps,
+    /// the Pi sender - and the server passes heartbeats on without reading their length, so the extra byte is ignored by
+    /// anything that does not know it.</summary>
+    public const int HeartbeatPayloadWithFlagsSize = 10;
     /// <summary>
     /// Control INNER plaintext: 1 byte <see cref="RemoteControlKind"/> + 1 signed byte delta = 2 bytes.
     /// Since 5.6 this does NOT travel on the wire on its own — it's sealed by ControlSealing, and the
@@ -218,7 +228,9 @@ public static class RemPacket
         // future receiver doesn't accidentally read stale stack data if WriteFormatPayload
         // is called on an uninitialised buffer.
         destination[32] = (byte)format.Lane;
-        destination[33] = 0;
+        // Byte 33: the flags (2026-09-26, from the latency lab), zero unless this copy can take Jamulus-style frames. Old readers - every phone port
+        // and every RemSound before this - never read it (checked in the iPhone and Android parsers).
+        destination[33] = format.LabFlags;
         destination[34] = 0;
         destination[35] = 0;
         // Optional 8-byte password fingerprint at offset 36. Written only when the caller
@@ -297,8 +309,10 @@ public static class RemPacket
         }
 
         var lane = RenderRoute.Mixed;
+        byte labFlags = 0;
         if (payload.Length >= FormatPayloadExtendedSize)
         {
+            labFlags = payload[33];
             var laneRaw = payload[32];
             lane = laneRaw switch
             {
@@ -319,11 +333,11 @@ public static class RemPacket
             BinaryPrimitives.ReadInt32LittleEndian(payload[24..]),
             BinaryPrimitives.ReadInt32LittleEndian(payload[28..]),
             lane,
-            captureLatencyMs);
+            captureLatencyMs) { LabFlags = labFlags };
         return true;
     }
 
-    public static int WriteHeartbeatPayload(Span<byte> destination, HeartbeatKind kind, long originatorTickMs)
+    public static int WriteHeartbeatPayload(Span<byte> destination, HeartbeatKind kind, long originatorTickMs, byte labFlags = 0)
     {
         if (destination.Length < HeartbeatPayloadSize)
         {
@@ -331,13 +345,20 @@ public static class RemPacket
         }
         destination[0] = (byte)kind;
         BinaryPrimitives.WriteInt64LittleEndian(destination[1..], originatorTickMs);
-        return HeartbeatPayloadSize;
+        if (labFlags == 0 || destination.Length < HeartbeatPayloadWithFlagsSize) return HeartbeatPayloadSize;
+        destination[HeartbeatPayloadSize] = labFlags;
+        return HeartbeatPayloadWithFlagsSize;
     }
 
-    public static bool TryReadHeartbeat(ReadOnlySpan<byte> payload, out HeartbeatKind kind, out long originatorTickMs)
+    public static bool TryReadHeartbeat(ReadOnlySpan<byte> payload, out HeartbeatKind kind, out long originatorTickMs) =>
+        TryReadHeartbeat(payload, out kind, out originatorTickMs, out _);
+
+    /// <summary>A heartbeat, and its flags byte if the sender added one (0 if not).</summary>
+    public static bool TryReadHeartbeat(ReadOnlySpan<byte> payload, out HeartbeatKind kind, out long originatorTickMs, out byte labFlags)
     {
         kind = HeartbeatKind.Ping;
         originatorTickMs = 0;
+        labFlags = payload.Length >= HeartbeatPayloadWithFlagsSize ? payload[HeartbeatPayloadSize] : (byte)0;
         if (payload.Length < HeartbeatPayloadSize) return false;
         var raw = payload[0];
         if (raw != (byte)HeartbeatKind.Ping && raw != (byte)HeartbeatKind.Pong) return false;

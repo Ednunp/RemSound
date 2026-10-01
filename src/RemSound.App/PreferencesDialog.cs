@@ -11,7 +11,7 @@ namespace RemSound.App;
 ///   * Connectivity — Accept connections from other peers, UPnP automatic router port-forwarding
 ///     (+ its status), and clearing the remembered peers and servers lists (Ed, 2026-09-24).
 ///   * Appearance — colour theme, show the volume/pan/EQ tab, main-window tab order, and the
-///     discovered / remembered peer list toggles.
+///     discovered / remembered peer list toggles, and remembering the main window's size and position.
 ///   * Audio cues — the cue list (a plain list of cue names; arrowing previews each cue's
 ///     current sound), a "Choose sound" list whose "(none)" entry turns a cue off, the Play /
 ///     Browse actions, and the keyboard-clicks toggle.
@@ -19,7 +19,7 @@ namespace RemSound.App;
 ///     (+ the profile list). Moved here from the standalone Options-menu dialog.
 ///   * Update settings — startup-check toggle, frequency, manual check, silent-install, the
 ///     install time range, and show-what's-new.
-///   * Logging — Enable logs, Write logs now, the logs-folder size warning, deleting old logs,
+///   * Logging — Enable logs (for this profile), Write logs now, the logs-folder size warning, deleting old logs,
 ///     and Delete all logs.
 ///
 /// All settings save through <see cref="RemSoundSettingsStore"/> or <see cref="AppConfig"/>
@@ -45,13 +45,13 @@ internal sealed class PreferencesDialog : Form
         Text = "&Auto-save non-read-only profiles (Alt+A):",
         AccessibleName = "Auto-save non-read-only profiles",
         AutoSize = true,
-        Padding = new Padding(0, 6, 0, 4),
+        Padding = Dpi.Pad(0, 6, 0, 4),
     };
     private readonly ListBox autoSaveList = new()
     {
         IntegralHeight = false,
-        Width = 360,
-        Height = 132,
+        Width = Dpi.Px(360),
+        Height = Dpi.Px(132),
         AccessibleName = "Auto-save non-read-only profiles",
     };
     // Parallel to autoSaveList.Items: the minute interval each row means (0 = Never).
@@ -64,13 +64,13 @@ internal sealed class PreferencesDialog : Form
         Text = "Accept co&nnections from other peers (Alt+N):",
         AccessibleName = "Accept connections from other peers",
         AutoSize = true,
-        Padding = new Padding(0, 6, 0, 4),
+        Padding = Dpi.Pad(0, 6, 0, 4),
     };
     private readonly ListBox acceptPeersList = new()
     {
         IntegralHeight = false,
-        Width = 360,
-        Height = 66,
+        Width = Dpi.Px(360),
+        Height = Dpi.Px(66),
         AccessibleName = "Accept connections from other peers",
     };
     // Parallel to acceptPeersList.Items. Prompt leads, because it is the default.
@@ -118,7 +118,7 @@ internal sealed class PreferencesDialog : Form
         Text = "Audio cue sou&nds (Alt+N):",
         AccessibleName = "Audio cue sounds",
         AutoSize = true,
-        Padding = new Padding(0, 6, 0, 4),
+        Padding = Dpi.Pad(0, 6, 0, 4),
     };
 
     // A plain list of cue names (no tickboxes any more - on/off is the "(none)" entry in the sound
@@ -126,21 +126,21 @@ internal sealed class PreferencesDialog : Form
     private readonly ListBox cueList = new()
     {
         IntegralHeight = false,
-        Height = 130,
-        Width = 360,
+        Height = Dpi.Px(130),
+        Width = Dpi.Px(360),
         AccessibleName = "Audio cue sounds",
     };
 
     private readonly Button playSelectedCueButton = new()
     {
         AutoSize = true,
-        Padding = new Padding(6, 2, 6, 2),
+        Padding = Dpi.Pad(6, 2, 6, 2),
     };
 
     private readonly Button browseSelectedCueButton = new()
     {
         AutoSize = true,
-        Padding = new Padding(6, 2, 6, 2),
+        Padding = Dpi.Pad(6, 2, 6, 2),
     };
 
     // "Choose sound" — a second listbox under the cue list. The cue WAVs ship as numbered
@@ -156,14 +156,14 @@ internal sealed class PreferencesDialog : Form
         Text = "Choose soun&d (Alt+D):",
         AccessibleName = "Choose sound",
         AutoSize = true,
-        Padding = new Padding(0, 6, 0, 4),
+        Padding = Dpi.Pad(0, 6, 0, 4),
     };
 
     private readonly ListBox defaultSoundList = new()
     {
         IntegralHeight = false,
-        Height = 76,
-        Width = 360,
+        Height = Dpi.Px(76),
+        Width = Dpi.Px(360),
         AccessibleName = "Choose sound",
     };
 
@@ -258,6 +258,11 @@ internal sealed class PreferencesDialog : Form
                 c => c.EnableSendOnCue, (c, v) => c.EnableSendOnCue = v),
             MachineRow("Send turned off sound", MainForm.CueId.SendOff, "send off.wav",
                 c => c.EnableSendOffCue, (c, v) => c.EnableSendOffCue = v),
+            // Push to talk opening and closing by the key (2026-09-28); silent in sound-level mode.
+            MachineRow("Push to talk on sound", MainForm.CueId.PushToTalkOn, "push talk on.wav",
+                c => c.EnablePushToTalkOnCue, (c, v) => c.EnablePushToTalkOnCue = v),
+            MachineRow("Push to talk off sound", MainForm.CueId.PushToTalkOff, "push talk off.wav",
+                c => c.EnablePushToTalkOffCue, (c, v) => c.EnablePushToTalkOffCue = v),
             MachineRow("Receive turned on sound", MainForm.CueId.ReceiveOn, "recieve on.wav",
                 c => c.EnableReceiveOnCue, (c, v) => c.EnableReceiveOnCue = v),
             MachineRow("Receive turned off sound", MainForm.CueId.ReceiveOff, "recieve off.wav",
@@ -324,19 +329,30 @@ internal sealed class PreferencesDialog : Form
                 // their contents are their own story (peer lists, cue paths) and belong in their own
                 // lines rather than as a rename of the whole collection.
                 if (was is System.Collections.IEnumerable && was is not string) continue;
-                if (Equals(was, now)) continue;
+                if (SamePreference(was, now)) continue;
                 UiChangeLog.Record($"preference: {p.Name}", $"{DescribePreference(was)} → {DescribePreference(now)}");
             }
         }
         catch { /* recording a change must never cost the user the change itself */ }
     }
 
+    /// <summary>A setting held as an object - a hotkey, a window's place - is the same when what it holds is. They compared
+    /// as objects, so every OK logged every hotkey as changed, by its type's name (the live test's logs, 2026-09-29).</summary>
+    private static bool SamePreference(object? was, object? now) =>
+        Equals(was, now)
+        || was is not null && now is not null && was.GetType() == now.GetType() && was.GetType().IsClass && was is not string
+           && System.Text.Json.JsonSerializer.Serialize(was, was.GetType()) == System.Text.Json.JsonSerializer.Serialize(now, now.GetType());
+
     private static string DescribePreference(object? value) => value switch
     {
         null => "(unset)",
         bool b => b ? "on" : "off",
+        HotkeyRecord h => h.ToHotkeyInfo(allowSingleKey: true).ToString(),
         _ => value.ToString() ?? "",
     };
+
+    /// <summary>What saving <paramref name="cfg"/> from Preferences records, for the gate.</summary>
+    internal static void RecordChangedPreferencesForTest(AppConfig cfg) => RecordChangedPreferences(cfg);
 
     private readonly AccessibleCheckBox acceptRemoteVolumeBox = new()
     {
@@ -371,7 +387,7 @@ internal sealed class PreferencesDialog : Form
     private readonly ComboBox updateFrequencyBox = new()
     {
         DropDownStyle = ComboBoxStyle.DropDownList,
-        Width = 200,
+        Width = Dpi.Px(200),
         AccessibleName = "Then check every (Alt+U)",
     };
 
@@ -401,13 +417,13 @@ internal sealed class PreferencesDialog : Form
     private readonly ComboBox updateWindowStartBox = new()
     {
         DropDownStyle = ComboBoxStyle.DropDownList,
-        Width = 100,
+        Width = Dpi.Px(100),
         AccessibleName = "Update window start time",
     };
     private readonly ComboBox updateWindowEndBox = new()
     {
         DropDownStyle = ComboBoxStyle.DropDownList,
-        Width = 100,
+        Width = Dpi.Px(100),
         AccessibleName = "Update window end time",
     };
 
@@ -443,7 +459,7 @@ internal sealed class PreferencesDialog : Form
     private readonly ComboBox themeBox = new()
     {
         DropDownStyle = ComboBoxStyle.DropDownList,
-        Width = 200,
+        Width = Dpi.Px(200),
         // The "takes effect next launch" hint is a separate grey label a screen reader never reaches, so the
         // name carries it too.
         AccessibleName = "Colour theme, takes effect next launch (Alt+T)",
@@ -452,8 +468,8 @@ internal sealed class PreferencesDialog : Form
     // Appearance tab — reorder the main-window tabs, and toggle the Connectivity-tab peer lists.
     private readonly ListBox tabOrderList = new()
     {
-        Width = 320,
-        Height = 96,
+        Width = Dpi.Px(320),
+        Height = Dpi.Px(96),
         IntegralHeight = false,
         AccessibleName = "Tab order (Alt+O), press the move up and move down buttons to reorder",
     };
@@ -469,6 +485,13 @@ internal sealed class PreferencesDialog : Form
     {
         Text = "Enable the &remembered peers list on the Connectivity tab (Alt+R)",
         AccessibleName = "Enable the remembered peers list on the Connectivity tab",
+        AutoSize = true,
+    };
+    // Off by default, like every setting that remembers something (Ed, 2026-09-28). Machine-wide (AppConfig).
+    private readonly AccessibleCheckBox rememberWindowPlacementBox = new()
+    {
+        Text = "Remember the &main window's size and position (Alt+M)",
+        AccessibleName = "Remember the main window's size and position",
         AutoSize = true,
     };
 
@@ -493,13 +516,13 @@ internal sealed class PreferencesDialog : Form
         Text = "",
         AccessibleName = "UPnP status",
         AutoSize = true,
-        Padding = new Padding(20, 0, 0, 4),
+        Padding = Dpi.Pad(20, 0, 0, 4),
     };
 
     private readonly AccessibleCheckBox loggingBox = new()
     {
-        Text = "Enable &logs",
-        AccessibleName = "Enable logs",
+        Text = "Enable &logs for this profile",
+        AccessibleName = "Enable logs for this profile",
         AutoSize = true,
     };
 
@@ -525,7 +548,7 @@ internal sealed class PreferencesDialog : Form
         Maximum = 100000,
         Increment = 10,
         Value = 100,
-        Width = 90,
+        Width = Dpi.Px(90),
         AccessibleName = "Warn when the logs folder is larger than this many megabytes (Alt+M)",
     };
     private readonly MnemonicLabel logsSizeUnitLabel = new()
@@ -533,7 +556,8 @@ internal sealed class PreferencesDialog : Form
         Text = "&megabytes",
         AutoSize = true,
         Anchor = AnchorStyles.Left,
-        Padding = new Padding(6, 6, 0, 0),
+        // Level with the middle of the number box beside it; a top padding sat it a few pixels low (finding 12).
+        Padding = Dpi.Pad(6, 0, 0, 0),
     };
     private readonly AccessibleCheckBox pruneOldLogsBox = new()
     {
@@ -547,7 +571,7 @@ internal sealed class PreferencesDialog : Form
         Maximum = 30,
         Increment = 1,
         Value = 14,
-        Width = 70,
+        Width = Dpi.Px(70),
         AccessibleName = "Delete logs older than this many days (Alt+Y)",
     };
     private readonly MnemonicLabel pruneDaysUnitLabel = new()
@@ -555,7 +579,8 @@ internal sealed class PreferencesDialog : Form
         Text = "da&ys old",
         AutoSize = true,
         Anchor = AnchorStyles.Left,
-        Padding = new Padding(6, 6, 0, 0),
+        // Level with the middle of the number box beside it; a top padding sat it a few pixels low (finding 12).
+        Padding = Dpi.Pad(6, 0, 0, 0),
     };
     private readonly Button deleteAllLogsButton = new()
     {
@@ -593,8 +618,8 @@ internal sealed class PreferencesDialog : Form
     private readonly ListBox startupProfileList = new()
     {
         IntegralHeight = false,
-        Width = 360,
-        Height = 120,
+        Width = Dpi.Px(360),
+        Height = Dpi.Px(120),
         AccessibleName = "Profile to start with",
     };
     private bool suppressStartWithUserHandler;
@@ -659,7 +684,11 @@ internal sealed class PreferencesDialog : Form
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterParent;
         KeyPreview = true;
-        ClientSize = new Size(580, 640);
+        // Wide enough that all seven tabs show without scroll arrows (UI audit 2026-09-28, finding 12: eight then), no taller than the
+        // fullest tab needs (it was 640 with most of it empty), and never taller than the screen: a page scrolls when the
+        // screen is small.
+        ClientSize = Dpi.Px(680, 500);
+        Size = Dpi.FitToScreen(Size);
 
         // 1st row — Browse for profiles folder. Same FolderBrowserDialog the startup
         // ProfileSelectionDialog uses; the choice is persisted to AppConfig.ProfilesDirectory
@@ -951,9 +980,9 @@ internal sealed class PreferencesDialog : Form
             cfg.ThemeMode = themeBox.SelectedIndex switch { 1 => "light", 2 => "dark", _ => "system" };
             TrySaveConfig(cfg);
         };
-        var themeLabel = new MnemonicLabel { Text = "Colour &theme (Alt+T)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = themeBox };
-        var themeHint = new Label { Text = "— takes effect next launch", AutoSize = true, ForeColor = SystemColors.GrayText, Anchor = AnchorStyles.Left, Padding = new Padding(8, 4, 0, 0) };
-        var themeRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 4, 0, 0) };
+        var themeLabel = new MnemonicLabel { Text = "Colour &theme (Alt+T):", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = themeBox };
+        var themeHint = new Label { Text = "— takes effect next launch", AutoSize = true, ForeColor = SystemColors.GrayText, Anchor = AnchorStyles.Left, Padding = Dpi.Pad(8, 0, 0, 0) };
+        var themeRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Dpi.Pad(0, 4, 0, 0) };
         themeRow.Controls.Add(themeLabel);
         themeRow.Controls.Add(themeBox);
         themeRow.Controls.Add(themeHint);
@@ -991,8 +1020,8 @@ internal sealed class PreferencesDialog : Form
         moveTabUpButton.Click += (_, _) => MoveTab(-1);
         moveTabDownButton.Click += (_, _) => MoveTab(1);
 
-        var tabOrderLabel = new MnemonicLabel { Text = "Tab &order (Alt+O)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = tabOrderList };
-        var tabOrderButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 2, 0, 0) };
+        var tabOrderLabel = new MnemonicLabel { Text = "Tab &order (Alt+O):", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = tabOrderList };
+        var tabOrderButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Dpi.Pad(0, 2, 0, 0) };
         tabOrderButtons.Controls.Add(moveTabUpButton);
         tabOrderButtons.Controls.Add(moveTabDownButton);
 
@@ -1008,6 +1037,16 @@ internal sealed class PreferencesDialog : Form
         {
             var cfg = AppConfig.Load();
             cfg.ShowRememberedPeers = enableRememberedPeersBox.Checked;
+            TrySaveConfig(cfg);
+        };
+        // Takes effect as the main window next closes (it keeps its size and place) and opens (it goes back to them).
+        // Turned off, what was kept is forgotten: the window opens as it always has.
+        rememberWindowPlacementBox.Checked = cfgForLoad.RememberMainWindowPlacement;
+        rememberWindowPlacementBox.CheckedChanged += (_, _) =>
+        {
+            var cfg = AppConfig.Load();
+            cfg.RememberMainWindowPlacement = rememberWindowPlacementBox.Checked;
+            if (!cfg.RememberMainWindowPlacement) cfg.MainWindowPlacement = null;
             TrySaveConfig(cfg);
         };
 
@@ -1126,9 +1165,9 @@ internal sealed class PreferencesDialog : Form
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
-            Padding = new Padding(0, 4, 0, 0),
+            Padding = Dpi.Pad(0, 4, 0, 0),
         };
-        updateFrequencyLabel.Padding = new Padding(0, 6, 8, 0);
+        updateFrequencyLabel.Padding = Dpi.Pad(0, 6, 8, 0);
         freqRow.Controls.Add(updateFrequencyLabel);
         freqRow.Controls.Add(updateFrequencyBox);
 
@@ -1140,10 +1179,10 @@ internal sealed class PreferencesDialog : Form
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
-            Padding = new Padding(0, 4, 0, 0),
+            Padding = Dpi.Pad(0, 4, 0, 0),
         };
-        var updateWindowStartLabel = new MnemonicLabel { Text = "St&art time:", MnemonicTarget = updateWindowStartBox, AutoSize = true, Padding = new Padding(0, 6, 8, 0) };
-        var updateWindowEndLabel = new MnemonicLabel { Text = "En&d time:", MnemonicTarget = updateWindowEndBox, AutoSize = true, Padding = new Padding(12, 6, 8, 0) };
+        var updateWindowStartLabel = new MnemonicLabel { Text = "St&art time:", MnemonicTarget = updateWindowStartBox, AutoSize = true, Padding = Dpi.Pad(0, 6, 8, 0) };
+        var updateWindowEndLabel = new MnemonicLabel { Text = "En&d time:", MnemonicTarget = updateWindowEndBox, AutoSize = true, Padding = Dpi.Pad(12, 6, 8, 0) };
         updateWindowRangeRow.Controls.Add(updateWindowStartLabel);
         updateWindowRangeRow.Controls.Add(updateWindowStartBox);
         updateWindowRangeRow.Controls.Add(updateWindowEndLabel);
@@ -1168,7 +1207,7 @@ internal sealed class PreferencesDialog : Form
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
-            Padding = new Padding(0, 4, 0, 0),
+            Padding = Dpi.Pad(0, 4, 0, 0),
             TabIndex = 4,
         };
         cueActions.Controls.Add(playSelectedCueButton);
@@ -1190,7 +1229,7 @@ internal sealed class PreferencesDialog : Form
             FlowDirection = FlowDirection.TopDown,
             AutoSize = true,
             WrapContents = false,
-            Padding = new Padding(20, 0, 0, 0),
+            Padding = Dpi.Pad(20, 0, 0, 0),
         };
         startupListPanel.Controls.Add(startupProfileListLabel);
         startupListPanel.Controls.Add(startupProfileList);
@@ -1204,7 +1243,7 @@ internal sealed class PreferencesDialog : Form
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
-            Padding = new Padding(20, 2, 0, 0),
+            Padding = Dpi.Pad(20, 2, 0, 0),
         };
         logsSizeRow.Controls.Add(logsSizeLimitBox);
         logsSizeRow.Controls.Add(logsSizeUnitLabel);
@@ -1214,7 +1253,7 @@ internal sealed class PreferencesDialog : Form
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
-            Padding = new Padding(20, 2, 0, 0),
+            Padding = Dpi.Pad(20, 2, 0, 0),
         };
         pruneDaysRow.Controls.Add(pruneDaysBox);
         pruneDaysRow.Controls.Add(pruneDaysUnitLabel);
@@ -1258,7 +1297,7 @@ internal sealed class PreferencesDialog : Form
             clearConnectivityListsHeader, clearRememberedPeersButton, clearRememberedRelaysButton));
         tabs.TabPages.Add(MakeTab("Appearance",
             themeRow, showPanEqTabBox, tabOrderLabel, tabOrderList, tabOrderButtons,
-            enableDiscoveredPeersBox, enableRememberedPeersBox));
+            enableDiscoveredPeersBox, enableRememberedPeersBox, rememberWindowPlacementBox));
         tabs.TabPages.Add(MakeTab("Audio cues", cueGroup));
         tabs.TabPages.Add(MakeTab("Startup behaviour",
             startMinimisedBox, startWithUserBox, startWithProfileBox, startupListPanel, showF1HelpMessageBox));
@@ -1275,7 +1314,7 @@ internal sealed class PreferencesDialog : Form
             Dock = DockStyle.Bottom,
             FlowDirection = FlowDirection.RightToLeft,
             AutoSize = true,
-            Padding = new Padding(0, 0, 12, 12),
+            Padding = Dpi.Pad(0, 0, 12, 12),
         };
         buttons.Controls.Add(closeButton);
 
@@ -1290,7 +1329,7 @@ internal sealed class PreferencesDialog : Form
             var body = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                Padding = new Padding(12),
+                Padding = Dpi.Pad(12),
                 ColumnCount = 1,
                 RowCount = controls.Length + 1,
                 AutoScroll = true,
@@ -1319,6 +1358,7 @@ internal sealed class PreferencesDialog : Form
         ContextHelp.Mark(moveTabDownButton, "prefs.appearance.move-tab-down");
         ContextHelp.Mark(enableDiscoveredPeersBox, "prefs.appearance.show-discovered-peers");
         ContextHelp.Mark(enableRememberedPeersBox, "prefs.appearance.show-remembered-peers");
+        ContextHelp.Mark(rememberWindowPlacementBox, "prefs.appearance.remember-window");
         ContextHelp.Mark(cueList, "prefs.cues.cue-list");
         ContextHelp.Mark(defaultSoundList, "prefs.cues.choose-sound");
         ContextHelp.Mark(playSelectedCueButton, "prefs.cues.play");

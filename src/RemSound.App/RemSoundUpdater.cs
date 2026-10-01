@@ -69,7 +69,7 @@ internal sealed class RemSoundUpdater
             // per_page=100 (vs the API default of 30): the repo holds both client (vX.Y) and
             // relay-server (server-vX.Y) releases, so a burst of server releases could push the
             // newest client release off a 30-item first page. 100 keeps it comfortably in view.
-            var url = $"https://api.github.com/repos/{RepoOwner}/{RepoName}/releases?per_page=100";
+            var url = ReleasesUrlForTest ?? $"https://api.github.com/repos/{RepoOwner}/{RepoName}/releases?per_page=100";
             Log?.Invoke($"updater: GET {url}");
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
             req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
@@ -225,7 +225,7 @@ internal sealed class RemSoundUpdater
                 ? null
                 : await http.GetStringAsync(info.SignatureUrl, token).ConfigureAwait(false);
             var zipBytes = await File.ReadAllBytesAsync(zipPath, token).ConfigureAwait(false);
-            if (!VerifyStagedRelease(zipBytes, info.SignatureUrl, signatureBase64, Log))
+            if (!VerifyStagedRelease(zipBytes, info.SignatureUrl, signatureBase64, Log, SignatureVerifiesForTest ?? UpdateSignature.Verify))
             {
                 TryDeleteDirectory(stageRoot);   // refused → leave the install untouched
                 return false;
@@ -273,6 +273,7 @@ internal sealed class RemSoundUpdater
             }
 
             Log?.Invoke($"updater: launching in-app installer from {appRoot}, parent PID {pid}");
+            if (LaunchForTest is { } launch) { launch(psi); return true; }
             using (System.Diagnostics.Process.Start(psi)) { }
             return true;
         }
@@ -332,6 +333,7 @@ internal sealed class RemSoundUpdater
     {
         get
         {
+            if (StageParentDirForTest is { } standIn) return standIn;
             var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             if (string.IsNullOrWhiteSpace(local)) local = Path.GetTempPath();
             return Path.Combine(local, "RemSound", "update");
@@ -389,6 +391,16 @@ internal sealed class RemSoundUpdater
 
     /// <summary>Self-test seam: the install folder the download clears its old notes from, instead of this copy's own.</summary>
     internal static string? InstallDirForTest;
+
+    /// <summary>Gate seam: where the release list is asked for - a stand-in on this machine, never GitHub, in a gate run.</summary>
+    internal static string? ReleasesUrlForTest;
+
+    /// <summary>Gate seams for the whole chain: the signature checked with a throwaway key instead of the release key, and
+    /// the installer handed to the test instead of started. Null (always, in the app): the real key, a real start.</summary>
+    internal static Func<byte[], string, bool>? SignatureVerifiesForTest;
+    internal static Action<System.Diagnostics.ProcessStartInfo>? LaunchForTest;
+    /// <summary>Gate seam: stage in a throwaway folder, not the person's own update folder.</summary>
+    internal static string? StageParentDirForTest;
 
     /// <summary>Copy <paramref name="src"/> to <paramref name="dst"/>, giving up with a <see cref="TimeoutException"/> if
     /// nothing arrives for <paramref name="stallLimit"/>.</summary>

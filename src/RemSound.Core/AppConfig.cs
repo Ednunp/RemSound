@@ -101,6 +101,16 @@ public sealed class AppConfig
     public bool ShowDiscoveredPeers { get; set; } = true;
     public bool ShowRememberedPeers { get; set; } = true;
 
+    /// <summary>Whether the main window opens as big as, and where, it was when it last closed ("Remember the main
+    /// window's size and position" on the Preferences Appearance tab; Ed, 2026-09-28). Off by default, like every setting
+    /// that remembers something: off, the window opens as it always has. Machine-wide, since the screens belong to this
+    /// computer rather than to a profile.</summary>
+    public bool RememberMainWindowPlacement { get; set; }
+
+    /// <summary>The main window's size and place when it last closed with <see cref="RememberMainWindowPlacement"/> on.
+    /// Null until then. Kept when remembering is turned off, and used again only once it is back on.</summary>
+    public WindowPlacement? MainWindowPlacement { get; set; }
+
     /// <summary>The machine-wide "named peers" book — peers the user has deliberately renamed, keyed by
     /// the peer's stable identity (machine name, or address for a nameless manual peer). A name applies in
     /// every profile and shows wherever that peer appears. Managed via the Connectivity tab's Rename peer
@@ -153,6 +163,17 @@ public sealed class AppConfig
     /// Machine-wide; the user unticks "Play keyboard clicks" in Preferences to silence it.</summary>
     public bool EnableKeyboardClicks { get; set; } = true;
 
+    // The latency lab (2026-09-26 to 2026-10-01) is gone, and its switches left with their fields: an old file that still
+    // names them loads as ever, the names are simply not read, and the next save drops them. Per-stream buffers became
+    // normal behaviour, the lean margins and rare-dropout tuning one per-profile tick box (Profile.AutoTuneLowestDelay),
+    // and the last switch, Jamulus-style Opus frames, automatic (JamulusStyle).
+
+    /// <summary>RETIRED 2026-09-28: the lab's machine-wide ASIO buffer size, now a per-profile setting
+    /// (<see cref="Profile.AsioBufferFrames"/>) that starts at the driver's own size. Read once, at start-up, only so the
+    /// log can say a value that no longer applies was set; then cleared, and a zero is never written.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public int LabAsioBufferFrames { get; set; }
+
     /// <summary>Whether a peer's pan and EQ (set in RemSound) are applied to the audio the VST plugin
     /// hands to the DAW. ON by default — "what you hear is what you get" is the least surprising
     /// behaviour, and it costs nothing: the shaping is per-sample, already in the read path the
@@ -196,6 +217,10 @@ public sealed class AppConfig
     /// <summary>Tick / untick sounds played on every checkbox toggle anywhere in the app.</summary>
     public bool EnableCheckboxOnCue { get; set; } = true;
     public bool EnableCheckboxOffCue { get; set; } = true;
+    /// <summary>Push to talk opening and closing, in key mode only (in sound-level mode they would sound with every
+    /// phrase). Machine-wide like the send on/off cues. Default on; push to talk itself is off until a profile turns it on.</summary>
+    public bool EnablePushToTalkOnCue { get; set; } = true;
+    public bool EnablePushToTalkOffCue { get; set; } = true;
     /// <summary>Sound played whenever the user switches between tabs anywhere in the app (the main
     /// window's tab strip and every tabbed dialog). Machine-wide, default on.</summary>
     public bool EnableTabSwitchCue { get; set; } = true;
@@ -261,6 +286,17 @@ public sealed class AppConfig
     /// switch. Machine-wide and unset by default; NOT stored in any profile (unlike the shaping
     /// values). The user binds it in Keyboard shortcuts.</summary>
     public HotkeyRecord? ToggleAllPeerShapingHotkey { get; set; }
+    /// <summary>The push to talk key: computer-wide, with the other shortcuts, while the rest of push to talk lives in the
+    /// profile. Null = the default, Scroll Lock on its own. Unlike the others it may be a single key, and it is watched for
+    /// release as well as press, by a keyboard hook, only while a profile has push to talk on by key.</summary>
+    public HotkeyRecord? PushToTalkHotkey { get; set; }
+    /// <summary>Start or stop the metronome - or, following a master, mute or unmute it - from anywhere (2026-09-28).
+    /// Computer-wide like every shortcut, and unset unless chosen: no free, conventional key exists for it.</summary>
+    public HotkeyRecord? MetronomeHotkey { get; set; }
+    /// <summary>The metronome's tempo up or down a beat a minute, from anywhere; held, it keeps going (Ed, 2026-09-29). Unset
+    /// unless chosen.</summary>
+    public HotkeyRecord? MetronomeTempoUpHotkey { get; set; }
+    public HotkeyRecord? MetronomeTempoDownHotkey { get; set; }
 
     /// <summary>If true, the "Use Windows default output" follower at the top of the received-sound
     /// output list is ticked at startup, so received sound plays to whatever Windows currently calls
@@ -342,6 +378,10 @@ public sealed class AppConfig
     /// RemSound starts. Ed's design, 2026-09-25: on until the message's own "Do not show me this message again" is
     /// ticked; the Startup behaviour tab of Preferences turns it back on. Per machine, not per profile.</summary>
     public bool ShowF1HelpMessageAtStartup { get; set; } = true;
+
+    /// <summary>Starting the metronome with no server says that nobody else will hear it (Ed, 2026-09-29), until "Do not show
+    /// me this message again" is ticked.</summary>
+    public bool ShowMetronomeNoServerMessage { get; set; } = true;
 
     /// <summary>If true, RemSound tries to open the audio port (UDP 47830) on the local router
     /// using UPnP / NAT-PMP / PCP, so peers on the public internet can reach this machine

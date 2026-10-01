@@ -6,9 +6,11 @@ namespace RemSound.App;
 /// Shared screen-reader wiring for a <see cref="CheckedListBox"/> — the exact behaviour the main
 /// window's device lists use, factored out so dialogs (e.g. the service profile editor) announce
 /// identically instead of each rolling its own. On focus and on arrow-key move it writes a spoken
-/// status ("checked, VLC. Item 1 of 3. Press Space to toggle.") into both the list's
-/// AccessibleDescription and a companion status label, so NVDA reads the item AND its checked state.
-/// Also adds first-letter navigation that never accidentally toggles a check.
+/// status ("checked, VLC. Item 1 of 3. Press Space to toggle.") into the list's AccessibleDescription
+/// and the companion status label's, so NVDA reads the item AND its checked state. The label SHOWS words
+/// only under an empty list, saying why it is empty; under a list with items it shows nothing, since a
+/// sighted person can see the items and their ticks (Ed, 2026-09-28). Also adds first-letter navigation
+/// that never accidentally toggles a check.
 /// </summary>
 internal static class CheckedListAccessibility
 {
@@ -79,15 +81,25 @@ internal static class CheckedListAccessibility
 
     /// <summary>THE single builder+applier for a CheckedListBox's spoken status. MainForm delegates
     /// here too, so the wording is word-for-word identical in the main window and every dialog by
-    /// construction — not by a comment promising it. Writes the text into the status label and the
-    /// list's AccessibleDescription (and the label's, for a focused non-empty item) so NVDA reads
-    /// the item AND its checked state.</summary>
+    /// construction — not by a comment promising it. Writes the text into the list's
+    /// AccessibleDescription (and the label's, for a focused non-empty item) so NVDA reads the item AND
+    /// its checked state; the label shows it only when the list is empty.</summary>
+    /// <summary>A list's own words for being empty, in place of the usual ones, while they apply - e.g. an ASIO driver that
+    /// could not be read (2026-09-29, Andre: "it said he had no asio outputs"). Null puts the usual words back.</summary>
+    public static void SetEmptyText(CheckedListBox list, string? text)
+    {
+        emptyTexts.Remove(list);
+        if (text is not null) emptyTexts.Add(list, text);
+    }
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<CheckedListBox, string> emptyTexts = new();
+
     public static void ApplyStatus(CheckedListBox list, Label statusLabel, string itemKind, int? overrideIndex = null, bool? overrideChecked = null)
     {
         if (list.Items.Count == 0)
         {
-            var emptyText = EmptyTextFor(itemKind);
-            statusLabel.Text = emptyText;
+            var emptyText = emptyTexts.TryGetValue(list, out var own) ? own : EmptyTextFor(itemKind);
+            Show(statusLabel, emptyText);
             list.AccessibleDescription = emptyText;
             return;
         }
@@ -97,8 +109,18 @@ internal static class CheckedListAccessibility
         var checkedText = isChecked ? "checked" : "not checked";
         var itemText = list.Items[index]?.ToString() ?? itemKind;
         var text = $"{checkedText}, {itemText}. Item {index + 1} of {list.Items.Count}. Press Space to toggle.";
-        statusLabel.Text = text;
+        // Not shown: the items and their ticks are on screen, and these are NVDA's words (Ed, 2026-09-28).
+        Show(statusLabel, "");
         list.AccessibleDescription = text;
         statusLabel.AccessibleDescription = text;
+    }
+
+    /// <summary>The words under a list, or none - and then no room taken either: an empty label that sizes itself keeps a
+    /// line's height, which left a gap under every list.</summary>
+    private static void Show(Label statusLabel, string words)
+    {
+        statusLabel.Text = words;
+        statusLabel.AutoSize = words.Length > 0;
+        if (words.Length == 0) statusLabel.Size = Size.Empty;
     }
 }

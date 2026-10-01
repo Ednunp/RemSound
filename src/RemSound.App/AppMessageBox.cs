@@ -140,8 +140,8 @@ internal sealed class HeadlessQuestionForm : Form
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
 
-        var layout = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, Padding = new Padding(12) };
-        layout.Controls.Add(new Label { Text = text, AutoSize = true, MaximumSize = new Size(480, 0), TabIndex = 0 });
+        var layout = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, Padding = Dpi.Pad(12) };
+        layout.Controls.Add(new Label { Text = text, AutoSize = true, MaximumSize = Dpi.Px(480, 0), TabIndex = 0 });
         var row = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true };
         var made = new List<Button>();
         foreach (var (label, result) in buttons)

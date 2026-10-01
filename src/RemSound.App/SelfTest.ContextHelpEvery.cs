@@ -57,6 +57,12 @@ internal static partial class SelfTest
         var menuItems = 0;
         var buttons = 0;
         var keys = new HashSet<string>(StringComparer.Ordinal);
+        // The feature pack presses F1 for real on the first control of each window, menu and the plugin, and checks every
+        // other control's help by its words: the key, the window and the help are the same code for all of them, and
+        // pressing every one takes seven minutes (Ed, 2026-09-27: a pack for every feature, the full sweep before a release).
+        var pressedIn = new HashSet<string>(StringComparer.Ordinal);
+        var sampledControls = 0;
+        var sampledMenuItems = 0;
         try
         {
             var manualPath = ContextHelp.ManualPath();
@@ -119,7 +125,8 @@ internal static partial class SelfTest
                 WordsAre(what, key, text);
                 Check(shownTitle == $"Context help: {title}", $"{what}: the window must be named for it (\"{shownTitle}\")");
                 Check(onText, $"{what}: the keyboard must land on the help words");
-                Check(selection == (0, length), $"{what}: every word must be selected, so the screen reader reads it all ({selection.Item1}-{selection.Item2} of {length})");
+                // Nothing selected, the cursor at the start (Ed, 2026-09-28; until then every word was selected so NVDA read it all).
+                Check(selection == (0, 0) && length > 0, $"{what}: the help must open with nothing selected, the cursor at the start ({selection.Item1}-{selection.Item2} of {length})");
                 keys.Add(key);
             }
             void PressTheManualButton(string what, string key)
@@ -152,6 +159,7 @@ internal static partial class SelfTest
             // first (the key still goes to the control), so only context help putting the keyboard back can pass.
             void RoundTrip(Form window, Control control, string scope, Control? elsewhere, bool pressButton)
             {
+                if (!pressedIn.Add(scope) && FeaturePack && !pressButton) { WordsWithoutTheKey(control, scope); byWordsOnly--; sampledControls++; return; }
                 var key = ContextHelp.KeyOf(control);
                 var title = Spoken(control);
                 var what = $"{scope}: \"{title}\"";
@@ -305,9 +313,35 @@ internal static partial class SelfTest
             // ---- The menus and the tray menu: F1 with the menu open on the item.
             // One menu item, found by `find` AFTER `open` has run: a submenu can rebuild itself as it opens (Recent profiles,
             // the tray's Profiles), so an item held from an earlier opening may be one it has thrown away.
+            // Every drop-down open right now, the tray's and the menu bar's, however deep - and which of them are on a screen.
+            List<string> DropDownsInSight()
+            {
+                var seen = new List<string>();
+                void Walk(ToolStrip strip)
+                {
+                    foreach (var dropItem in strip.Items.OfType<ToolStripDropDownItem>())
+                    {
+                        if (!dropItem.HasDropDownItems || !dropItem.DropDown.Visible) continue;
+                        var at = dropItem.DropDown.Bounds;
+                        if (Screen.AllScreens.Any(s => s.Bounds.IntersectsWith(at))) seen.Add($"\"{dropItem.Text}\" at {at.X},{at.Y}");
+                        Walk(dropItem.DropDown);
+                    }
+                }
+                var trayMenu = form.TrayControllerForTest.TrayMenuForTest;
+                if (trayMenu.Visible && Screen.AllScreens.Any(s => s.Bounds.IntersectsWith(trayMenu.Bounds)))
+                    seen.Add($"the tray menu at {trayMenu.Bounds.X},{trayMenu.Bounds.Y}");
+                Walk(trayMenu);
+                if (form.MainMenuStrip is { } bar) Walk(bar);
+                return seen;
+            }
+
             void MenuRoundTrip(Func<ToolStripItem?> find, string scope, Action open, Action close)
             {
                 main.Invoke(open);
+                // Out of sight while the gate runs: a menu the sweep opens is held off every screen, as every window is -
+                // or the person at the computer sees it, and their screen reader says "menu" (the review of every step).
+                var inSight = main.Invoke(DropDownsInSight);
+                Check(inSight.Count == 0, $"{scope} menu: THE MENU IN SIGHT: a menu the gate opens must stay off every screen ({string.Join("; ", inSight)})");
                 var item = Require(main.Invoke(find), $"{scope} menu: an item was not found after its menu opened");
                 var key = ContextHelp.KeyOfItem(item);
                 var title = ContextHelp.NameOfItem(item);
@@ -324,6 +358,18 @@ internal static partial class SelfTest
                     Check(NameFits(title, built.HelpText.Text), $"{what}: THE RIGHT THING: the help must be about it - it reads: {Head(built.HelpText.Text)}");
                     keys.Add(key!);
                     byWordsOnly++;
+                    return;
+                }
+                if (!pressedIn.Add("menu: " + scope) && FeaturePack)
+                {
+                    main.Invoke(close);
+                    using var sampled = ContextHelp.Build(title, key!);
+                    Check(sampled.Key == key, $"{what}: the help built must be its own");
+                    WordsAre(what, key!, sampled.HelpText.Text);
+                    Check(NameFits(title, sampled.HelpText.Text), $"{what}: THE RIGHT THING: the help must be about it - it reads: {Head(sampled.HelpText.Text)}");
+                    keys.Add(key!);
+                    sampledMenuItems++;
+                    menuItems++;
                     return;
                 }
                 var mark = HeadlessRecords.Cues.Mark;
@@ -429,6 +475,7 @@ internal static partial class SelfTest
                     var what = $"plugin window: \"{title}\"";
                     Check(key is not null, $"{what} must have context help of its own");
                     if (!control.Enabled) { WordsWithoutTheKey(control, "plugin window"); continue; }
+                    if (!pressedIn.Add("plugin window") && FeaturePack) { WordsWithoutTheKey(control, "plugin window"); byWordsOnly--; sampledControls++; continue; }
                     var mark = HeadlessRecords.Cues.Mark;
                     DriveWhilePumping(main, () =>
                     {
@@ -492,8 +539,10 @@ internal static partial class SelfTest
             Check(said.Any(l => l.Contains("context help: opening the manual in the browser at ", StringComparison.Ordinal)), "and where the manual was opened");
             form.LogForTest.EventTapForTest = null;
 
-            return $"{roundTrips} F1 round trips on controls (the main window's tabs in all three configurations, {dialogs} dialogs, the "
-                 + $"plugin window) and {menuItems} on menu items with the menu open: each opens its own manual entry word for word, "
+            return (FeaturePack ? $"FEATURE PACK SAMPLE - F1 pressed on the first control of each window and menu; {sampledControls} other "
+                                  + $"controls and {sampledMenuItems} other menu items checked by their words only. " : "")
+                 + $"{roundTrips} F1 round trips on controls (the main window's tabs in all three configurations, {dialogs} dialogs, the "
+                 + $"plugin window) and {menuItems - sampledMenuItems} on menu items with the menu open: each opens its own manual entry word for word, "
                  + "named for it, the keyboard on the words, all selected, the sounds playing; Escape closes it with the keyboard "
                  + $"back on the control or the menu open again on the item. {buttons} manual buttons open their exact entries; "
                  + $"{byWordsOnly} greyed-out or hidden controls have the right words; {keys.Count} different entries. The plugin's "

@@ -32,7 +32,7 @@ internal sealed class PluginInstallPlaceDialog : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        Padding = new Padding(12);
+        Padding = Dpi.Pad(12);
 
         var words = "Where should RemSound put the DAW plugin?\r\n\r\n"
                   + $"The standard place is {standard}. Most music software looks there, and it needs no administrator permission.";
@@ -46,13 +46,14 @@ internal sealed class PluginInstallPlaceDialog : Form
             Text = words,
             ReadOnly = true,
             Multiline = true,
-            Width = 520,
-            Height = 130,
+            Width = Dpi.Px(520),
+            Height = Dpi.Px(130),
             BorderStyle = BorderStyle.None,
             BackColor = SystemColors.Control,
             TabStop = true,
             AccessibleName = "Where to install the plugin",
         };
+        FormLayoutRows.FitReadOnlyText(MessageBoxForTest);
         StandardButton = new Button
         {
             Text = "Install in the &standard place (Alt+S)",
@@ -80,7 +81,8 @@ internal sealed class PluginInstallPlaceDialog : Form
             DialogResult = DialogResult.OK;
         };
 
-        var buttons = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false };
+        // Right-aligned, in the order they always had (UI audit 2026-09-28, finding 11).
+        var buttons = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Anchor = AnchorStyles.Right };
         buttons.Controls.Add(StandardButton);
         buttons.Controls.Add(ChooseButton);
         buttons.Controls.Add(CancelChoiceButton);
@@ -105,6 +107,7 @@ internal sealed class PluginInstallPlaceDialog : Form
     /// <summary>Windows' own folder picker, starting where the plugin is now (or the standard place). Null when cancelled.</summary>
     private string? PickFolder()
     {
+        if (PickFolderForTest is { } stand) return stand();
         var start = Path.GetDirectoryName(current.TrimEnd('\\', '/'));
         if (start is null || !Directory.Exists(start)) start = Path.GetDirectoryName(standard.TrimEnd('\\', '/'));
         using var picker = new FolderBrowserDialog
@@ -117,6 +120,10 @@ internal sealed class PluginInstallPlaceDialog : Form
         if (picker.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(picker.SelectedPath)) return null;
         return picker.SelectedPath;
     }
+
+    /// <summary>Gate seam: stands in for Windows' folder picker - the folder "chosen", or null for Cancel. Windows' own picker
+    /// driven through the control channel is proven by the remote-control step; here it only cost seconds a time.</summary>
+    internal static Func<string?>? PickFolderForTest { get; set; }
 
     /// <summary>Build it without showing it, so the dialog audits can reach it headlessly.</summary>
     internal static PluginInstallPlaceDialog Build() =>
@@ -160,21 +167,24 @@ internal sealed class PluginFolderNoticeDialog : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        Padding = new Padding(12);
+        Padding = Dpi.Pad(12);
 
         NoticeBox = new TextBox
         {
             Text = Words(folder),
             ReadOnly = true,
             Multiline = true,
-            Width = 460,
-            Height = 80,
+            Width = Dpi.Px(460),
+            Height = Dpi.Px(80),
             BorderStyle = BorderStyle.None,
             BackColor = SystemColors.Control,
             TabStop = true,
             AccessibleName = "Plugin updates notice",
         };
+        FormLayoutRows.FitReadOnlyText(NoticeBox);
+        FormLayoutRows.OpenWithNothingSelected(NoticeBox);   // not one solid block of highlight (finding 14)
         OkButton = new Button { Text = "&OK", DialogResult = DialogResult.OK, AutoSize = true, AccessibleName = "OK" };
+        OkButton.Anchor = AnchorStyles.Right;   // at the bottom right, where a dialog's buttons go (UI audit 2026-09-28, finding 11)
         var layout = new TableLayoutPanel { ColumnCount = 1, RowCount = 3, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill };
         layout.Controls.Add(NoticeBox, 0, 0);
         layout.Controls.Add(DontShowAgainBox, 0, 1);

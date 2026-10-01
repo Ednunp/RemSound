@@ -129,7 +129,7 @@ public sealed class PluginTrackSource : IDisposable
         bool isDriver;
         bool needArm;
         HostState[]? others = null;
-        var now = Stopwatch.GetTimestamp();
+        var now = AudioClock.GetTimestamp();   // the simulator's clock in a test, else Stopwatch's
         lock (gate)
         {
             if (!hosts.TryGetValue(hostId, out var host))
@@ -232,7 +232,7 @@ public sealed class PluginTrackSource : IDisposable
         lock (gate)
         {
             if (hosts.Count == 0) return;
-            var cutoff = Stopwatch.GetTimestamp() - (long)(HostIdleTimeout.TotalSeconds * Stopwatch.Frequency);
+            var cutoff = AudioClock.GetTimestamp() - (long)(HostIdleTimeout.TotalSeconds * Stopwatch.Frequency);
             List<Guid>? stale = null;
             foreach (var host in hosts.Values)
             {

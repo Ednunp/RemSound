@@ -828,6 +828,12 @@ internal static partial class SelfTest
         Check(File.ReadAllBytes(loader).AsSpan().IndexOf(marker) >= 0,
             "the shipped loader must be RemSound's patched one (third-party\\AudioPlugSharpVst), which reports an infinite tail - "
           + "this is the package's own, and hosts that go by the tail will stop calling a receiving track");
+        // And the pairing fix (2026-09-28): without it the third RemSound in a project crashes the DAW. Its log line is
+        // a string only the fixed loader carries (a managed string, so UTF-16).
+        var pairing = System.Text.Encoding.Unicode.GetBytes("this call counts as the new instance's first");
+        Check(File.ReadAllBytes(loader).AsSpan().IndexOf(pairing) >= 0,
+            "the shipped loader must carry the processor/controller pairing fix (third-party\\AudioPlugSharpVst\\remsound.patch) - "
+          + "without it the third RemSound in one project crashes the DAW");
 
         // And the real installer must succeed FROM this real folder, into a throwaway target. Testing
         // the installer only against invented files would never catch a payload that cannot be copied.
@@ -857,84 +863,133 @@ internal static partial class SelfTest
     /// sharp) arrives as "my friend sounds strange", not as an error.</summary>
     private static string? PluginRateConversion()
     {
-        const double HostRate = 44100.0;
+        // Three host rates, both ways, measured to the cent (2026-09-28: one rate, and a 25 Hz bar - about 43 cents - that
+        // passed a resampler 2 % out). The DAW's own blocks are paced by the replies landing, not by fixed pauses.
         const double ToneHz = 1000.0;
         const int HostBlock = 512;
-
-        // --- Out of the DAW: host rate -> 48k wire -------------------------------------------------
-        var captured = new List<float>();
-        var capture = new HostCaptureBackend(samples => captured.AddRange(samples.Span.ToArray()));
-        capture.PrepareForBlockSize(HostBlock, HostRate);
-        capture.Start([]);
-
-        var left = new double[HostBlock];
-        var right = new double[HostBlock];
-        var phase = 0.0;
-        var step = 2 * Math.PI * ToneHz / HostRate;
-        for (var block = 0; block < 200; block++)
+        var said = new List<string>();
+        foreach (var hostRate in new[] { 44100.0, 88200.0, 96000.0 })
         {
-            for (var i = 0; i < HostBlock; i++) { left[i] = right[i] = Math.Sin(phase); phase += step; }
-            capture.SubmitHostBlock(left, right);
+            // --- Out of the DAW: host rate -> 48k wire ---------------------------------------------
+            var captured = new List<float>();
+            var capture = new HostCaptureBackend(samples => captured.AddRange(samples.Span.ToArray()));
+            capture.PrepareForBlockSize(HostBlock, hostRate);
+            capture.Start([]);
+            var left = new double[HostBlock];
+            var right = new double[HostBlock];
+            var phase = 0.0;
+            var step = 2 * Math.PI * ToneHz / hostRate;
+            var blocks = (int)Math.Ceiling(hostRate * 2 / HostBlock);   // two seconds
+            for (var block = 0; block < blocks; block++)
+            {
+                for (var i = 0; i < HostBlock; i++) { left[i] = right[i] = Math.Sin(phase); phase += step; }
+                capture.SubmitHostBlock(left, right);
+            }
+            capture.Stop();
+
+            Check(captured.Count > 0, $"{hostRate / 1000:0.#} kHz: the DAW's block must reach the wire at all");
+            // A host at another rate produces a different number of 48k frames than it consumed. If this came out equal,
+            // the resampler was skipped and the far end would hear everyone transposed.
+            var wireFrames = captured.Count / 2;
+            var expectedWire = blocks * HostBlock * (48000.0 / hostRate);
+            Check(Math.Abs(wireFrames - expectedWire) / expectedWire < 0.02,
+                $"a {hostRate / 1000:0.#} kHz host must produce ~{expectedWire:0} wire frames, not {wireFrames} - a mismatch here IS the transposition bug");
+            var capturedCents = CentsFrom(ToneHz, PreciseHz(captured.Skip(4800 * 2).ToList(), 48000, stride: 2));
+            Check(Math.Abs(capturedCents) < 2,
+                $"a 1 kHz tone from a {hostRate / 1000:0.#} kHz DAW must be 1 kHz on the wire, within 2 cents ({capturedCents:+0.0;-0.0} cents)");
+            var (outGaps, outClicks) = GapsAndClicks(captured.Skip(4800 * 2).Where((_, k) => k % 2 == 0).ToList(), ToneHz, 48000, 1.0);   // the DAW side sends at full scale
+
+            // --- Into the DAW: 48k wire -> host rate -----------------------------------------------
+            // Driven through the REAL bridge, so this measures the whole receive path rather than the resampler alone.
+            var peer = new IPEndPoint(IPAddress.Parse("192.168.1.50"), 47830);
+            var engine = new PlayoutEngine(new ReceiverDiagnostics());
+            engine.SetLaneActive(RenderRoute.WasapiLane, true);
+            engine.SetMaxLatencyMs(RenderRoute.Mixed, 30);
+            var session = engine.GetOrCreateSession(peer, 1, 8 * 1024 * 1024);
+
+            // Feed the tone in AS IT IS CONSUMED, the way a real peer sends it: dumped in at once, the session would sit
+            // far over its 30 ms target and the drift corrector would race to drain it - changing the pitch on purpose.
+            var tone = new ToneStream(ToneHz, 0.5f);
+            tone.WriteInto(session, frames: 48000 / 5);   // 200 ms head start, near the target depth
+            session.NoteFramesQueued(30);
+
+            using var host = new PluginBridgeHost(engine.ReadClaimedPeer, port: 0);
+            engine.SetPluginPeerClaims(host.Claims);
+            using var client = new PluginBridgeClient(host.Port);
+            client.SetReceivedPeers([peer.Address]);
+
+            var render = new PeerRenderBridge(client);
+            render.PrepareForBlockSize(HostBlock, hostRate);
+
+            var outLeft = new double[HostBlock];
+            var outRight = new double[HostBlock];
+            var received = new List<float>();
+            var wirePerBlock = (int)Math.Ceiling(HostBlock * 48000.0 / hostRate);
+            var rounds = (int)Math.Ceiling(hostRate * 1.5 / HostBlock) + 20;
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            for (var block = 0; block < rounds; block++)
+            {
+                tone.WriteInto(session, wirePerBlock);     // the peer keeps sending
+                var bytesBefore = client.BytesReceived;
+                var filled = render.FillHostBlock(outLeft, outRight);
+                // Paced by the reply to this block's ask landing, as a DAW's next callback would be by its own clock.
+                var until = clock.ElapsedMilliseconds + 50;
+                while (client.BytesReceived == bytesBefore && clock.ElapsedMilliseconds < until) Thread.SpinWait(200);
+                // Skip the first blocks: the ring is still filling, and a partly-empty block is silence then audio.
+                if (block > 20) for (var i = 0; i < filled; i++) received.Add((float)outLeft[i]);
+            }
+
+            Check(received.Count > HostBlock * 20, $"{hostRate / 1000:0.#} kHz: the peer's audio must reach the DAW track ({received.Count} frames)");
+            var receivedCents = CentsFrom(ToneHz, PreciseHz(received, (int)hostRate, stride: 1));
+            Check(Math.Abs(receivedCents) < 2,
+                $"a 1 kHz peer must be 1 kHz on a {hostRate / 1000:0.#} kHz DAW track, within 2 cents ({receivedCents:+0.0;-0.0} cents) - SonoBus's open bug, avoided");
+            var (inGaps, inClicks) = GapsAndClicks(received, ToneHz, hostRate, 0.5);
+            Check(inGaps == 0 && inClicks == 0 && outGaps == 0 && outClicks == 0,
+                $"{hostRate / 1000:0.#} kHz: no gap and no click either way (into the DAW {inGaps} gaps, {inClicks} clicks; out of it {outGaps}, {outClicks})");
+            said.Add($"{hostRate / 1000:0.#} kHz out {capturedCents:0.00} / in {receivedCents:0.00} cents");
         }
-        capture.Stop();
+        return "a 1 kHz tone through both conversions, measured to the cent, with no gap or click: " + string.Join("; ", said);
+    }
 
-        Check(captured.Count > 0, "the DAW's block must reach the wire at all");
-        // A 44.1k host produces MORE 48k frames than it consumed. If this came out equal, the
-        // resampler was skipped and the far end would hear everyone sharp.
-        var wireFrames = captured.Count / 2;
-        var expectedWire = 200 * HostBlock * (48000.0 / HostRate);
-        Check(Math.Abs(wireFrames - expectedWire) / expectedWire < 0.02,
-            $"a 44.1k host must produce ~{expectedWire:0} wire frames, not {wireFrames} — a mismatch here IS the transposition bug");
-        var capturedHz = DominantHz(captured, 48000, stride: 2);
-        Check(Math.Abs(capturedHz - ToneHz) < 25,
-            $"a 1 kHz tone from a 44.1k DAW must still be 1 kHz on the wire (measured {capturedHz:0} Hz)");
-
-        // --- Into the DAW: 48k wire -> host rate ----------------------------------------------------
-        // Driven through the REAL bridge, so this measures the whole receive path rather than the
-        // resampler in isolation.
-        var peer = new IPEndPoint(IPAddress.Parse("192.168.1.50"), 47830);
-        var engine = new PlayoutEngine(new ReceiverDiagnostics());
-        engine.SetLaneActive(RenderRoute.WasapiLane, true);
-        engine.SetMaxLatencyMs(RenderRoute.Mixed, 30);
-        var session = engine.GetOrCreateSession(peer, 1, 8 * 1024 * 1024);
-
-        // Feed the tone in AS IT IS CONSUMED, the way a real peer sends it. Dumping four seconds in
-        // at once would leave the session massively over-buffered against its 30 ms target, and the
-        // drift corrector would do exactly what it is supposed to — race to drain it — which changes
-        // the pitch on purpose and would make this measure the wrong thing entirely.
-        var tone = new ToneStream(ToneHz, 0.5f);
-        tone.WriteInto(session, frames: 48000 / 5);   // 200 ms head start, near the target depth
-        session.NoteFramesQueued(30);
-
-        using var host = new PluginBridgeHost(engine.ReadClaimedPeer, port: 0);
-        engine.SetPluginPeerClaims(host.Claims);
-        using var client = new PluginBridgeClient(host.Port);
-        client.SetReceivedPeers([peer.Address]);
-
-        var render = new PeerRenderBridge(client);
-        render.PrepareForBlockSize(HostBlock, HostRate);
-
-        var outLeft = new double[HostBlock];
-        var outRight = new double[HostBlock];
-        var received = new List<float>();
-        var wirePerBlock = (int)Math.Ceiling(HostBlock * 48000.0 / HostRate);
-        for (var block = 0; block < 300; block++)
+    /// <summary>The tone's frequency from its upward zero crossings, each placed between samples by linear interpolation:
+    /// over a second of a clean 1 kHz tone this is good to a small fraction of a cent.</summary>
+    private static double PreciseHz(IReadOnlyList<float> samples, int sampleRate, int stride)
+    {
+        double first = -1, last = -1;
+        var crossings = 0;
+        var previous = samples.Count > 0 ? samples[0] : 0f;
+        var index = 0;
+        for (var i = stride; i < samples.Count; i += stride)
         {
-            tone.WriteInto(session, wirePerBlock);     // the peer keeps sending
-            var filled = render.FillHostBlock(outLeft, outRight);
-            // Skip the first blocks: the ring is still filling, and a partly-empty block is silence
-            // followed by audio, which would read as a spurious zero crossing.
-            if (block > 20) for (var i = 0; i < filled; i++) received.Add((float)outLeft[i]);
-            Thread.Sleep(2);
+            index++;
+            var value = samples[i];
+            if (previous < 0 && value >= 0)
+            {
+                var at = index - 1 + (-previous / (value - previous));
+                if (first < 0) first = at;
+                last = at;
+                crossings++;
+            }
+            previous = value;
         }
+        return crossings < 2 ? 0 : (crossings - 1) / ((last - first) / sampleRate);
+    }
 
-        Check(received.Count > HostBlock, $"the peer's audio must reach the DAW track at the host's rate ({received.Count} frames)");
-        var receivedHz = DominantHz(received, (int)HostRate, stride: 1);
-        Check(Math.Abs(receivedHz - ToneHz) < 25,
-            $"a 1 kHz peer must still be 1 kHz on a 44.1k DAW track (measured {receivedHz:0} Hz) — this is SonoBus's open bug, avoided");
+    private static double CentsFrom(double wantedHz, double gotHz) => gotHz <= 0 ? double.PositiveInfinity : 1200 * Math.Log2(gotHz / wantedHz);
 
-        return $"44.1k DAW -> 48k wire: {wireFrames} frames, tone held at {capturedHz:0} Hz; "
-             + $"48k wire -> 44.1k DAW track through the real bridge: tone held at {receivedHz:0} Hz";
+    /// <summary>Gaps (three or more samples in a row at silence) and clicks (a jump between samples well beyond the steepest a
+    /// clean tone of this frequency and amplitude makes) in one channel.</summary>
+    private static (int Gaps, int Clicks) GapsAndClicks(IReadOnlyList<float> channel, double toneHz, double sampleRate, double amplitude)
+    {
+        var steepest = amplitude * 2 * Math.PI * toneHz / sampleRate;
+        int gaps = 0, clicks = 0, quiet = 0;
+        for (var i = 1; i < channel.Count; i++)
+        {
+            if (Math.Abs(channel[i]) < 1e-4) { if (++quiet == 3) gaps++; }
+            else quiet = 0;
+            if (Math.Abs(channel[i] - channel[i - 1]) > steepest * 1.5 + 0.01) clicks++;
+        }
+        return (gaps, clicks);
     }
 
 
@@ -961,22 +1016,4 @@ internal static partial class SelfTest
         }
     }
 
-    /// <summary>Frequency by zero crossings. Crude, and entirely sufficient: the failure being
-    /// guarded against shifts the pitch by nearly 9%, not by a hair.</summary>
-    private static double DominantHz(IReadOnlyList<float> samples, int sampleRate, int stride)
-    {
-        var crossings = 0;
-        var counted = 0;
-        var previous = 0f;
-        for (var i = 0; i < samples.Count; i += stride)
-        {
-            var value = samples[i];
-            if (counted > 0 && ((previous < 0 && value >= 0) || (previous >= 0 && value < 0))) crossings++;
-            previous = value;
-            counted++;
-        }
-        if (counted < 2) return 0;
-        // Two crossings per cycle.
-        return crossings / 2.0 * sampleRate / counted;
-    }
 }

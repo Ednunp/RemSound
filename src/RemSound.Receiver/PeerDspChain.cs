@@ -42,7 +42,12 @@ public sealed class PeerDspChain
     /// <summary>A fresh chain identical in coefficients/gain but with its OWN zeroed biquad state, for a
     /// second output lane playing the same peer. Cheap (rebuilds a handful of biquads); the brief
     /// zero-state settle is sub-millisecond, same as any DSP change.</summary>
-    public PeerDspChain Clone() => Build(sourceShaping, sourceEnabled) ?? this;
+    public PeerDspChain Clone()
+    {
+        var copy = Build(sourceShaping, sourceEnabled) ?? this;
+        if (ThrowForTest) copy.ThrowForTest = true;   // each stream gets a copy: the gate's failing filter must fail in all of them
+        return copy;
+    }
 
     /// <summary>True when this chain would do nothing (unity gain — pan off/centre, volume 100% — and
     /// EQ off/flat). Build returns null in that case so an unshaped peer's <c>dsp</c> reference is null
@@ -127,11 +132,17 @@ public sealed class PeerDspChain
         return BiQuadFilter.PeakingEQ(PeerEqBands.MixSampleRate, freq, mode == PeerEqMode.Advanced10Band ? 1.4f : 0.9f, gainDb);
     }
 
+    /// <summary>Gate seam: a filter that throws on the audio thread, as a bad one would (finding R3's other half).</summary>
+    internal bool ThrowForTest { get; set; }
+    private static int throwsForTest;
+    internal static int ThrowsForTest => Volatile.Read(ref throwsForTest);
+
     /// <summary>Process one interleaved stereo block IN PLACE. <paramref name="frames"/> is the number
     /// of stereo frames (the used span length is frames*2). Per-sample, no allocation, no locks —
     /// safe to call on the audio render thread.</summary>
     public void Process(Span<float> output, int frames)
     {
+        if (ThrowForTest) { Interlocked.Increment(ref throwsForTest); throw new InvalidOperationException("the gate's failing filter"); }
         int n = left.Length;
         if (n > 0)
         {

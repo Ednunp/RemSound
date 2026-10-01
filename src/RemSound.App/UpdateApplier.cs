@@ -57,6 +57,9 @@ internal static class UpdateApplier
     /// <summary>Self-test seam: called after each new file lands in the install, with its path.</summary>
     internal static Action<string>? AfterCopyForTest;
 
+    /// <summary>Gate seam: told of each retry of a file operation - what it was, and which attempt had just failed.</summary>
+    internal static Action<string, int>? RetryForTest;
+
     public static void Run(string[] args)
     {
         var source = GetArg(args, "--update-source");
@@ -264,6 +267,7 @@ internal static class UpdateApplier
             try { op(); return; }
             catch (Exception ex) when ((ex is IOException || ex is UnauthorizedAccessException) && attempt < CopyRetryAttempts)
             {
+                RetryForTest?.Invoke(what, attempt);
                 Thread.Sleep(CopyRetryDelayMs);
             }
         }

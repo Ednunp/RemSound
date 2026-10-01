@@ -45,6 +45,27 @@ internal static partial class SelfTest
                 var lines = new List<string>();
                 var feeding = new CancellationTokenSource();
                 Task? feeder = null;
+                // THE WIRE (2026-09-28): what actually reaches the peer, by stream. The name promises your inputs never go on
+                // the wire; until now the sender's own state was asked instead.
+                var wire = new List<(RemPacketType Type, ushort Stream)>();
+                peerSink.Client.ReceiveTimeout = 200;
+                var listening = Task.Run(() =>
+                {
+                    var from = new IPEndPoint(IPAddress.Any, 0);
+                    while (!feeding.IsCancellationRequested)
+                    {
+                        try
+                        {
+                            var datagram = peerSink.Receive(ref from);
+                            if (RemPacket.TryReadHeader(datagram, out var type, out var stream, out _) && type is RemPacketType.Format or RemPacketType.Audio)
+                                lock (wire) wire.Add((type, stream));
+                        }
+                        catch (System.Net.Sockets.SocketException) { /* nothing this moment */ }
+                        catch (ObjectDisposedException) { break; }
+                    }
+                });
+                int WireMark() { lock (wire) return wire.Count; }
+                List<ushort> StreamsSince(int mark) { lock (wire) return wire.Skip(mark).Select(p => p.Stream).ToList(); }
                 try
                 {
                     var profile = Profile.NewBlank();
@@ -85,10 +106,18 @@ internal static partial class SelfTest
 
                     // 1. Off, and a track sending: the once-a-second check and the set-up leave your own sources alone.
                     _ = sender.TakeSenderAudioFramesSent();
+                    var offMark = WireMark();
                     for (var i = 0; i < 3; i++) { ensure.Invoke(main, null); apply.Invoke(main, null); Application.DoEvents(); Thread.Sleep(100); }
                     Check(!sender.IsRunning && sender.PendingSourceCountForTest == 0,
                         $"{name}: THE MICROPHONE: with \"Send my audio\" off, a sending DAW track must not start your own capture (running: {sender.IsRunning}, sources handed over: {sender.PendingSourceCountForTest})");
                     Check(WaitUntil(() => sender.TakeSenderAudioFramesSent() > 0, 3000), $"{name}: and the DAW track itself must still go out");
+                    var ownLanes = new[] { sender.DefaultLaneStreamIdForTest, sender.AsioLaneStreamIdForTest };
+                    var whileOff = StreamsSince(offMark);
+                    Check(whileOff.Contains(sender.PluginLaneStreamIdForTest),
+                        $"{name}: ON THE WIRE, the DAW track's stream must reach the peer (streams seen: {string.Join(",", whileOff.Distinct())})");
+                    Check(!whileOff.Any(ownLanes.Contains),
+                        $"{name}: ON THE WIRE, with \"Send my audio\" off nothing of your own may reach the peer - a stream of your capture lanes arrived "
+                        + $"({string.Join(",", whileOff.Where(ownLanes.Contains).Distinct())})");
 
                     // 2. On: your own source is captured beside the track - so the check above could fail.
                     sendBox.Checked = true;
@@ -96,6 +125,9 @@ internal static partial class SelfTest
                     Application.DoEvents();
                     Check(sender.PendingSourceCountForTest == 1 && sender.IsRunning,
                         $"{name}: premise: with \"Send my audio\" on, your ticked source must be captured (running: {sender.IsRunning}, sources: {sender.PendingSourceCountForTest})");
+                    var onMark = WireMark();
+                    Check(WaitUntil(() => StreamsSince(onMark).Any(s => s == sender.DefaultLaneStreamIdForTest || s == sender.AsioLaneStreamIdForTest), 3000),
+                        $"{name}: premise: with it on, your own stream must reach the peer - or the wire check above could never have failed");
                     var streamBefore = sender.PluginLaneStreamIdForTest;
 
                     // 3. Off again while the track plays: your source stops; the track's lane carries on, same stream, no gap.
@@ -107,6 +139,14 @@ internal static partial class SelfTest
                         $"{name}: THE MICROPHONE: unticking \"Send my audio\" while a track sends must stop your own capture (running: {sender.IsRunning}, sources: {sender.PendingSourceCountForTest})");
                     Check(sender.IsPluginSending && sender.PluginLaneStreamIdForTest == streamBefore,
                         $"{name}: the DAW track's lane must carry on as it was - still armed, the same stream, so the other end hears no gap");
+                    Thread.Sleep(100);   // what was already on its way lands
+                    var offAgainMark = WireMark();
+                    var ownNow = new[] { sender.DefaultLaneStreamIdForTest, sender.AsioLaneStreamIdForTest };
+                    Thread.Sleep(400);
+                    var afterOff = StreamsSince(offAgainMark);
+                    Check(afterOff.Contains(streamBefore) && !afterOff.Any(ownNow.Contains),
+                        $"{name}: ON THE WIRE, once unticked your stream must stop reaching the peer while the track's goes on "
+                        + $"(streams seen: {string.Join(",", afterOff.Distinct())}; the track's is {streamBefore})");
                     _ = sender.TakeSenderAudioFramesSent();
                     Check(WaitUntil(() => sender.TakeSenderAudioFramesSent() > 0, 3000), $"{name}: and the track must still be going out");
                     for (var i = 0; i < 3; i++) { ensure.Invoke(main, null); Application.DoEvents(); Thread.Sleep(100); }
@@ -124,6 +164,7 @@ internal static partial class SelfTest
                 {
                     feeding.Cancel();
                     try { feeder?.Wait(1000); } catch { /* teardown */ }
+                    try { listening.Wait(1000); } catch { /* teardown */ }
                     try { if (form is not null) form.LogForTest.EventTapForTest = null; } catch { /* teardown */ }
                     try { form?.Dispose(); } catch { /* teardown */ }
                     MainForm.LocalAudioPortForTest = 0;

@@ -12,8 +12,35 @@
 #
 # Modelled on Andre's Sensor Readout (Build.ps1 + an in-app self-test), the pattern that inspired
 # RemSound's command line in the first place.
+#
+# TWO PACKS (Ed, 2026-09-27: "a pack we can run for every feature ... and then the full regression suite which we run
+# before every release"):
+#   -Pack Full     (the default here, and always for build-release.ps1) - every check.
+#   -Pack Feature  (deploy-test.ps1's default) - the build, the package and source checks, the core self-test steps and the
+#                  steps of the areas the change touches (from the files changed since the last commit, plus any named
+#                  with -Areas), the cold start and the headless start. The leak check and the restarts stage are left for
+#                  the full run, and the verdict says so: a feature pack never clears a build for release.
+#
+# SILENT AND INVISIBLE (Ed, 2026-09-27: it "should be silent and invisible"): the self-test, the leak check and the cold
+# start run on a desktop of their own that nobody is looking at (tools\GateTools "hidden"), and the whole run is listened
+# to by a watcher (GateTools "watch") that fails the gate if any copy of the gate's RemSound said anything a screen reader
+# would speak, or put a window where it can be seen.
+param(
+    [ValidateSet('Full', 'Feature')][string]$Pack = 'Full',
+    [string]$Areas = 'auto'
+)
 
 $ErrorActionPreference = 'Stop'
+$gateClock = [System.Diagnostics.Stopwatch]::StartNew()
+$script:stageName = $null
+$script:stageStarted = 0
+# Every stage says how long it took, so the slow ones can be seen (the full gate had crept to 40 minutes untimed).
+function Stage([string]$title) {
+    if ($script:stageName) { Write-Host ("  (" + $script:stageName + ": " + [int]($gateClock.Elapsed.TotalSeconds - $script:stageStarted) + " s)") -ForegroundColor DarkGray }
+    $script:stageName = $title
+    $script:stageStarted = $gateClock.Elapsed.TotalSeconds
+    if ($title) { Write-Host "`n${title}:" -ForegroundColor Cyan }
+}
 $repo = $PSScriptRoot
 $proj = Join-Path $repo 'src\RemSound.App\RemSound.App.csproj'
 
@@ -23,6 +50,7 @@ function Pass($m) { Write-Host "  [PASS] $m" -ForegroundColor Green }
 # Checks that did not run on this machine. Named again in the verdict, so "Safe to publish" is never said over them
 # without saying what was not verified (2026-09-24: a skipped relay test and skipped self-test steps went unmentioned).
 $script:skips = @()
+$script:leftForFull = @()
 function Skip($m) { $script:skips += $m; Write-Host "  [SKIP] $m" -ForegroundColor Yellow }
 
 # ---- expected version, read from the one source of truth (the csproj) ----
@@ -90,13 +118,26 @@ if (-not (Test-Path -LiteralPath $exe)) {
     Write-Host "RESULT: FAIL - no RemSound.exe was produced." -ForegroundColor Red
     exit 1
 }
+# The gate's own tools: a desktop nobody is looking at, and the watcher. Never shipped.
+$gateToolsDir = Join-Path ([System.IO.Path]::GetTempPath()) 'rs-gatetools'
+& dotnet build (Join-Path $repo 'tools\GateTools\GateTools.csproj') -c Release -o $gateToolsDir --nologo -v q | Out-Null
+$gateTools = Join-Path $gateToolsDir 'GateTools.exe'
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $gateTools)) {
+    Write-Host "RESULT: FAIL - the gate's tools (tools\GateTools) did not build." -ForegroundColor Red
+    exit 1
+}
+Write-Host "Pack: $Pack$(if ($Pack -eq 'Feature') { " (areas: $Areas)" })" -ForegroundColor Cyan
+# Listen from here to the end: anything a copy of THIS build says to a screen reader, or shows, fails the gate.
+$watchOut = Join-Path $env:TEMP ("rs-watch-" + [guid]::NewGuid().ToString('N') + ".txt")
+$watchStop = Join-Path $env:TEMP ("rs-watch-stop-" + [guid]::NewGuid().ToString('N'))
+$watcher = Start-Process -FilePath $gateTools -ArgumentList @('watch', '--out', "`"$watchOut`"", '--stop-file', "`"$watchStop`"", '--path-prefix', "`"$publishDir`"") -PassThru -WindowStyle Hidden
 
 # ---- 2. PACKAGE CONTENTS ----
 #  The shipped DEFAULT cues live install-side in 'default sounds\' next to the exe (the app reads
 #  them from there and updates always overwrite them; they're no longer copied into the per-user
 #  folder). So unlike before, a CLI launch does NOT empty this folder - the checks here are robust
 #  whatever order they run in.
-Write-Host "`nPackage contents:" -ForegroundColor Cyan
+Stage "Package contents"
 $soundsPath = Join-Path $publishDir 'default sounds'
 $wavCount = @(Get-ChildItem -LiteralPath $soundsPath -Filter *.wav -ErrorAction SilentlyContinue).Count
 if ($wavCount -ge 3) { Pass "cue sounds bundled ($wavCount .wav)" } else { Fail "cue sounds missing (found $wavCount) - this is the bug that shipped v3.9 with no sounds" }
@@ -119,6 +160,9 @@ $missingScripts = @($wantScripts | Where-Object { -not (Test-Path -LiteralPath (
 if ($missingScripts.Count -eq 0) { Pass "all $($wantScripts.Count) install and uninstall scripts bundled" } else { Fail "missing from 'Install and Uninstall Scripts': $($missingScripts -join ', ')" }
 if (Test-Path -LiteralPath (Join-Path $publishDir 'Install Scripts')) { Fail "the old 'Install Scripts' folder was published" } else { Pass "no old 'Install Scripts' folder in the build" }
 if (Test-Path -LiteralPath (Join-Path $publishDir 'runtimes\win-x64\native\opus.dll')) { Pass "native opus.dll bundled" } else { Fail "native opus.dll missing (runtimes\win-x64\native\)" }
+# And beside RemSound.exe, where Concentus looks. Only there does the native libopus get used however RemSound is first
+# started; the check above passed for months while a copy first started from another folder used the managed fallback.
+if (Test-Path -LiteralPath (Join-Path $publishDir 'opus.dll')) { Pass "native opus.dll beside RemSound.exe" } else { Fail "opus.dll is not beside RemSound.exe - Concentus will use its managed fallback unless RemSound is first started from its own folder" }
 # The VST plugin ships in a plugin\ folder next to the exe. RemSound.App.csproj copies it in after
 # publish with ContinueOnError, so a failed copy would not stop the build. The DAW plugin menu's
 # Install plugin copies from that folder, so an empty or missing one leaves it nothing to install.
@@ -135,7 +179,7 @@ try {
 } catch { Fail "could not read RemSound.dll version: $($_.Exception.Message)" }
 
 # ---- 3. SOURCE CHECKS (no app run needed) ----
-Write-Host "`nRelease readiness:" -ForegroundColor Cyan
+Stage "Release readiness"
 $about = Get-Content -LiteralPath (Join-Path $repo 'src\RemSound.App\AboutDialog.cs') -Raw
 if ($about -match [regex]::Escape("RemSound v$expectedMM")) { Pass "About-box changelog has a 'RemSound v$expectedMM' entry" }
 else { Fail "About-box changelog has no 'RemSound v$expectedMM' entry - add the release notes before shipping" }
@@ -143,7 +187,7 @@ else { Fail "About-box changelog has no 'RemSound v$expectedMM' entry - add the 
 # Client <-> server wire contract. The Pi relay forwards by reading the wire header only; if the
 # client's header drifts from what the relay parses, the relay must be updated and re-released.
 # Ideally we never touch the server - this proves we don't need to.
-Write-Host "`nClient/server wire compatibility (no server change should be needed):" -ForegroundColor Cyan
+Stage "Client/server wire compatibility (no server change should be needed)"
 $relay = Get-Content -LiteralPath (Join-Path $repo 'server\remsound-relay.py') -Raw
 $packet = Get-Content -LiteralPath (Join-Path $repo 'src\RemSound.Core\RemPacket.cs') -Raw
 $wireOk = $true
@@ -162,7 +206,7 @@ if ($wireOk) { Pass "relay magic / version / port still match the client header 
 # relay auto-updates every user - a regression there would sail past the C# gate. Run them here so
 # a server change can't ship un-tested. Needs a Python interpreter; if none is found we SKIP loudly
 # rather than fail (the C# gate doesn't depend on Python being installed on the build box).
-Write-Host "`nRelay logic tests (server\test_relay.py):" -ForegroundColor Cyan
+Stage "Relay logic tests (server\test_relay.py)"
 $py = $null
 foreach ($cand in @('py', 'python', 'python3')) {
     $cmd = Get-Command $cand -ErrorAction SilentlyContinue
@@ -202,15 +246,17 @@ else {
 # that guard running in the real gate instead of quietly skipping.
 $env:REMSOUND_SOURCE_ROOT = $repo
 
-function Invoke-RsCli([string[]]$cliArgs) {
+function Invoke-RsCli([string[]]$cliArgs, [switch]$Hidden) {
     $out = Join-Path $env:TEMP ("rs-cli-" + [guid]::NewGuid().ToString('N') + ".txt")
-    $p = Start-Process -FilePath $exe -ArgumentList $cliArgs -Wait -NoNewWindow -RedirectStandardOutput $out -PassThru
+    # -Hidden: on the desktop nobody is looking at, for anything that opens windows.
+    $p = if ($Hidden) { Start-Process -FilePath $gateTools -ArgumentList (@('hidden', "`"$exe`"") + $cliArgs) -Wait -NoNewWindow -RedirectStandardOutput $out -PassThru }
+         else { Start-Process -FilePath $exe -ArgumentList $cliArgs -Wait -NoNewWindow -RedirectStandardOutput $out -PassThru }
     $text = if (Test-Path $out) { Get-Content -LiteralPath $out -Raw -Encoding UTF8 } else { '' }
     Remove-Item $out -Force -ErrorAction SilentlyContinue
     [pscustomobject]@{ Code = $p.ExitCode; Text = ([string]$text) }
 }
 
-Write-Host "`nCLI surface:" -ForegroundColor Cyan
+Stage "CLI surface"
 $v = Invoke-RsCli @('--version')
 if ($v.Code -eq 0 -and $v.Text.Trim() -like 'RemSound *') { Pass "--version: $($v.Text.Trim())" } else { Fail "--version returned '$($v.Text.Trim())' (exit $($v.Code))" }
 if ($v.Text -match "$([regex]::Escape($expectedMM))(\D|$)") { Pass "--version matches csproj $expectedMM" } else { Fail "--version '$($v.Text.Trim())' does not match csproj <Version> $expectedVersion" }
@@ -232,16 +278,22 @@ if ($dev.Code -eq 0 -and $dev.Text -match 'Microphones / line-in' -and $dev.Text
 }
 else { Fail "--devices did not list all three kinds of device (exit $($dev.Code)): $($dev.Text.Substring(0, [Math]::Min(200, $dev.Text.Length)))" }
 
-Write-Host "`nIn-app self-test:" -ForegroundColor Cyan
+Stage "In-app self-test ($Pack pack, on the hidden desktop)"
 # --silent: the gate must be SILENT. The self-test drives controls that play cue sounds, and
 # without this every gate run chimed at whoever was at the screen (Ed, 2026-08-15).
 # The release-signing steps compare the publisher's private key with the public key built into RemSound. RemSound no
 # longer knows where that key lives (2026-09-13), so hand it over when it is on this machine.
 $defaultSigningKey = 'D:\Dropbox\proj\rsound key\remsound-signing-key.pem'
 if (-not $env:REMSOUND_SIGNING_KEY -and (Test-Path -LiteralPath $defaultSigningKey)) { $env:REMSOUND_SIGNING_KEY = $defaultSigningKey }
-$st = Invoke-RsCli @('--selftest', '--silent')
+$stArgs = @('--selftest', '--silent')
+if ($Pack -eq 'Feature') {
+    $stArgs += @('--pack', 'feature')
+    if ($Areas -and $Areas -ne 'auto') { $stArgs += @('--areas', $Areas) }
+}
+# On the desktop nobody is looking at: whatever a step opens - Windows' own pickers included - nobody sees or hears.
+$st = Invoke-RsCli $stArgs -Hidden
 foreach ($line in ($st.Text -split "`r?`n")) {
-    if ($line -match '\[(PASS|FAIL|SKIP)\]|^RESULT:') { Write-Host "  $($line.Trim())" }
+    if ($line -match '\[(PASS|FAIL|SKIP)\]|^RESULT:|^FEATURE PACK|^LEFT FOR THE') { Write-Host "  $($line.Trim())" }
 }
 if ($st.Code -eq 0) { Pass "self-test passed (exit 0)" } else { Fail "self-test failed (exit $($st.Code))" }
 # Skipped steps are coverage that did NOT run. The gate still passes (some skips are legitimate on a
@@ -256,19 +308,45 @@ if ($skipLine) {
     $script:skips += "$skippedSteps self-test step(s)"
 }
 
-Write-Host "`nResource sanity (handle/memory leak check):" -ForegroundColor Cyan
-$pf = Invoke-RsCli @('--perftest', '--seconds', '12')
-foreach ($line in ($pf.Text -split "`r?`n")) {
-    if ($line -match 'baseline:|cycle \d|net change|^\s*RESULT:') { Write-Host "  $($line.Trim())" }
+Stage "Resource sanity (handle/memory leak check)"
+if ($Pack -eq 'Feature') {
+    Write-Host "  left for the full run (feature pack)" -ForegroundColor DarkGray
+    $script:leftForFull += 'the leak check'
 }
-# A skip exits 0 too, and was reported as a pass (2026-09-24).
-if ($pf.Code -eq 0 -and $pf.Text -match 'RESULT: SKIP') { Skip "the resource check (it found no audio device to cycle)" }
-elseif ($pf.Code -eq 0) { Pass "resources stayed bounded across cycles" }
-else { Fail "perf sanity flagged possible runaway (exit $($pf.Code))" }
+else {
+    $pf = Invoke-RsCli @('--perftest', '--seconds', '12') -Hidden
+    foreach ($line in ($pf.Text -split "`r?`n")) {
+        if ($line -match 'baseline:|cycle \d|net change|^\s*RESULT:') { Write-Host "  $($line.Trim())" }
+    }
+    # A skip exits 0 too, and was reported as a pass (2026-09-24).
+    if ($pf.Code -eq 0 -and $pf.Text -match 'RESULT: SKIP') { Skip "the resource check (it found no audio device to cycle)" }
+    elseif ($pf.Code -eq 0) { Pass "resources stayed bounded across cycles" }
+    else { Fail "perf sanity flagged possible runaway (exit $($pf.Code))" }
+}
+
+# ---- The copies this script starts keep off the real ports and leave the lock-screen service alone (Ed, 2026-09-28: a
+#      full gate run paused his desktop service's stream for a couple of minutes). REMSOUND_GATE_PORT gives each its own
+#      audio port, and the next one for the plugin link, and a copy with it never takes the token that makes the service
+#      stand aside (src\RemSound.App\GateIsolation.cs). ----
+function Get-FreeUdpPortPair {
+    for ($p = 49200; $p -lt 49900; $p += 2) {
+        $a = $null; $b = $null
+        try {
+            $a = New-Object System.Net.Sockets.UdpClient($p)
+            $b = New-Object System.Net.Sockets.UdpClient($p + 1)
+            return $p
+        }
+        catch { }
+        finally { if ($a) { $a.Close() }; if ($b) { $b.Close() } }
+    }
+    return 49200
+}
+$gatePort = Get-FreeUdpPortPair
+$env:REMSOUND_GATE_PORT = "$gatePort"
 
 # ---- 5. COLD START + CLEAN CLOSE, against an isolated --config-dir so the real settings are never
 #         touched (smoke-test brief, safety rule 1 + baseline steps 3-4) ----
-Write-Host "`nCold start and clean close (isolated config):" -ForegroundColor Cyan
+Stage "Cold start and clean close (isolated config, on the hidden desktop)"
 # Session 0 is the lock-screen service, which runs RemSound.exe but never holds the app's one-copy lock, so it
 # does not stop this check. Counting it meant the check skipped on every machine with the service running.
 $already = @(Get-Process RemSound -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 })
@@ -288,7 +366,10 @@ else {
         # dialogs at whoever's at the screen while the gate runs. The shipped default sounds live
         # install-side ('default sounds\' next to the exe) so this cold-start finds them with no
         # consolidation step and no missing-sound warning - nothing to restore here any more.
-        $proc = Start-Process -FilePath $exe -ArgumentList @('--config-dir', $testCfg, '--connect', '127.0.0.1', '--minimized', '--silent') -PassThru
+        # A normal, windowed start - on the desktop nobody is looking at: its window came up on screen for a moment every
+        # run before it went to the tray (the gate's screen-reader watch, 2026-09-27). $proc is the launcher, which lives
+        # exactly as long as RemSound does.
+        $proc = Start-Process -FilePath $gateTools -ArgumentList @('hidden', "`"$exe`"", '--config-dir', "`"$testCfg`"", '--connect', "127.0.0.1:$gatePort", '--minimized', '--silent') -PassThru -WindowStyle Hidden
         Start-Sleep -Seconds 6
         if (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) { Pass "GUI cold-started and stayed up (minimized to tray)" }
         else { Fail "GUI exited or crashed during cold start" }
@@ -329,7 +410,7 @@ else {
 # ---- 6. HEADLESS START: the real program with no window at all, driven only through --control (Ed, 2026-09-24:
 #         "a way of driving remsound entirely without a window"). Every promise is checked on the real process:
 #         nothing of it takes focus or appears on screen, it answers, it acts, it logs, and it closes. ----
-Write-Host "`nHeadless start, driven through the control channel (isolated config):" -ForegroundColor Cyan
+Stage "Headless start, driven through the control channel (isolated config)"
 if ($script:coldStartSkipped) {
     Write-Host "  [SKIP] a RemSound instance is already running - close it to run this check" -ForegroundColor Yellow
 }
@@ -431,6 +512,8 @@ else {
             Pass "headless: its start and every command, the picker's answer included, are in its log"
         }
         else { Fail "headless: the log is missing the headless start or a command" }
+        if ($logText -match "gate copy: listening on $gatePort") { Pass "headless: it kept off the real ports and left the lock-screen service sending" }
+        else { Fail "headless: its log does not say it kept off the real ports (REMSOUND_GATE_PORT $gatePort) - it may have paused the lock-screen service" }
         $crashes = @(Get-ChildItem -LiteralPath (Join-Path $hlCfg 'logs') -Filter 'crash-*.txt' -ErrorAction SilentlyContinue)
         if ($crashes.Count -eq 0) { Pass "headless: no crash report" }
         else { Fail "headless: wrote a crash report: $((Get-Content -LiteralPath $crashes[0].FullName -TotalCount 6) -join ' | ')" }
@@ -449,9 +532,13 @@ else {
 # ---- 7. RESTARTS, DIALOGS AND A SECOND COPY, on the real program with no window (2026-09-24). What the in-app steps
 #         cannot reach: settings and a profile surviving a real quit and start, a second copy bowing out, a password
 #         never reaching the log, and every menu dialog opening and closing. Isolated config, like 5 and 6. ----
-Write-Host "`nRestarts, dialogs and a second copy, driven through the control channel (isolated config):" -ForegroundColor Cyan
+Stage "Restarts, dialogs and a second copy, driven through the control channel (isolated config)"
 if ($script:coldStartSkipped) {
     Write-Host "  [SKIP] a RemSound instance is already running - close it to run this check" -ForegroundColor Yellow
+}
+elseif ($Pack -eq 'Feature') {
+    Write-Host "  left for the full run (feature pack)" -ForegroundColor DarkGray
+    $script:leftForFull += 'the restarts, dialogs and second-copy stage'
 }
 else {
     $rtCfg = Join-Path ([System.IO.Path]::GetTempPath()) ("rs-cfg-" + [guid]::NewGuid().ToString('N'))
@@ -592,7 +679,7 @@ else {
     }
 }
 
-Write-Host "`nThe real plugin pointer and this computer's real RemSound state:" -ForegroundColor Cyan
+Stage "The real plugin pointer and this computer's real RemSound state"
 if ((Get-PointerState) -eq $pointerBefore) { Pass "the whole run, real starts included, left the plugin's real log pointer alone" }
 else { Fail "the run changed $realPointer - every DAW's plugin reads it to find RemSound's log folder" }
 $realStateAfter = Get-RealState
@@ -602,9 +689,39 @@ else {
     Fail "the run changed this computer's real RemSound state: $($changed -join ', ')"
 }
 
+Stage "Silent and invisible: what a screen reader heard and the screen showed of the gate's copies"
+Set-Content -LiteralPath $watchStop -Value 'stop'
+if (-not $watcher.WaitForExit(15000)) { try { $watcher.Kill() } catch { } }
+$watched = if (Test-Path -LiteralPath $watchOut) { Get-Content -LiteralPath $watchOut -Encoding UTF8 } else { @() }
+$verdict = $watched | Where-Object { $_ -match '^RESULT:' } | Select-Object -First 1
+if (-not $verdict) { Fail "the screen-reader watch said nothing - it did not listen, so silence is unproven" }
+else {
+    # Case-sensitive, and never the summary line: PowerShell's -match ignores case, and "0 spoken" in the watcher's own
+    # RESULT line failed the first run as a thing spoken (2026-09-28).
+    $events = @($watched | Where-Object { $_ -notmatch '^RESULT:' })
+    $heard = @($events | Where-Object { $_ -cmatch '\bSPOKEN\b' })
+    $shown = @($events | Where-Object { $_ -cmatch '\bSEEN\b' })
+    $exposed = @($events | Where-Object { $_ -cmatch '\bEXPOSED\b' })
+    if ($heard.Count -eq 0) { Pass "silent: nothing any copy of this build did was spoken by a screen reader" }
+    else { Fail "silent: a screen reader would have spoken $($heard.Count) thing(s), first: $(($heard | Select-Object -First 3) -join ' | ')" }
+    if ($shown.Count -eq 0) { Pass "invisible: no window of any copy of this build appeared on screen" }
+    else { Fail "invisible: $($shown.Count) window(s) appeared on screen, first: $(($shown | Select-Object -First 3) -join ' | ')" }
+    if ($exposed.Count -eq 0) { Pass "nothing always-on-top that a screen reader would listen to" }
+    else { Fail "$($exposed.Count) always-on-top window(s) a screen reader takes every event from, first: $(($exposed | Select-Object -First 3) -join ' | ')" }
+}
+Remove-Item -LiteralPath $watchOut, $watchStop -Force -ErrorAction SilentlyContinue
+Stage $null
+
 # ---- summary ----
 Remove-Item -LiteralPath $publishDir -Recurse -Force -ErrorAction SilentlyContinue
+Write-Host "Took $([int]$gateClock.Elapsed.TotalMinutes) min $([int]($gateClock.Elapsed.TotalSeconds % 60)) s ($Pack pack)."
 Write-Host ""
+if ($script:failures.Count -eq 0 -and $Pack -eq 'Feature') {
+    # Never a clearance to release: the feature pack left things out, and says what.
+    Write-Host "RESULT: FEATURE PACK PASS - every check that ran passed. NOT a release gate: left for the full run -" -ForegroundColor Yellow
+    Write-Host "        the self-test steps outside the changed areas, $($script:leftForFull -join ', '). Run run-tests.ps1 (-Pack Full) before a release." -ForegroundColor Yellow
+    exit 0
+}
 $skipNote = if ($script:skips.Count -gt 0) { " Not run on this machine: $($script:skips -join '; ')." } else { '' }
 if ($script:failures.Count -eq 0 -and $script:coldStartSkipped) {
     # Still a pass, so test copies and tester zips carry on. Not a clearance to publish: build-release.ps1 refuses to

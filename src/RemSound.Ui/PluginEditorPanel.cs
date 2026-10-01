@@ -64,8 +64,8 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
     // space toggles it, so the control says everything it needs to without any custom drawing.
     private readonly CheckedListBox peerList = new()
     {
-        Width = 320,
-        Height = 96,
+        Width = Dpi.Px(320),
+        Height = Dpi.Px(96),
         IntegralHeight = false,
         CheckOnClick = true,
         AccessibleName = "Peers to receive (Alt+P)",
@@ -77,7 +77,7 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
     // user recognises, and the bottom of the range is a real off rather than very quiet.
     private readonly NumericUpDown sendLevel = new()
     {
-        Width = 90,
+        Width = Dpi.Px(90),
         DecimalPlaces = 1,
         Increment = 1m,
         Minimum = MinLevelDb,
@@ -88,7 +88,7 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
 
     private readonly NumericUpDown receiveLevel = new()
     {
-        Width = 90,
+        Width = Dpi.Px(90),
         DecimalPlaces = 1,
         Increment = 1m,
         Minimum = MinLevelDb,
@@ -119,8 +119,8 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
         Multiline = true,
         ReadOnly = true,
         TabStop = true,
-        Width = 320,
-        Height = 60,
+        Width = Dpi.Px(320),
+        Height = Dpi.Px(60),
         BorderStyle = BorderStyle.FixedSingle,
         AccessibleName = "Plugin status (Alt+S)",
     };
@@ -194,7 +194,7 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
         ColumnCount = 2;
         RowCount = 9;
         AutoSize = true;
-        Padding = new Padding(12);
+        Padding = Dpi.Pad(12);
         ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
@@ -213,12 +213,12 @@ internal sealed class PluginEditorPanel : TableLayoutPanel
         SetColumnSpan(receiveBox, 2);
         Controls.Add(allPeersBox, 0, 2);
         SetColumnSpan(allPeersBox, 2);
-        FormLayoutRows.AddRow(this, 3, "&Peers to receive (Alt+P)", peerList, c => c.Focus());
-        FormLayoutRows.AddRow(this, 4, "Send &level in dB (Alt+L)", sendLevel, c => c.Focus());
-        FormLayoutRows.AddRow(this, 5, "Receive le&vel in dB (Alt+V)", receiveLevel, c => c.Focus());
+        FormLayoutRows.AddRow(this, 3, "&Peers to receive (Alt+P):", peerList, c => c.Focus());
+        FormLayoutRows.AddRow(this, 4, "Send &level in dB (Alt+L):", sendLevel, c => c.Focus());
+        FormLayoutRows.AddRow(this, 5, "Receive le&vel in dB (Alt+V):", receiveLevel, c => c.Focus());
         Controls.Add(activeBox, 0, 6);
         SetColumnSpan(activeBox, 2);
-        FormLayoutRows.AddRow(this, 7, "&Status (Alt+S)", statusReadout, c => c.Focus());
+        FormLayoutRows.AddRow(this, 7, "&Status (Alt+S):", statusReadout, c => c.Focus());
         Controls.Add(helpButton, 0, 8);
         SetColumnSpan(helpButton, 2);
 

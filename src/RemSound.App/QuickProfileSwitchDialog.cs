@@ -47,31 +47,21 @@ internal sealed class QuickProfileSwitchDialog
             MinimizeBox = false,
             MaximizeBox = false,
             ShowInTaskbar = false,
-            TopMost = true,
+            TopMost = true,   // Windowless takes this away while it hides the window (a screen reader hears always-on-top ones)
             KeyPreview = true,
-            ClientSize = new Size(440, 340),
+            ClientSize = Dpi.Px(440, 340),
         };
 
         var root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(10),
+            Padding = Dpi.Pad(10),
             ColumnCount = 1,
-            RowCount = 3, // 0 intro, 1 list, 2 close button
+            RowCount = 2, // 0 list, 1 close button
         };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-
-        var intro = new Label
-        {
-            Text = "Arrow up and down to a profile, then press Enter to switch to it. Escape closes without changing.",
-            AutoSize = true,
-            MaximumSize = new Size(410, 0),
-            Anchor = AnchorStyles.Left,
-        };
-        root.Controls.Add(intro, 0, 0);
 
         var list = new ListBox
         {
@@ -79,6 +69,9 @@ internal sealed class QuickProfileSwitchDialog
             IntegralHeight = false,
             // NVDA reads this on first focus, then each item's text as the selection moves.
             AccessibleName = "Profiles",
+            // How to use it, for the screen reader alone: it was a line of text above the list, which a sighted person
+            // does not need - the list is there to click, and Close beside it (Ed, 2026-09-28).
+            AccessibleDescription = "Arrow up and down to a profile, then press Enter to switch to it. Escape closes without changing.",
             TabIndex = 0,
         };
         var currentIndex = 0;
@@ -89,18 +82,18 @@ internal sealed class QuickProfileSwitchDialog
             if (p.IsCurrent) currentIndex = i;
         }
         list.SelectedIndex = currentIndex;
-        root.Controls.Add(list, 0, 1);
+        root.Controls.Add(list, 0, 0);
 
         var buttons = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.RightToLeft,
             AutoSize = true,
-            Padding = new Padding(0, 8, 0, 0),
+            Padding = Dpi.Pad(0, 8, 0, 0),
         };
         var closeButton = new Button { Text = "&Close", AutoSize = true, DialogResult = DialogResult.Cancel, TabIndex = 1 };
         buttons.Controls.Add(closeButton);
-        root.Controls.Add(buttons, 0, 2);
+        root.Controls.Add(buttons, 0, 1);
 
         dialog.Controls.Add(root);
         dialog.CancelButton = closeButton;

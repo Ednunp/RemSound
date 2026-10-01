@@ -71,6 +71,8 @@ internal sealed class SessionPlayout : IDisposable
     // depth corrector drains the buffer lets the buffer slide down UNDER the threshold instead of
     // being trimmed. Genuine bloat above the gliding ceiling still trims. In steady state it equals
     // the target, so normal operation - including ASIO Tight mode's burst snap-back - is unchanged.
+    // While it is above the target it never glides below where the buffer actually is: it follows
+    // the buffer down, not a clock (2026-09-28; see the trim block in ReadFloats).
     private double trimGlideTargetMs;
     private long prevTrimGlideTicks;
 
@@ -98,6 +100,25 @@ internal sealed class SessionPlayout : IDisposable
     // 5 ms ASIO render = 40 ms of repeated bursts before we give up; covers normal jitter
     // without bleeding into "sender gone" pauses.
     private const int ConcealmentMaxConsecutiveEmpties = 8;
+
+    // === A REAL STOP REFILLS BEFORE PLAYING ON (2026-09-30, Ed approved) ===
+    // When the sender's sound stops for a moment - its card hiccups, the send-only service reopens its capture, the sending
+    // PC stalls - the buffer runs dry, and when the sound came back playback carried on at once with almost nothing in
+    // reserve. Measured in the simulator: a 200 ms stop at 5 s took the delay from 53 ms to 33 at a 30 ms buffer (83 to 33
+    // at 60 ms), and it stayed there for 15 s, then crept back over another 30 to 50 s at the depth correction's 0.3 % -
+    // which waits for a clean ten-second clock reading the stop had spoiled. For that minute there was no jitter buffer.
+    // So a stop LONGER than LongGapRearmMs - the buffer empty on every read for that long - disarms playback, and the
+    // sound coming back is treated as a stream starting: nothing plays until the buffer is back at its target (the
+    // resumed audio then fades in, as after any gap). A momentary empty is left exactly as it was: re-arming after EVERY
+    // empty read is what was removed in April 2026 (each harmless dip became a 10-15 ms silence - see the NOTE in
+    // ReadFloats), and a dip that short never reaches this.
+    private const int LongGapRearmMs = 100;
+    private int emptyFramesInARow;
+    private long longGapRearms;
+
+    /// <summary>Times playback was re-armed after a real stop (see LongGapRearmMs), this copy and its mirrors, for the
+    /// simulator and the gate.</summary>
+    internal long LongGapRearmsForTest => Interlocked.Read(ref longGapRearms) + mirrors.Sum(m => Interlocked.Read(ref m.longGapRearms));
     private bool inUnderrunConcealment;
     private int consecutiveEmptyReads;
     private float lastConcealSampleL;
@@ -115,7 +136,13 @@ internal sealed class SessionPlayout : IDisposable
     private float[] recordScratch = new float[2048];
     // Per-session RNG for noise concealment. Seeded from process-level Shared so each session
     // gets a different sequence — but we don't care about reproducibility, just character.
-    private readonly Random concealRng = new(Random.Shared.Next());
+    // ...except in the simulator, which must hear the same run the same way every time: it seeds it (2026-09-28 - the
+    // noise burst on an underrun was the one thing left making a run with a stall come out different on a second run).
+    private readonly Random concealRng = new(ConcealSeedForTest ?? Random.Shared.Next());
+
+    /// <summary>Simulator seam: the seed for the concealment noise of sessions made on this thread (null, always in the app,
+    /// = random).</summary>
+    [ThreadStatic] internal static int? ConcealSeedForTest;
 
     // === Drift correction (Phase 4, 2026-05-14) — fixed-ratio resampler ===
     //
@@ -170,6 +197,160 @@ internal sealed class SessionPlayout : IDisposable
     private long bytesWrittenForDriftEst;
     private long bytesReadOutputForDriftEst;
 
+    // A WINDOW THE STREAM STALLED IN IS NOT A CLOCK READING (2026-09-28). Home wifi, a 1.5 s network
+    // stall (SIMULATOR STALL RECOVERY): the WASAPI output's window ended 118 to 135 ms into it and read
+    // -10,250 to -13,000 ppm (9,870 ms written against 10,000 played). That is inside the +-5 % band
+    // below, so it was taken for a clock, and the output played 11 cents flat for ten seconds. Real
+    // crystals are under 1,000 ppm apart. So the producer notes the longest gap between writes, on the
+    // drift loop's own clock (the simulator's virtual time counts), and a window whose longest gap - or
+    // the one still open at its end - is over DriftStallGapSec is thrown away; the depth correction at
+    // its boundary still runs, and the next window starts fresh. 100 ms: the worst gap in any window on
+    // the simulator's networks, measured the same day, is 80 ms (Andre's lumpy receiver, its 60 ms
+    // holds included); the rough internet 55, Ed's laptop 50. Not "any underrun in the window": lumpy
+    // WASAPI devices short-read routinely, and that would starve the loop of readings.
+    // lastWriteTicksForDrift is the producer's; longestWriteGapTicks is raised by the producer and
+    // taken (reset to 0) by the consumer at each window boundary.
+    private long lastWriteTicksForDrift;
+    private long longestWriteGapTicks;
+    private const double DriftStallGapSec = 0.100;
+
+    // NOR IS A WINDOW THE OUTPUT STOPPED IN (2026-09-28, Ed approved). An output that hiccups - a driver or a device
+    // stopping for a moment, its missed callbacks gone - left the window reading the stall's share of it as a clock: 100 ms
+    // in 10 s is +10,000 ppm, inside the band, so it was believed, and the output then played that much fast for most of a
+    // minute and ran its buffer dry (the performance suite's finding: 127 underruns in the minute after a 20 ms hiccup on an
+    // ASIO output, 6,598 after 450 ms; clean again only 49 s after a 0.1 s one). So the reads are timed too, on the same
+    // clock: a window whose longest gap between reads is longer than DriftReadStallMinSec and DriftReadStallFactor of its
+    // own average read is thrown away the same way; the depth correction still runs. A late driver thread that fires its
+    // missed callbacks in a burst is a different case (the reads catch up) and is left as it was.
+    private const double DriftReadStallMinSec = 0.020;
+    private const double DriftReadStallFactor = 4;
+    private long lastReadTicksForDrift;     // render thread
+    private long longestReadGapTicks;       // render thread, taken at each window boundary
+    private long readsInWindow;             // render thread
+
+    // THE WRITTEN COUNT AT A WINDOW'S EDGE IS READ OFF THE STREAM'S ARRIVAL LINE (2026-09-28). A stream
+    // arrives in lumps - a WASAPI capture's 10 ms blocks (four 2.5 ms Opus packets at once), 10 ms Opus
+    // frames, a network that delivers in bunches or late - and the count of bytes written at the
+    // edge's moment is whole lumps: whether the lump due there has landed yet is a coin toss, one
+    // 10 ms block in a ten-second window, a reading 1,000 ppm out. Measured with the cards at the same
+    // rate: the WASAPI output's first reading -1,000 ppm on a wired network, holding its buffer ~10 ms
+    // over the target for the first 45 s (SIMULATOR DESCENT on WASAPI); and in "both", the ASIO
+    // output's copy of the WASAPI-lane stream read the SAME -1,000 as that stream's WASAPI copy (the
+    // two are fed the same lumps and open their windows together), so it moved with the WASAPI side
+    // instead of its own output: 29.6 ms at 45 s against a 15 ms target while the ASIO-lane stream's
+    // copy beside it was at 20.3 (SIMULATOR AUTO-TUNE FROM 500, wired). First readings over eight
+    // seeds: up to 1,000 ppm out on a wired network, 1,067 on home wifi, 1,250 on the internet.
+    //
+    // So each arrival is noted as where it sits against a steady clock - the bytes written so far less
+    // what a steady stream would have written by then - one note per lump (writes within
+    // ArrivalSameLumpSec of one another are one lump, and so is the burst after a stall), and the
+    // count at an edge is the mean of the last ArrivalLineSec of notes carried forward to the edge's
+    // moment: audio counted as it is made, not as it happens to have been delivered. The mean evens
+    // out lumps, jitter and a lump a packet long or short; no note is older than ArrivalLineSec, so a
+    // stall or a real loss is forgotten a fifth of a second after it (and the window it fell in is
+    // thrown away anyway, see DriftStallGapSec). And an edge is not taken in the middle of a lump,
+    // while its last packets are still landing: it waits until the last write is DriftEdgeSettleSec
+    // old - the next read on an ASIO output, a read or two on a WASAPI one - and is taken regardless
+    // after DriftEdgeMaxDeferSec.
+    private const double DriftEdgeSettleSec = 0.001;
+    private const double DriftEdgeMaxDeferSec = 0.030;
+    private const double ArrivalSameLumpSec = 0.0005;
+    private const double ArrivalLineSec = 0.2;
+    private const int ArrivalNotes = 256;
+    private long firstEdgeDueTicks;
+    private readonly object arrivalLock = new();
+    private readonly double[] arrivalOffsetBytes = new double[ArrivalNotes];   // under arrivalLock
+    private readonly long[] arrivalNoteTicks = new long[ArrivalNotes];        // under arrivalLock
+    private int arrivalNoteCount;                                              // under arrivalLock
+    private int arrivalNoteNext;                                               // under arrivalLock
+    private long arrivalOriginTicks;                                           // under arrivalLock
+
+    /// <summary>Network thread, at every write: where the stream now sits against a steady clock (see ArrivalLineSec).</summary>
+    private void NoteArrival(long writtenBytes, long nowTicks)
+    {
+        lock (arrivalLock)
+        {
+            if (arrivalOriginTicks == 0) arrivalOriginTicks = nowTicks;
+            var offset = writtenBytes - (nowTicks - arrivalOriginTicks) / (double)Stopwatch.Frequency * MixBytesPerSecond;
+            var last = (arrivalNoteNext + ArrivalNotes - 1) % ArrivalNotes;
+            if (arrivalNoteCount > 0 && nowTicks - arrivalNoteTicks[last] <= ArrivalSameLumpSec * Stopwatch.Frequency)
+            {
+                // The same lump: its note is where the stream sits once the lump is in.
+                arrivalOffsetBytes[last] = offset;
+                arrivalNoteTicks[last] = nowTicks;
+                return;
+            }
+            arrivalOffsetBytes[arrivalNoteNext] = offset;
+            arrivalNoteTicks[arrivalNoteNext] = nowTicks;
+            arrivalNoteNext = (arrivalNoteNext + 1) % ArrivalNotes;
+            if (arrivalNoteCount < ArrivalNotes) arrivalNoteCount++;
+        }
+    }
+
+    /// <summary>Is there an arrival line to read at <paramref name="nowTicks"/>: notes reaching back half of
+    /// ArrivalLineSec with no stall among them? After a window thrown away for a stall, the next is not started until
+    /// there is (see WrittenBytesAt: a stall breaks the line).</summary>
+    private bool ArrivalLineSettled(long nowTicks)
+    {
+        lock (arrivalLock)
+        {
+            var breakTicks = (long)(DriftStallGapSec * Stopwatch.Frequency);
+            var reach = nowTicks - (long)(ArrivalLineSec / 2 * Stopwatch.Frequency);
+            var newer = nowTicks;
+            for (var i = 0; i < arrivalNoteCount; i++)
+            {
+                var k = (arrivalNoteNext + ArrivalNotes - 1 - i) % ArrivalNotes;
+                if (newer - arrivalNoteTicks[k] > breakTicks) return false;
+                if (arrivalNoteTicks[k] <= reach) return true;
+                newer = arrivalNoteTicks[k];
+            }
+            return false;
+        }
+    }
+
+    /// <summary>May a window's edge, due at <paramref name="dueTicks"/>, be taken now? Once the last write has settled
+    /// (see DriftEdgeSettleSec), or once it has waited long enough.</summary>
+    private bool EdgeSettled(long nowTicks, long dueTicks)
+    {
+        var lastWriteTicks = Interlocked.Read(ref lastWriteTicksForDrift);
+        return lastWriteTicks == 0
+            || nowTicks - lastWriteTicks >= DriftEdgeSettleSec * Stopwatch.Frequency
+            || nowTicks - dueTicks >= DriftEdgeMaxDeferSec * Stopwatch.Frequency;
+    }
+
+    /// <summary>Render thread, at a window's edge: the bytes written as of now, read off the stream's arrival line - the
+    /// mean of the last ArrivalLineSec of arrival notes, carried to now at the steady rate. With no note that recent (the
+    /// stream stalled, and the window will be thrown away), the count as it stands.
+    ///
+    /// <para>A STALL BREAKS THE LINE (2026-09-30, Ed approved). The mean reaches back no further than the last wait of
+    /// more than DriftStallGapSec between two notes: the notes before a stall are no guide to the count after it. A sending
+    /// card that stopped for 150 ms lost that sound for good, so its notes from before the stall sit 150 ms of audio above
+    /// the line the stream is on now; averaged in, they put the next window's starting count too high, and that window -
+    /// nothing wrong in it - read two cards at the same rate as 2,500 ppm apart. It was believed (it is inside the band),
+    /// and the output played 4 cents flat and grew its buffer for over a minute (SIMULATOR DRIFT AFTER A STALL).</para></summary>
+    private long WrittenBytesAt(long nowTicks)
+    {
+        lock (arrivalLock)
+        {
+            if (arrivalNoteCount == 0) return Interlocked.Read(ref bytesWrittenForDriftEst);
+            var oldest = nowTicks - (long)(ArrivalLineSec * Stopwatch.Frequency);
+            var breakTicks = (long)(DriftStallGapSec * Stopwatch.Frequency);
+            double sum = 0;
+            var notes = 0;
+            var newer = nowTicks;
+            for (var i = 0; i < arrivalNoteCount; i++)
+            {
+                var k = (arrivalNoteNext + ArrivalNotes - 1 - i) % ArrivalNotes;
+                if (arrivalNoteTicks[k] < oldest || newer - arrivalNoteTicks[k] > breakTicks) break;
+                sum += arrivalOffsetBytes[k];
+                notes++;
+                newer = arrivalNoteTicks[k];
+            }
+            if (notes == 0) return Interlocked.Read(ref bytesWrittenForDriftEst);
+            return (long)(sum / notes + (nowTicks - arrivalOriginTicks) / (double)Stopwatch.Frequency * MixBytesPerSecond);
+        }
+    }
+
     // Window state. windowStartTicks = when the current measurement window started, ticks
     // 0 means "not yet armed for measurement". The values at window start are snapshotted
     // so we can compute the delta cleanly even if the counters wrap (long is 63-bit so wrap
@@ -188,6 +369,14 @@ internal sealed class SessionPlayout : IDisposable
     // RequestFastLatencyApproach, cleared on the audio thread once the ring reaches the new target.
     private volatile bool fastApproachUntilOnTarget;
     private long lastFastApplyTicks;
+    // Descent state (see the DescentDepthBias block): set on the audio thread when the target it is handed falls.
+    private bool descentUntilOnTarget;
+    private int lastTargetMs = -1;
+    private int lastOutputTargetMs = -1;
+    private long snapArmedTicks;
+    private long snapCount;
+    private long snapSkippedBytes;
+    private long snapsInQuiet;
     private long resamplerUpdatesTotal;
 
     // Scratch buffer for reading from the ring buffer in float form. Sized lazily based on
@@ -238,6 +427,24 @@ internal sealed class SessionPlayout : IDisposable
     // ≤0.3 % pitch nudge, never a click.
     private const double DepthCorrectionSec = 15.0;
     private const double MaxDepthBias = 0.003;
+    // The depth that steady-state term steers is the buffer's MEAN over the last DepthMeanSec, not
+    // the one sample taken at the window's edge (2026-09-28). The buffer is a sawtooth - packets
+    // arrive in lumps, the card takes blocks - and the 10 s window is a whole number of 10 ms
+    // capture blocks, so the edge lands at much the same point of the sawtooth every time. Measured:
+    // in SIMULATOR AUTO-TUNE FROM 500 (both outputs, home wifi) the ASIO output's copy of the
+    // WASAPI-lane stream was sampled 7.1 ms under its mean at the first edge (489.3 against a 500
+    // target); with that window's clock reading (-1,067 ppm, one 10 ms block short) it grew the
+    // buffer to 523.6 ms and the click-trim cut 188 ms. In SIMULATOR BOTH OUTPUTS every edge sat
+    // 3.1 to 4.0 ms over the mean, holding that buffer 3 to 4 ms under its target. A tenth of a
+    // second spans ten 10 ms blocks and lags a 3 ms/s descent by 0.3 ms. The fast approach below
+    // keeps the instantaneous depth: at 50 ms a second a lagging mean would overshoot.
+    private const double DepthMeanSec = 0.1;
+    private double depthMeanFrames = -1;
+    private long prevDepthMeanTicks;
+    /// <summary>Simulator seam: that mean depth, in ms (the depth now before the first read).</summary>
+    internal double DepthMeanMsForTest => (depthMeanFrames >= 0 ? depthMeanFrames : playout.BufferedBytes / (double)MixBytesPerFrame) * 1000.0 / MixSampleRate;
+    /// <summary>Simulator seam: has the drift loop taken its first clock reading? (A reading can be exactly 1.0.)</summary>
+    internal bool DriftTrackingForTest => resamplerActivelyTracking;
     // === Fast approach after a DELIBERATE latency change (2026-08-14) ===
     // The steady-state numbers above are deliberately sleepy: 0.3% of realtime is ~3 ms of catch-up
     // per second, and the correction is only recomputed at the 10 s drift-window boundary. That's
@@ -253,6 +460,27 @@ internal sealed class SessionPlayout : IDisposable
     private const double FastDepthBias = 0.05;          // 5% => ~50 ms of catch-up per second
     private const double FastApplyIntervalSec = 0.2;    // recompute 5x/sec while converging
     private const double FastApproachDoneMs = 15.0;     // close enough — hand back to steady state
+    // === Coming down from a lowered target (Ed, 2026-09-28) ===
+    // Ed: from a silly delay "you want it to snap back down... at most a minute... honestly more like 30 seconds"; from a
+    // sensible one, 100 ms to 20 in about 20 seconds. Measured before: the auto-tune took 3.5 minutes from 500 ms, draining
+    // at the steady-state 0.3 % recomputed once every 10 s window, and 45 ms and under crept in with a 15 s time constant.
+    // So once the target is LOWERED (by anything - the auto-tune, the per-person correction, the lab's tuner):
+    // - Descent mode: the depth correction pulls up to DescentDepthBias (0.4 %, about 4 ms a second, ~7 cents - still
+    //   click-free, the sound just plays that little bit fast), spread over DescentDepthCorrectionSec and recomputed several
+    //   times a second like the fast approach, until the buffer is within DescentDoneMs of the target.
+    // - The snap: while the buffer is more than SnapAboveMs over the target, everything above that is skipped at once with a
+    //   short crossfade (AudioRingBuffer.SkipWithCrossfade) - a skipped bit of sound, never a click - waiting up to
+    //   SnapWaitForQuietSec for a quiet moment so the skip lands in a pause when there is one. Then the rest drains as above.
+    // A burst after a network stall (the target unchanged) is still the click-trim's business: only a lowered target snaps.
+    private const double DescentDepthCorrectionSec = 3.0;
+    private const double DescentDepthBias = 0.004;
+    private const double DescentDoneMs = 2.0;
+    private const int SnapAboveMs = 100;
+    private const int SnapMinSkipMs = 20;
+    private const double SnapWaitForQuietSec = 2.0;
+    private const float SnapQuietPeak = 0.0056f;        // -45 dBFS
+    private const int SnapCrossfadeFrames = 720;        // 15 ms
+    private const int SnapAlignFrames = 240;            // the landing point may move 5 ms either way to line up
     /// <summary>Diagnostic accessor — current smoothed sender-rate-ratio applied to the
     /// resampler. 1.0 = no resampling (matched clocks). Values like 1.0002 = sender running
     /// 200 ppm faster than receiver; 0.9998 = 200 ppm slower.</summary>
@@ -306,6 +534,13 @@ internal sealed class SessionPlayout : IDisposable
     /// (audible) plus any short-read taken while the ring was chronically below target (producer
     /// starvation). These block the auto-tune from lowering, exactly as the legacy total used to.</summary>
     public long TuneBlockingUnderrunsTotal => Interlocked.Read(ref tuneBlockingUnderrunsTotal);
+
+    // Audible GAPS (2026-09-26): one run of tune-blocking short reads is one gap, however many callbacks it spans - at ASIO's
+    // 0.67 ms callbacks a 5 ms gap is about eight short reads, which is what made the underrun count look alarming while
+    // Ed heard clean music. The latency lab's "keep dropouts rare" auto-tune counts these.
+    private long dropoutGapsTotal;
+    private bool lastReadWasShort;
+    public long DropoutGapsTotal => Interlocked.Read(ref dropoutGapsTotal);
     /// <summary>Inaudible partial short-reads taken while the ring was on target — the device-gulp
     /// case more buffer can't fix. These must NOT block the auto-tune from lowering.</summary>
     public long DeviceGulpUnderrunsTotal => Interlocked.Read(ref deviceGulpUnderrunsTotal);
@@ -352,6 +587,13 @@ internal sealed class SessionPlayout : IDisposable
     public long TrimDropBytes => Interlocked.Read(ref trimDropBytes);
     public long DrainDropBytes => Interlocked.Read(ref drainDropBytes);
     public long TrimFireCount => Interlocked.Read(ref trimFireCount);
+    /// <summary>Snaps down from a lowered target (see the DescentDepthBias block): how many, how much they skipped, and how
+    /// many landed in a quiet moment.</summary>
+    public long SnapCount => Interlocked.Read(ref snapCount);
+    public long SnapSkippedBytes => Interlocked.Read(ref snapSkippedBytes);
+    public long SnapsInQuiet => Interlocked.Read(ref snapsInQuiet);
+    /// <summary>Coming down from a lowered target right now (descent mode).</summary>
+    public bool DescentActive => descentUntilOnTarget;
 
     /// <summary>Sets the concealment artifact this session's playout uses on underrun gaps.
     /// Takes effect on the very next gap; no need to restart playback. Receiver-side only —
@@ -381,7 +623,7 @@ internal sealed class SessionPlayout : IDisposable
 
     /// <summary>UTC time of the most recent successful audio write. Used by <see cref="AudioReceiver"/>
     /// to prune long-idle sessions so the dictionary doesn't grow unboundedly.</summary>
-    public DateTime LastWriteUtc { get; private set; } = DateTime.UtcNow;
+    public DateTime LastWriteUtc { get; private set; } = AudioClock.UtcNow;
 
     /// <summary>Gate seam: audio bytes really written into this session's buffer since it opened. LastWriteUtc starts at
     /// "now" so a new session is not swept at once, which means a session opened by a format packet alone reads as
@@ -417,6 +659,24 @@ internal sealed class SessionPlayout : IDisposable
     // Replaced wholesale (reference swap) by the UI thread; the network/audio threads only read it.
     private volatile SessionPlayout[] mirrors = [];
     public void SetMirrors(SessionPlayout[] value) => mirrors = value;
+    internal SessionPlayout[] Mirrors => mirrors;
+
+    /// <summary>The latency lab's per-stream buffer (2026-09-26): this stream's own measured need in ms, or 0 for none.
+    /// When set and below the output's target, the stream is played at this depth instead - so a smooth stream stops
+    /// paying for a bursty one on the same output. Never above the output's target: the output's setting stays the
+    /// ceiling. It only moves through the same arming, trim-glide and drift paths as any other target, so lowering it
+    /// is exactly as gentle as the auto-tune lowering the slider (and the caller lowers it at most 1 ms a second).</summary>
+    public volatile int OwnNeedMs;
+
+    /// <summary>The per-stream sizing's memory of this replica's underrun counter (UI thread only).</summary>
+    internal long LabLastUnderrunTotal = -1;
+
+    /// <summary>The target this replica actually plays at: the output's, or this stream's own need if lower.</summary>
+    public int EffectiveTargetMs(int routeTargetMs)
+    {
+        var own = OwnNeedMs;
+        return own > 0 && own < routeTargetMs ? own : routeTargetMs;
+    }
 
     /// <summary>Set on every replica the engine fans out — the primary and each mirror — so it can ask
     /// whether a lane is still taking audio. Null in tests that build a session directly.</summary>
@@ -424,14 +684,14 @@ internal sealed class SessionPlayout : IDisposable
 
     /// <summary>The clock the trim glide and the drift loop read: the Stopwatch, always, in the app. A self-test hands in
     /// a simulated clock so it can drive minutes of this loop in a moment.</summary>
-    internal Func<long> NowTicks { get; init; } = Stopwatch.GetTimestamp;
+    internal Func<long> NowTicks { get; init; } = AudioClock.GetTimestamp;
 
     public void Write(ReadOnlySpan<byte> source)
     {
         // Audio arrived for this stream, whichever copy below plays it. Stamped only inside WriteLocal, a stream playing
         // from its ASIO copy while the WASAPI lane was not reading looked silent, was pruned four seconds later, and came
         // back on the next format packet: the ASIO output dropped out every few seconds (found 2026-09-25).
-        LastWriteUtc = DateTime.UtcNow;
+        LastWriteUtc = AudioClock.UtcNow;
         var mir = mirrors;
         // EACH LANE PLAYS ITS OWN COPY. When the lane this primary belongs to stops reading while a mirror's lane
         // is still reading, that mirror is what plays the peer. So the primary is not fed — exactly as a mirror on
@@ -501,8 +761,21 @@ internal sealed class SessionPlayout : IDisposable
         // Track bytes written for the drift-resampler measurement window. Producer thread
         // updates this; consumer thread (audio thread in ReadFloats) reads it via
         // Interlocked.Read when sampling the window. Cumulative since session start.
-        Interlocked.Add(ref bytesWrittenForDriftEst, source.Length);
-        LastWriteUtc = DateTime.UtcNow;
+        var writtenNow = Interlocked.Add(ref bytesWrittenForDriftEst, source.Length);
+        var nowWriteTicks = NowTicks();
+        // Where the stream now sits against a steady clock, for the window edges (see ArrivalLineSec).
+        NoteArrival(writtenNow, nowWriteTicks);
+        // The gap since the last write, for the drift loop's stall check (see DriftStallGapSec). A compare-and-swap loop, so
+        // a gap raised here just as the consumer takes and resets the window's longest is never lost to the reset.
+        var lastWriteTicks = Interlocked.Exchange(ref lastWriteTicksForDrift, nowWriteTicks);
+        if (lastWriteTicks != 0)
+        {
+            var gap = nowWriteTicks - lastWriteTicks;
+            long seen;
+            while (gap > (seen = Interlocked.Read(ref longestWriteGapTicks))
+                   && Interlocked.CompareExchange(ref longestWriteGapTicks, gap, seen) != seen) { }
+        }
+        LastWriteUtc = AudioClock.UtcNow;
     }
 
     /// <summary>
@@ -543,6 +816,7 @@ internal sealed class SessionPlayout : IDisposable
 
     private void NoteFramesQueuedLocal(int targetLatencyMs)
     {
+        targetLatencyMs = EffectiveTargetMs(targetLatencyMs);
         const int CatastrophicCapMs = 1000;
         const int CatastrophicTrimToMs = 250;
         if (playout.BufferedBytes > MillisecondsToBytes(CatastrophicCapMs))
@@ -557,22 +831,30 @@ internal sealed class SessionPlayout : IDisposable
         }
     }
 
-    /// <summary>Disarm and request a drain on the next read — used when the user lowers the
-    /// latency knob. The mix bus continues with whatever's already armed.</summary>
-    public void DisarmAndRequestDrain()
+    /// <summary>The user lowered the latency knob: on the next read the buffer comes straight down to the new target, the
+    /// excess skipped with a short crossfade (2026-09-28). It used to be dropped outright and the session disarmed until
+    /// the buffer refilled - a click and a moment's silence on every move down.</summary>
+    public void RequestDrainToTarget()
     {
-        playbackArmed = false;
         drainRequested = true;
     }
 
     /// <summary>The user just moved the latency slider: converge on the new depth in seconds rather
     /// than minutes (see the FastDepthBias block). Deliberate changes only — the auto-tune's soft
-    /// setter must NOT call this, so its gentle, parked descent behaviour is untouched.</summary>
+    /// setter must NOT call this, so its gentle, parked descent behaviour is untouched.
+    ///
+    /// <para>THIS COPY ONLY (2026-09-28). It used to set every mirror too, and the slider's setter
+    /// (PlayoutEngine.SetMaxLatencyMs) already calls it on every copy its slider governs - so the only
+    /// thing the forwarding ever added was copies on the OTHER lane. With both kinds of output every
+    /// stream's primary plays on the WASAPI output and its mirror on the ASIO one, so moving the WASAPI
+    /// slider by hand threw the ASIO output's copies into the 5 % fast approach toward their own,
+    /// unchanged target: measured in the simulator, a WASAPI raise from 40 to 80 ms while the ASIO
+    /// output was coming down from 100 to 20 took its descent from 6.8 cents sharp to 39 to 41 cents
+    /// for three seconds. The ASIO slider's own moves never reached the WASAPI copies (mirrors have no
+    /// mirrors), so it was one-way. Each lane's copies now answer to their own slider alone.</para></summary>
     public void RequestFastLatencyApproach()
     {
         fastApproachUntilOnTarget = true;
-        var mir = mirrors;
-        for (var i = 0; i < mir.Length; i++) mir[i].fastApproachUntilOnTarget = true;
     }
 
     public void Dispose()
@@ -593,6 +875,8 @@ internal sealed class SessionPlayout : IDisposable
     /// mirror while the primary's own lane is not reading — and a peer is never recorded once per lane.</param>
     public int ReadFloats(Span<float> output, int outFrames, int targetLatencyMs, int currentMaxLatencyMs, int smoothness = 3, bool applyShaping = true, bool emitRecordTap = true)
     {
+        var outputTargetMs = targetLatencyMs;
+        targetLatencyMs = EffectiveTargetMs(targetLatencyMs);
         // Drain on user knob change.
         if (drainRequested)
         {
@@ -601,11 +885,19 @@ internal sealed class SessionPlayout : IDisposable
             var buffered = playout.BufferedBytes;
             if (buffered > targetBytes)
             {
-                var bytes = buffered - targetBytes;
-                playout.DropOldest(bytes);
+                var bytes = playout.SkipWithCrossfade(buffered - targetBytes, SnapCrossfadeFrames, SnapAlignFrames);
                 Interlocked.Add(ref drainDropBytes, bytes);
+                depthMeanFrames = -1;
             }
         }
+        // A lowered target starts the descent (see the DescentDepthBias block). The hand-moved slider has its own drain.
+        // Only the OUTPUT's target lowered - the slider, the auto-tune, the per-person correction. A stream's own need
+        // (OwnNeedMs) comes down 1 ms a second by itself and reaches it through the steady drift path, as it was built to;
+        // counted as a lowering, every second of it started the descent's 7-cent pull and let a network stall's backlog
+        // be snapped away - measured in the simulator once per-stream buffers became normal (2026-09-29).
+        if (lastTargetMs >= 0 && targetLatencyMs < lastTargetMs && outputTargetMs < lastOutputTargetMs) descentUntilOnTarget = true;
+        lastTargetMs = targetLatencyMs;
+        lastOutputTargetMs = outputTargetMs;
 
         if (!playbackArmed)
         {
@@ -709,6 +1001,17 @@ internal sealed class SessionPlayout : IDisposable
             // trims), glide DOWN at ~1.5 ms/sec - slower than the depth corrector can drain the
             // buffer - so a lowered target (the auto-tune walking latency down) lets the buffer
             // slide down under the threshold rather than being shaved into a click on each step.
+            //
+            // And while the ceiling is above the target it never glides below where the buffer actually
+            // is: it follows the buffer down, not a clock (2026-09-28). The glide assumed the buffer was
+            // already draining. It is not until the drift loop's next 10 s window, and on WASAPI the
+            // 10 ms lumps keep it close to the line. Measured in SIMULATOR AUTO-TUNE FROM 500 (WASAPI only,
+            // wired): the target went 500 -> 405 with the buffer at 507.9 ms; five seconds later the buffer
+            // had wandered UP to 516.2, the ceiling had glided to 492.6, and the trim cut 102 ms at once -
+            // the same in every WASAPI run of that step, 102 to 106 ms each. Held at the buffer, the ceiling
+            // waits for the drain. A genuine surge - the buffer growing more than the margin above the held
+            // ceiling - still trims, the glide never goes faster than 1.5 ms/s, and in steady state
+            // (ceiling == target) nothing changes.
             const double TrimGlideDownMsPerSec = 1.5;
             var nowTrimTicks = NowTicks();
             if (trimGlideTargetMs <= 0 || targetLatencyMs >= trimGlideTargetMs)
@@ -718,7 +1021,9 @@ internal sealed class SessionPlayout : IDisposable
             else if (prevTrimGlideTicks != 0)
             {
                 var dtSec = (nowTrimTicks - prevTrimGlideTicks) / (double)Stopwatch.Frequency;
-                trimGlideTargetMs = Math.Max(targetLatencyMs, trimGlideTargetMs - TrimGlideDownMsPerSec * dtSec);
+                var glidedMs = trimGlideTargetMs - TrimGlideDownMsPerSec * dtSec;
+                var bufferedMs = playout.BufferedBytes * 1000.0 / MixBytesPerSecond;
+                trimGlideTargetMs = Math.Max(targetLatencyMs, Math.Max(glidedMs, Math.Min(trimGlideTargetMs, bufferedMs)));
             }
             prevTrimGlideTicks = nowTrimTicks;
 
@@ -760,16 +1065,18 @@ internal sealed class SessionPlayout : IDisposable
         }
         prevDriftSampleTicks = nowTicks;
 
+        if (descentUntilOnTarget) SnapDownIfFarAbove(targetLatencyMs, nowTicks);
         UpdateDriftResamplerRateIfDue(nowTicks, targetLatencyMs);
         // While converging on a freshly-moved slider, re-apply the (much larger) depth correction
         // several times a second instead of waiting for the 10 s drift window — otherwise the first
         // seconds after the user's move do nothing at all, which is exactly what "the slider doesn't
         // work" felt like. Self-clearing once the ring is within FastApproachDoneMs of target.
-        if (fastApproachUntilOnTarget && resamplerActivelyTracking
+        // Coming down from a lowered target is recomputed as often (see the DescentDepthBias block).
+        if ((fastApproachUntilOnTarget || descentUntilOnTarget) && resamplerActivelyTracking
             && (nowTicks - lastFastApplyTicks) / (double)Stopwatch.Frequency >= FastApplyIntervalSec)
         {
             lastFastApplyTicks = nowTicks;
-            ApplyDepthCorrectedRate(targetLatencyMs);
+            ApplyDepthCorrectedRate(targetLatencyMs, fastApproachUntilOnTarget ? -1 : depthMeanFrames);
         }
 
         // Read through the resampler and apply concealment on full underruns.
@@ -815,10 +1122,12 @@ internal sealed class SessionPlayout : IDisposable
     /// that walks the ring toward <paramref name="targetLatencyMs"/>. Shared by the steady-state
     /// 10 s window and the fast approach after a deliberate slider move — the ONLY difference is how
     /// hard it's allowed to pull (see the FastDepthBias block), so both paths stay one piece of
-    /// arithmetic rather than two that can drift apart.</summary>
-    private void ApplyDepthCorrectedRate(int targetLatencyMs)
+    /// arithmetic rather than two that can drift apart. <paramref name="meanDepthFrames"/>: the
+    /// steady-state window's depth, the buffer's mean (see DepthMeanSec); the fast approach and a
+    /// window during it use the depth now.</summary>
+    private void ApplyDepthCorrectedRate(int targetLatencyMs, double meanDepthFrames = -1)
     {
-        var depthFrames = playout.BufferedBytes / MixBytesPerFrame;
+        var depthFrames = meanDepthFrames >= 0 && !fastApproachUntilOnTarget ? meanDepthFrames : playout.BufferedBytes / MixBytesPerFrame;
         var targetFrames = targetLatencyMs * MixSampleRate / 1000;
         var depthError = depthFrames - targetFrames;
         var fast = fastApproachUntilOnTarget;
@@ -827,8 +1136,14 @@ internal sealed class SessionPlayout : IDisposable
             fastApproachUntilOnTarget = false; // arrived — back to the sleepy steady-state numbers
             fast = false;
         }
-        var spreadSec = fast ? FastDepthCorrectionSec : DepthCorrectionSec;
-        var bias = fast ? FastDepthBias : MaxDepthBias;
+        var descent = !fast && descentUntilOnTarget;
+        if (descent && depthError <= DescentDoneMs * MixSampleRate / 1000)
+        {
+            descentUntilOnTarget = false; // down - back to the steady state
+            descent = false;
+        }
+        var spreadSec = fast ? FastDepthCorrectionSec : descent ? DescentDepthCorrectionSec : DepthCorrectionSec;
+        var bias = fast ? FastDepthBias : descent ? DescentDepthBias : MaxDepthBias;
         var depthCorrection = Math.Clamp(depthError / (spreadSec * MixSampleRate), -bias, bias);
         var appliedRatio = smoothedRateRatio + depthCorrection;
         driftResampler.SetRates(MixSampleRate * appliedRatio, MixSampleRate);
@@ -843,24 +1158,61 @@ internal sealed class SessionPlayout : IDisposable
     /// </summary>
     private void UpdateDriftResamplerRateIfDue(long nowTicks, int targetLatencyMs)
     {
+        // The buffer's mean depth for the depth correction (see DepthMeanSec), sampled where the one
+        // sample it replaces was taken: every read, before the read.
+        var depthNowFrames = playout.BufferedBytes / (double)MixBytesPerFrame;
+        if (depthMeanFrames < 0 || prevDepthMeanTicks == 0) depthMeanFrames = depthNowFrames;
+        else
+        {
+            var dtSec = (nowTicks - prevDepthMeanTicks) / (double)Stopwatch.Frequency;
+            depthMeanFrames += dtSec / (DepthMeanSec + dtSec) * (depthNowFrames - depthMeanFrames);
+        }
+        prevDepthMeanTicks = nowTicks;
+
+        // The gap since the last read, for the output-stall check (see DriftReadStallMinSec).
+        if (lastReadTicksForDrift != 0 && nowTicks - lastReadTicksForDrift > longestReadGapTicks) longestReadGapTicks = nowTicks - lastReadTicksForDrift;
+        lastReadTicksForDrift = nowTicks;
+        readsInWindow++;
+
         if (resamplerWindowStartTicks == 0)
         {
+            // Not in the middle of a lump (see DriftEdgeSettleSec).
+            if (firstEdgeDueTicks == 0) firstEdgeDueTicks = nowTicks;
+            if (!EdgeSettled(nowTicks, firstEdgeDueTicks)) return;
+            // After a window thrown away for a stall: not until the arrivals have a line again (see ArrivalLineSettled).
+            if (restartAfterStall && !ArrivalLineSettled(nowTicks)) return;
+            restartAfterStall = false;
             // First call — anchor the measurement window. Defer the first rate update by
             // DriftFirstWindowSec so we get a stable initial measurement rather than one
             // based on the first few writes (which can be bursty during session arming).
             resamplerWindowStartTicks = nowTicks;
-            resamplerWindowStartBytesWritten = Interlocked.Read(ref bytesWrittenForDriftEst);
+            resamplerWindowStartBytesWritten = WrittenBytesAt(nowTicks);
             resamplerWindowStartBytesOutput = bytesReadOutputForDriftEst;
+            Interlocked.Exchange(ref longestWriteGapTicks, 0);
+            longestReadGapTicks = 0;
+            readsInWindow = 0;
             return;
         }
 
         var windowDuration = resamplerActivelyTracking ? DriftMeasurementWindowSec : DriftFirstWindowSec;
         var elapsedSec = (nowTicks - resamplerWindowStartTicks) / (double)Stopwatch.Frequency;
         if (elapsedSec < windowDuration) return;
+        if (!EdgeSettled(nowTicks, resamplerWindowStartTicks + (long)(windowDuration * Stopwatch.Frequency))) return;
 
-        var bytesWrittenNow = Interlocked.Read(ref bytesWrittenForDriftEst);
+        var bytesWrittenNow = WrittenBytesAt(nowTicks);
         var bytesWrittenInWindow = bytesWrittenNow - resamplerWindowStartBytesWritten;
         var bytesOutputInWindow = bytesReadOutputForDriftEst - resamplerWindowStartBytesOutput;
+        // The window's longest hole in its arrivals, counting one still open now (a stall the window ends
+        // inside); taken and reset, so the next window starts fresh. See DriftStallGapSec.
+        var lastWriteTicks = Interlocked.Read(ref lastWriteTicksForDrift);
+        var openGapTicks = lastWriteTicks != 0 ? nowTicks - lastWriteTicks : 0;
+        var longestGapTicks = Math.Max(Interlocked.Exchange(ref longestWriteGapTicks, 0), openGapTicks);
+        var stalled = longestGapTicks > DriftStallGapSec * Stopwatch.Frequency;
+        // ...or the output stopped reading (see DriftReadStallMinSec).
+        var meanReadTicks = readsInWindow > 0 ? (nowTicks - resamplerWindowStartTicks) / (double)readsInWindow : 0;
+        if (longestReadGapTicks > Math.Max(DriftReadStallMinSec * Stopwatch.Frequency, DriftReadStallFactor * meanReadTicks)) stalled = true;
+        longestReadGapTicks = 0;
+        readsInWindow = 0;
 
         if (bytesOutputInWindow > 0 && bytesWrittenInWindow > 0)
         {
@@ -870,7 +1222,7 @@ internal sealed class SessionPlayout : IDisposable
             // cancels steady-state drift and the depth feedback below doesn't have to fight it.
             // For Ed's hardware (sender slower than receiver) this should settle ~0.9998.
             var measuredRatio = (double)bytesWrittenInWindow / bytesOutputInWindow;
-            if (measuredRatio >= DriftRatioMin && measuredRatio <= DriftRatioMax)
+            if (!stalled && measuredRatio >= DriftRatioMin && measuredRatio <= DriftRatioMax)
             {
                 if (!resamplerActivelyTracking)
                 {
@@ -886,7 +1238,8 @@ internal sealed class SessionPlayout : IDisposable
             }
             // If the measured ratio is outside the sanity window (>5 % off), reject it.
             // That happens transiently during session arming, slider raises, or sender
-            // start-of-stream bursts. Keep the previous ratio rather than yanking.
+            // start-of-stream bursts. Keep the previous ratio rather than yanking. A window the
+            // stream stalled in is rejected the same way, whatever it read (see DriftStallGapSec).
         }
 
         // Feedback: nudge the ring back toward the user's target depth. Without this the
@@ -896,13 +1249,26 @@ internal sealed class SessionPlayout : IDisposable
         // faster; < 0 biases down to refill. Clamped + spread over DepthCorrectionSec so it's a
         // gentle, inaudible pitch trim, not a per-sample discontinuity. No-op until the
         // feed-forward has a valid measurement (smoothedRateRatio is meaningless before then).
-        if (resamplerActivelyTracking) ApplyDepthCorrectedRate(targetLatencyMs);
+        // It steers the buffer's mean depth, not the one sample at this edge (see DepthMeanSec).
+        if (resamplerActivelyTracking) ApplyDepthCorrectedRate(targetLatencyMs, depthMeanFrames);
 
-        // Anchor the next window.
+        // Anchor the next window - unless this one was thrown away for a stall. Then the next is started afresh, once the
+        // arrivals have a line again: a count taken at the stall's end would still be read off the stream from before it
+        // (see WrittenBytesAt).
+        if (stalled)
+        {
+            resamplerWindowStartTicks = 0;
+            firstEdgeDueTicks = 0;
+            restartAfterStall = true;
+            return;
+        }
         resamplerWindowStartTicks = nowTicks;
         resamplerWindowStartBytesWritten = bytesWrittenNow;
         resamplerWindowStartBytesOutput = bytesReadOutputForDriftEst;
     }
+
+    /// <summary>The last window was thrown away for a stall: the next waits for a line to read (see ArrivalLineSettled).</summary>
+    private bool restartAfterStall;
 
     /// <summary>
     /// Resampler-backed read. Asks the resampler how many input frames it needs to
@@ -983,23 +1349,44 @@ internal sealed class SessionPlayout : IDisposable
             const int TuneStarveMs = 3;
             var producerBehind = filteredErrorFrames <= -(TuneStarveMs * MixSampleRate / 1000.0);
             if (framesGot == 0 || producerBehind)
+            {
                 Interlocked.Increment(ref tuneBlockingUnderrunsTotal);
+                if (!lastReadWasShort) Interlocked.Increment(ref dropoutGapsTotal);
+                lastReadWasShort = true;
+            }
             else
+            {
                 Interlocked.Increment(ref deviceGulpUnderrunsTotal);
+            }
+        }
+        else
+        {
+            lastReadWasShort = false;
         }
         if (framesGot == 0)
         {
             Interlocked.Increment(ref concealmentFiresTotal);
             consecutiveEmptyReads++;
+            emptyFramesInARow += outFrames;
         }
         else if (framesGot < inputFramesNeeded)
         {
             Interlocked.Increment(ref partialReadFiresTotal);
             consecutiveEmptyReads = 0;
+            emptyFramesInARow = 0;
         }
         else
         {
             consecutiveEmptyReads = 0;
+            emptyFramesInARow = 0;
+        }
+        // A real stop: empty for longer than LongGapRearmMs. Wait for the buffer to be back at its target before playing
+        // on, as at a stream's start (NoteFramesQueuedLocal arms it again).
+        if (emptyFramesInARow >= LongGapRearmMs * MixSampleRate / 1000 && playbackArmed)
+        {
+            playbackArmed = false;
+            emptyFramesInARow = 0;
+            Interlocked.Increment(ref longGapRearms);
         }
 
         // Run the resampler. Output goes into outputScratch (the resampler needs a float[]
@@ -1106,12 +1493,14 @@ internal sealed class SessionPlayout : IDisposable
             switch (artifact)
             {
                 case ConcealmentArtifact.NoiseBurst:
-                    // White noise at last-sample peak amplitude. Random per channel — broader
-                    // stereo image than mono noise, and avoids correlated content the brain
-                    // can latch onto as a tone.
-                    var peak = Math.Max(Math.Abs(lastConcealSampleL), Math.Abs(lastConcealSampleR));
-                    inSpan[idx] = ((float)concealRng.NextDouble() * 2f - 1f) * peak * g;
-                    inSpan[idx + 1] = ((float)concealRng.NextDouble() * 2f - 1f) * peak * g;
+                    // White noise, each channel at its OWN last sample's amplitude. Random per channel —
+                    // broader stereo image than mono noise, and avoids correlated content the brain
+                    // can latch onto as a tone. Until 2026-09-30 both channels took the louder one's level,
+                    // so a silent or quiet channel got a hiss as loud as the other channel's music - a
+                    // sound that was never there, with nothing in that channel to cover it (found by the
+                    // simulator's music-like signal; Ed approved the change).
+                    inSpan[idx] = ((float)concealRng.NextDouble() * 2f - 1f) * Math.Abs(lastConcealSampleL) * g;
+                    inSpan[idx + 1] = ((float)concealRng.NextDouble() * 2f - 1f) * Math.Abs(lastConcealSampleR) * g;
                     break;
                 default:
                     // Cosine-tone variants (short/low). Hold last sample, scaled by envelope.
@@ -1141,6 +1530,29 @@ internal sealed class SessionPlayout : IDisposable
             inSpan[idx] *= g;
             inSpan[idx + 1] *= g;
         }
+    }
+
+    /// <summary>The snap (see the DescentDepthBias block): with the buffer more than SnapAboveMs over a lowered target, skip
+    /// everything above that with a crossfade - at a quiet moment if one comes within SnapWaitForQuietSec, else then.</summary>
+    private void SnapDownIfFarAbove(int targetLatencyMs, long nowTicks)
+    {
+        var keepBytes = MillisecondsToBytes(targetLatencyMs + SnapAboveMs);
+        var excessBytes = playout.BufferedBytes - keepBytes;
+        if (excessBytes < MillisecondsToBytes(SnapMinSkipMs))
+        {
+            snapArmedTicks = 0;
+            return;
+        }
+        if (snapArmedTicks == 0) snapArmedTicks = nowTicks;
+        var quiet = playout.PeakAhead(SnapCrossfadeFrames * MixBytesPerFrame) <= SnapQuietPeak;
+        if (!quiet && (nowTicks - snapArmedTicks) / (double)Stopwatch.Frequency < SnapWaitForQuietSec) return;
+        var skipped = playout.SkipWithCrossfade(excessBytes, SnapCrossfadeFrames, SnapAlignFrames);
+        snapArmedTicks = 0;
+        if (skipped <= 0) return;
+        Interlocked.Increment(ref snapCount);
+        Interlocked.Add(ref snapSkippedBytes, skipped);
+        if (quiet) Interlocked.Increment(ref snapsInQuiet);
+        depthMeanFrames = -1;   // the mean starts again from the new depth
     }
 
     private static int MillisecondsToBytes(int milliseconds) =>

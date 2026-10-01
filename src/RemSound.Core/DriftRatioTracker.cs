@@ -175,7 +175,9 @@ public sealed class DriftRatioTracker
     /// <returns>True when a window boundary was just crossed; call <see cref="ApplyMeasurement"/> next.</returns>
     public bool WindowClosed(long fedBytes, long drainedBytes)
     {
-        var now = Stopwatch.GetTimestamp();
+        // The audio clock: the Stopwatch, except inside the simulator, which runs the WASAPI output stage in virtual
+        // time (2026-09-28) - its windows decide the rate the card is fed at, which is heard.
+        var now = AudioClock.GetTimestamp();
         if (windowStartTicks == 0)
         {
             windowStartTicks = now;
@@ -198,8 +200,12 @@ public sealed class DriftRatioTracker
 
     /// <summary>Fold the window that <see cref="WindowClosed"/> just ended into the ratio. Does nothing
     /// unless a window really did just close, so a stray call cannot count one window twice.</summary>
+    /// <param name="readingIsAClock">False when the caller knows this window is not a clock reading however it reads - its
+    /// consumer stopped for a moment (2026-09-28: a WASAPI card that hiccups; its missed pulls are gone, so the window reads
+    /// the stall's share of it as a slow clock, inside the sanity band). The reading is thrown away as an out-of-band one
+    /// is; the depth nudge is still worked out.</param>
     /// <returns>True when the ratio was recomputed and is worth acting on.</returns>
-    public bool ApplyMeasurement(int depthFrames, int targetFrames)
+    public bool ApplyMeasurement(int depthFrames, int targetFrames, bool readingIsAClock = true)
     {
         if (!measurementPending) return false;
         measurementPending = false;
@@ -211,7 +217,7 @@ public sealed class DriftRatioTracker
         var measured = (double)lastFedDelta / lastDrainedDelta;
         // Outside the band it is a glitch, not a clock — DISCARDED, not clamped. Clamping would feed
         // a wild reading into the smoother and drag the rate for windows afterwards.
-        if (measured >= RatioMin && measured <= RatioMax)
+        if (readingIsAClock && measured >= RatioMin && measured <= RatioMax)
         {
             if (tracking)
             {
@@ -260,5 +266,5 @@ public sealed class DriftRatioTracker
     /// assembly: real drift takes ten seconds per window to measure by design, and a test that waited
     /// that long for each direction would not get run. Nothing shipped calls this.</summary>
     public void RewindWindowStartForTest(double seconds)
-        => windowStartTicks = Stopwatch.GetTimestamp() - (long)(seconds * Stopwatch.Frequency);
+        => windowStartTicks = AudioClock.GetTimestamp() - (long)(seconds * Stopwatch.Frequency);
 }

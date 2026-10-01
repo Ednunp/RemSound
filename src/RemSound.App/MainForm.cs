@@ -33,7 +33,8 @@ public sealed partial class MainForm : Form
     /// the decision about which connected DAW drives the plugin lane, and arms and disarms that lane
     /// as plugins come and go. Built in the constructor because it needs the sender.</summary>
     private readonly PluginTrackSource pluginTrackSource;
-    private readonly AudioReceiver receiver = new();
+    // Its network recorder on: Record > Save the last minute of the network saves what it kept (2026-09-30).
+    private readonly AudioReceiver receiver = new() { NetworkRecorder = { Enabled = true } };
 
     /// <summary>The app's end of the link to VST plugin instances, or null when the user has turned
     /// the link off. The app owns the ONE connection and hands audio to and from plugins — which is
@@ -108,18 +109,18 @@ public sealed partial class MainForm : Form
     //     TableLayoutPanel cell — same as the old code.
     private readonly AccessibleCheckBox receiveAudioCheckbox = new() { Text = "Receive audio", AutoSize = true };
     private readonly AccessibleCheckBox sendMyAudioCheckbox = new() { Text = "Send my audio", AutoSize = true };
-    private readonly TrackBar volumeBar = new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Value = 100, Width = 200 };
+    private readonly TrackBar volumeBar = new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Value = 100, Width = Dpi.Px(200) };
     // Receive output devices. Ticks are saved on the profile and put back when it loads
     // (ApplyPendingProfileToControls); the "Use Windows default" row is a machine-wide preference.
-    private readonly CheckedListBox receiveOutputDevicesList = new() { CheckOnClick = true, Width = 430, Height = 90 };
+    private readonly CheckedListBox receiveOutputDevicesList = new() { CheckOnClick = true, Width = Dpi.Px(430), Height = Dpi.Px(90) };
     private readonly Label receiveOutputDevicesStatusLabel = new() { AutoSize = true, Text = "No output device selected." };
     // Capture devices the user has ticked for sending. Two lists — render-side outputs (loopback
     // capture: system audio / soundcard playback) and capture-side inputs (mics, line-ins). Both
     // are summed into one outgoing stream by the sender's MixingEngine. Ticks are saved on the
     // profile and put back when it loads; a device the profile names that isn't present is skipped.
-    private readonly CheckedListBox sendOutputDevicesList = new() { CheckOnClick = true, Width = 430, Height = 90 };
+    private readonly CheckedListBox sendOutputDevicesList = new() { CheckOnClick = true, Width = Dpi.Px(430), Height = Dpi.Px(90) };
     private readonly Label sendOutputDevicesStatusLabel = new() { AutoSize = true, Text = "No output device selected." };
-    private readonly CheckedListBox sendInputDevicesList = new() { CheckOnClick = true, Width = 430, Height = 90 };
+    private readonly CheckedListBox sendInputDevicesList = new() { CheckOnClick = true, Width = Dpi.Px(430), Height = Dpi.Px(90) };
     private readonly Label sendInputDevicesStatusLabel = new() { AutoSize = true, Text = "No input device selected." };
     // Per-application WASAPI send (issue #20). The WASAPI send side captures EITHER whole output
     // devices (sendOutputDevicesList above — the classic behaviour) OR the audio of specific running
@@ -133,16 +134,16 @@ public sealed partial class MainForm : Form
     // the applications mode means picking specific apps; whole-system audio is what devices mode is for.
     // (The SERVICE still has its own send-all concept — a headless lock-screen sender wants system audio —
     // so Profile.SendAllApplications stays for ServiceProfileDialog/ServiceSendHost.)
-    private readonly ListBox sendModeList = new() { Width = 430, Height = 38, IntegralHeight = false };
+    private readonly ListBox sendModeList = new() { Width = Dpi.Px(430), Height = Dpi.Px(38), IntegralHeight = false };
     private MnemonicLabel? sendModeLabel;
     // "Currently active applications" — the apps running right now (like Discovered peers), PLUS any
     // ticked app that isn't running (shown "(not running)") so the user can always find and untick it.
-    private readonly CheckedListBox sendAppsList = new() { CheckOnClick = true, Width = 430, Height = 90 };
+    private readonly CheckedListBox sendAppsList = new() { CheckOnClick = true, Width = Dpi.Px(430), Height = Dpi.Px(90) };
     private readonly Label sendAppsStatusLabel = new() { AutoSize = true, Text = "No application selected." };
     private MnemonicLabel? sendAppsLabel;
     // "Remembered applications" — the GLOBAL remembered-apps address book (like Remembered peers). Tick one
     // here and it's marked to send; the instant it goes live it also appears (ticked) in the active list.
-    private readonly CheckedListBox rememberedAppsList = new() { CheckOnClick = true, Width = 430, Height = 90 };
+    private readonly CheckedListBox rememberedAppsList = new() { CheckOnClick = true, Width = Dpi.Px(430), Height = Dpi.Px(90) };
     private readonly Label rememberedAppsStatusLabel = new() { AutoSize = true, Text = "No remembered application." };
     private MnemonicLabel? rememberedAppsLabel;
     // The authoritative set of app process-names to send — ticked in EITHER list. Both lists render their
@@ -168,9 +169,9 @@ public sealed partial class MainForm : Form
     // own stream, and the receiver renders the two lanes independently. This lets
     // someone use a WASAPI mic and an ASIO instrument input together, or send out to a WASAPI
     // headset alongside ASIO studio monitors.
-    private readonly CheckedListBox asioSendDevicesList = new() { CheckOnClick = true, Width = 430, Height = 90 };
+    private readonly CheckedListBox asioSendDevicesList = new() { CheckOnClick = true, Width = Dpi.Px(430), Height = Dpi.Px(90) };
     private readonly Label asioSendDevicesStatusLabel = new() { AutoSize = true, Text = "No ASIO send channel selected." };
-    private readonly CheckedListBox asioReceiveOutputDevicesList = new() { CheckOnClick = true, Width = 430, Height = 90 };
+    private readonly CheckedListBox asioReceiveOutputDevicesList = new() { CheckOnClick = true, Width = Dpi.Px(430), Height = Dpi.Px(90) };
     private readonly Label asioReceiveOutputDevicesStatusLabel = new() { AutoSize = true, Text = "No ASIO receive channel selected." };
     // One-press "clear every device tick" — sits above the ASIO driver picker on the I/O tab.
     // The device lists can get long; this is the quick reset when you've lost track of what's on.
@@ -233,18 +234,19 @@ public sealed partial class MainForm : Form
     private readonly AccessibleCheckBox enableAllPeerShapingBox = new() { Text = "Enable volume, pan and &EQ for all peers (Alt+E)", AccessibleName = "Enable volume, pan and EQ for all peers", AutoSize = true };
     // A checklist: ticking a peer applies your shaping to them (a per-peer bypass), and the peer the
     // cursor is on is the one the controls below edit.
-    private readonly CheckedListBox panEqPeerList = new() { Width = 430, Height = 90, IntegralHeight = false, AccessibleName = "Peers (Alt+U)" };
-    private readonly TrackBar volumeSlider = new() { Minimum = 0, Maximum = 100, Value = 100, SmallChange = 1, LargeChange = 10, TickFrequency = 25, Width = 320 };
-    private readonly TrackBar panSlider = new() { Minimum = 0, Maximum = 100, Value = 50, SmallChange = 1, LargeChange = 10, TickFrequency = 25, Width = 320 };
+    private readonly CheckedListBox panEqPeerList = new() { Width = Dpi.Px(430), Height = Dpi.Px(90), IntegralHeight = false, AccessibleName = "Peers (Alt+U)" };
+    private readonly TrackBar volumeSlider = new() { Minimum = 0, Maximum = 100, Value = 100, SmallChange = 1, LargeChange = 10, TickFrequency = 25, Width = Dpi.Px(320) };
+    private readonly TrackBar panSlider = new() { Minimum = 0, Maximum = 100, Value = 50, SmallChange = 1, LargeChange = 10, TickFrequency = 25, Width = Dpi.Px(320) };
     private readonly Button resetPeerEqButton = new() { Text = "Set peer E&Q to default (Alt+Q)", AutoSize = true, AccessibleName = "Set peer EQ to default" };
-    private readonly ListBox eqModeList = new() { Width = 320, Height = 58, IntegralHeight = false, AccessibleName = "EQ mode" };
-    private readonly FlowLayoutPanel eqBandsPanel = new() { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+    // Readable while greyed out, with no peer chosen (finding 10): Windows drew its selected row grey on blue.
+    private readonly ReadableWhenDisabledListBox eqModeList = new() { Width = Dpi.Px(320), Height = Dpi.Px(58), IntegralHeight = false, AccessibleName = "EQ mode" };
+    private readonly FlowLayoutPanel eqBandsPanel = new() { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Margin = Dpi.Pad(0) };
     // Parametric-mode controls (built into eqBandsPanel when the 16-band mode is active).
     private readonly Button addBandButton = new() { Text = "&Add band (Alt+A)", AutoSize = true, AccessibleName = "Add band" };
     private readonly Button deleteBandButton = new() { Text = "&Delete band (Alt+D)", AutoSize = true, AccessibleName = "Delete band" };
-    private readonly ListBox parametricBandList = new() { Width = 430, Height = 150, IntegralHeight = false, SelectionMode = SelectionMode.MultiExtended, AccessibleName = "Bands (Alt+B), left and right arrow change the selected band's gain" };
+    private readonly ListBox parametricBandList = new() { Width = Dpi.Px(430), Height = Dpi.Px(150), IntegralHeight = false, SelectionMode = SelectionMode.MultiExtended, AccessibleName = "Bands (Alt+B), left and right arrow change the selected band's gain" };
     // Purely visual EQ response graph: not a tab stop, and it has no accessible name. See EqCurveControl.
-    private readonly EqCurveControl eqCurve = new() { Width = 430, Height = 110, Margin = new Padding(0, 8, 0, 0) };
+    private readonly EqCurveControl eqCurve = new() { Width = Dpi.Px(430), Height = Dpi.Px(110), Margin = Dpi.Pad(0, 8, 0, 0) };
     // Working copy of the active profile's per-peer shaping, keyed by peer address string. Loaded on
     // profile apply, saved by BuildCurrentProfile, mutated live as the user moves the controls.
     private Dictionary<string, PeerShaping> peerShaping = new();
@@ -273,7 +275,9 @@ public sealed partial class MainForm : Form
     // sticky selection is unambiguous for sighted users and screen-reader users alike.
     // First item is always the "(none)" sentinel (NoAsioDriverSentinel below) — selecting it
     // means "no ASIO driver, run WASAPI-only". Real driver names follow.
-    private readonly ListBox asioDriverBox = new() { Width = 280, Height = 80, IntegralHeight = false };
+    // Four rows high (it scrolls): the ASIO buffer size sits under it in the same cell, and at 80 the tab grew taller than a
+    // 1080-line screen holds at 150 % (LAYOUT E, 2026-09-29).
+    private readonly ListBox asioDriverBox = new() { Width = Dpi.Px(280), Height = Dpi.Px(64), IntegralHeight = false };
     /// <summary>Visible label of the "no ASIO driver" sentinel row in <see cref="asioDriverBox"/>.
     /// Equality against this string is how the code distinguishes "user has chosen WASAPI-only"
     /// from "user has selected a real driver". Kept as a constant so the visible text and the
@@ -294,13 +298,13 @@ public sealed partial class MainForm : Form
     private readonly Label statusLabel = new() { Text = "Disconnected", AutoSize = true };
 
     // --- Audio profile tab controls ---
-    private readonly ComboBox codecBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 360, AccessibleName = "Audio codec (Alt+C)" };
-    private readonly ListBox sendRateBox = new() { Width = 240, Height = 40, IntegralHeight = false, AccessibleName = "Packet size (Alt+P)" };
+    private readonly ComboBox codecBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = Dpi.Px(360), AccessibleName = "Audio codec (Alt+C)" };
+    private readonly ListBox sendRateBox = new() { Width = Dpi.Px(280), Height = Dpi.Px(40), IntegralHeight = false, AccessibleName = "Packet size (Alt+P)" };
     // Min 1 ms is intentionally aggressive — for LAN/localhost users who want to push it.
     // Values below ~10 ms cause audible crackling on any network with real jitter.
-    private readonly NumericUpDown maxLatencyBox = new() { Minimum = 1, Maximum = 500, Increment = 1, Value = 80, Width = 90, AccessibleName = "Audio jitter buffer in milliseconds (Alt+L)" };
+    private readonly NumericUpDown maxLatencyBox = new() { Minimum = 1, Maximum = 500, Increment = 1, Value = 80, Width = Dpi.Px(90), AccessibleName = "Audio jitter buffer in milliseconds (Alt+L)" };
     private readonly AccessibleCheckBox continuousTuneBox = new() { Text = "Continuous auto-tune jitter buffer", AutoSize = true };
-    private readonly ComboBox continuousIntervalBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90, AccessibleName = "Auto-tune interval for jitter buffer (Alt+N)" };
+    private readonly ComboBox continuousIntervalBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = Dpi.Px(90), AccessibleName = "Auto-tune interval for jitter buffer (Alt+N)" };
     // Label for continuousIntervalBox. Held as a field (rather than a local in
     // BuildAudioReceiveGroupContents) so UpdateBothIndependentVisibility can rewrite the
     // text and mnemonic when the user flips audio mode — the interval governs both lanes'
@@ -315,34 +319,28 @@ public sealed partial class MainForm : Form
     // become the WASAPI-lane controls (Alt+W / Alt+Y) and these new ASIO controls take over
     // the simpler Alt+L / Alt+T mnemonics — ASIO is the "headline" lane in the new mode
     // (the reason a user picked it) so it gets the more memorable shortcuts.
-    private readonly NumericUpDown maxLatencyAsioBox = new() { Minimum = 1, Maximum = 500, Increment = 1, Value = 10, Width = 90, AccessibleName = "ASIO jitter buffer in milliseconds (Alt+I)" };
+    private readonly NumericUpDown maxLatencyAsioBox = new() { Minimum = 1, Maximum = 500, Increment = 1, Value = 10, Width = Dpi.Px(90), AccessibleName = "ASIO jitter buffer in milliseconds (Alt+I)" };
     private readonly AccessibleCheckBox continuousTuneAsioBox = new() { Text = "Continuous auto-tune ASIO jitter buffer", AutoSize = true };
-    private readonly ListBox smoothnessBox = new() { Width = 420, Height = 200, IntegralHeight = false, AccessibleName = "Buffer smoothness (Alt+B)" };
-    private readonly ListBox artefactBox = new() { Width = 420, Height = 60, IntegralHeight = false, AccessibleName = "Artefact sound type (Alt+A) — controls how audio gaps sound" };
-    // Priority mode (per profile). Sits as the first control on the Audio profile tab,
-    // ungrouped above the two GroupBoxes, so it's the first thing focus lands on when the
-    // user Tabs into the tab. Toggling marks the profile dirty (the setting lives in
-    // Profile, not AppConfig) and flips every PerformanceMode lever in one shot — CPU
-    // scheduling, Windows power management, memory priority, working-set lock, and
-    // MMCSS thread priority. Label deliberately mentions both "CPU" and "Windows
-    // performance settings" because the toggle reaches well past just CPU scheduling.
-    private readonly AccessibleCheckBox priorityModeBox = new()
+    // The latency lab's two auto-tune switches as one, beside the interval (Ed, 2026-09-29). See MainForm.StreamBuffers.cs.
+    private readonly AccessibleCheckBox lowestDelayTuneBox = new()
     {
-        Text = "&Use CPU and Windows performance settings in high priority mode (Alt+U)",
-        AccessibleName = "Use CPU and Windows performance settings in high priority mode",
+        Text = "Lowest-delay auto-tune, accepting a rare dropout (Alt+&R)",
+        AccessibleName = "Lowest-delay auto-tune, accepting a rare dropout",
         AutoSize = true,
     };
+    private readonly ListBox smoothnessBox = new() { Width = Dpi.Px(420), Height = Dpi.Px(200), IntegralHeight = false, AccessibleName = "Buffer smoothness (Alt+B)" };
+    private readonly ListBox artefactBox = new() { Width = Dpi.Px(420), Height = Dpi.Px(60), IntegralHeight = false, AccessibleName = "Artefact sound type (Alt+A) — controls how audio gaps sound" };
 
     // --- Connectivity tab controls (Phase 2 refactor) ---
-    private readonly LiveCheckedListBox connectedPeersList = new() { CheckOnClick = true, Width = 430, Height = 90, AccessibleName = "Connected peers (Alt+C)" };
+    private readonly LiveCheckedListBox connectedPeersList = new() { CheckOnClick = true, Width = Dpi.Px(430), Height = Dpi.Px(90), AccessibleName = "Connected peers (Alt+C)" };
     private readonly Label connectedPeersStatus = new() { AutoSize = true, Text = "No peer connected." };
-    private readonly CheckedListBox discoveredPeersList = new() { CheckOnClick = true, Width = 430, Height = 90, AccessibleName = "Discovered peers not on a server (Alt+D)" };
+    private readonly CheckedListBox discoveredPeersList = new() { CheckOnClick = true, Width = Dpi.Px(430), Height = Dpi.Px(90), AccessibleName = "Discovered peers not on a server (Alt+D)" };
     private readonly Label discoveredPeersStatus = new() { AutoSize = true, Text = "No peer discovered." };
-    private readonly CheckedListBox rememberedPeersList = new() { CheckOnClick = true, Width = 430, Height = 90, AccessibleName = "Remembered peers (Alt+R)" };
+    private readonly CheckedListBox rememberedPeersList = new() { CheckOnClick = true, Width = Dpi.Px(430), Height = Dpi.Px(90), AccessibleName = "Remembered peers (Alt+R)" };
     private readonly Label rememberedPeersStatus = new() { AutoSize = true, Text = "No remembered peer selected." };
     private readonly Button manualAddButton = new() { Text = "Add peer by IP (Alt+&A)", AutoSize = true, AccessibleName = "Add peer by IP" };
     // Read-only details for the peer highlighted in the connected list, and a button to give it a name.
-    private readonly TextBox peerDetailsBox = new() { Multiline = true, ReadOnly = true, Width = 430, Height = 132, ScrollBars = ScrollBars.Vertical, AccessibleName = "Peer details (Alt+E)" };
+    private readonly TextBox peerDetailsBox = new() { Multiline = true, ReadOnly = true, Width = Dpi.Px(430), Height = Dpi.Px(132), ScrollBars = ScrollBars.Vertical, AccessibleName = "Peer details (Alt+E)" };
     private readonly Button renamePeerButton = new() { Text = "Rena&me peer (Alt+M)", AutoSize = true, AccessibleName = "Rename peer" };
     // The Discovered / Remembered row labels, captured so those rows can be hidden when the user turns
     // the lists off on the Preferences Appearance tab.
@@ -370,8 +368,8 @@ public sealed partial class MainForm : Form
         Multiline = true,
         ReadOnly = true,
         TabStop = true,
-        Width = 460,
-        Height = 110,
+        Width = Dpi.Px(460),
+        Height = Dpi.Px(110),
         BorderStyle = BorderStyle.FixedSingle,
         ScrollBars = ScrollBars.Vertical,
         AccessibleName = "Connection status (Alt+S)",
@@ -387,8 +385,8 @@ public sealed partial class MainForm : Form
         Multiline = true,
         ReadOnly = true,
         TabStop = true,
-        Width = 460,
-        Height = 40,
+        Width = Dpi.Px(460),
+        Height = Dpi.Px(40),
         BorderStyle = BorderStyle.FixedSingle,
         AccessibleName = "Total latency (Alt+M)",
     };
@@ -466,6 +464,8 @@ public sealed partial class MainForm : Form
     private long lastPacketsSentForLatency;
     private DateTime lastPacketsSentAtUtc = DateTime.MinValue;
     private double measuredEmitIntervalMs;
+    /// <summary>How long a sample really waits to be sent (AudioSender.TakeMeasuredSendWaitMs), -1 before it is known.</summary>
+    private double measuredSendWaitMs = -1;
     /// <summary>Per-second LOW-WATER marks of the receive buffer — the shallowest it got each second.
     /// The evidence the auto-tune descends on (see <see cref="RemSound.Core.AutoTuneDescent"/>):
     /// cushion the buffer never touched is provably spare, which is the only honest way to know what
@@ -581,7 +581,8 @@ public sealed partial class MainForm : Form
         RenderRoute.AsioLane => asioTuneMemory,
         _ => mixedTuneMemory,
     };
-    private const int RecentMaxGapWindowSeconds = 60;
+    // Internal so the simulator's copy of the per-second evidence keeps the same window (SimMainWindow).
+    internal const int RecentMaxGapWindowSeconds = 60;
     private DateTime lastUserSliderMoveUtc = DateTime.MinValue;
     private bool suppressUserSliderMoveTracking; // true while continuous tune is changing the slider
     private bool continuousTuneEnabled;
@@ -757,7 +758,6 @@ public sealed partial class MainForm : Form
         catch (Exception ex) { logFile.Event($"addr-check echo to {remote} failed: {ex.GetType().Name}: {ex.Message}"); }
         // Only a relay sends one of these. If it came from somebody in the peer list, that "peer" is a relay:
         // offer to connect to it as one (Ed, 2026-09-20).
-        relayGroup.NoteRelay(remote);
         try { BeginInvoke(() => OfferRelayForPeerAddress(remote)); }
         catch (InvalidOperationException) { /* window not up yet */ }
     }
@@ -986,6 +986,11 @@ public sealed partial class MainForm : Form
         // the in-memory settings cache BEFORE the rest of the constructor body reads from it.
         // Control states (device ticks, checkboxes, volume) come later in OnShown.
         if (profile is not null) settings.ApplyProfile(profile);
+        // Push to talk from the start, so the sender holds from its first block when the profile says so.
+        ApplyPushToTalk(settings.LoadPushToTalkSettings(), null);
+        // The metronome, before anything can arrive for it (2026-09-28).
+        InitMetronome();
+        ApplyMetronomeSettings(settings.LoadMetronomeSettings(), null);
 
         // BothModeWarningSuppressed migration removed 2026-05-11. The popup it suppressed
         // (the classic-Both ~45 ms latency warning) is gone with the audio-mode listbox, so
@@ -993,9 +998,13 @@ public sealed partial class MainForm : Form
         // field deserialise with it ignored.
 
         Text = FormatWindowTitle(loadedTitle);
-        Width = 640;
-        Height = 600;
-        MinimumSize = new Size(560, 520);
+        // Wide enough for a list beside its label to show a long device name; OnLoad then makes it tall enough for the
+        // tallest tab, clamped to the screen (UI audit 2026-09-28, finding 4: every tab needed scrolling at 640 x 600).
+        Width = Dpi.Px(760);
+        Height = Dpi.Px(600);
+        // Narrower than this, a label and the control beside it no longer fit side by side (the layout check J). 690 since
+        // 2026-09-29: at 680 the jitter buffer box and its auto-tune tick box, Alt+U now, missed sharing a line by 2 px.
+        MinimumSize = Dpi.Px(690, 520);
         StartPosition = FormStartPosition.CenterScreen;
         if (Theme.AppIcon is { } appIcon) Icon = appIcon;   // window title bar + Alt+Tab + taskbar
         // No AccessibleName / AccessibleRole on the form. Andre's accessible app does not
@@ -1062,6 +1071,11 @@ public sealed partial class MainForm : Form
         // is nothing in the profile to save — and the "unsaved changes" prompt it used to raise asked the
         // user to save something that was already saved. 2026-09-13 review.
         hotkeyController.OnHotkeyChanged = UpdateHotkeyAnnouncements;
+        hotkeyController.OnPushToTalkKeyChanged = ArmPushToTalkKey;
+        // Start or stop the metronome from anywhere - mute or unmute while following a master (2026-09-28).
+        hotkeyController.ToggleMetronome = () => MetronomeStartStop("the hotkey");
+        hotkeyController.MetronomeTempoUp = () => StepMetronomeTempo(+1, "the hotkey");
+        hotkeyController.MetronomeTempoDown = () => StepMetronomeTempo(-1, "the hotkey");
         trayController = new MainFormTrayController(
             this,
             // getSending / toggleSending — the tray's "Enable sending" checkable item reads
@@ -1267,11 +1281,13 @@ public sealed partial class MainForm : Form
         statusLabel.AccessibleName = "Status";
 
         // --- Populate static choices ---
-        // Three transport choices, ordered most-tolerant-of-bad-networks to most-demanding:
-        //   * PCM 48K 24-bit       — uncompressed, ~2.3 Mbps
-        //   * Opus broadcast quality — 20 ms frame (960 samples/ch at 48 kHz), loss tolerant
+        // Three transport choices, live playing first (Ed, 2026-09-28: "opus for live jamming at the top, then the other
+        // opus then uncompressed at the bottom. opus live jamming needs to be the default"):
         //   * Opus live latency      — 2.5 ms frame (120 samples/ch at 48 kHz), 8× the packet
-        //                              rate of broadcast quality, for jamming / live monitoring
+        //                              rate of broadcast quality, for jamming / live monitoring - the default
+        //   * Opus broadcast quality — 20 ms frame (960 samples/ch at 48 kHz), loss tolerant
+        //   * PCM 48K 24-bit       — uncompressed, ~2.3 Mbps
+        // A saved profile is matched to its choice by codec and frame, never by position (ResolveCodecIndex).
         // The 10 ms middle option (480 samples/ch) that lived here in v2.x has been retired —
         // it sat between the other two without a clear use case (saved only 5 ms over 20 ms
         // and gave up loss tolerance for no clearly audible win). Frame size on the wire is
@@ -1280,9 +1296,9 @@ public sealed partial class MainForm : Form
         // actual ms figure for users who want to verify.
         codecBox.Items.AddRange(new object[]
         {
-            new CodecChoice("PCM 48K 24 bit — uncompressed", AudioTransportCodec.Pcm, 0),
-            new CodecChoice("Opus, broadcast quality — loss tolerant", AudioTransportCodec.Opus, 960),
             new CodecChoice("Opus, live latency — for jamming and monitoring", AudioTransportCodec.Opus, 120),
+            new CodecChoice("Opus, broadcast quality — loss tolerant", AudioTransportCodec.Opus, 960),
+            new CodecChoice("PCM 48K 24 bit — uncompressed", AudioTransportCodec.Pcm, 0),
         });
         codecBox.SelectedIndex = ResolveCodecIndex(settings.LoadCodec(), settings.LoadOpusFrameSamplesPerChannel());
         var initialCodec = (CodecChoice)codecBox.SelectedItem!;
@@ -1329,11 +1345,9 @@ public sealed partial class MainForm : Form
         sender.SetTightLatency(true);
         logFile.Event($"tight latency at startup: on (always) (audio mode={settings.LoadAudioMode()})");
 
-        // Priority mode (per-profile) is SCOPED to actual streaming now — see
-        // EvaluatePriorityModeScope on the 1 Hz status tick. Nothing to engage at construction:
-        // the levers come up within a tick of audio moving and drop after the quiet hold-down.
-        // (Pre-2026-07-26 this applied every lever here and held them for the whole app
-        // lifetime, keeping an idle-in-tray machine awake and off deep power states.)
+        // The fast timer is scoped to streaming - see EvaluateStreamingScope on the 1 Hz status tick. Nothing to engage at
+        // construction. (The profile's high-priority setting was removed 2026-09-29, Ed: its audible part was the fast
+        // timer while hidden, which is always on while streaming now.)
         // Native-rate passthrough is automatic now (driven by codec, not a user setting):
         // PCM+single-source-WASAPI-push = pass capture-device rate through to the wire;
         // Opus = always pre-resample to 48 kHz (encoder is locked at 48 k); MixingEngine /
@@ -1357,16 +1371,23 @@ public sealed partial class MainForm : Form
         // companion control has been created and its loaded value applied.
         receiver.SetMaxLatencyMsFor(MaxLatencyBoxRoute, (int)maxLatencyBox.Value);
 
-        // Apply the user's "enable logs" preference to the log gate. Logging is a
-        // machine-local debug knob stored in AppConfig (default off) — switching profiles
-        // doesn't change it. RemSoundLog defers actually creating the file in
-        // <exe>\logs\ until the first write arrives while Enabled is true, so an idle "off"
-        // setting produces zero filesystem traffic. The Preferences dialog's Enable-logs
-        // checkbox writes through to both AppConfig.LoggingEnabled and logFile.Enabled when
-        // the user toggles it.
-        logFile.Enabled = AppConfig.Load().LoggingEnabled;
+        // Apply the profile's "enable logs" to the log gate (per profile since 2026-09-29; a profile that has never chosen
+        // follows this computer's setting). RemSoundLog defers actually creating the file in <exe>\logs\ until the first write
+        // arrives while Enabled is true, so an idle "off" setting produces zero filesystem traffic. The Preferences dialog's
+        // Enable-logs checkbox changes the profile's (ApplyLoggingFromPreferences).
+        var profileLogs = settings.LoadEnableLogs();
+        logFile.Enabled = profileLogs ?? AppConfig.Load().LoggingEnabled;
+        if (profileLogs is bool chosen) KeepComputerLoggingInStep(chosen);
+        logFile.Event(profileLogs is null
+            ? "logs: on - this profile has not chosen, so it follows this computer's setting"
+            : "logs: on for this profile");
         // Dialogs own no log of their own; point them at this one. See UiChangeLog.
         WireDialogChangeLog();
+        // Jamulus-style Opus frames, automatic: the library loaded and said, and whether this computer asks for them. See
+        // MainForm.JamulusStyle.cs.
+        WireJamulusStyle();
+        // The profile's ASIO buffer size, before the driver first opens. See MainForm.AsioBufferSize.cs.
+        WireAsioBufferSize();
         // Tell any VST plugin where this machine's RemSound keeps its logs. The plugin runs inside a
         // DAW, where it cannot work that out for itself.
         AppConfig.WritePluginPointer(logFile.Enabled);
@@ -1391,6 +1412,7 @@ public sealed partial class MainForm : Form
         // and the receiver not, or the other way round. One line per assembly makes that visible
         // instead of leaving it as the explanation nobody can check.
         if (logFile.Enabled) logFile.Event($"build: {DescribeAssemblyBuilds()}");
+        if (logFile.Enabled) logFile.Event($"opus: {OpusInUse.Describe()}");
 
         // Sender diagnostic events (capture started, errors, etc.) get written to the log file.
         sender.Diagnostic = msg => logFile.Event($"sender: {msg}");
@@ -1410,6 +1432,8 @@ public sealed partial class MainForm : Form
         TryLoadCueSound(CueId.Update, "update.wav", out updateSound);
         TryLoadCueSound(CueId.SendOn, "send on.wav", out sendOnSound);
         TryLoadCueSound(CueId.SendOff, "send off.wav", out sendOffSound);
+        TryLoadCueSound(CueId.PushToTalkOn, "push talk on.wav", out pushToTalkOnSound);
+        TryLoadCueSound(CueId.PushToTalkOff, "push talk off.wav", out pushToTalkOffSound);
         TryLoadCueSound(CueId.ReceiveOn, "recieve on.wav", out receiveOnSound);
         TryLoadCueSound(CueId.ReceiveOff, "recieve off.wav", out receiveOffSound);
         TryLoadCueSound(CueId.Hide, "minimise.wav", out hideSound);
@@ -1643,6 +1667,11 @@ public sealed partial class MainForm : Form
             asioDriverChangeDebounce.Stop(); asioDriverChangeDebounce.Dispose();
             try { sendAppsReconcileTimer?.Stop(); sendAppsReconcileTimer?.Dispose(); } catch { }
             DisposeSessionStartWatcher();
+            try { pushToTalkHook?.Dispose(); } catch { }
+            // A master lets its followers go, and a follower says it has gone, before the socket closes - without a word
+            // to the screen reader as the window goes.
+            try { metronome.StoppedFollowing = null; metronome.ReleaseMaster(); metronome.StopFollowing("RemSound closed", sendLeave: true); } catch { }
+            metronomeTimer.Stop(); metronomeTimer.Dispose();
             try { processSelfMeter.Dispose(); } catch { }
             try { deviceChangeNotifier?.Dispose(); } catch { }
             try { powerResumeHandler?.Dispose(); } catch { }
@@ -1653,7 +1682,7 @@ public sealed partial class MainForm : Form
             // Reverse every Win32 lever PerformanceMode applied. The kernel would clean
             // these up on process exit anyway, but doing it explicitly releases the power
             // request handle and matches our timeBeginPeriod with a timeEndPeriod.
-            try { PerformanceMode.Apply(false, msg => logFile.Event(msg)); } catch { /* harmless */ }
+            try { PerformanceMode.KeepFastTimerWhileStreaming(false, msg => logFile.Event(msg)); } catch { /* harmless */ }
             try { discovery.Dispose(); } catch { }
             try { relayGroup.Stop(); } catch { }   // says goodbye, so the others see us leave at once
             try { heartbeatService?.Dispose(); } catch { }
@@ -1736,6 +1765,7 @@ public sealed partial class MainForm : Form
             isFirstLaunch = false;
             var minimizeThisInstance = startNextInstanceMinimized || (coldStart && AppConfig.Load().StartMinimised);
             startNextInstanceMinimized = false;
+            if (!minimizeThisInstance) EndQuietStartToTray();   // staying on screen after all: a normal window now
             // Consume the one-shot post-install foreground flag now, whichever branch we take below, so
             // it can't leak into a later profile-switch relaunch. "Start minimised" WINS over it: a user
             // who chose to boot into the tray wants the just-installed copy in the tray too — we only
@@ -1746,7 +1776,11 @@ public sealed partial class MainForm : Form
             {
                 // playCue:false — starting up in the tray (StartMinimised / --minimized) isn't the
                 // user choosing to minimise, so it must not sound the "minimise" cue.
-                BeginInvoke(() => trayController.Minimize(playCue: false));
+                BeginInvoke(() =>
+                {
+                    trayController.Minimize(playCue: false);
+                    EndQuietStartToTray();   // hidden now: back to a normal window for when it is next shown
+                });
             }
             else if (forcePostInstallForeground)
             {
@@ -1833,6 +1867,8 @@ public sealed partial class MainForm : Form
             // An installed service still watching a folder no update reaches (installed from the portable copy by 5.3 to
             // 5.9) is pointed at this installed copy, so it takes the update too. Off the UI thread; no admin rights.
             _ = Task.Run(() => ServiceSourceRepair.RunAtStartup(m => logFile.Event(m)));
+            // An installed copy puts its installed apps entry right: publisher and version (an update never re-registers).
+            _ = Task.Run(() => AppInstaller.RefreshInstalledAppEntryAtStart(m => logFile.Event(m)));
 
             // Post-launch notices, shown ONE AT A TIME via a single BeginInvoke that runs them in
             // sequence — NOT one BeginInvoke per notice. Separate BeginInvokes NEST: the second
@@ -2263,7 +2299,7 @@ public sealed partial class MainForm : Form
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
-            Padding = new Padding(8, 4, 8, 4),
+            Padding = Dpi.Pad(8, 4, 8, 4),
         };
         statusPanel.Controls.Add(healthDot);
         statusPanel.Controls.Add(healthLabel);
@@ -2302,6 +2338,7 @@ public sealed partial class MainForm : Form
         ["Stop recording"] = "menu.record.start-stop",
         ["Open current recordings folder"] = "menu.record.open-folder",
         ["Change recordings folder"] = "menu.record.change-folder",
+        ["Save the last minute of the network"] = "menu.record.save-network",
         ["Service menu"] = "menu.service",
         ["Service status"] = "menu.service.status",
         ["Configure service profile"] = "menu.service.configure",
@@ -2318,6 +2355,10 @@ public sealed partial class MainForm : Form
         ["Remove plugin"] = "menu.plugin.remove",
         ["Apply pan and EQ to plugin audio"] = "menu.plugin.apply-shaping",
         ["Let plugins connect to RemSound"] = "menu.plugin.let-connect",
+        ["Metronome menu"] = "menu.metronome",
+        ["Start metronome"] = "menu.metronome.start-stop",
+        ["Be the master metronome"] = "menu.metronome.master",
+        ["Metronome settings"] = "menu.metronome.settings",
         ["Options menu"] = "menu.options",
         ["Recording settings"] = "menu.options.recording-settings",
         ["Keyboard shortcuts"] = "menu.options.keyboard",
@@ -2613,6 +2654,7 @@ public sealed partial class MainForm : Form
         // run the service, re-gate this with OperatingSystem.IsWindowsVersionAtLeast(10, 0).
         menu.Items.Add(BuildServiceMenu());
         menu.Items.Add(BuildDawPluginMenu());
+        menu.Items.Add(BuildMetronomeMenu());
         menu.Items.Add(optionsMenu);
         menu.Items.Add(helpMenu);
         return menu;
@@ -2621,7 +2663,12 @@ public sealed partial class MainForm : Form
     /// <summary>Open or close the plugin link to match the setting. Idempotent — safe to call from
     /// startup and from the menu item, which is the point: one code path decides whether the port is
     /// open, so the menu can never disagree with reality.</summary>
-    private void ApplyPluginLinkSetting() => ApplyPluginLinkSetting(PluginBridgeProtocol.DefaultPort);
+    private void ApplyPluginLinkSetting() => ApplyPluginLinkSetting(PluginLinkPortForTest > 0 ? PluginLinkPortForTest : PluginBridgeProtocol.DefaultPort);
+
+    /// <summary>Gate seams: a port of the test's own for the link the menu's tick opens - never the real 47831, where a DAW's
+    /// plugin could reach a gate run - and whether the link is open now.</summary>
+    internal static int PluginLinkPortForTest;
+    internal bool PluginLinkOpenForTest => pluginHost is not null;
 
     /// <summary>Test seam: the SAME code path on a port the gate chooses. Not a parallel copy — the
     /// wiring being checked (the log hook, the claim register reaching the receiver) is precisely what
@@ -2661,7 +2708,8 @@ public sealed partial class MainForm : Form
 
         try
         {
-            pluginHost = new PluginBridgeHost(receiver.ReadClaimedPeer, port);
+            // A peer's audio - or, for the metronome's place in the list, its clicks (2026-09-28).
+            pluginHost = new PluginBridgeHost(ReadForPlugins, port);
             pluginHost.PeerListSource = () => PeerListForPlugins();
             pluginHost.AppReceivingSource = () => receiver.PlaybackEnabled;
             // THE SEND DIRECTION. This subscription is the whole of what was missing: the plugin has
@@ -2709,7 +2757,7 @@ public sealed partial class MainForm : Form
         // pointing at it. Sorting by address would move it the moment it switched networks, which is
         // the very thing this is here to prevent. Address is only the tie-break, so the order is
         // total and stable even for two peers sharing a name.
-        return selectedPeerEndpoints
+        var peers = selectedPeerEndpoints
             // Somebody reached through a server says so, as they do in RemSound's own list: the same machine reached on
             // the network AND through a server is otherwise two identical names in the plugin window (review, 2026-09-23).
             .Select(kv => (Address: kv.Value.Address, Name: selectedPeerLabels.GetValueOrDefault(kv.Key, kv.Value.Address.ToString())
@@ -2718,6 +2766,9 @@ public sealed partial class MainForm : Form
             .ThenBy(p => p.Address.ToString(), StringComparer.Ordinal)
             .Select(p => (p.Address, p.Name))
             .ToList();
+        // The metronome, heard in the DAW (2026-09-28): LAST, so no person's place in the list moves when it comes and goes.
+        if (metronomeSettings.HearIn == MetronomeHearIn.Daw) peers.Add((MetronomeDaw.PseudoPeer, MetronomeDaw.Name));
+        return peers;
     }
 
     /// <summary>The DAW plugin menu: put the VST plugin on this machine, take it off again, and
@@ -3282,6 +3333,123 @@ public sealed partial class MainForm : Form
     // like a crash, issue #12). Flipped false in the first OnShown.
     private static bool isFirstLaunch = true;
 
+    /// <summary>
+    /// This window is about to go straight to the tray (Start minimised, --minimized, a --headless copy). It is still
+    /// shown first and hidden a moment later - hiding it during the show made some virtual machines' display drivers
+    /// throw - but for that moment it is fully see-through and does not take the keyboard. It used to come up on screen
+    /// in full, and with focus, which a screen reader announces: the gate's screen-reader watch saw it at every cold start
+    /// (2026-09-27). Decided before the first show; ended once the window is in the tray.
+    /// </summary>
+    private bool quietStartToTray;
+
+    protected override bool ShowWithoutActivation => quietStartToTray || base.ShowWithoutActivation;
+
+    /// <summary>Gate seam: the quiet start to the tray is under way.</summary>
+    internal bool QuietStartToTrayForTest => quietStartToTray;
+
+    protected override void OnLoad(EventArgs e)
+    {
+        quietStartToTray = startNextInstanceMinimized || (isFirstLaunch && AppConfig.Load().StartMinimised);
+        if (quietStartToTray) Opacity = 0;
+        if (!RestoreRememberedPlacement())
+        {
+            // The size is known only now, with the window's parts made; but Windows placed the window, centred, when it was
+            // made, at the old size. So it is centred again at the new one, or a taller window would run off the bottom of the
+            // screen. Not while hidden: a headless copy stays wherever Windowless put it.
+            var before = Size;
+            Size = Dpi.FitToScreen(sizeThisSession ?? OpeningSize());
+            if (Size != before && StartPosition == FormStartPosition.CenterScreen && !headless && !Windowless.Hiding)
+            {
+                var area = Dpi.WorkingArea();
+                Location = new Point(area.X + Math.Max(0, (area.Width - Width) / 2), area.Y + Math.Max(0, (area.Height - Height) / 2));
+            }
+        }
+        base.OnLoad(e);
+    }
+
+    /// <summary>The size the last main window of this session had. A profile switch builds a new window, and it came back
+    /// at the default size every time (UI audit 2026-09-28, finding 4). Kept for this session only, never saved: between
+    /// sessions the window is remembered only when "Remember the main window's size and position" is ticked.</summary>
+    private static Size? sizeThisSession;
+
+    /// <summary>Gate seam: whether this window remembers and restores its size and place, whatever it is. Null (always,
+    /// outside the gate) means only a window a person uses does - never a headless copy, nor one Windowless is hiding.</summary>
+    internal static bool? PlacementAppliesForTest;
+
+    private bool PlacementApplies => PlacementAppliesForTest ?? (!headless && !Windowless.Hiding);
+
+    /// <summary>With "Remember the main window's size and position" ticked (Preferences, Appearance; Ed, 2026-09-28), the
+    /// window opens as big as, and where, it last closed - pulled wholly onto a screen there is now, since a monitor may
+    /// have gone, and never below its minimum size. False when it is off or nothing is saved yet: the window then opens as
+    /// it always has.</summary>
+    private bool RestoreRememberedPlacement()
+    {
+        if (!PlacementApplies) return false;
+        var cfg = AppConfig.Load();
+        if (!cfg.RememberMainWindowPlacement || cfg.MainWindowPlacement is not { } saved) return false;
+        var wanted = new Rectangle(saved.X, saved.Y, saved.Width, saved.Height);
+        var placed = Dpi.PlaceOnAScreen(wanted, MinimumSize);
+        StartPosition = FormStartPosition.Manual;
+        Bounds = placed;
+        if (saved.Maximized) WindowState = FormWindowState.Maximized;
+        logFile.Event($"main window: size and position restored - {placed.Width} x {placed.Height} at {placed.X}, {placed.Y}"
+                      + (saved.Maximized ? ", maximised" : "")
+                      + (placed != wanted ? $" (saved as {saved}; moved to fit the screens there are now)" : ""));
+        return true;
+    }
+
+    /// <summary>Keep the window's size and place for next time, when remembering is on: its normal bounds (what it goes
+    /// back to when not maximised) and whether it is maximised. Called as it closes, so a profile switch keeps them too.</summary>
+    private void RememberPlacement()
+    {
+        if (!PlacementApplies) return;
+        try
+        {
+            var cfg = AppConfig.Load();
+            if (!cfg.RememberMainWindowPlacement) return;
+            var normal = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+            if (normal.Width <= 0 || normal.Height <= 0) normal = Bounds;
+            var place = new WindowPlacement(normal.X, normal.Y, normal.Width, normal.Height, WindowState == FormWindowState.Maximized);
+            if (cfg.MainWindowPlacement == place) return;
+            cfg.MainWindowPlacement = place;
+            cfg.Save();
+            logFile.Event($"main window: size and position remembered - {place}");
+        }
+        catch (Exception ex)
+        {
+            logFile.Event($"main window: size and position could not be remembered: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        if (!headless) sizeThisSession = WindowState == FormWindowState.Normal ? Size : RestoreBounds.Size;
+        base.OnFormClosed(e);
+    }
+
+    /// <summary>Tall enough to show the tallest tab without scrolling, at the width the window has. The screen clamps it.</summary>
+    private Size OpeningSize()
+    {
+        PerformLayout();
+        var page = mainTabControl.SelectedTab ?? (mainTabControl.TabCount > 0 ? mainTabControl.TabPages[0] : null);
+        if (page is null) return Size;
+        // Everything round a tab's page: the menu, the tab strip, the status line and the window's own frame.
+        var around = Height - page.ClientSize.Height;
+        var tallest = 0;
+        foreach (TabPage tab in mainTabControl.TabPages)
+            if (tab.Controls.Count == 1)
+                tallest = Math.Max(tallest, tab.Controls[0].GetPreferredSize(new Size(page.ClientSize.Width, 0)).Height);
+        return new Size(Width, Math.Max(Height, tallest + around));
+    }
+
+    /// <summary>The quiet start is over: the window is a normal one again, for whenever it is next shown.</summary>
+    private void EndQuietStartToTray()
+    {
+        if (!quietStartToTray) return;
+        quietStartToTray = false;
+        Opacity = 1;
+    }
+
     /// <summary>Switch to the profile at <paramref name="path"/> via the same close-and-relaunch
     /// flow OpenProfileFromPicker uses. The active profile gets pushed to the front of the
     /// recents list by the next MainForm constructor when it sees the loaded path.</summary>
@@ -3466,8 +3634,10 @@ public sealed partial class MainForm : Form
         };
         startStopRecordingMenuItem.Click += (_, _) => ToggleRecording();
 
+        // Ctrl+Shift+O from anywhere in the main window, as Command-Shift-O is on the Mac (Andre, 2026-09-28).
         var openFolderItem = new ToolStripMenuItem("&Open current recordings folder")
         {
+            ShortcutKeys = Keys.Control | Keys.Shift | Keys.O,
             AccessibleName = "Open current recordings folder",
         };
         openFolderItem.Click += (_, _) => recordingController.OpenCurrentFolder(this);
@@ -3492,6 +3662,9 @@ public sealed partial class MainForm : Form
             new ToolStripSeparator(),
             openFolderItem,
             changeFolderItem,
+            new ToolStripSeparator(),
+            // The network, not the sound: the last minute of packet arrivals, for the simulator to replay (2026-09-30).
+            BuildSaveNetworkItem(),
         });
 
         return recordMenu;
@@ -3794,14 +3967,7 @@ public sealed partial class MainForm : Form
             getLoggingEnabled: () => logFile.Enabled,
             applyLoggingEnabled: enabled =>
             {
-                // Persist the user's choice to AppConfig — it's machine-local, not part of
-                // the profile, so switching profiles doesn't change it.
-                var cfg = AppConfig.Load();
-                cfg.LoggingEnabled = enabled;
-                try { cfg.Save(); } catch { /* harmless — choice just won't survive a restart */ }
-                // Flip the gate live so the user's tick takes effect immediately. No need to
-                // restart the app or reopen the log file — writes simply stop / resume mid-flight.
-                logFile.Enabled = enabled;
+                ApplyLoggingFromPreferences(enabled);
                 // Engine instrumentation rides on logging OR auto-tune — auto-tune needs the
                 // same per-second diag data the log line emits, so disabling logs alone must
                 // not starve auto-tune.
@@ -4205,7 +4371,7 @@ public sealed partial class MainForm : Form
         var panel = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(12),
+            Padding = Dpi.Pad(12),
             ColumnCount = 2,
             RowCount = 6,
             AutoScroll = true,
@@ -4349,11 +4515,14 @@ public sealed partial class MainForm : Form
         panel.Controls.Add(peersHeader, 0, 0);
         panel.SetColumnSpan(peersHeader, 2);
 
-        FormLayoutRows.AddCheckedListRow(panel, 1, "Connected peers (Alt+&C)", connectedPeersList, connectedPeersStatus, FocusListControl);
+        FormLayoutRows.AddCheckedListRow(panel, 1, "Connected peers (Alt+&C):", connectedPeersList, connectedPeersStatus, FocusListControl);
 
         // Details of, and a rename for, the peer highlighted in the connected list above.
-        var detailsLabel = new MnemonicLabel { Text = "Peer d&etails (Alt+E)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = peerDetailsBox };
+        var detailsLabel = new MnemonicLabel { Text = "Peer d&etails (Alt+E):", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = peerDetailsBox };
         detailsLabel.Click += (_, _) => peerDetailsBox.Focus();
+        // For sighted people (UI audit 2026-09-28): the label level with the box's top, the box across its column.
+        FormLayoutRows.LevelWithTop(detailsLabel, peerDetailsBox.Margin.Top);
+        FormLayoutRows.StretchInCell(peerDetailsBox);
         panel.Controls.Add(detailsLabel, 0, 2);
         panel.Controls.Add(peerDetailsBox, 1, 2);
         renamePeerButton.Click += (_, _) => OnRenamePeer();
@@ -4362,9 +4531,9 @@ public sealed partial class MainForm : Form
 
         // The two discovered lists sit together: the people on your network, and the people on the relay you are on.
         // The relay one is not there at all until you are on one (Ed, 2026-09-20). See MainForm.Relay.
-        discoveredPeersLabel = FormLayoutRows.AddCheckedListRow(panel, 4, "Discovered peers not on a server (Alt+&D)", discoveredPeersList, discoveredPeersStatus, FocusListControl);
+        discoveredPeersLabel = FormLayoutRows.AddCheckedListRow(panel, 4, "Discovered peers not on a server (Alt+&D):", discoveredPeersList, discoveredPeersStatus, FocusListControl);
         BuildRelayPeersRow(panel, 5);
-        rememberedPeersLabel = FormLayoutRows.AddCheckedListRow(panel, 6, "Remembered peers (Alt+&R)", rememberedPeersList, rememberedPeersStatus, FocusListControl);
+        rememberedPeersLabel = FormLayoutRows.AddCheckedListRow(panel, 6, "Remembered peers (Alt+&R):", rememberedPeersList, rememberedPeersStatus, FocusListControl);
         BuildRelayButtonRow(panel, 7);
         var afterRelay = 8;
 
@@ -4383,8 +4552,10 @@ public sealed partial class MainForm : Form
         panel.SetColumnSpan(lockPeerAddressesBox, 2);
 
         // Connection status readout — last row, tab-into-able.
-        var statusLabel = new MnemonicLabel { Text = "Connection status (Alt+&S)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = statusReadout };
+        var statusLabel = new MnemonicLabel { Text = "Connection status (Alt+&S):", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = statusReadout };
         statusLabel.Click += (_, _) => statusReadout.Focus();
+        FormLayoutRows.LevelWithTop(statusLabel, statusReadout.Margin.Top);
+        FormLayoutRows.StretchInCell(statusReadout);
         panel.Controls.Add(statusLabel, 0, afterRelay + 2);
         panel.Controls.Add(statusReadout, 1, afterRelay + 2);
         UpdatePeerDetails();
@@ -4448,7 +4619,7 @@ public sealed partial class MainForm : Form
         var panel = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(12),
+            Padding = Dpi.Pad(12),
             ColumnCount = 2,
             RowCount = 13,
             AutoScroll = true,
@@ -4478,10 +4649,11 @@ public sealed partial class MainForm : Form
 
         if (hasAnyAsioDriverInstalled)
         {
-            asioDriverLabel = new MnemonicLabel { Text = "ASIO driver (Alt+&D)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = asioDriverBox };
+            asioDriverLabel = new MnemonicLabel { Text = "ASIO driver (Alt+&D):", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = asioDriverBox };
             asioDriverLabel.Click += (_, _) => asioDriverBox.Focus();
+            FormLayoutRows.LevelWithTop(asioDriverLabel, asioDriverBox.Margin.Top);
             panel.Controls.Add(asioDriverLabel, 0, 1);
-            panel.Controls.Add(asioDriverBox, 1, 1);
+            panel.Controls.Add(AsioDriverCell(), 1, 1);
         }
         else
         {
@@ -4496,11 +4668,14 @@ public sealed partial class MainForm : Form
         var receiveCheckboxPanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         receiveCheckboxPanel.Controls.Add(receiveAudioCheckbox);
         panel.Controls.Add(receiveCheckboxPanel, 1, 2);
-        receiveOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 3, "WASAPI outputs for received audio (Alt+&3)", receiveOutputDevicesList, receiveOutputDevicesStatusLabel, FocusListControl);
-        asioReceiveOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 4, "ASIO outputs for received audio (Alt+&1)", asioReceiveOutputDevicesList, asioReceiveOutputDevicesStatusLabel, FocusListControl);
-        FormLayoutRows.AddRow(panel, 5, "Master volume for received audio (Alt+&V)", volumeBar, FocusControl);
+        receiveOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 3, "WASAPI outputs for received audio (Alt+&3):", receiveOutputDevicesList, receiveOutputDevicesStatusLabel, FocusListControl);
+        asioReceiveOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 4, "ASIO outputs for received audio (Alt+&1):", asioReceiveOutputDevicesList, asioReceiveOutputDevicesStatusLabel, FocusListControl);
+        FormLayoutRows.AddRow(panel, 5, "Master volume for received audio (Alt+&V):", volumeBar, FocusControl);
         var sendCheckboxPanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         sendCheckboxPanel.Controls.Add(sendMyAudioCheckbox);
+        // Push to talk's settings, straight after Send my audio (2026-09-28); the button says whether it is on.
+        sendCheckboxPanel.Controls.Add(pushToTalkButton);
+        WirePushToTalkButton();
         panel.Controls.Add(sendCheckboxPanel, 1, 6);
 
         // Row 7: "how to send WASAPI audio" chooser — audio devices (the classic loopback list) or
@@ -4509,20 +4684,28 @@ public sealed partial class MainForm : Form
         BuildSendModeRow(panel, 7);
 
         // Row 8 (devices mode): the classic WASAPI outputs-to-send loopback list.
-        sendOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 8, "WASAPI audio outputs to send (Alt+&4)", sendOutputDevicesList, sendOutputDevicesStatusLabel, FocusListControl);
+        sendOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 8, "WASAPI audio outputs to send (Alt+&4):", sendOutputDevicesList, sendOutputDevicesStatusLabel, FocusListControl);
 
         // Rows 9-10 (applications mode): TWO app lists — currently-active (running now, plus any ticked
         // app that isn't, so it can always be unticked) and remembered (the global address book, minus
         // whatever is ticked), mirroring the peers lists. No "send all applications" toggle — picking this
         // mode means picking specific apps; whole-system audio is devices mode's job (Ed, 2026-07-16).
-        sendAppsLabel = FormLayoutRows.AddCheckedListRow(panel, 9, "Currently active applications (Alt+&8)", sendAppsList, sendAppsStatusLabel, FocusListControl);
-        rememberedAppsLabel = FormLayoutRows.AddCheckedListRow(panel, 10, "Remembered applications (Alt+&9)", rememberedAppsList, rememberedAppsStatusLabel, FocusListControl);
+        sendAppsLabel = FormLayoutRows.AddCheckedListRow(panel, 9, "Currently active applications (Alt+&8):", sendAppsList, sendAppsStatusLabel, FocusListControl);
+        rememberedAppsLabel = FormLayoutRows.AddCheckedListRow(panel, 10, "Remembered applications (Alt+&9):", rememberedAppsList, rememberedAppsStatusLabel, FocusListControl);
 
         // Rows 11-12: the remaining send lists.
-        sendInputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 11, "WASAPI audio inputs to send (Alt+&5)", sendInputDevicesList, sendInputDevicesStatusLabel, FocusListControl);
-        asioSendDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 12, "ASIO audio inputs to send (Alt+&2)", asioSendDevicesList, asioSendDevicesStatusLabel, FocusListControl);
+        sendInputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 11, "WASAPI audio inputs to send (Alt+&5):", sendInputDevicesList, sendInputDevicesStatusLabel, FocusListControl);
+        asioSendDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 12, "ASIO audio inputs to send (Alt+&2):", asioSendDevicesList, asioSendDevicesStatusLabel, FocusListControl);
 
         WireSendModeControls();
+
+        // The two ASIO lists' labels exist only from here, but ApplyAsioMode, which shows or hides them with their lists, ran
+        // before this in the constructor - so with no driver chosen they sat on the tab with nothing beside them (UI audit
+        // 2026-09-28, finding 7). Labels are no tab stops: the tab order is unchanged, and Alt+1 and Alt+2 go through
+        // ProcessCmdKey as before.
+        var asioListsShown = ModeUsesAsio(settings.LoadAudioMode());
+        asioReceiveOutputDevicesLabel.Visible = asioListsShown;
+        asioSendDevicesLabel.Visible = asioListsShown;
 
         audioIOTabPage.Controls.Add(panel);
     }
@@ -4535,7 +4718,7 @@ public sealed partial class MainForm : Form
     {
         sendModeLabel = new MnemonicLabel
         {
-            Text = "How to send WASAPI audio (Alt+&6)",
+            Text = "How to send WASAPI audio (Alt+&6):",
             AutoSize = true,
             Anchor = AnchorStyles.Left,
             MnemonicTarget = sendModeList,
@@ -4557,6 +4740,9 @@ public sealed partial class MainForm : Form
         };
         wrapper.Controls.Add(sendModeList);
         panel.Controls.Add(wrapper, 1, row);
+        // As the device lists: level with the list's top, and as wide as the column (UI audit 2026-09-28).
+        FormLayoutRows.LevelWithTop(sendModeLabel, wrapper.Margin.Top + sendModeList.Margin.Top);
+        FormLayoutRows.FillWidth(wrapper, sendModeList, null);
     }
 
     /// <summary>Wires the send-mode chooser and the two app lists, sets up the reconcile timer, and
@@ -4849,6 +5035,11 @@ public sealed partial class MainForm : Form
         try { if (!IsDisposed) BeginInvoke((Action)RefreshSendAppCapture); } catch { /* form gone */ }
     }
 
+    /// <summary>Gate seams: the session-start watcher's callback, as Windows would raise it; and the window marked
+    /// connected without opening the network (the send-app re-apply only runs once connected).</summary>
+    internal void AppSessionStartedForTest(int pid) => OnAppSessionStarted(pid);
+    internal void MarkConnectedForTest() => connected = true;
+
     /// <summary>Stand up the session-start watcher while we're sending specific applications, so a remembered
     /// app is captured the instant it starts. No-op if already running or process-loopback isn't supported.</summary>
     private void EnsureSessionStartWatcher()
@@ -4928,71 +5119,50 @@ public sealed partial class MainForm : Form
     }
 
     /// <summary>Audio profile tab — split into two GroupBox sections so NVDA announces the
-    /// section name when focus first crosses into it. The high-priority-mode checkbox sits above
-    /// both groups. Send-side group: codec, packet size. Receive-side group: jitter buffer +
+    /// section name when focus first crosses into it. Send-side group: codec, packet size. Receive-side group: jitter buffer +
     /// auto-tune controls, total latency readout, buffer smoothness, artefact. Inside each group,
     /// focus traversal is the natural top-to-bottom order; crossing the boundary triggers NVDA's
     /// grouping-name announcement on the first child of the entered group. GroupBox `Text` is also
     /// the accessible name (single-source label rule); no `&` mnemonic since GroupBox isn't focusable.</summary>
     private void BuildAudioProfileTab()
     {
-        // Outer layout: one column, three rows. Row 0 is the high-priority-mode checkbox — the
-        // first thing the user lands on when they Tab into the tab, deliberately ungrouped
-        // and at the top so it can't be missed. Rows 1 and 2 are the existing Audio send
-        // parameters / Audio receive parameters GroupBoxes. AutoScroll on so the tab page
-        // handles overflow rather than the inner groups clipping their contents.
+        // Outer layout: one column, two rows - the Audio send parameters and Audio receive parameters GroupBoxes. (Row 0
+        // was the high-priority tick box until 2026-09-29.) AutoScroll on so the tab page handles overflow rather than the
+        // inner groups clipping their contents.
         var outerPanel = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(12),
+            Padding = Dpi.Pad(12, 6, 12, 6),   // 6 top and bottom: the tab fits a 768-line screen with the lowest-delay row (2026-09-29)
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 2,
             AutoScroll = true,
         };
         outerPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         outerPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         outerPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        outerPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-
-        // Wrap the checkbox in its own FlowLayoutPanel — same NVDA-friendly pattern the
-        // form's other top-level checkboxes use (a bare CheckBox in a TableLayoutPanel
-        // cell suppresses some state-change announcements; the FlowLayoutPanel restores
-        // the announcement chain).
-        var priorityModePanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        priorityModePanel.Controls.Add(priorityModeBox);
-        priorityModeBox.Checked = settings.LoadPriorityMode();
-        priorityModeBox.CheckedChanged += (_, _) =>
-        {
-            settings.SavePriorityMode(priorityModeBox.Checked);
-            LogUiChange("priority mode (high priority + keep awake)", priorityModeBox.Checked ? "on" : "off");
-            // Re-evaluate the streaming-scoped levers right away: unticking releases them
-            // immediately; ticking engages them now if audio is moving (else on the next tick
-            // once it is). See EvaluatePriorityModeScope.
-            EvaluatePriorityModeScope();
-            MarkProfileDirty();
-        };
 
         var sendGroup = new GroupBox
         {
             Text = "Audio send parameters",
             AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,   // as tall as what it holds now, not the tallest it has ever been
             Dock = DockStyle.Top,
-            Padding = new Padding(8, 4, 8, 8),
+            Padding = Dpi.Pad(8, 4, 8, 8),
         };
         var receiveGroup = new GroupBox
         {
             Text = "Audio receive parameters",
             AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Dock = DockStyle.Top,
-            Padding = new Padding(8, 4, 8, 8),
+            Padding = Dpi.Pad(8, 4, 8, 8),
         };
 
         BuildAudioSendGroupContents(sendGroup);
         BuildAudioReceiveGroupContents(receiveGroup);
 
-        outerPanel.Controls.Add(priorityModePanel, 0, 0);
-        outerPanel.Controls.Add(sendGroup, 0, 1);
-        outerPanel.Controls.Add(receiveGroup, 0, 2);
+        outerPanel.Controls.Add(sendGroup, 0, 0);
+        outerPanel.Controls.Add(receiveGroup, 0, 1);
         audioProfileTabPage.Controls.Add(outerPanel);
         MarkContextHelp();
     }
@@ -5022,6 +5192,7 @@ public sealed partial class MainForm : Form
         ContextHelp.Mark(asioReceiveOutputDevicesList, "audio-io.asio-outputs");
         ContextHelp.Mark(volumeBar, "audio-io.volume");
         ContextHelp.Mark(sendMyAudioCheckbox, "audio-io.send");
+        ContextHelp.Mark(pushToTalkButton, "audio-io.push-to-talk");
         ContextHelp.Mark(sendModeList, "audio-io.send-mode");
         ContextHelp.Mark(sendOutputDevicesList, "audio-io.wasapi-send-outputs");
         ContextHelp.Mark(sendAppsList, "audio-io.active-apps");
@@ -5044,7 +5215,6 @@ public sealed partial class MainForm : Form
         ContextHelp.Mark(audioProfileTabPage, "audio-profile");
         ContextHelp.Mark(panEqTabPage, "pan-eq");
 
-        ContextHelp.Mark(priorityModeBox, "audio-profile.priority-mode");
         ContextHelp.Mark(codecBox, "audio-profile.codec");
         ContextHelp.Mark(sendRateBox, "audio-profile.packet-size");
         ContextHelp.Mark(maxLatencyAsioBox, "audio-profile.asio-jitter-buffer");
@@ -5052,6 +5222,7 @@ public sealed partial class MainForm : Form
         ContextHelp.Mark(maxLatencyBox, "audio-profile.jitter-buffer");
         ContextHelp.Mark(continuousTuneBox, "audio-profile.auto-tune");
         ContextHelp.Mark(continuousIntervalBox, "audio-profile.auto-tune-interval");
+        ContextHelp.Mark(lowestDelayTuneBox, "audio-profile.lowest-delay");
         ContextHelp.Mark(measuredLatencyReadout, "audio-profile.total-latency");
         ContextHelp.Mark(smoothnessBox, "audio-profile.smoothness");
         ContextHelp.Mark(artefactBox, "audio-profile.artefact");
@@ -5075,7 +5246,7 @@ public sealed partial class MainForm : Form
     /// <see cref="PeerShaping"/>.</summary>
     private void BuildPanEqTab()
     {
-        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 9, AutoScroll = true };
+        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = Dpi.Pad(12), ColumnCount = 1, RowCount = 9, AutoScroll = true };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
         enableAllPeerShapingBox.CheckedChanged += (_, _) => { if (!loadingPanEqControls) { LogUiChange("shaping: master switch", $"{(enableAllPeerShapingBox.Checked ? "on" : "off")} ({peerShaping.Count} peer(s) with saved shaping)"); MarkProfileDirty(); ApplyAllPeerShaping(); } };
@@ -5090,23 +5261,28 @@ public sealed partial class MainForm : Form
         addBandButton.Click += (_, _) => OnAddParametricBand();
         deleteBandButton.Click += (_, _) => OnDeleteParametricBands();
         parametricBandList.KeyDown += OnParametricBandListKeyDown;
+        ListSelection.AllowSelectAll(parametricBandList);
         eqModeList.Items.Add("3 band simple EQ");
         eqModeList.Items.Add("12 band advanced graphic EQ");
         eqModeList.Items.Add("16 band parametric EQ");
         eqModeList.SelectedIndexChanged += (_, _) => OnEqModeChanged();
 
-        var peerLabel = new MnemonicLabel { Text = "Peers (Alt+&U)", AutoSize = true, MnemonicTarget = panEqPeerList };
-        var volumeLabel = new MnemonicLabel { Text = "Vo&lume (Alt+L)", AutoSize = true, MnemonicTarget = volumeSlider };
-        var panLabel = new MnemonicLabel { Text = "Pa&n (Alt+N)", AutoSize = true, MnemonicTarget = panSlider };
-        var modeLabel = new MnemonicLabel { Text = "EQ &mode (Alt+M)", AutoSize = true, MnemonicTarget = eqModeList };
+        var peerLabel = new MnemonicLabel { Text = "Peers (Alt+&U):", AutoSize = true, MnemonicTarget = panEqPeerList };
+        var volumeLabel = new MnemonicLabel { Text = "Vo&lume (Alt+L):", AutoSize = true, MnemonicTarget = volumeSlider };
+        var panLabel = new MnemonicLabel { Text = "Pa&n (Alt+N):", AutoSize = true, MnemonicTarget = panSlider };
+        var modeLabel = new MnemonicLabel { Text = "EQ &mode (Alt+M):", AutoSize = true, MnemonicTarget = eqModeList };
+        // Each level with the top of the slider or list beside it (UI audit 2026-09-28, finding 8).
+        FormLayoutRows.LevelWithTop(volumeLabel, volumeSlider.Margin.Top);
+        FormLayoutRows.LevelWithTop(panLabel, panSlider.Margin.Top);
+        FormLayoutRows.LevelWithTop(modeLabel, eqModeList.Margin.Top);
 
-        var volumeRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+        var volumeRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Dpi.Pad(0) };
         volumeRow.Controls.Add(volumeLabel);
         volumeRow.Controls.Add(volumeSlider);
-        var panRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+        var panRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Dpi.Pad(0) };
         panRow.Controls.Add(panLabel);
         panRow.Controls.Add(panSlider);
-        var modeRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+        var modeRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Dpi.Pad(0) };
         modeRow.Controls.Add(modeLabel);
         modeRow.Controls.Add(eqModeList);
 
@@ -5437,15 +5613,17 @@ public sealed partial class MainForm : Form
                     SmallChange = 1,
                     LargeChange = 10,
                     TickFrequency = 25,
-                    Width = 300,
+                    Width = Dpi.Px(300),
                     Tag = i,
                     Enabled = selectedShapingKey is not null,
                 };
                 UpdateBandAccessibleName(slider, bands[i].Label);
                 ContextHelp.Mark(slider, "pan-eq.eq-band");
                 slider.ValueChanged += (_, _) => OnBandChanged(slider);
-                var row = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
-                row.Controls.Add(new MnemonicLabel { Text = bands[i].Label, AutoSize = true, MnemonicTarget = slider });
+                var row = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Dpi.Pad(0) };
+                var bandLabel = new MnemonicLabel { Text = bands[i].Label + ":", AutoSize = true, MnemonicTarget = slider };
+                FormLayoutRows.LevelWithTop(bandLabel, slider.Margin.Top);
+                row.Controls.Add(bandLabel);
                 row.Controls.Add(slider);
                 eqBandsPanel.Controls.Add(row);
                 eqBandSliders.Add(slider);
@@ -5538,7 +5716,7 @@ public sealed partial class MainForm : Form
     /// list, Delete band). The three controls are persistent members reused across rebuilds.</summary>
     private void BuildParametricPanel()
     {
-        var bandsLabel = new MnemonicLabel { Text = "Bands (Alt+&B)", AutoSize = true, MnemonicTarget = parametricBandList };
+        var bandsLabel = new MnemonicLabel { Text = "Bands (Alt+&B):", AutoSize = true, MnemonicTarget = parametricBandList };
         eqBandsPanel.Controls.Add(addBandButton);
         eqBandsPanel.Controls.Add(bandsLabel);
         eqBandsPanel.Controls.Add(parametricBandList);
@@ -5704,14 +5882,20 @@ public sealed partial class MainForm : Form
         // Each box has its OWN label and its own letter. This used to be one plain label carrying both
         // "&C" and "&P", and a caption can only have one working mnemonic, so Alt+P never reached Packet
         // size however its name advertised it. 2026-09-13 review.
-        var codecAndSendLabel = new MnemonicLabel { Text = "Audio &codec (Alt+C)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = codecBox };
+        var codecAndSendLabel = new MnemonicLabel { Text = "Audio &codec (Alt+C):", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = codecBox };
         codecAndSendLabel.Click += (_, _) => FocusControl(codecBox);
-        var codecRowPanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+        var codecRowPanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = true };
         codecRowPanel.Controls.Add(codecBox);
-        var packetSizeLabel = new MnemonicLabel { Text = "  &Packet size (Alt+P): ", AutoSize = true, Padding = new Padding(8, 6, 0, 0), MnemonicTarget = sendRateBox };
+        var packetSizeLabel = new MnemonicLabel { Text = "  &Packet size (Alt+P): ", AutoSize = true, MnemonicTarget = sendRateBox };
+        FormLayoutRows.LevelWithTop(packetSizeLabel, sendRateBox.Margin.Top);
         packetSizeLabel.Click += (_, _) => FocusControl(sendRateBox);
         codecRowPanel.Controls.Add(packetSizeLabel);
         codecRowPanel.Controls.Add(sendRateBox);
+        // Packet size on a row of its own under the codec, where it can be seen (UI audit 2026-09-28, finding 4: it sat
+        // off the right edge of the window). A flow break, so it is visual only: the same panel, in the same order, so
+        // the tab order and what a screen reader reads are unchanged.
+        codecRowPanel.SetFlowBreak(codecBox, true);
+        FormLayoutRows.LevelWithTop(codecAndSendLabel, codecRowPanel.Margin.Top + codecBox.Margin.Top);
         panel.Controls.Add(codecAndSendLabel, 0, 0);
         panel.Controls.Add(codecRowPanel, 1, 0);
 
@@ -5733,7 +5917,7 @@ public sealed partial class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 5,
+            RowCount = 6,
             AutoSize = true,
         };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -5742,18 +5926,19 @@ public sealed partial class MainForm : Form
         // === Row 0: ASIO latency row — VISIBLE ONLY IN BOTHINDEPENDENT MODE ===
         // In BothIndependent the WASAPI and ASIO lanes have independent targets. The ASIO row
         // sits above the WASAPI row so it's first in tab order (ASIO is the "headline" lane
-        // a user picks the new mode for) and takes Alt+I for its jitter buffer and Alt+T for its
+        // a user picks the new mode for) and takes Alt+I for its jitter buffer and Alt+U for its
         // auto-tune — when the user enters BothIndependent the WASAPI row's labels mutate to
-        // "WASAPI jitter buffer (Alt+W)" / "Continuous auto-tune WASAPI (Alt+Y)", surrendering T to
+        // "WASAPI jitter buffer (Alt+W)" / "Continuous auto-tune WASAPI (Alt+Y)", surrendering U to
         // ASIO. The shared interval takes Alt+N. With no ASIO driver this row is hidden via
         // UpdateBothIndependentVisibility and the WASAPI row keeps the unqualified
         // "Audio jitter buffer (Alt+L)" labels. KeyboardShortcutsGoWhereTheySay walks all three
         // configurations, so a letter reused here fails the gate.
-        asioLatencyLabel = new Label { Text = "AS&IO jitter buffer in milliseconds (Alt+I)", AutoSize = true, Anchor = AnchorStyles.Left };
+        asioLatencyLabel = new Label { Text = "AS&IO jitter buffer in milliseconds (Alt+I):", AutoSize = true, Anchor = AnchorStyles.Left };
+        FormLayoutRows.LevelWithTop(asioLatencyLabel, 3 + maxLatencyAsioBox.Margin.Top);   // 3: the row panel's own margin
         asioLatencyLabel.Click += (_, _) => FocusControl(maxLatencyAsioBox);
         SelectAllOnFocus(maxLatencyAsioBox);
         maxLatencyAsioBox.Value = Math.Clamp(settings.LoadMaxLatencyMsAsio(), (int)maxLatencyAsioBox.Minimum, (int)maxLatencyAsioBox.Maximum);
-        continuousTuneAsioBox.Text = "Continuous auto-tune ASIO jitter buffer (Alt+&T)";
+        continuousTuneAsioBox.Text = "Continuous auto-tune ASIO jitter buffer (Alt+&U)";
         continuousTuneAsioBox.AccessibleName = "Continuous auto-tune ASIO jitter buffer";
         continuousTuneAsioBox.Checked = settings.LoadContinuousAutoTuneAsioEnabled();
         asioDelayContainer = new FlowLayoutPanel
@@ -5770,15 +5955,17 @@ public sealed partial class MainForm : Form
 
         // === Row 1: WASAPI latency row ===
         // Labels and mnemonics mutate based on audio mode — see UpdateBothIndependentVisibility.
-        //   No ASIO:        "Audio jitter buffer (Alt+L)" / "Continuous auto-tune jitter buffer (Alt+T)"
+        //   No ASIO:        "Audio jitter buffer (Alt+L)" / "Continuous auto-tune jitter buffer (Alt+U)"
         //   WASAPI+ASIO:    "WASAPI jitter buffer (Alt+W)" / "Continuous auto-tune WASAPI (Alt+Y)"
         // The interval dropdown stays attached to this row in both modes; one interval setting
         // governs both lanes' auto-tune ticks (separate intervals would be more knobs than
         // value).
-        wasapiLatencyLabel = new Label { Text = "Audio jitter buffer in milliseconds (Alt+&L)", AutoSize = true, Anchor = AnchorStyles.Left };
+        wasapiLatencyLabel = new Label { Text = "Audio jitter buffer in milliseconds (Alt+&L):", AutoSize = true, Anchor = AnchorStyles.Left };
+        // Level with the number box on the first line of its row, not centred on a row that wraps onto two lines.
+        FormLayoutRows.LevelWithTop(wasapiLatencyLabel, 3 + maxLatencyBox.Margin.Top);   // 3: the row panel's own margin
         wasapiLatencyLabel.Click += (_, _) => FocusControl(maxLatencyBox);
         SelectAllOnFocus(maxLatencyBox);
-        continuousTuneBox.Text = "Continuous auto-tune jitter buffer (Alt+&T)";
+        continuousTuneBox.Text = "Continuous auto-tune jitter buffer (Alt+&U)";
         continuousTuneBox.AccessibleName = "Continuous auto-tune jitter buffer";
         continuousTuneBox.Checked = continuousTuneEnabled;
         // 3 seconds added 2026-05-06 alongside the lookback shortening. The interval sets how
@@ -5792,11 +5979,12 @@ public sealed partial class MainForm : Form
         // in BothIndependent mode when only ASIO auto-tune was ticked, even though the
         // timer was running and the interval was being honoured for the ASIO lane.
         continuousIntervalBox.Enabled = AnyAutoTuneEnabled();
+        lowestDelayTuneBox.Enabled = continuousIntervalBox.Enabled;
         // Label text is set by UpdateAutoTuneIntervalWording (via UpdateBothIndependentVisibility) —
         // it follows the output lanes in use: one lane → "Auto-tune interval for jitter buffer", both
         // → "Auto-tune interval for WASAPI and ASIO jitter buffer", to make explicit that the same
         // dropdown drives both lanes' tick cadence in the latter case.
-        continuousIntervalLabel = new Label { AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(8, 6, 0, 0) };
+        continuousIntervalLabel = new Label { AutoSize = true, Anchor = AnchorStyles.Left, Padding = Dpi.Pad(8, 6, 0, 0) };
         var delayContainer = new FlowLayoutPanel
         {
             AutoSize = true,
@@ -5810,12 +5998,26 @@ public sealed partial class MainForm : Form
         delayContainer.Controls.Add(continuousIntervalBox);
         panel.Controls.Add(wasapiLatencyLabel, 0, 1);
         panel.Controls.Add(delayContainer, 1, 1);
+        // Row 2: the lowest-delay auto-tune, straight under the interval it goes with and next in Tab order. A row of its
+        // own rather than a third line of the row above, which the window did not measure and so cut off.
+        panel.Controls.Add(lowestDelayTuneBox, 1, 2);
+        lowestDelayTuneBox.Checked = settings.LoadAutoTuneLowestDelay();
+        lowestDelayTuneBox.Enabled = continuousIntervalBox.Enabled;
+        ApplyLowestDelayTune(lowestDelayTuneBox.Checked);
+        lowestDelayTuneBox.CheckedChanged += (_, _) =>
+        {
+            settings.SaveAutoTuneLowestDelay(lowestDelayTuneBox.Checked);
+            ApplyLowestDelayTune(lowestDelayTuneBox.Checked);
+            MarkProfileDirty();
+            LogUiChange("lowest-delay auto-tune", lowestDelayTuneBox.Checked ? "on" : "off");
+        };
 
         continuousTuneBox.CheckedChanged += (_, _) =>
         {
             continuousTuneEnabled = continuousTuneBox.Checked;
             settings.SaveContinuousAutoTuneEnabled(continuousTuneEnabled);
             continuousIntervalBox.Enabled = AnyAutoTuneEnabled();
+            lowestDelayTuneBox.Enabled = continuousIntervalBox.Enabled;
             ApplyContinuousTuneTimer();
             MarkProfileDirty();
             // Named by LANE. Auto-tune moves the buffer on its own, so a log that shows the buffer
@@ -5870,19 +6072,23 @@ public sealed partial class MainForm : Form
         {
             // Alt+M, as it says. The & used to sit on the T, which made the real key Alt+T — already the
             // auto-tune checkbox — and left Alt+M answering nothing. 2026-09-13 review.
-            Text = "Total latency (Alt+&M)",
+            Text = "Total latency (Alt+&M):",
             AutoSize = true,
             Anchor = AnchorStyles.Left,
             MnemonicTarget = measuredLatencyReadout,
         };
-        panel.Controls.Add(measuredLatencyLabel, 0, 2);
-        panel.Controls.Add(measuredLatencyReadout, 1, 2);
+        FormLayoutRows.LevelWithTop(measuredLatencyLabel, measuredLatencyReadout.Margin.Top);
+        FormLayoutRows.StretchInCell(measuredLatencyReadout);
+        panel.Controls.Add(measuredLatencyLabel, 0, 3);
+        panel.Controls.Add(measuredLatencyReadout, 1, 3);
 
         // === Row 3: Buffer smoothness ===
-        var smoothnessLabel = new Label { Text = "Buffer smoothness (Alt+&B)", AutoSize = true, Anchor = AnchorStyles.Left };
+        var smoothnessLabel = new Label { Text = "Buffer smoothness (Alt+&B):", AutoSize = true, Anchor = AnchorStyles.Left };
         smoothnessLabel.Click += (_, _) => FocusControl(smoothnessBox);
-        panel.Controls.Add(smoothnessLabel, 0, 3);
-        panel.Controls.Add(smoothnessBox, 1, 3);
+        FormLayoutRows.LevelWithTop(smoothnessLabel, smoothnessBox.Margin.Top);
+        FormLayoutRows.StretchInCell(smoothnessBox);
+        panel.Controls.Add(smoothnessLabel, 0, 4);
+        panel.Controls.Add(smoothnessBox, 1, 4);
 
         // === Row 4: Artefact ===
         artefactBox.Items.Clear();
@@ -5901,21 +6107,22 @@ public sealed partial class MainForm : Form
             LogUiChange("concealment artifact", $"{newArtifact}");
             MarkProfileDirty();
         };
-        var artefactLabel = new Label { Text = "Artefact sound type (Alt+&A)", AutoSize = true, Anchor = AnchorStyles.Left };
+        var artefactLabel = new Label { Text = "Artefact sound type (Alt+&A):", AutoSize = true, Anchor = AnchorStyles.Left };
         artefactLabel.Click += (_, _) => FocusControl(artefactBox);
         var artefactHint = new Label
         {
             Text = "Use this to change the way audio artefacts sound when they appear (e.g. on brief network or buffer hiccups). Changes take effect immediately.",
-            AutoSize = false,
-            Width = 420,
-            Height = 36,
+            // Wrapped to the column, however wide that is: a fixed 420 x 36 was cut off on the right and at the bottom.
+            AutoSize = true,
             Anchor = AnchorStyles.Left,
         };
-        var artefactContainer = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, Dock = DockStyle.Fill };
+        var artefactContainer = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, Dock = DockStyle.Fill, WrapContents = false };
         artefactContainer.Controls.Add(artefactHint);
         artefactContainer.Controls.Add(artefactBox);
-        panel.Controls.Add(artefactLabel, 0, 4);
-        panel.Controls.Add(artefactContainer, 1, 4);
+        FormLayoutRows.LevelWithTop(artefactLabel, artefactContainer.Margin.Top + artefactHint.Margin.Top - Dpi.Px(3));   // beside words, not a box
+        FormLayoutRows.FillWidth(artefactContainer, artefactBox, artefactHint);
+        panel.Controls.Add(artefactLabel, 0, 5);
+        panel.Controls.Add(artefactContainer, 1, 5);
 
         // Wire ASIO companion control event handlers and apply initial visibility now that
         // every element exists. After this method returns the panel is ready to dock into
@@ -5957,7 +6164,7 @@ public sealed partial class MainForm : Form
         // kept stale text until the NEXT change came along. It self-healed here because the status
         // text changes often, but it is the same defect that made the latency readout unreadable, so
         // it is fixed rather than left to be rediscovered. 2026-08-23.
-        if (!ShouldWriteReadout(lastStatusReadoutText, text, statusReadout.Focused)) return;
+        if (!ShouldWriteReadout(lastStatusReadoutText, text, BeingRead(statusReadout))) return;
         lastStatusReadoutText = text;
         statusReadout.Text = text;
     }
@@ -6033,13 +6240,14 @@ public sealed partial class MainForm : Form
 
         // Healthy peers from heartbeat. Map each to its display label (the user-friendly
         // name from selectedPeerLabels, falling back to the address).
-        var healthy = new List<(string Label, int? RttMs)>();
-        if (heartbeatService is { } hb)
+        var healthy = new List<(string Label, int? RttMs, List<(bool Asio, double Ms)> Delays)>();
+        if ((PeerHealthForTest?.Invoke() ?? heartbeatService?.GetAllPeerHealth()) is { } peerHealth)
         {
-            foreach (var ph in hb.GetAllPeerHealth())
+            foreach (var ph in peerHealth)
             {
                 // The same rule as the connect cue: audio arriving or a healthy heartbeat, held through a blip.
                 if (!IsPeerConnectedNow(ph)) continue;
+                if (IsHeldForPassword(ph.AudioEndpoint)) continue;   // named below instead
                 // Find a label by walking selectedPeerEndpoints for a matching address+port.
                 string? label = null;
                 foreach (var (id, ep) in selectedPeerEndpoints)
@@ -6053,7 +6261,7 @@ public sealed partial class MainForm : Form
                 label ??= ph.AudioEndpoint.ToString();
                 if (DescribeRelayGroup(ph.AudioEndpoint) is { } group) label = $"{label}, {group}";
                 int? rtt = ph.RttMs is { } r ? RoundToFive(r) : null;
-                healthy.Add((label, rtt));
+                healthy.Add((label, rtt, PeerDelays(ph.AudioEndpoint, ph.RttMs)));
             }
         }
 
@@ -6077,12 +6285,13 @@ public sealed partial class MainForm : Form
         else
         {
             sb.AppendLine($"Connected to {healthy.Count} peer{(healthy.Count == 1 ? "" : "s")}.");
-            foreach (var (label, rtt) in healthy)
-            {
-                var rttStr = rtt is { } r ? $"{r} ms" : "unknown";
-                sb.AppendLine($"  {label}: ping {rttStr}");
-            }
+            foreach (var (label, rtt, delays) in healthy)
+                sb.AppendLine(PeerStatusLine(label, rtt, delays));
         }
+
+        foreach (var id in heldForPassword)
+            if (selectedPeerEndpoints.ContainsKey(id))
+                sb.AppendLine($"  {selectedPeerLabels.GetValueOrDefault(id) ?? id.ToString()}: a different password, not connected");
 
         if (statusConnectedSinceUtc is { } since)
         {
@@ -6094,6 +6303,8 @@ public sealed partial class MainForm : Form
             sb.AppendLine("Uptime: 0 seconds.");
         }
 
+        if (PushToTalkStatus() is { } talk) sb.AppendLine(talk + ".");
+        if (MetronomeStatus() is { } beat) sb.AppendLine(beat + ".");
         sb.AppendLine($"Receiving {rxKbs:0.0} kB/s; sending {txKbs:0.0} kB/s.");
         sb.AppendLine($"Total received {FormatDataSize(receiver.BytesReceived)}; sent {FormatDataSize(sender.BytesSent)}.");
         sb.Append($"CPU usage {cpuPercent:0}% and memory {FormatDataSize(workingSetBytes)}.");
@@ -6329,7 +6540,7 @@ public sealed partial class MainForm : Form
         // Not while it has focus. "Connected for" changes every second, so this rewrote the box under a
         // screen reader once a second while it was being read — the house rule every other readout keeps.
         // Selecting a different peer moves focus to the list, so a genuine change still lands. 2026-09-13 review.
-        if (ShouldWriteReadout(peerDetailsBox.Text, text, peerDetailsBox.Focused)) peerDetailsBox.Text = text;
+        if (ShouldWriteReadout(peerDetailsBox.Text, text, BeingRead(peerDetailsBox))) peerDetailsBox.Text = text;
     }
 
     private string BuildPeerDetailsText(PeerListItem item)
@@ -6480,6 +6691,12 @@ public sealed partial class MainForm : Form
 
     /// <summary>Builds the Manage named peers dialog without showing it, so the dialog audits can reach it (it was built
     /// and shown in one step until 2026-09-24, out of their sight).</summary>
+    /// <summary>Test seam: give a peer a name, as Rename does.</summary>
+    internal void NamePeerForTest(string key, string machineName, string address, string friendlyName) =>
+        ApplyFriendlyName(key, machineName, address, friendlyName);
+    internal int NamedPeerCountForTest => namedPeers.Count;
+    internal ListBox ParametricBandListForTest => parametricBandList;
+
     internal Form BuildManageNamedPeersDialog()
     {
         var dialog = new Form
@@ -6491,10 +6708,10 @@ public sealed partial class MainForm : Form
             MaximizeBox = false,
             ShowInTaskbar = false,
             KeyPreview = true,
-            ClientSize = new Size(600, 420),
+            ClientSize = Dpi.Px(600, 420),
         };
 
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 5 };
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = Dpi.Pad(12), ColumnCount = 1, RowCount = 5 };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -6504,27 +6721,33 @@ public sealed partial class MainForm : Form
 
         root.Controls.Add(Theme.Heading("Named peers"), 0, 0);
 
+        // Shown: only what cannot be seen, that deleting forgets the name alone. The heading, the list and the Rename and
+        // Delete buttons say the rest on screen, so it is kept for the screen reader, which reads it as it always has.
         var intro = new Label
         {
-            Text = "The peers you've given a name to. Rename or delete any of them. Deleting forgets the "
-                 + "name only — the peer still connects as normal, under its machine name.",
+            Text = "Deleting forgets the name only — the peer still connects as normal, under its machine name.",
+            AccessibleName = "The peers you've given a name to. Rename or delete any of them. Deleting forgets the "
+                           + "name only — the peer still connects as normal, under its machine name.",
             AutoSize = true,
-            MaximumSize = new Size(560, 0),
-            Margin = new Padding(0, 0, 0, 8),
+            MaximumSize = Dpi.Px(560, 0),
+            Margin = Dpi.Pad(0, 0, 0, 8),
         };
         root.Controls.Add(intro, 0, 1);
 
         // Plain label with '&' focuses the next control in tab order (the list).
-        var peersLabel = new Label { Text = "&Peers", AutoSize = true, Anchor = AnchorStyles.Left };
+        var peersLabel = new Label { Text = "&Peers:", AutoSize = true, Anchor = AnchorStyles.Left };
         root.Controls.Add(peersLabel, 0, 2);
 
-        var list = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false, AccessibleName = "Peers (Alt+P)" };   // its place in the tab order follows the &Peers label, so Alt+P lands here
+        // Several at once: Ctrl+A, then Delete forgets every selected name (Ed, 2026-09-29).
+        var list = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false, SelectionMode = SelectionMode.MultiExtended, AccessibleName = "Peers (Alt+P)" };   // its place in the tab order follows the &Peers label, so Alt+P lands here
+        ListSelection.AllowSelectAll(list);
         root.Controls.Add(list, 0, 3);
 
         var renameBtn = new Button { Text = "&Rename (Alt+R)", AutoSize = true, AccessibleName = "Rename", TabIndex = 1 };
         var deleteBtn = new Button { Text = "&Delete (Alt+D)", AutoSize = true, AccessibleName = "Delete", TabIndex = 2 };
         var closeBtn = new Button { Text = "&Close", AutoSize = true, AccessibleName = "Close", DialogResult = DialogResult.OK, TabIndex = 3 };
-        var buttonRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, AutoSize = true, Padding = new Padding(0, 8, 0, 0) };
+        // Right-aligned, in the order they always had (UI audit 2026-09-28, finding 11).
+        var buttonRow = new FlowLayoutPanel { Anchor = AnchorStyles.Right, FlowDirection = FlowDirection.LeftToRight, AutoSize = true, WrapContents = false, Padding = Dpi.Pad(0, 8, 0, 0) };
         buttonRow.Controls.Add(renameBtn);
         buttonRow.Controls.Add(deleteBtn);
         buttonRow.Controls.Add(closeBtn);
@@ -6561,9 +6784,13 @@ public sealed partial class MainForm : Form
 
         void DeleteSelected()
         {
-            if (list.SelectedItem is not NamedPeerItem it) return;
-            logFile.Event($"named peer: deleted \"{it.Peer.FriendlyName}\" ({it.Key})");
-            namedPeers.Remove(it.Key);
+            var doomed = list.SelectedItems.OfType<NamedPeerItem>().ToList();
+            if (doomed.Count == 0) return;
+            foreach (var it in doomed)
+            {
+                logFile.Event($"named peer: deleted \"{it.Peer.FriendlyName}\" ({it.Key})");
+                namedPeers.Remove(it.Key);
+            }
             SaveNamedPeers();
             lastPanEqPeerSignature = "";
             SyncAllPeerLists();
@@ -6799,37 +7026,28 @@ public sealed partial class MainForm : Form
         UpdateStatus();
     }
 
-    // --- Priority-mode scoping (2026-07-26 resource audit) -------------------------------------
-    // The opt-in Priority mode's levers (keep-awake, High priority, EcoQoS opt-out, fine timer,
-    // working-set lock) used to engage at profile load and hold for the WHOLE app lifetime — a
-    // machine with RemSound idle in the tray was kept awake and off deep power states for
-    // nothing. They now engage only while audio is actually moving (send armed to at least one
-    // peer, or received audio hitting a live session) and release after a quiet hold-down, so
-    // brief silences and re-arms never flap the levers. The service already scoped this way; the
-    // app now matches. The audio loops' own fine-timer scopes (SystemTimerResolution — the
-    // overnight-lag fix) are independent of Priority mode and deliberately untouched.
-    internal static readonly TimeSpan PriorityModeHoldDown = TimeSpan.FromSeconds(30);
+    // --- Streaming scope (2026-07-26 resource audit; the fast timer since 2026-09-28) ------------------------------------
+    // What RemSound asks of Windows while audio is moving - today the fast timer (see PerformanceMode.KeepFastTimerWhileStreaming)
+    // - engages only while audio is actually moving (send armed to at least one peer, or received audio hitting a live
+    // session) and releases after a quiet hold-down, so brief silences and re-arms never flap it. The profile's
+    // high-priority setting that used to ride this too was removed 2026-09-29 (Ed): its audible part was this timer. The
+    // service keeps its own always-on full-speed mode while sending (ServiceSendHost) - a background service is what Windows
+    // throttles hardest. The audio loops' own fine-timer scopes (SystemTimerResolution) are independent and untouched.
+    internal static readonly TimeSpan StreamingHoldDown = TimeSpan.FromSeconds(30);
     private DateTime lastStreamActivityUtc = DateTime.MinValue;
-    private bool priorityModeEngaged;
 
-    /// <summary>Pure decision core, pinned by the self-test: engage while the toggle is on AND
-    /// stream activity happened within the hold-down; everything else releases.</summary>
-    internal static bool PriorityModeShouldEngage(bool priorityModeOn, DateTime lastActivityUtc, DateTime nowUtc) =>
-        priorityModeOn && nowUtc - lastActivityUtc < PriorityModeHoldDown;
+    /// <summary>The fast timer's rule (Ed, 2026-09-28: always on while streaming, the latency lab's switch retired): held
+    /// while audio is moving, sent or received, and released after the quiet hold-down, so a pause between songs does not
+    /// flap it. See <see cref="PerformanceMode.KeepFastTimerWhileStreaming"/>.</summary>
+    internal static bool FastTimerShouldHold(DateTime lastActivityUtc, DateTime nowUtc) =>
+        nowUtc - lastActivityUtc < StreamingHoldDown;
 
-    private void EvaluatePriorityModeScope()
+    private void EvaluateStreamingScope()
     {
         var sendActive = connected && sender.IsRunning && !string.IsNullOrEmpty(activeAudioReceiverSignature);
         var receiveActive = connected && receiver.AnyRecentAudio(TimeSpan.FromSeconds(3));
         if (sendActive || receiveActive) lastStreamActivityUtc = DateTime.UtcNow;
-
-        var want = PriorityModeShouldEngage(settings.LoadPriorityMode(), lastStreamActivityUtc, DateTime.UtcNow);
-        if (want == priorityModeEngaged) return;
-        priorityModeEngaged = want;
-        logFile.Event(want
-            ? "priority mode engaging (streaming active)"
-            : "priority mode releasing (no stream activity for the hold-down)");
-        PerformanceMode.Apply(want, msg => logFile.Event(msg));
+        PerformanceMode.KeepFastTimerWhileStreaming(FastTimerShouldHold(lastStreamActivityUtc, DateTime.UtcNow), msg => logFile.Event($"{msg} [{ActiveAudioConfiguration().Describe()}]"));
     }
 
     private void HandleCapabilityChange()
@@ -6992,22 +7210,7 @@ public sealed partial class MainForm : Form
     {
         if (!connected) return;
         var all = allSendEndpoints;
-
-        // Decide which selected peers to actually TRANSMIT audio to. We arm only peers that are
-        // genuinely reachable — anyone whose heartbeat has been Unreachable for longer than
-        // AudioPruneUnreachableAfter is dropped from the send set, so RemSound never streams audio
-        // into a dead address. The heartbeat keeps pinging EVERY selected peer regardless (it runs
-        // off SetTrackedPeers, not this set), so the instant a peer comes back it is re-armed.
-        //
-        // Carve-out: a peer we are actively RECEIVING audio from stays armed even if its heartbeat
-        // reads Unreachable — that covers an asymmetric path where audio flows but the heartbeat
-        // round-trip doesn't, so a working stream is never cut.
-        // The prune itself is the shared Core rule (PeerArming) — same code the service arms with. The
-        // app's receiving-carve-out rides in as the keepAnyway predicate.
-        var armed = all.Length > 0 && heartbeatService is { } hb
-            ? PeerArming.ComputeArmedEndpoints(all, hb.GetAllPeerHealth(), AudioPruneUnreachableAfter,
-                keepAnyway: addr => receiver.IsAudioFlowingFrom(addr, TimeSpan.FromSeconds(3)))
-            : all;
+        var armed = EndpointsToArm(all);
 
         // There used to be a "never silence EVERY peer" safety net here that re-armed the whole
         // set when pruning would leave nobody. Removed 2026-06-12: when NO peer is reachable we
@@ -7035,6 +7238,31 @@ public sealed partial class MainForm : Form
             logFile.Event($"audio receivers updated: {armed.Length} active");
         }
     }
+
+    /// <summary>Which of the chosen peers to actually send audio to.</summary>
+    private IPEndPoint[] EndpointsToArm(IPEndPoint[] all)
+    {
+        // Decide which selected peers to actually TRANSMIT audio to. We arm only peers that are
+        // genuinely reachable — anyone whose heartbeat has been Unreachable for longer than
+        // AudioPruneUnreachableAfter is dropped from the send set, so RemSound never streams audio
+        // into a dead address. The heartbeat keeps pinging EVERY selected peer regardless (it runs
+        // off SetTrackedPeers, not this set), so the instant a peer comes back it is re-armed.
+        //
+        // Carve-out: a peer we are actively RECEIVING audio from stays armed even if its heartbeat
+        // reads Unreachable — that covers an asymmetric path where audio flows but the heartbeat
+        // round-trip doesn't, so a working stream is never cut.
+        // The prune itself is the shared Core rule (PeerArming) — same code the service arms with. The
+        // app's receiving-carve-out rides in as the keepAnyway predicate.
+        var armed = all.Length > 0 && heartbeatService is { } hb
+            ? PeerArming.ComputeArmedEndpoints(all, hb.GetAllPeerHealth(), AudioPruneUnreachableAfter,
+                keepAnyway: addr => receiver.IsAudioFlowingFrom(addr, TimeSpan.FromSeconds(3)))
+            : all;
+        // Nothing to a peer held for its password (CheckPeerSecurity) - the heartbeat still reaches them, so the moment the
+        // passwords match they are let go.
+        return WithoutPeersHeldForPassword(armed);
+    }
+
+    internal IPEndPoint[] EndpointsToArmForTest(IPEndPoint[] all) => EndpointsToArm(all);
 
     // ---- Long-run report state. See LongRunReport for why this line exists at all. ----
     private readonly DateTime longRunStartedUtc = DateTime.UtcNow;
@@ -7434,6 +7662,8 @@ public sealed partial class MainForm : Form
         // can't be missed (2026-09-25 sweep: a sending DAW plugin started the microphone).
         if (!IsSendEnabled) specs.Clear();
         sender.Configure(specs);
+        // An output sent as loopback never plays the metronome's click (2026-09-28).
+        UpdateMetronomeLoopbackExclusion();
 
         // ONLY invalidate when the capture set ACTUALLY changed.
         //
@@ -7558,6 +7788,7 @@ public sealed partial class MainForm : Form
             if (ModeUsesAsio(currentMode) && settings.LoadAsioDriverName() is { } asioDriver && !string.IsNullOrWhiteSpace(asioDriver) && !disabledAsioDrivers.Contains(asioDriver))
             {
                 var info = GetCachedAsioProbeInfo(asioDriver, out var probeFailed);
+                SayWhetherAsioDriverCouldBeRead(asioDriver, readable: info is not null || !probeFailed);
                 if (info is not null)
                 {
                     LogAsioChannelNamesIfChanged(asioDriver, info);
@@ -7683,6 +7914,34 @@ public sealed partial class MainForm : Form
     }
 
     private string? absentAsioDriver;
+
+    // A driver that could not be read, said once per driver in the log and on its empty lists until it can be (2026-09-29, the
+    // live test: Andre's Komplete driver read as empty after a profile switch - most likely another program had it, many
+    // drivers allowing one at a time - and nothing said why; choosing another driver and back brought it).
+    private string? asioUnreadableSaidFor;
+
+    private void SayWhetherAsioDriverCouldBeRead(string driver, bool readable)
+    {
+        if (readable)
+        {
+            if (asioUnreadableSaidFor is null) return;
+            asioUnreadableSaidFor = null;
+            CheckedListAccessibility.SetEmptyText(asioSendDevicesList, null);
+            CheckedListAccessibility.SetEmptyText(asioReceiveOutputDevicesList, null);
+            return;
+        }
+        if (string.Equals(asioUnreadableSaidFor, driver, StringComparison.OrdinalIgnoreCase)) return;
+        asioUnreadableSaidFor = driver;
+        logFile.Event($"asio: \"{driver}\" could not be read - another program may be using it (many drivers allow one at a time), or it is "
+            + "still closing; it is read again when a device comes or goes, or when it is chosen again");
+        var words = $"{driver} could not be read. Another program may be using it. To try again, choose (none) under ASIO driver (Alt+D), then {driver}.";
+        CheckedListAccessibility.SetEmptyText(asioSendDevicesList, words);
+        CheckedListAccessibility.SetEmptyText(asioReceiveOutputDevicesList, words);
+        UpdateCheckedListStatus(asioSendDevicesList, asioSendDevicesStatusLabel, "ASIO send channel");
+        UpdateCheckedListStatus(asioReceiveOutputDevicesList, asioReceiveOutputDevicesStatusLabel, "ASIO receive output channel");
+    }
+
+    internal string AsioSendEmptyTextForTest => asioSendDevicesStatusLabel.Text;
 
     private void ClearAsioProbeCache()
     {
@@ -8086,6 +8345,9 @@ public sealed partial class MainForm : Form
         {
             suppressDeviceCheckChange = false;
         }
+        // The words under the list follow what it holds now: a list filled after it was empty (a driver chosen, a device
+        // plugged in) went on saying it had nothing in it.
+        if (listAccessibility.TryGetValue(list, out var wiring)) UpdateCheckedListStatus(list, wiring.Status, wiring.Kind);
         return signature;
     }
 
@@ -8231,7 +8493,8 @@ public sealed partial class MainForm : Form
         // tick changed, a profile's ticks put back at start-up, the Windows default changed, a driver chosen, a wake,
         // Uncheck all - opened and played them regardless, and nothing closed them again (2026-09-25 sweep). What is
         // ticked is still remembered below, and switching receiving on applies it.
-        if (starting || receiver.IsRunning) receiver.SetOutputDevices(ids);
+        // Or while the metronome holds them open (2026-09-28): a tick changed then reaches the outputs it plays on.
+        if (starting || receiver.OutputsRunning) receiver.SetOutputDevices(ids);
         // Remember what SHOULD be open, so the per-second heal can tell "the user unticked it" from
         // "it is ticked but did not open" — a device that came back too late to be caught, which is
         // the shape a resume from hibernate leaves behind.
@@ -8353,7 +8616,7 @@ public sealed partial class MainForm : Form
         if (continuousIntervalLabel is null) return;
         var text = AutoTuneIntervalLabel(ActiveAudioConfiguration());
         if (continuousIntervalLabel.Text != text) continuousIntervalLabel.Text = text;
-        var spoken = text.Replace("&", "");
+        var spoken = text.Replace("&", "").TrimEnd(':');   // the name a screen reader reads, without the label's colon
         if (continuousIntervalBox.AccessibleName != spoken) continuousIntervalBox.AccessibleName = spoken;
     }
 
@@ -8364,8 +8627,8 @@ public sealed partial class MainForm : Form
     /// the same tab owns Alt+I, so the interval's Alt+I was a second owner of one key. 2026-09-13 review.</remarks>
     internal static string AutoTuneIntervalLabel(AudioConfiguration configuration) =>
         configuration.HasTwoLanes()
-            ? "Auto-tune i&nterval for WASAPI and ASIO jitter buffer (Alt+N)"
-            : "Auto-tune i&nterval for jitter buffer (Alt+N)";
+            ? "Auto-tune i&nterval for WASAPI and ASIO jitter buffer (Alt+N):"
+            : "Auto-tune i&nterval for jitter buffer (Alt+N):";
 
     // ===================== "Use Windows default device" follower support =====================
 
@@ -8571,6 +8834,7 @@ public sealed partial class MainForm : Form
             // BothIndependent) left the interval combo greyed out and made the recheck
             // cadence invisible to the user even though it was actively in effect.
             continuousIntervalBox.Enabled = AnyAutoTuneEnabled();
+            lowestDelayTuneBox.Enabled = continuousIntervalBox.Enabled;
             ApplyContinuousTuneTimer();
             MarkProfileDirty();
         };
@@ -8583,7 +8847,7 @@ public sealed partial class MainForm : Form
     /// <summary>
     /// Toggles visibility of the BothIndependent-only ASIO row and rewrites the WASAPI row's
     /// labels and mnemonics based on the current audio mode. With no ASIO driver (WasapiOnly) the
-    /// WASAPI row keeps its unqualified "Audio jitter buffer (Alt+L)" / "Continuous auto-tune jitter buffer (Alt+T)"
+    /// WASAPI row keeps its unqualified "Audio jitter buffer (Alt+L)" / "Continuous auto-tune jitter buffer (Alt+U)"
     /// shape and the ASIO row is hidden. In BothIndependent the ASIO row is shown above the
     /// WASAPI row (first in tab order) and the WASAPI row's labels become "WASAPI jitter buffer
     /// (Alt+W)" / "Continuous auto-tune WASAPI jitter buffer (Alt+Y)" so the two sets of mnemonics don't
@@ -8602,9 +8866,10 @@ public sealed partial class MainForm : Form
         // entering it brings it back. Re-evaluate so the shared interval combo's Enabled
         // state tracks reality after every mode flip.
         continuousIntervalBox.Enabled = AnyAutoTuneEnabled();
+        lowestDelayTuneBox.Enabled = continuousIntervalBox.Enabled;
         if (inBothIndependent)
         {
-            wasapiLatencyLabel.Text = "WASAPI jitter buffer in milliseconds (Alt+&W)";
+            wasapiLatencyLabel.Text = "WASAPI jitter buffer in milliseconds (Alt+&W):";
             maxLatencyBox.AccessibleName = "WASAPI jitter buffer in milliseconds (Alt+W)";
             continuousTuneBox.Text = "Continuous auto-tune WASAPI jitter buffer (Alt+&Y)";
             continuousTuneBox.AccessibleName = "Continuous auto-tune WASAPI jitter buffer";
@@ -8621,9 +8886,9 @@ public sealed partial class MainForm : Form
             // impossible to talk about. The rename originally reached only the WASAPI+ASIO wording
             // above, so the SAME control renamed itself back to "latency" the moment you were not in
             // that mode. Whatever mode you are in, it says jitter buffer. 2026-08-23.
-            wasapiLatencyLabel.Text = "Audio jitter buffer in milliseconds (Alt+&L)";
+            wasapiLatencyLabel.Text = "Audio jitter buffer in milliseconds (Alt+&L):";
             maxLatencyBox.AccessibleName = "Audio jitter buffer in milliseconds (Alt+L)";
-            continuousTuneBox.Text = "Continuous auto-tune jitter buffer (Alt+&T)";
+            continuousTuneBox.Text = "Continuous auto-tune jitter buffer (Alt+&U)";
             continuousTuneBox.AccessibleName = "Continuous auto-tune jitter buffer";
             UpdateAutoTuneIntervalWording();
         }
@@ -8775,11 +9040,10 @@ public sealed partial class MainForm : Form
         ApplyReceiveDevices();
         MarkProfileDirty();
 
-        receiveOutputDevicesStatusLabel.Text = "No output device selected.";
-        sendOutputDevicesStatusLabel.Text = "No output device selected.";
-        sendInputDevicesStatusLabel.Text = "No input device selected.";
-        asioReceiveOutputDevicesStatusLabel.Text = "No ASIO receive channel selected.";
-        asioSendDevicesStatusLabel.Text = "No ASIO send channel selected.";
+        // Each list's status from what it holds now: NVDA's words on the list, and words shown only under an empty one.
+        // ("No output device selected." used to be shown under a full list; 2026-09-28.)
+        foreach (var list in lists)
+            if (listAccessibility.TryGetValue(list, out var wiring) && wiring.Status is not null) UpdateCheckedListStatus(list, wiring.Status, wiring.Kind);
 
         logFile.Event("user pressed 'Uncheck all inputs and outputs on all soundcards'");
     }
@@ -8843,11 +9107,13 @@ public sealed partial class MainForm : Form
         var splash = headless ? null : AsioLoadingSplash.StartIfAsioDriverName(driver, "Reconnecting to audio driver, please wait...");
         try
         {
-            // 1. STOP. Every output, every stream session, every buffer.
+            // 1. STOP. Every output, every stream session, every buffer - the metronome's hold on the outputs too.
             var wasReceiving = receiver.IsRunning;
             var wasSending = sender.IsRunning;
+            var metronomeHeld = receiver.OutputsHeldForMetronome;
             try
             {
+                receiver.SetOutputsForMetronome(false);
                 receiver.SetPlaybackEnabled(false);
                 if (wasSending) sender.Stop();
                 logFile.Event($"power: all audio stopped — every stream and buffer dropped (was receiving={wasReceiving}, sending={wasSending}) "
@@ -8900,6 +9166,11 @@ public sealed partial class MainForm : Form
                 {
                     ApplySendSources();
                     sender.Start();
+                }
+                if (metronomeHeld)
+                {
+                    ApplyReceiveDevices(starting: true);
+                    receiver.SetOutputsForMetronome(true);
                 }
                 logFile.Event($"power: all audio started again (receiving={receiver.IsRunning}, sending={sender.IsRunning}) "
                     + $"[{ActiveAudioConfiguration().Describe()}]");
@@ -9077,6 +9348,14 @@ public sealed partial class MainForm : Form
         : localDeviceMs > 0 ? localDeviceMs
         : estimateMs;
 
+    /// <summary>The capture term of one OUTPUT's journey (N7, 2026-09-28): what the streams sent for that output announce
+    /// (<see cref="AudioReceiver.AnnouncedCaptureLatencyMsFor"/>), then this machine's own capture for that output, then the
+    /// estimate - <see cref="PickCaptureLatencyMs"/>'s order, asked per output. A sender's ASIO stream carries its ASIO
+    /// input's figure and its WASAPI stream its WASAPI capture's, so the ASIO output no longer reads the WASAPI capture's
+    /// 10 ms or more, nor the WASAPI output the ASIO input's 1 ms.</summary>
+    internal static double LaneCaptureMs(AudioReceiver receiver, AudioSender sender, RenderRoute output, double estimateMs) =>
+        PickCaptureLatencyMs(receiver.AnnouncedCaptureLatencyMsFor(output), sender.CaptureLatencyMsForOutput(output), estimateMs);
+
     /// <summary>Which lane's output figures should the estimate read?
     ///
     /// <para>The live lane where there is one. Where there is not, the lane this CONFIGURATION uses —
@@ -9128,10 +9407,15 @@ public sealed partial class MainForm : Form
         // caught in the auto-tune interval label, still live here in the box he actually reads.
         // Found on 2026-08-24 by checking his claim that no app code needed branching — it mostly
         // did not, and this one did. See AudioConfiguration for why the mode is the wrong axis.
+        // The jitter buffer as the streams play it (Ed, 2026-09-29): the setting, or - where per-stream buffers have taken a
+        // stream below it - that depth, held against the same deadband so a stream settling 1 ms a second does not rewrite
+        // the box every second.
+        committedWasapiBufferMs = ShownBufferMs(receiver, RenderRoute.WasapiLane, committedWasapiBufferMs);
+        committedAsioBufferMs = ShownBufferMs(receiver, RenderRoute.AsioLane, committedAsioBufferMs);
         var text = FormatMeasuredLatency(
             ActiveAudioConfiguration(),
-            receiver.TargetLatencyMsFor(RenderRoute.WasapiLane), committedWasapiAchievedMs,
-            receiver.TargetLatencyMsFor(RenderRoute.AsioLane), committedAsioAchievedMs);
+            committedWasapiBufferMs, committedWasapiAchievedMs,
+            committedAsioBufferMs, committedAsioAchievedMs);
         // HOLD STILL WHILE IT IS BEING READ — the same rule RefreshStatusReadout already follows.
         // Setting Text on a multiline TextBox resets the caret to the top, so a once-a-second refresh
         // threw the screen-reader cursor back to line one every second and made this box impossible to
@@ -9141,7 +9425,7 @@ public sealed partial class MainForm : Form
         // Compared against the LIVE control text rather than a cached copy, so whatever landed while
         // you were reading is written on the first tick after focus leaves — no separate LostFocus
         // handler, and nothing can be stranded.
-        var focused = measuredLatencyReadout.Focused;
+        var focused = BeingRead(measuredLatencyReadout);
         if (!ShouldWriteReadout(measuredLatencyReadout.Text, text, focused))
         {
             if (focused) readoutSkippedWhileFocused++;
@@ -9177,7 +9461,7 @@ public sealed partial class MainForm : Form
         // The measured figures on show are stale once the switch is off; the deadband starts fresh when it comes back on.
         committedWasapiAchievedMs = -1;
         committedAsioAchievedMs = -1;
-        if (!ShouldWriteReadout(measuredLatencyReadout.Text, text, measuredLatencyReadout.Focused)) return;
+        if (!ShouldWriteReadout(measuredLatencyReadout.Text, text, BeingRead(measuredLatencyReadout))) return;
         WritePreservingReaderPosition(measuredLatencyReadout, text);
     }
 
@@ -9261,6 +9545,17 @@ public sealed partial class MainForm : Form
     /// while it has focus (a screen-reader user is reading it), and don't rewrite identical text.
     /// Pinned by the gate because "the readout holds still while you read it" is invisible until
     /// somebody tries to read it with a screen reader, which is how it shipped broken.</summary>
+    /// <summary>Whether a screen reader is on this readout: its keyboard focus - or, in a gate run, whatever the test says,
+    /// since a window nobody sees never truly has the keyboard.</summary>
+    private bool BeingRead(Control readout) => FocusedForTest?.Invoke(readout) ?? readout.Focused;
+    internal Func<Control, bool>? FocusedForTest;
+    internal void RefreshReadoutsForTest(bool status, bool peerDetails, bool latency)
+    {
+        if (status) RefreshStatusReadout();
+        if (peerDetails) UpdatePeerDetails();
+        if (latency) UpdateMeasuredLatencyReadout();
+    }
+
     internal static bool ShouldWriteReadout(string currentText, string newText, bool focused) =>
         currentText != newText && !focused;
 
@@ -9282,6 +9577,21 @@ public sealed partial class MainForm : Form
     // The figures currently ON SHOW, as opposed to the live ones. Negative = nothing shown yet.
     private double committedWasapiAchievedMs = -1;
     private double committedAsioAchievedMs = -1;
+    private int committedWasapiBufferMs = -1;
+    private int committedAsioBufferMs = -1;
+
+    /// <summary>The jitter buffer figure the Total latency box shows: the setting whenever the streams play at it, so a slider
+    /// or auto-tune move shows at once; where per-stream buffers have a stream below it, what it plays at - held until it
+    /// has moved the readout's deadband, as the measured figure is.</summary>
+    internal static int LatencyReadoutDeadbandMsForTest => (int)LatencyReadoutDeadbandMs;
+
+    /// <summary>One output's jitter buffer figure for the box, from the receiver - the window's and the simulator's alike.</summary>
+    internal static int ShownBufferMs(AudioReceiver receiver, RenderRoute route, int committedMs) =>
+        BufferFigureToShow(committedMs, receiver.TargetLatencyMsFor(route), receiver.PlayingTargetMsFor(route));
+    internal static int BufferFigureToShow(int committedMs, int settingMs, int playingMs) =>
+        playingMs >= settingMs ? settingMs
+        : committedMs >= 0 && committedMs < settingMs && Math.Abs(playingMs - committedMs) < LatencyReadoutDeadbandMs ? committedMs
+        : playingMs;
 
     /// <summary>Pure and testable: the readout's wording. One line per lane in two-slider mode; one
     /// unlabelled line when there is only one lane, because naming a lane the user hasn't got is
@@ -9378,14 +9688,16 @@ public sealed partial class MainForm : Form
             : (IsSendEnabled && !HasCheckedSendDevice() ? "not sending — tick a capture device" : "not sending");
         // No buffer or target here: they were one shared figure, true only with a single lane. The jitter buffer boxes and
         // the Total latency box give them per lane. 2026-09-13 review.
-        var receiveText = receiver.IsRunning
+        var receiveText = (ReceiverRunningForTest?.Invoke() ?? receiver.IsRunning)
             ? $"receiving {receiver.PacketsReceived} packets, underruns {receiver.Underruns}, drops {receiver.Drops} on \"{receiver.OutputDeviceName}\""
             : "not receiving";
         var peerCount = knownPeers.Count;
         var hbSummary = heartbeatService?.GetHealthSummary() ?? "no peers";
         // The measured latency deliberately does NOT appear here: with two lanes to report it would
         // bloat a line a screen reader already reads in full. It lives beside the latency controls.
-        statusLabel.Text = $"Connected for {since}. {peerCount} peer(s) known. {sendText}. {receiveText}. Heartbeat: {hbSummary}.";
+        var talkText = PushToTalkStatus() is { } talk ? $" {talk}." : "";
+        var metronomeText = MetronomeStatus() is { } beat ? $" {beat}." : "";
+        statusLabel.Text = $"Connected for {since}. {peerCount} peer(s) known. {sendText}.{talkText} {receiveText}.{metronomeText} Heartbeat: {hbSummary}.";
         bool streaming = connected && (sender.IsRunning || receiver.IsRunning);
         healthLabel.Text = connected
             ? streaming ? "Health: streaming" : "Health: idle"
@@ -9415,9 +9727,9 @@ public sealed partial class MainForm : Form
     /// keep up. Losing audio quietly and mentioning it afterwards is no use to somebody mid-take.</summary>
     private void WarnIfRecordingIsLosingAudio()
     {
-        if (!recordingController.IsRecording) { recordingDropWarningGiven = false; return; }
+        if (!(RecordingActiveForTest?.Invoke() ?? recordingController.IsRecording)) { recordingDropWarningGiven = false; return; }
         if (recordingDropWarningGiven) return;
-        var dropped = recordingController.DroppedSampleFrames;
+        var dropped = RecordingDroppedFramesForTest?.Invoke() ?? recordingController.DroppedSampleFrames;
         // A whole second of audio lost is past any reasonable hiccup.
         if (dropped < 48000) return;
         recordingDropWarningGiven = true;
@@ -9432,10 +9744,28 @@ public sealed partial class MainForm : Form
 
     private bool recordingDropWarningGiven;
 
+    /// <summary>Gate seams: a recording running, and the frames it has lost - a disk too slow to keep up cannot be made on
+    /// demand. Unset, the recording controller answers.</summary>
+    internal Func<bool>? RecordingActiveForTest;
+    internal Func<long>? RecordingDroppedFramesForTest;
+
     /// <summary>Gate seam: run the once-a-second tick now, ignoring the throttle. Exists so the
     /// always-on half of that tick can be DRIVEN rather than read — the plugin sweep and the
     /// recording warning were both sitting below a diagnostics-only early return, and no test could
     /// see it because none of them ran the tick. 2026-08-24.</summary>
+    /// <summary>Gate seams for a send-only machine's per-second tick, which otherwise needs a real capture running: whether
+    /// the sender counts as running, and the frames it sent this second. Unset, the real sender answers.</summary>
+    internal Func<bool>? SenderRunningForTest;
+    internal Func<long>? SenderFramesSentForTest;
+    private bool SenderRunningNow => SenderRunningForTest?.Invoke() ?? sender.IsRunning;
+    internal void ForceLongRunReportForTest() => longRunForceNext = true;
+
+    /// <summary>Gate seam: whether the status line takes the receiver as running - which otherwise needs an output open.</summary>
+    internal Func<bool>? ReceiverRunningForTest;
+
+    /// <summary>Gate seam: the status line as the window writes it, freshly.</summary>
+    internal string StatusLineForTest() { UpdateStatus(); return statusLabel.Text; }
+
     internal void SnapshotTickForTest()
     {
         lastSnapshotUtc = DateTime.MinValue;
@@ -9472,6 +9802,8 @@ public sealed partial class MainForm : Form
         RefreshAudioReceivers();
         // Tell everybody we have ticked that we have, with proof of the password (every few seconds).
         SendTickProofsIfDue();
+        // A metronome master or follower that is no longer connected lets go.
+        MetronomeSecondTick();
         // Names the profile gave that could not be looked up yet, and a server by name that may have moved.
         RetryNameLookupsIfDue();
         // Refresh the tray icon's hover tooltip so it reflects the current peer count and
@@ -9544,6 +9876,14 @@ public sealed partial class MainForm : Form
         // there is still something to be done about it. Behind the log switch, a user with logging off
         // lost audio in silence — which is the exact failure this warning exists to prevent.
         WarnIfRecordingIsLosingAudio();
+        // Push to talk by sound level opens and shuts on the audio threads: written down here, logging on or off.
+        NotePushToTalkTransitions();
+        // Whether this computer plays through ASIO, which its heartbeats and Format packets tell the others (Jamulus-style
+        // frames are sent only to a copy that does). Logging on or off: it changes what is sent.
+        KeepJamulusStyleInStep();
+        // Per-stream buffers and the per-second "streams" line: before the diagnostics gate, because the per-stream timing
+        // is its own (cheap) and the line is wanted whether or not auto-tune is on.
+        TickStreamBuffers();
         // If neither logs nor auto-tune is active we have nothing to do — neither audience
         // wants the diag work. When logs are off but auto-tune is on (the gate is on for
         // auto-tune), we fall through and run the snapshot+drain so the auto-tune feed
@@ -9629,7 +9969,7 @@ public sealed partial class MainForm : Form
         // diag line on send-only machines (no receiver bound, but the sender's capture-callback
         // gap is exactly what we want to log there). Adding `|| sender.IsRunning` lets the
         // send-only branch below actually emit.
-        if (receiver.IsRunning || sender.IsRunning)
+        if (receiver.IsRunning || SenderRunningNow)
         {
             if (receiver.IsRunning && !firstReceiverPacketLogged && receiver.PacketsReceived > 0)
             {
@@ -9865,7 +10205,7 @@ public sealed partial class MainForm : Form
                     $"wireOkΔ={wireInOrderDelta} wireMissΔ={wireMissedDelta} wireReordΔ={wireReorderedDelta} wireDupΔ={wireDuplicatedDelta} " +
                     $"pcmRej={receiver.PcmFrameRejections} pcmDiscard={receiver.PcmFrameDiscardedPartials}");
             }
-            else if (sender.IsRunning)
+            else if (SenderRunningNow)
             {
                 // Send-only machine (no receive output ticked). Emit a sender-side diag line so
                 // sendCbGapMs is visible — that's the most important metric on a send-only box,
@@ -9920,7 +10260,7 @@ public sealed partial class MainForm : Form
                 // nothing sent" (drop at encode/encrypt) from "mic captured and sent" — the
                 // measurement the "mic only works in ASIO" report needs, now on the talker side too.
                 var capPeak = sender.TakeMaxSenderPreEncodePeak();
-                var sndAudFr = sender.TakeSenderAudioFramesSent();
+                var sndAudFr = SenderFramesSentForTest?.Invoke() ?? sender.TakeSenderAudioFramesSent();
                 // No render figures on a send-only machine, but the long-run report's send frames still count. It read
                 // "send frames=0/s" on every one of them. 2026-09-13 review.
                 NoteLongRunSendFrames(sndAudFr);
@@ -9968,6 +10308,7 @@ public sealed partial class MainForm : Form
                 [RenderRoute.AsioLane] = receiver.MaxRenderCallbackGapMsFor(RenderRoute.AsioLane),
                 [RenderRoute.Mixed] = receiver.MaxRenderCallbackGapMsFor(RenderRoute.Mixed),
             };
+            lastLanePeriodMs = periodByRoute;   // kept for each peer's line in the status, which must not read them again
             // The same single readings, handed to the long-run report. In a WASAPI-only configuration the WASAPI
             // output renders on the Mixed route, so the WASAPI figure is the worse of the two.
             NoteLongRunRenderGaps(
@@ -9990,11 +10331,10 @@ public sealed partial class MainForm : Form
                 // estimate for it is a guess about somebody else's hardware: Ed's 2026-08-24 laptop
                 // called it 10 ms while the sending desktop had measured 0.7. Senders now state it in
                 // the format packet, so we use what they said, fall back to our own device's figure
-                // (right when we are the sender in the pair), and only then to the estimate.
-                var announcedCaptureMs = receiver.AnnouncedCaptureLatencyMs;
-                var reportedCaptureMs = sender.ReportedInputLatencyMs;
-                var captureBufferMs = PickCaptureLatencyMs(
-                    announcedCaptureMs, reportedCaptureMs, CaptureBufferEstimateMs(captureGapMs));
+                // (right when we are the sender in the pair), and only then to the estimate. PER OUTPUT since N7
+                // (2026-09-28): each of the sender's lanes states its own capture, so each output takes the figure of
+                // the stream sent for it (LaneCaptureMs).
+                var captureEstimateMs = CaptureBufferEstimateMs(captureGapMs);
                 var senderAccumulatorMs = SenderAccumulatorEstimateMs();
                 var wireOneWayMs = LowestPeerRttMs() / 2.0;
                 // Which lane is the user actually listening on? ASIO runs its own backend at its own
@@ -10042,13 +10382,17 @@ public sealed partial class MainForm : Form
                 // while the total ignored it. MEASURED, and zero on ASIO, which pulls straight from
                 // the engine — a real reason ASIO is tighter rather than a claim about it. 2026-08-24.
                 var outputQueueMs = receiver.OutputQueueMsFor(listeningRoute);
+                var captureBufferMs = LaneCaptureMs(receiver, sender, listeningRoute, captureEstimateMs);
                 var totalMs = captureBufferMs + senderAccumulatorMs + wireOneWayMs + diag.BufferAvgMs + outputQueueMs + renderBufferMs;
-                // PER-LANE totals for the readout. Capture, encode and wire are shared by both lanes;
-                // the queue depth and the output period are not — those are the two terms that make a
-                // WASAPI journey and an ASIO journey genuinely different lengths.
-                var sharedMs = captureBufferMs + senderAccumulatorMs + wireOneWayMs;
-                achievedLatencyWasapiMs = LaneLatencyMs(RenderRoute.WasapiLane, sharedMs, wasapiPeriodMs, lanePeriodMs);
-                achievedLatencyAsioMs = LaneLatencyMs(RenderRoute.AsioLane, sharedMs, asioPeriodMs, lanePeriodMs);
+                // PER-LANE totals for the readout. Encode and wire are shared by both lanes; the queue
+                // depth and the output period are not — those are the two terms that make a WASAPI journey
+                // and an ASIO journey genuinely different lengths — and nor, since N7, is the capture: each
+                // output counts the capture of the stream sent for it.
+                var senderAndWireMs = senderAccumulatorMs + wireOneWayMs;
+                achievedLatencyWasapiMs = LaneLatencyMs(RenderRoute.WasapiLane,
+                    LaneCaptureMs(receiver, sender, RenderRoute.WasapiLane, captureEstimateMs) + senderAndWireMs, wasapiPeriodMs, lanePeriodMs);
+                achievedLatencyAsioMs = LaneLatencyMs(RenderRoute.AsioLane,
+                    LaneCaptureMs(receiver, sender, RenderRoute.AsioLane, captureEstimateMs) + senderAndWireMs, asioPeriodMs, lanePeriodMs);
                 UpdateMeasuredLatencyReadout();
                 // Each term is tagged with WHERE IT CAME FROM. A total made of four constants and one
                 // measurement reads exactly like a total made of five measurements, which is how this
@@ -10059,7 +10403,7 @@ public sealed partial class MainForm : Form
                 // "peer" is the strongest of the three: the SENDER measured its own capture and told
                 // us on the wire, so it is a real figure about the machine the journey actually
                 // started on rather than a guess made here about somebody else's hardware.
-                var capSrc = announcedCaptureMs > 0 ? "peer" : reportedCaptureMs > 0 ? "dev" : "est";
+                var capSrc = receiver.AnnouncedCaptureLatencyMsFor(listeningRoute) > 0 ? "peer" : sender.CaptureLatencyMsForOutput(listeningRoute) > 0 ? "dev" : "est";
                 var renSrc = reportedRenderMs > 0 ? "dev" : "est";
                 logFile.Event($"latency-probe estimated one-way ≈ {totalMs:0.0}ms " +
                     $"(capture={captureBufferMs:0.0}[{capSrc}], send-accum={senderAccumulatorMs:0.0}[est], wire={wireOneWayMs:0.0}[meas], " +
@@ -10113,8 +10457,9 @@ public sealed partial class MainForm : Form
                 }
                 lastPacketsSentForLatency = packets;
                 lastPacketsSentAtUtc = now;
+                if (sender.TakeMeasuredSendWaitMs() is var wait and >= 0) measuredSendWaitMs = wait;
             }
-            else measuredEmitIntervalMs = 0;
+            else { measuredEmitIntervalMs = 0; measuredSendWaitMs = -1; }
 
             // Readings taken while the tuner is on hold describe a transition, not the listening conditions —
             // see TuneEvidenceHold. A wake holds every lane, so even the network window is skipped. An output
@@ -10337,6 +10682,10 @@ public sealed partial class MainForm : Form
         if (pendingProfile is null) return;
         var p = pendingProfile;
         applyingProfile = true;
+        ApplyPushToTalk(settings.LoadPushToTalkSettings(), null);
+        logFile.Event($"push to talk: {pushToTalk.Describe()} (the profile's)");
+        ApplyMetronomeSettings(settings.LoadMetronomeSettings(), null);
+        logFile.Event($"metronome: {metronomeSettings.Describe()} (the profile's)");
         // Silence the generic checkbox tick/untick for the whole bulk apply. The per-box Focused
         // gate isn't enough on launch: the box we tick in code is often the focused control, so it
         // would click. This + the applyingProfile guard on the send/receive cue keep a profile load
@@ -10738,6 +11087,9 @@ public sealed partial class MainForm : Form
     /// <summary>The window's own log, so the control suite can prove a control REPORTS what it did
     /// and not merely that it did it. See <see cref="RemSoundLog.EventTapForTest"/>.</summary>
     internal RemSoundLog LogForTest => logFile;
+
+    /// <summary>Gate seam: the recorder, so a test can stand in for File Explorer.</summary>
+    internal RecordingController RecordingControllerForTest => recordingController;
     /// <summary>Find a control by its private FIELD name, so a spec can name the exact control the
     /// developer sees in the source rather than guessing at a caption.</summary>
     internal bool SendEnabledForTest => IsSendEnabled;
@@ -10763,6 +11115,10 @@ public sealed partial class MainForm : Form
         !ReferenceEquals(wasapiTuneMemory.RenderCbGaps, asioTuneMemory.RenderCbGaps)
         && !ReferenceEquals(wasapiTuneMemory.MinBuffers, asioTuneMemory.MinBuffers)
         && !ReferenceEquals(wasapiTuneMemory.Creep, asioTuneMemory.Creep);
+
+    /// <summary>Gate seam: the learned floor and creep schedule the window keeps for a lane.</summary>
+    internal AutoTuneDescent.CreepState CreepForTest(RenderRoute route) =>
+        route == RenderRoute.AsioLane ? asioTuneMemory.Creep : wasapiTuneMemory.Creep;
 
     internal bool AllPeerShapingEnabledForTest => enableAllPeerShapingBox.Checked;
 
@@ -11078,7 +11434,7 @@ public sealed partial class MainForm : Form
         // recovers. The individual Sync* methods are also hardened (see SafeSelectedItem).
         try
         {
-            EvaluatePriorityModeScope();
+            EvaluateStreamingScope();
             // While the password warning is up, the status line and the peer lists wait: rebuilding them under it is
             // what knocked it out of the foreground (Ed, 2026-06-11). Everything else in the tick carries on.
             if (!securityWarningShowing) UpdateStatus();
@@ -11127,11 +11483,27 @@ public sealed partial class MainForm : Form
             if (status is PeerSecurityStatus.Secure or PeerSecurityStatus.Unknown)
             {
                 lastSecurityWarned.Remove(addr);
+                // The passwords match now: a peer held for its password is let go, and sent to again.
+                if (heldForPassword.RemoveWhere(id => selectedPeerEndpoints.TryGetValue(id, out var ep) && ep.Address.Equals(addr)) > 0)
+                    logFile.Event($"security: {addr} is on the same password now — connected");
                 continue;
             }
+            if (status == PeerSecurityStatus.PasswordMismatch) NoteDifferentPassword(addr);
             if (lastSecurityWarned.TryGetValue(addr, out var warned) && warned == status) continue;
             lastSecurityWarned[addr] = status;
             logFile.Event($"security: {status} with {addr}");
+            // Ticked by the profile or accepted for you rather than ticked by you (Ed, 2026-09-29): held quietly - kept in the
+            // profile, sent nothing, named in the status line - and no warning. Ticking them yourself brings the warning.
+            var here = selectedPeerEndpoints.Where(kv => kv.Value.Address.Equals(addr)).Select(kv => kv.Key).ToList();
+            if (status == PeerSecurityStatus.PasswordMismatch && here.Count > 0 && here.All(notChosenByYou.Contains))
+            {
+                heldForPassword.UnionWith(here);
+                var names = string.Join(", ", here.Select(id => selectedPeerLabels.GetValueOrDefault(id) ?? id.ToString()));
+                logFile.Event($"security: {names} at {addr} uses a different password — ticked by the profile or accepted for you, not by you, "
+                    + "so not connected and not warned about (tick them yourself to be told)");
+                activeAudioReceiverSignature = null;   // re-arm without them
+                continue;
+            }
             var msg = status == PeerSecurityStatus.PasswordMismatch
                 ? $"You and {addr} have different passwords, so no audio will pass between you.\n\nMake sure you've both set the same password (File → Change this profile's password)."
                 : PeerSecurityNotice.NoFingerprintMessage(addr.ToString());
@@ -11479,6 +11851,10 @@ public sealed partial class MainForm : Form
         // Played as F1 help opens and as it closes (HelpSoundService, 2026-09-25). "help open 1.wav" etc.
         public const string HelpOpen = "help-open";
         public const string HelpClose = "help-close";
+        // Push to talk opening and closing, key mode only (2026-09-28). Machine-wide like send on/off. Ed's own sounds:
+        // "push talk on 1.wav" to "3" and "push talk off 1.wav" to "3", the 1s the default.
+        public const string PushToTalkOn = "push-to-talk-on";
+        public const string PushToTalkOff = "push-to-talk-off";
     }
 
     /// <summary>Load one cue sound. Resolution order:
@@ -11554,6 +11930,8 @@ public sealed partial class MainForm : Form
         TryLoadCueSound(CueId.Update, "update.wav", out updateSound, cfg);
         TryLoadCueSound(CueId.SendOn, "send on.wav", out sendOnSound, cfg);
         TryLoadCueSound(CueId.SendOff, "send off.wav", out sendOffSound, cfg);
+        TryLoadCueSound(CueId.PushToTalkOn, "push talk on.wav", out pushToTalkOnSound, cfg);
+        TryLoadCueSound(CueId.PushToTalkOff, "push talk off.wav", out pushToTalkOffSound, cfg);
         TryLoadCueSound(CueId.ReceiveOn, "recieve on.wav", out receiveOnSound, cfg);
         TryLoadCueSound(CueId.ReceiveOff, "recieve off.wav", out receiveOffSound, cfg);
         TryLoadCueSound(CueId.Hide, "minimise.wav", out hideSound, cfg);
@@ -11593,6 +11971,8 @@ public sealed partial class MainForm : Form
             (updateSound, settings.LoadEnableUpdateCue(), () => settings.SaveEnableUpdateCue(false), "update", "an update is about to install"),
             (sendOnSound, cfg.EnableSendOnCue, () => SetMachineCueEnabled(c => c.EnableSendOnCue = false), "send turned on", "you turn sending on"),
             (sendOffSound, cfg.EnableSendOffCue, () => SetMachineCueEnabled(c => c.EnableSendOffCue = false), "send turned off", "you turn sending off"),
+            (pushToTalkOnSound, cfg.EnablePushToTalkOnCue, () => SetMachineCueEnabled(c => c.EnablePushToTalkOnCue = false), "push to talk on", "you start talking with the push to talk key"),
+            (pushToTalkOffSound, cfg.EnablePushToTalkOffCue, () => SetMachineCueEnabled(c => c.EnablePushToTalkOffCue = false), "push to talk off", "you stop talking with the push to talk key"),
             (receiveOnSound, cfg.EnableReceiveOnCue, () => SetMachineCueEnabled(c => c.EnableReceiveOnCue = false), "receive turned on", "you turn receiving on"),
             (receiveOffSound, cfg.EnableReceiveOffCue, () => SetMachineCueEnabled(c => c.EnableReceiveOffCue = false), "receive turned off", "you turn receiving off"),
             (hideSound, cfg.EnableHideCue, () => SetMachineCueEnabled(c => c.EnableHideCue = false), "minimise", "RemSound minimises to the tray"),
@@ -11757,6 +12137,7 @@ public sealed partial class MainForm : Form
         {
             startStopRecordingMenuItem.AccessibleDescription = DescribeHotkey(hotkeyController.ToggleRecordingHotkey);
         }
+        if (metronomeStartStopItem is not null) metronomeStartStopItem.AccessibleDescription = DescribeHotkey(hotkeyController.MetronomeHotkey);
         // The received-sound volume slider is driven by two hotkeys (up and down).
         var up = hotkeyController.VolumeUpHotkey;
         var down = hotkeyController.VolumeDownHotkey;
@@ -11947,6 +12328,9 @@ public sealed partial class MainForm : Form
         //
         // Half the interval, because a sample arriving at a random moment waits on average half a
         // packet - the same average the derived values below express.
+        // The wait itself, measured sample by sample, first (2026-09-28): half the interval is right only when samples
+        // arrive one at a time. A WASAPI block of 10 ms cut into shorter packets sends nearly all of it at once.
+        if (measuredSendWaitMs >= 0) return Math.Clamp(measuredSendWaitMs, 0, 200);
         if (measuredEmitIntervalMs > 0) return Math.Clamp(measuredEmitIntervalMs / 2.0, 0.1, 200);
         if (codecBox.SelectedItem is not CodecChoice item) return 2.5;
         var rate = settings.LoadSendRate();
@@ -11993,7 +12377,7 @@ public sealed partial class MainForm : Form
 
     /// <summary>Second-highest reading in a window, falling back to the only one when that is all
     /// there is. A single transient spike is not evidence; two are.</summary>
-    private static int SecondHighest(Queue<int> window)
+    internal static int SecondHighest(Queue<int> window)
     {
         int peak = 0, second = 0;
         foreach (var v in window)
@@ -12093,19 +12477,23 @@ public sealed partial class MainForm : Form
         }
     }
 
-    private static int ResolveCodecIndex(AudioTransportCodec codec, int opusFrameSamples)
+    private int ResolveCodecIndex(AudioTransportCodec codec, int opusFrameSamples)
     {
-        if (codec == AudioTransportCodec.Pcm) return 0;
-        // Opus 120 (2.5 ms — live latency) = index 2. Anything else (including the retired
-        // 10 ms middle (480) and the never-exposed 5 ms (240)) collapses to index 1
-        // (broadcast quality / 20 ms), the safer default — losing a little latency is the
-        // less surprising outcome on upgrade than losing loss tolerance.
-        return opusFrameSamples switch
-        {
-            120 => 2,
-            _ => 1,
-        };
+        // By what each choice IS, never by where it sits: the list was reordered on 2026-09-28, and a profile saved as
+        // PCM must still open as PCM. Opus 120 (2.5 ms) is live latency; any other Opus frame (the retired 10 ms middle
+        // (480), the never-exposed 5 ms (240)) is broadcast quality / 20 ms, the safer choice - losing a little latency is
+        // the less surprising outcome on upgrade than losing loss tolerance.
+        var (wantCodec, wantFrames) = codec == AudioTransportCodec.Pcm
+            ? (AudioTransportCodec.Pcm, 0)
+            : (AudioTransportCodec.Opus, opusFrameSamples == 120 ? 120 : 960);
+        for (var i = 0; i < codecBox.Items.Count; i++)
+            if (codecBox.Items[i] is CodecChoice c && c.Codec == wantCodec && c.OpusFrameSamples == wantFrames) return i;
+        return 0;
     }
+
+    /// <summary>Gate seam: which choice a saved codec and frame open as.</summary>
+    internal CodecChoice CodecChoiceForTest(AudioTransportCodec codec, int opusFrameSamples) =>
+        (CodecChoice)codecBox.Items[ResolveCodecIndex(codec, opusFrameSamples)]!;
 
     // ===================== Auto-tune =====================
 
@@ -12222,15 +12610,13 @@ public sealed partial class MainForm : Form
             // this gate a route with no audio would still react to the OTHER route's
             // gap signal and silently inflate its target before any of its own audio has
             // arrived.
-            if (continuousTuneEnabled && receiver.HasSessionsForRoute(RenderRoute.WasapiLane)
-                && TuneLaneAllowed(RenderRoute.WasapiLane, DateTime.UtcNow))
+            if (UsualTuneHas(RenderRoute.WasapiLane, continuousTuneEnabled, receiver.HasSessionsForRoute(RenderRoute.WasapiLane)))
             {
                 TickRoute(RenderRoute.WasapiLane, maxLatencyBox, "WASAPI",
                     ref lastObservedUnderrunCount, ref lastObservedDeviceGulpCount, ref suppressUserSliderMoveTracking,
                     lastUserSliderMoveUtc, intervalSec, frameMs.Value);
             }
-            if (settings.LoadContinuousAutoTuneAsioEnabled() && receiver.HasSessionsForRoute(RenderRoute.AsioLane)
-                && TuneLaneAllowed(RenderRoute.AsioLane, DateTime.UtcNow))
+            if (UsualTuneHas(RenderRoute.AsioLane, settings.LoadContinuousAutoTuneAsioEnabled(), receiver.HasSessionsForRoute(RenderRoute.AsioLane)))
             {
                 TickRoute(RenderRoute.AsioLane, maxLatencyAsioBox, "ASIO",
                     ref lastObservedUnderrunCountAsio, ref lastObservedDeviceGulpCountAsio, ref suppressUserAsioSliderMoveTracking,
@@ -12239,7 +12625,7 @@ public sealed partial class MainForm : Form
         }
         else
         {
-            if (continuousTuneEnabled && TuneLaneAllowed(RenderRoute.Mixed, DateTime.UtcNow))
+            if (UsualTuneHas(RenderRoute.Mixed, continuousTuneEnabled, hasAudio: true))
             {
                 TickRoute(RenderRoute.Mixed, maxLatencyBox, "",
                     ref lastObservedUnderrunCount, ref lastObservedDeviceGulpCount, ref suppressUserSliderMoveTracking,
@@ -12289,11 +12675,9 @@ public sealed partial class MainForm : Form
         // the constant inflated every recommendation by 8ms+ for ASIO users. Now derived
         // from the actual render-callback measurements over the same lookback as the gap
         // measurement.
-        const int RenderPeriodFloorMs = 2;
-        const int SafetyMarginMs = 5;
-        const int HysteresisMs = 5;
-        const int AutoTuneRecommendationCapMs = 200;
-        const int LookbackSeconds = 15;
+        // The long-standing margins. The lean ones go with the lowest-delay auto-tune, which stands this tune aside.
+        const int RenderPeriodFloorMs = TuneRenderFloorMs;
+        const int SafetyMarginMs = TuneSafetyMs;
 
         // COUNTERS FIRST, before any early return, because they are LIFETIME TOTALS and this is the
         // only place the baseline moves. Returning early without reading them let underruns pile up
@@ -12332,166 +12716,42 @@ public sealed partial class MainForm : Form
         // saving it up to ambush the user a second after they let go of the slider.
         if (DateTime.UtcNow - lastUserMoveUtc < TimeSpan.FromSeconds(intervalSec)) return;
 
-        // MEASURE FIRST, then decide. This block used to sit below the underrun branch, so a raise
-        // had nothing to aim at except the learned floor's 3 ms crawl — while the recommendation that
-        // knew the real answer was computed a few lines later and thrown away on that path.
-        // Ed, 2026-08-22: "I wonder if I had set it to 5 ms whether it would have seen that as stupid
-        // and jumped up, like it jumps down?" It would not have. It would have gone 5, 8, 11, 14 and
-        // taken most of a minute of broken audio to arrive. Now it can jump.
-        var sampleCount = Math.Min(LookbackSeconds, recentMaxGaps.Count);
-        var skip = recentMaxGaps.Count - sampleCount;
-        // Track the TWO highest arrival-gap seconds, not just the worst. A single transient spike —
-        // one bad second from an OS/driver hiccup that doesn't recur — used to drive the whole
-        // recommendation (one 1046ms gap pushed the buffer straight to the 200ms cap and shed a big
-        // trim burst). Using the SECOND-highest requires the jitter to persist across >=2 seconds
-        // before it counts, while still honouring sustained jitter at full speed. The true peak is
-        // still logged for diagnosis; we fall back to the single value when there's only one sample.
-        int gapPeak = 0, gapSecond = 0;
-        var i = 0;
-        foreach (var gap in recentMaxGaps)
-        {
-            if (i++ < skip) continue;
-            if (gap > gapPeak) { gapSecond = gapPeak; gapPeak = gap; }
-            else if (gap > gapSecond) { gapSecond = gap; }
-        }
-        var observedGap = sampleCount >= 2 ? gapSecond : gapPeak;
-
-        // Same lone-spike rejection for the render-callback gap — from THIS LANE's window. The render
-        // period belongs to an output device, and the two lanes' devices are not the same device.
+        // THE DECISION ITSELF lives in ContinuousAutoTune.Decide (moved out whole on 2026-09-28 so the simulator runs the
+        // same one - see there for every rule). What stays here is where its evidence comes from and what is done with it.
         var laneRenderCbGaps = memory.RenderCbGaps.Count > 0 ? memory.RenderCbGaps : recentRenderCbGaps;
-        int rcbPeak = RenderPeriodFloorMs, rcbSecond = RenderPeriodFloorMs;
-        var rcbSkip = laneRenderCbGaps.Count - Math.Min(sampleCount, laneRenderCbGaps.Count);
-        var rcbI = 0;
-        foreach (var rcb in laneRenderCbGaps)
+        var laneMinBuffers = memory.MinBuffers.Count > 0 ? memory.MinBuffers : recentMinBuffers;
+        var decision = ContinuousAutoTune.Decide((int)slider.Value, (int)slider.Minimum, (int)slider.Maximum,
+            underrunDelta, recentMaxGaps, laneRenderCbGaps, laneMinBuffers,
+            CodecFloorMs(frameMs), RenderPeriodFloorMs, SafetyMarginMs, ref memory.CleanTicks, memory.Creep);
+        var current = decision.CurrentMs;
+        var capped = decision.CappedMs;
+        var prefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
+        switch (decision.Verdict)
         {
-            if (rcbI++ < rcbSkip) continue;
-            if (rcb > rcbPeak) { rcbSecond = rcbPeak; rcbPeak = rcb; }
-            else if (rcb > rcbSecond) { rcbSecond = rcb; }
-        }
-        var observedRenderCb = sampleCount >= 2 ? rcbSecond : rcbPeak;
-
-        var codecFloor = (int)Math.Ceiling(1.5 * frameMs);
-        var jitterBased = observedGap + observedRenderCb + SafetyMarginMs;
-        var recommended = Math.Max(codecFloor, jitterBased);
-        var capped = Math.Min(recommended, AutoTuneRecommendationCapMs);
-        var current = (int)slider.Value;
-
-        // (the counters were read at the top, before any early return — see there for why)
-        if (underrunDelta > 0)
-        {
-            // Route label slots into the message prefix when present and is omitted when there is
-            // none (WasapiOnly's Mixed route), so the prefix never reads "continuous auto-tune :".
-            // devGulp shows how many inaudible device-gulp partials were ignored
-            // this tick — a high devGulp with a small underrunDelta is the Realtek fingerprint.
-            var prefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
-            memory.CleanTicks = 0; // this lane's buffer ran short — its evidence for shedding is void
-            // ...and record WHERE it ran short: that value is too thin for THIS lane, so its creep
-            // must never probe back down to it. A floor learned by experiment beats a guessed constant.
-            // Capped at what the measurement justifies (capped = the recommendation, computed above).
-            // Without that cap the floor was learned from the slider's own value, so every raise
-            // justified the next one. See CreepState.NoteShortfallAt. 2026-09-06.
-            memory.Creep.NoteShortfallAt((int)slider.Value, capped);
-
-            // UNDERRUNS MUST RAISE, NOT FREEZE.
-            //
-            // This used to log "skipping" and return, doing nothing at all. The guard is right for
-            // LOWERING — you must never shave the buffer on the back of a second where it already ran
-            // out — but returning here blocked raising too, and an underrun is the strongest evidence
-            // there is that the buffer is too thin. So the one condition that proves a raise is needed
-            // was the one condition that prevented it.
-            //
-            // Ed hit it on 2026-08-22: set to 20 ms, auto-tune on, and it sat at 20 for six minutes
-            // underrunning hundreds of times a tick. Fifteen ticks, fourteen of them "skipping". The
-            // fifteenth happened to be clean, and it immediately went 20 -> 37 and settled. Auto-tune
-            // had the answer the whole time and no way to act on it.
-            var learnedFloor = memory.Creep.DiscoveredFloorMs;
-
-            // AIM AT THE MEASUREMENT, NOT JUST THE CRAWL.
-            //
-            // The learned floor only ever sits 3 ms above wherever it last ran short, so using it
-            // alone meant every raise was a 3 ms step no matter how badly the buffer failed — one
-            // underrun and fifteen underruns moved it exactly the same distance. From a silly value
-            // like 5 ms that is fourteen ticks and the best part of a minute of broken audio.
-            //
-            // `capped` is the jitter measurement's own answer, computed above from the arrival gaps
-            // and the render period. Taking whichever is higher means a wild setting is corrected in
-            // ONE step, while the learned floor still does its real job: stopping a later descent
-            // from probing back into a depth already proven too thin.
-            // The learned floor grows a few ms per shortfall with nothing to stop it, while the
-            // recommendation is capped. Taking the higher of the two without capping BOTH let a long
-            // rough patch walk the buffer past the ceiling the measurement itself respects.
-            var cappedFloor = Math.Min(learnedFloor, AutoTuneRecommendationCapMs);
-            var raiseTarget = AutoTuneDescent.NextRaiseTarget(current, capped, cappedFloor, HysteresisMs);
-            if (raiseTarget > current)
+            case ContinuousAutoTune.Verdict.Raise:
             {
                 // Same mechanism the descent path uses: set the slider under the suppress flag and let
                 // its own handler push the value into the receiver. One way to apply a value, not two.
-                var raiseTo = (int)Math.Clamp(raiseTarget, slider.Minimum, slider.Maximum);
+                // devGulp shows how many inaudible device-gulp partials were ignored this tick — a high
+                // devGulp with a small underrunDelta is the Realtek fingerprint.
+                var raiseTo = decision.Target;
                 suppressFlag = true;
                 try { slider.Value = raiseTo; }
                 finally { suppressFlag = false; }
-                var why = capped >= cappedFloor ? "the measured need" : "the floor it has learned by experiment";
+                var why = capped >= decision.CappedFloorMs ? "the measured need" : "the floor it has learned by experiment";
                 logFile.Event($"{prefix}: RAISING {current}ms -> {raiseTo}ms ({underrunDelta} new underruns, devGulp={deviceGulpDelta} ignored) "
-                            + $"- the buffer ran short; measured={capped}ms learnedFloor={cappedFloor}ms, aiming at {why}");
+                            + $"- the buffer ran short; measured={capped}ms learnedFloor={decision.CappedFloorMs}ms, aiming at {why}");
                 return;
             }
-
-            // Already at or above both; hold and gather more evidence rather than climbing on every
-            // tick, which would ratchet the buffer up on a single bad second.
-            logFile.Event($"{prefix}: holding at {current}ms ({underrunDelta} new underruns, devGulp={deviceGulpDelta} ignored) "
-                        + $"- already at or above measured={capped}ms and learnedFloor={learnedFloor}ms");
-            return;
-        }
-        memory.CleanTicks++;
-        // A quiet stretch also RELAXES the learned floor, one step at a time. Without this a floor
-        // learned in a noisy first twenty seconds bound the rest of the session, however clean it
-        // became. See CreepState.NoteCleanRun. 2026-09-06.
-        memory.Creep.NoteCleanRun(memory.CleanTicks);
-
-
-        // Low-water evidence: the shallowest the buffer got across the same lookback window. Cushion
-        // it never touched is provably spare — that's what lets a descent be a measurement rather
-        // than a crawl. -1 = unknown, which AutoTuneDescent treats as "no evidence, step gently".
-        // ...and the low-water mark likewise: how shallow THIS lane's buffer got, not the machine's.
-        var laneMinBuffers = memory.MinBuffers.Count > 0 ? memory.MinBuffers : recentMinBuffers;
-        var lowWater = -1;
-        if (laneMinBuffers.Count > 0)
-        {
-            var lwSkip = laneMinBuffers.Count - Math.Min(LookbackSeconds, laneMinBuffers.Count);
-            var lwI = 0;
-            lowWater = int.MaxValue;
-            foreach (var m in laneMinBuffers)
-            {
-                if (lwI++ < lwSkip) continue;
-                if (m < lowWater) lowWater = m;
-            }
-            if (lowWater == int.MaxValue) lowWater = -1;
+            case ContinuousAutoTune.Verdict.HoldAfterShortfall:
+                logFile.Event($"{prefix}: holding at {current}ms ({underrunDelta} new underruns, devGulp={deviceGulpDelta} ignored) "
+                            + $"- already at or above measured={capped}ms and learnedFloor={decision.LearnedFloorMs}ms");
+                return;
+            case ContinuousAutoTune.Verdict.Stay:
+                return;
         }
 
-        int target;
-        if (capped > current)
-        {
-            target = capped;
-        }
-        else
-        {
-            // Descend on evidence rather than a fixed 5 ms crawl (2026-08-15, Ed). MaxDecreasePerTick
-            // is gone: AutoTuneDescent sizes the step from the unused margin when the evidence is
-            // strong, and proportionally when it isn't — so a silly value converges in a few ticks
-            // while a small correction stays gentle. Never below `capped`, which is the measured need.
-            target = AutoTuneDescent.NextTarget(current, capped, lowWater, sampleCount, memory.CleanTicks,
-                policy: null, creep: memory.Creep);
-        }
-
-        var clamped = Math.Clamp(target, (int)slider.Minimum, (int)slider.Maximum);
-        if (Math.Abs(clamped - current) < HysteresisMs) return;
-
-        // A RAISE ENDS THE CLEAN RUN. Those ticks were evidence that the CURRENT depth was
-        // comfortable; the moment the depth changes upward they describe a setting that no longer
-        // exists. Left standing, the tuner could take a big confident descent step on the very next
-        // tick — undoing the raise it just decided was necessary.
-        if (clamped > current) memory.CleanTicks = 0;
-
+        var clamped = decision.Target;
         suppressFlag = true;
         try
         {
@@ -12501,8 +12761,7 @@ public sealed partial class MainForm : Form
         {
             suppressFlag = false;
         }
-        var logPrefix = string.IsNullOrEmpty(routeLabel) ? "continuous auto-tune" : $"continuous auto-tune {routeLabel}";
-        logFile.Event($"{logPrefix}: gap-max={gapPeak}ms gap-used={observedGap}ms renderCb={observedRenderCb}ms over {sampleCount}s recommended={recommended}ms capped={capped}ms lowWater={lowWater}ms cleanTicks={memory.CleanTicks} learnedFloor={memory.Creep.DiscoveredFloorMs}ms prev={current}ms applied={clamped}ms frame={frameMs}ms devGulp={deviceGulpDelta}");
+        logFile.Event($"{prefix}: gap-max={decision.GapPeakMs}ms gap-used={decision.GapUsedMs}ms renderCb={decision.RenderCbUsedMs}ms over {decision.SampleCount}s recommended={decision.RecommendedMs}ms capped={capped}ms lowWater={decision.LowWaterMs}ms cleanTicks={memory.CleanTicks} learnedFloor={memory.Creep.DiscoveredFloorMs}ms prev={current}ms applied={clamped}ms frame={frameMs}ms devGulp={deviceGulpDelta}");
     }
 
     // ===================== Accessibility helpers (CheckedListBox status labels) =====================
@@ -12915,6 +13174,9 @@ public sealed partial class MainForm : Form
         // Flush named-peers last-seen timestamps (updated in memory each tick, only saved to disk on
         // address change during the session) so the Manage named peers dialog shows fresh times next run.
         if (namedPeers.Count > 0) SaveNamedPeers();
+
+        // Before the teardown the base raises closes the log.
+        RememberPlacement();
 
         base.OnFormClosing(e);
     }

@@ -59,7 +59,8 @@ internal static partial class SelfTest
                 var failingKey = $"{failing.DeviceId}|{CaptureKind.Loopback}";
                 Check(mixing.ActiveSourcesForTest.All(a => a.Key != failingKey), "premise: the refused source must not be capturing");
                 var before = mixing.ActiveSourcesForTest.ToList();
-                Thread.Sleep(900);   // several beats, still refused
+                // The heal's own 200 ms beat, until it has tried and logged it - not a fixed 900 ms (2026-09-28).
+                WaitFor(() => lines.Any(l => l.Contains("still cannot be opened", StringComparison.Ordinal)), TimeSpan.FromSeconds(3));
                 Check(lines.Any(l => l.Contains("still cannot be opened", StringComparison.Ordinal)),
                     $"the log must say the failed source keeps being tried (it said: {string.Join(" | ", lines.TakeLast(3))})");
                 Check(composite.IsRunning, "one source failing must not make the whole send look stopped");
@@ -88,7 +89,8 @@ internal static partial class SelfTest
                 composite.Start([only]);
                 var push = Require(composite.WasapiLaneForTest as PushModeWasapiBackend, "the single-source fast path was not chosen");
                 Check(!push.IsRunning, "premise: the refused source must not be capturing");
-                Thread.Sleep(500);
+                Check(WaitFor(() => pushLines.Any(l => l.Contains("still cannot be opened", StringComparison.Ordinal)), TimeSpan.FromSeconds(3)),
+                    "on the fast path, the heal's beat must try it again and say it still cannot be opened");
                 refused.TryRemove(only.DeviceId, out _);
                 Check(WaitFor(() => push.IsRunning, TimeSpan.FromSeconds(5)),
                     "THE SILENT SOURCE: on the fast path too, a source that failed must come back by itself once it can be opened");
@@ -154,15 +156,28 @@ internal static partial class SelfTest
                 Check(push.IsRunning && !push.HasFaulted, "and the heal must bring the source back");
             }
 
-            // Staying "running" is what spares ASIO: only the sender's Start gives the ASIO stream a fresh start.
-            var root = FindSourceRoot();
-            if (root is null) return Skip("the heal works; the source is not reachable to check where the ASIO stream is reset");
-            var sender = File.ReadAllText(Path.Combine(root, "src", "RemSound.Sender", "AudioSender.cs"));
-            Check(System.Text.RegularExpressions.Regex.Matches(sender, @"asioLane\.ResetForStart\(\)").Count == 1
-                  && SourceMethodBody(sender, "private void StartEngineWithCurrentSources()").Contains("asioLane.ResetForStart()", StringComparison.Ordinal),
-                "the ASIO stream must be given a fresh start only when the whole sender starts");
-            return "a dead source leaves the capture 'running', so nothing restarts the sender (which alone resets the ASIO stream), "
-                 + "and the heal re-opens only that source - through the mixer, every other source untouched, and on the fast path";
+            // AND ASIO CARRIES ON (2026-09-28: this was a regex over the source - no ASIO lane was ever present). The real sender
+            // with an ASIO lane beside the WASAPI sources, on a driver that cannot exist: a WASAPI source dies and is healed, and
+            // the ASIO stream keeps the stream id it had - so the far end hears no new stream.
+            using (var sender = new AudioSender())
+            {
+                sender.SetAudioMode(AudioMode.BothIndependent, "RemSound self-test — no such ASIO driver");
+                sender.Configure(specs);
+                sender.Start();
+                Check(sender.PersistentAsioForTest is not null, "premise: the ASIO lane must be there beside the WASAPI sources");
+                var composite = Require(sender.EngineForTest as CompositeCaptureBackend, "the sender's capture must be the composite");
+                var mixing = Require(composite.WasapiLaneForTest as MixingEngine, "the WASAPI side must be the mixer (two sources)");
+                var asioStream = sender.AsioLaneStreamIdForTest;
+                mixing.FaultSourceForTest(specs[^1].DeviceId);
+                composite.HealNowForTest();
+                Check(composite.IsRunning && sender.AsioLaneStreamIdForTest == asioStream,
+                    $"ASIO CARRIES ON: a WASAPI source dying and healing must leave the ASIO stream as it was ({asioStream} became {sender.AsioLaneStreamIdForTest})");
+                sender.Stop();
+                sender.Start();
+                Check(sender.AsioLaneStreamIdForTest != asioStream, "premise: a real restart of the sender does give the ASIO stream a fresh start - so the check above could fail");
+            }
+            return "a dead source leaves the capture 'running', so nothing restarts the sender, and the heal re-opens only that source - "
+                 + "through the mixer, every other source untouched, and on the fast path; with an ASIO lane beside them, its stream carries on unchanged";
         }
         finally { CompositeCaptureBackend.HealIntervalMs = restoreBeat; }
     }

@@ -340,12 +340,18 @@ internal static partial class SelfTest
             plugin.Stop();
             Check(WaitFor(() => host.InstanceCount == 0, TimeSpan.FromSeconds(2)),
                 "THE LINGERER: once the host stops the plugin - the last thing a removed plugin hears - RemSound must forget it at once");
-            Thread.Sleep(2600);   // longer than the plugin's two-second hello
-            Check(host.InstanceCount == 0, "and nothing from it may bring it back while it is stopped: its timers must stand down");
+            // The two-second tick run by hand, three times, rather than waited out (2026-09-28: two real 2.6 s sleeps).
+            var hellos = host.HellosForTest;
+            for (var i = 0; i < 3; i++) plugin.RefreshTickForTest();
+            Thread.Sleep(100);   // anything a tick had sent would have landed
+            Check(host.HellosForTest == hellos && host.InstanceCount == 0,
+                $"and nothing from it may bring it back while it is stopped: its timers must stand down ({host.HellosForTest - hellos} hellos)");
             plugin.Start();
             Check(WaitFor(() => host.InstanceCount == 1, TimeSpan.FromSeconds(3)), "started again, RemSound must know it again");
-            Thread.Sleep(2600);
-            Check(host.InstanceCount == 1, "and its hello keeps it known, as before");
+            hellos = host.HellosForTest;
+            for (var i = 0; i < 3; i++) plugin.RefreshTickForTest();
+            Check(WaitFor(() => host.HellosForTest >= hellos + 3, TimeSpan.FromSeconds(3)) && host.InstanceCount == 1,
+                $"and its tick says hello again, keeping it known ({host.HellosForTest - hellos} hellos for three ticks)");
             return "stopped, RemSound forgets the plugin at once and hears nothing more from it; started, it is back and stays";
         }
         finally

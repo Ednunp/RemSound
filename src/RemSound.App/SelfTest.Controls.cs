@@ -132,6 +132,7 @@ internal static partial class SelfTest
         new("asioSendDevicesList", "which ASIO input pairs are captured", GovernsNothing: true, BothIndependentOnly: true),
         new("asioReceiveOutputDevicesList", "which ASIO output pairs play incoming audio", GovernsNothing: true, BothIndependentOnly: true),
         new("uncheckAllDevicesButton", "clears every ticked device at once", GovernsNothing: true),
+        new("pushToTalkButton", "opens Push to talk settings, and says whether push to talk is on - PROVEN by 'PUSH TO TALK WINDOW'", GovernsNothing: true),
 
         // ---- Volume, pan and EQ -----------------------------------------------------------------
         new("volumeSlider", "the selected peer's volume - EFFECT PROVEN by 'The pan and EQ tab's real controls reach the live sound', which moves this slider and measures the level", GovernsNothing: true),
@@ -160,9 +161,11 @@ internal static partial class SelfTest
             f => f.ReceiverForTest.TargetLatencyMsFor(RenderRoute.AsioLane),
             BothIndependentOnly: true,
             LogContains: "jitter buffer (ASIO lane)"),
-        new("codecBox", "the codec the sender actually encodes with",
+        // The codec AND its frame: the first two choices are both Opus (live latency, then broadcast quality, since
+        // 2026-09-28), and a move between them changes only the frame.
+        new("codecBox", "the codec and frame the sender actually encodes with",
             (f, c) => SelectNext(c),
-            f => f.SenderForTest.Codec,
+            f => $"{f.SenderForTest.Codec} at {f.SenderForTest.OpusFrameSamplesPerChannel} samples",
             LogContains: "codec"),
         new("smoothnessBox", "buffer smoothness in the live playout",
             (f, c) => SelectNext(c),
@@ -177,6 +180,10 @@ internal static partial class SelfTest
             f => f.SettingsForTest.LoadContinuousAutoTuneAsioEnabled(),
             BothIndependentOnly: true,
             LogContains: "auto-tune (ASIO lane)"),
+        new("lowestDelayTuneBox", "whether the lowest-delay auto-tune has the lanes, and each stream's lean margins",
+            (f, c) => ((CheckBox)c).Checked = !((CheckBox)c).Checked,
+            f => f.ReceiverForTest.LeanTuning,
+            LogContains: "lowest-delay auto-tune"),
         new("continuousIntervalBox", "how often auto-tune re-checks",
             (f, c) => SelectNext(c),
             f => f.AutoTuneTimerIntervalForTest,
@@ -184,10 +191,6 @@ internal static partial class SelfTest
         // Read-only readout: it reports latency, it doesn't set any. Its WORDING is pinned separately
         // by the "Measured-latency readout" step (FormatMeasuredLatency), which is where the substance is.
         new("measuredLatencyReadout", "read-only display of each lane's set vs achieved latency", GovernsNothing: true),
-        new("priorityModeBox", "the high-priority / keep-awake levers",
-            (f, c) => ((CheckBox)c).Checked = !((CheckBox)c).Checked,
-            f => f.SettingsForTest.LoadPriorityMode(),
-            LogContains: "priority mode"),
 
         // ---- Chrome and read-only surfaces ------------------------------------------------------
         new("mainTabControl", "tab navigation", GovernsNothing: true),
@@ -219,6 +222,10 @@ internal static partial class SelfTest
             f => f.ReceiverForTest.ConcealmentArtifactValue,
             LogContains: "concealment artifact"),
         new("asioDriverBox", "the ASIO driver choice — which also decides one-slider vs two-slider mode", GovernsNothing: true),
+        new("asioBufferSizeBox", "the ASIO buffer size the profile asks its driver for when it opens (SharedAsioDevice.RequestedBufferFrames)",
+            (f, c) => SelectNext(c),
+            f => (f.AsioBufferFramesForTest, SharedAsioDevice.RequestedBufferFrames),
+            LogContains: "ASIO buffer size"),
         new("eqModeList", "which of the three EQ modes is active - its effect on the sound is measured by 'All three EQ modes'; that choosing one reaches the live chain by 'The pan and EQ tab's real controls reach the live sound'", GovernsNothing: true),
         new("parametricBandList", "which parametric band is being edited - each band's effect is PROVEN by 'All three EQ modes' (two bands must both apply)", GovernsNothing: true),
         new(Decorative: true, Field: "eqBandsPanel", Governs: "container for the EQ band controls", GovernsNothing: true),
@@ -238,6 +245,7 @@ internal static partial class SelfTest
         new("asioSendDevicesLabel", "label for the ASIO capture list", GovernsNothing: true),
         new("asioReceiveOutputDevicesLabel", "label for the ASIO output list", GovernsNothing: true),
         new("asioDriverLabel", "label for the ASIO driver picker", GovernsNothing: true),
+        new("asioBufferSizeLabel", "label for the ASIO buffer size", GovernsNothing: true),
         new("discoveredPeersLabel", "label for the discovered-peers list", GovernsNothing: true),
         new("rememberedPeersLabel", "label for the remembered-peers list", GovernsNothing: true),
         new("sendOutputDevicesLabel", "label for the output-capture list", GovernsNothing: true),

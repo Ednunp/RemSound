@@ -60,8 +60,17 @@ internal static partial class SelfTest
         Pin("type Audio", (byte)RemPacketType.Audio, 2, "every peer's dispatch");
         Pin("type KeepAlive", (byte)RemPacketType.KeepAlive, 3, "older peers that still send it");
         Pin("type Heartbeat", (byte)RemPacketType.Heartbeat, 4, "peer discovery and reachability on every port");
+        Pin("type Control", (byte)RemPacketType.Control, 5, "remote volume and mute from the phone apps");
         Pin("type TickProof", (byte)RemPacketType.TickProof, 11, "accepting a peer that only listens - the iPhone and Android apps send and read it by this number");
         Pin("tick proof sealed payload", TickProof.SealedPayloadBytes, 53, "the phone apps build and check it at this size");
+        // The master metronome (2026-09-28): new, and additive - its layout is pinned from the day it exists.
+        Pin("type Metronome", (byte)RemPacketType.Metronome, 12, "a master metronome's followers - any port that learns to follow reads it by this number");
+        Pin("metronome format version", MetronomeWire.FormatVersion, 1, "every follower; another version is refused");
+        Pin("metronome kinds", string.Join(",", Enum.GetValues<MetronomeKind>().Select(k => $"{k}={(byte)k}")),
+            "Offer=1,Accept=2,Decline=3,Release=4,State=5,SyncRequest=6,SyncReply=7,Leave=8", "every master and follower");
+        Pin("metronome state plaintext", MetronomeWire.StateBytes, 37, "a follower reading the timeline by fixed offset");
+        Pin("metronome sync request plaintext", MetronomeWire.SyncRequestBytes, 22, "a master answering a clock reading");
+        Pin("metronome sync reply plaintext", MetronomeWire.SyncReplyBytes, 38, "a follower reading the master's stamps");
 
         // --- Payload shapes. The far end reads these by fixed offset. ------------------------------
         Pin("format payload", RemPacket.FormatPayloadSize, 32, "peers negotiating stream format");
@@ -177,12 +186,10 @@ internal static partial class SelfTest
             "nothing on the wire, but the relay forgets a member after 60 s of silence and the notes tell other ports this figure");
 
         // --- The app↔plugin bridge. Pinned so none of it changes by ACCIDENT: moving the port on
-        // 2026-08-24 broke nothing in the gate at all. The plugin has never been released (Ed,
-        // 2026-09-25: "no one has this plugin ... this is its 1st release"), so the app and the plugin
-        // always come from the same build and there is no older plugin to stay compatible with. A
-        // deliberate change is made in both halves together - as the reply's parts were on 2026-09-25,
-        // which changed the reply's own layout and none of these. A tester's older test build simply
-        // gets the new one. ------------------------------------------------------------------------
+        // 2026-08-24 broke nothing in the gate at all. The plugin was first released in v6.0 (2026-09-26),
+        // so from 6.1 on a v6.0 plugin in somebody's DAW talks to a newer app: this link is a cross-port
+        // contract like the network one, and a change to it is Ed's call. The exact bytes of its messages
+        // are pinned in CROSS-PORT KNOWN ANSWERS (the plugin link's messages). -------------------------
         Pin("plugin bridge magic", System.Text.Encoding.ASCII.GetString(PluginBridgeProtocol.Magic), "RSBR",
             "any already-installed VST3 — every message it sends would be discarded as foreign");
         Pin("plugin bridge version", PluginBridgeProtocol.Version, 1,
@@ -254,6 +261,7 @@ internal static partial class SelfTest
         Same("TYPE_LOBBY_FULL", RelayGroupClient.TypeFull);
         Same("TYPE_LOBBY_BYE", RelayGroupClient.TypeBye);
         Same("TYPE_ADDR_CHECK", (int)RemPacketType.AddrCheck);
+        Same("TYPE_METRONOME", (int)RemPacketType.Metronome);
         Same("LOBBY_NAME_BYTES", RelayGroupClient.NameBytes);
         Same("GROUP_TAG_BYTES", RelayGroupClient.GroupTagBytes);
         Same("MAX_TICKED_IDS", RelayGroupClient.MaxTickedIds);

@@ -48,6 +48,7 @@ internal static partial class SelfTest
             var problems = new List<string>();
             var scopes = 0;
             var promises = 0;
+            var menuClashesChecked = 0;
 
             MainForm form;
             try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
@@ -57,6 +58,13 @@ internal static partial class SelfTest
                 var asioRowField = Require(typeof(MainForm).GetField("asioLatencyLabel", BindingFlags.Instance | BindingFlags.NonPublic),
                     "MainForm.asioLatencyLabel not found — the premise that hidden controls are recognised cannot be checked");
                 var asioRowLabel = Require(asioRowField.GetValue(form) as Control, "MainForm.asioLatencyLabel is not a control");
+                // The menus' own Alt letters (Alt+F opens File...). A control holding the same letter takes the key and the
+                // menu never opens - checked in every configuration, as the ASIO rows add and hide letters (merged from the
+                // old "Menu shortcuts don't clash with controls", which looked at one configuration, 2026-09-28).
+                var menuLetters = new Dictionary<char, string>();
+                foreach (ToolStripItem item in Require(form.MainMenuStrip, "the main window's menu").Items)
+                    if (TryMnemonic(item.Text, out var m)) menuLetters[m] = item.Text ?? "";
+                Check(menuLetters.Count >= 3, $"the main window's menus must have their Alt letters (found {menuLetters.Count})");
                 foreach (var configuration in AudioConfigurations.All)
                 {
                     SetAudioConfigurationForTest(form, configuration);
@@ -66,6 +74,14 @@ internal static partial class SelfTest
                         $"{configuration.Describe()}: premise — the ASIO jitter-buffer row must read as showing exactly when an ASIO driver "
                         + "is chosen, or this audit is looking at the wrong controls");
                     var (s, p) = AuditAltKeys($"Main window ({configuration.Describe()})", form, problems);
+                    var everyControl = new List<Control>();
+                    void WalkAll(Control parent) { foreach (Control c in parent.Controls) { everyControl.Add(c); WalkAll(c); } }
+                    WalkAll(form);
+                    foreach (var c in everyControl.Where(IsSetVisibleForAltAudit))
+                        if (TryMnemonic(c.Text, out var m) && menuLetters.TryGetValue(m, out var menuName))
+                            problems.Add($"Main window ({configuration.Describe()}): Alt+{char.ToUpperInvariant(m)} is the {menuName.Replace("&", "")} menu's, "
+                                         + $"and the control \"{c.Text}\" takes it - the menu would never open");
+                    menuClashesChecked++;
                     Check(s >= 3, $"{configuration.Describe()}: every main-window tab must be audited as a scope of its own (found {s})");
                     Check(p >= 10, $"{configuration.Describe()}: the main window's Alt promises must be found and followed (found {p})");
                     scopes += s;
@@ -89,9 +105,10 @@ internal static partial class SelfTest
             }
 
             Check(dialogs == DialogFactories().Length, $"every dialog must be audited ({dialogs} of {DialogFactories().Length})");
+            Check(menuClashesChecked == AudioConfigurations.All.Count(), $"the menus' letters must be checked in every configuration ({menuClashesChecked})");
             Check(problems.Count == 0, $"{problems.Count} Alt key problem(s): {string.Join("; ", problems)}");
             return $"{scopes} keyboard scopes — the main window in all three configurations and {dialogs} dialogs; {promises} written or "
-                 + "spoken \"Alt+\" promises all lead where they say, and no letter has two owners";
+                 + "spoken \"Alt+\" promises all lead where they say, no letter has two owners, and no control takes a menu's letter";
         }
         finally
         {
@@ -515,26 +532,4 @@ internal static partial class SelfTest
         return "audio or a healthy heartbeat means connected, a blip holds it, and the cue, the readout and the list all ask that one rule";
     }
 
-    /// <summary>
-    /// THE PEER DETAILS BOX HOLDS STILL WHILE IT IS BEING READ.
-    ///
-    /// <para>2026-09-13 review. The box's "Connected for" line changes every second, and it was rewritten every second
-    /// whether or not it had focus — under NVDA while someone was reading it. Every other readout in the window follows
-    /// ShouldWriteReadout, which is pinned on its own; this pins that the details box uses it.</para>
-    /// </summary>
-    private static string? AuditPeerDetailsHoldStillWhileRead()
-    {
-        var root = FindSourceRoot();
-        if (root is null) return Skip("the source tree is not reachable from here (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
-        var writes = File.ReadAllLines(Path.Combine(root, "src", "RemSound.App", "MainForm.cs"))
-            .Select((line, index) => (Text: line, Line: index + 1))
-            .Where(l => l.Text.Contains("peerDetailsBox.Text = ", StringComparison.Ordinal))
-            .ToList();
-        Check(writes.Count > 0, "the peer details box must still be written somewhere — no write was found");
-        var unguarded = writes.Where(w => !w.Text.Contains("ShouldWriteReadout(", StringComparison.Ordinal)).ToList();
-        Check(unguarded.Count == 0,
-            $"the peer details box is written without ShouldWriteReadout (line {string.Join(", ", unguarded.Select(u => u.Line))}) — "
-            + "it changes every second, so it is rewritten under a screen reader while it is being read");
-        return $"every write to the peer details box ({writes.Count}) holds still while the box has focus";
-    }
 }

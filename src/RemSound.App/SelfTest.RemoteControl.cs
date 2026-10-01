@@ -74,7 +74,14 @@ internal static partial class SelfTest
             Thread.Sleep(5);
         }
         sweeping.Cancel();
-        try { sweeper?.Wait(2000); } catch { /* teardown */ }
+        // Pump while the sweeper finishes: it may be mid-Invoke onto this very thread, and a bare Wait here held both until
+        // the 2 s timeout - on every call of this helper, 35 of them (found 2026-09-28).
+        var sweeperDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+        while (sweeper is { IsCompleted: false } && DateTime.UtcNow < sweeperDeadline)
+        {
+            Application.DoEvents();
+            Thread.Sleep(1);
+        }
         Check(task.IsCompleted, $"the remote-control script did not finish within {limit.TotalSeconds:0} s");
         task.GetAwaiter().GetResult();
     }
@@ -255,14 +262,17 @@ internal static partial class SelfTest
                         chosen = dialog.FileName;
                     });
                     Check(WaitFor(() => Windowless.NativeDialogs().Any(d => d.Title.Contains("Self-test", StringComparison.Ordinal)), TimeSpan.FromSeconds(30)), "the file picker must have opened");
-                    // Nobody presses Open the instant a picker appears: it is still filling itself in, and ignores an Open
-                    // that comes that early. In the full gate run it came that early (2026-09-24).
-                    Thread.Sleep(1500);
                     var picker = Windowless.NativeDialogs().First(d => d.Title.Contains("Self-test", StringComparison.Ordinal));
                     Check(GetWindowRect(picker.Handle, out var pr) && pr.Left <= Windowless.OffScreen.X / 2, "HEADLESS: the file picker must be off-screen");
                     Check(!ForegroundIsThisProcess(), "HEADLESS: and must not have taken focus");
-                    Check(Ask($"type {pick}").StartsWith("ok", StringComparison.Ordinal), "type must fill in the picker's file name");
-                    Check(Ask("answer Open").StartsWith("ok", StringComparison.Ordinal), "and answer must press its Open button");
+                    // A picker still filling itself in ignores an Open that comes too early (it did in the full gate run,
+                    // 2026-09-24): typed and answered again until it closes, rather than a fixed 1.5 s wait first.
+                    for (var tries = 0; tries < 10 && picked is null; tries++)
+                    {
+                        Check(Ask($"type {pick}").StartsWith("ok", StringComparison.Ordinal) || picked is not null, "type must fill in the picker's file name");
+                        if (picked is null) Ask("answer Open");
+                        WaitFor(() => picked is not null, TimeSpan.FromMilliseconds(400));
+                    }
                     if (!WaitFor(() => picked is not null, TimeSpan.FromSeconds(5)))
                         Check(false, $"and the picker must close (still open: {Head(Ask("windows"))}; buttons: {string.Join(", ", Windowless.NativeDialogs().SelectMany(d => d.Buttons).Select(b => b.Text + "=" + b.Id))})");
                     Check(picked == DialogResult.OK && string.Equals(chosen, pick, StringComparison.OrdinalIgnoreCase),
@@ -367,8 +377,15 @@ internal static partial class SelfTest
                 quoted = server.LoggedLineForTest("set \"Password for profile Gate profile\" \"correct horse battery\"");
                 // An ordinary command between, so nothing the password command before it left behind can hide this one.
                 server.LoggedLineForTest("windows");
-                dialog.BeginInvoke(() => Thread.Sleep(RemoteControl.CommandWait + TimeSpan.FromMilliseconds(700)));
-                slow = server.LoggedLineForTest("set \"Gate profile\" slow-secret-7");
+                // A command that outlasts the wait: the wait shortened for the step (it blocked the window for 3.7 s).
+                var restoreWait = RemoteControl.CommandWait;
+                RemoteControl.CommandWait = TimeSpan.FromMilliseconds(300);
+                try
+                {
+                    dialog.BeginInvoke(() => Thread.Sleep(RemoteControl.CommandWait + TimeSpan.FromMilliseconds(300)));
+                    slow = server.LoggedLineForTest("set \"Gate profile\" slow-secret-7");
+                }
+                finally { RemoteControl.CommandWait = restoreWait; }
             }, TimeSpan.FromSeconds(30));
             Check(input.Text.Contains("slow-secret-7", StringComparison.Ordinal), "premise: the slow command must have reached the password box");
             Check(quoted.Length > 0 && !quoted.Contains("horse", StringComparison.Ordinal) && !quoted.Contains("correct", StringComparison.Ordinal),
@@ -509,7 +526,8 @@ internal static partial class SelfTest
             CuePlayer.GloballyMuted = true;
 
             // A question already waiting when the person takes over (shown here without its own loop, to stay on this thread).
-            waiting = new Form { Text = "headless waiting question", ShowInTaskbar = false, Size = new Size(200, 120) };
+            // See-through: the hand-over brings it onto the screen, and that is what is checked - nobody should see it there.
+            waiting = new Form { Text = "headless waiting question", ShowInTaskbar = false, Size = new Size(200, 120), Opacity = 0 };
             waiting.Show();
             for (var i = 0; i < 10; i++) { Application.DoEvents(); Thread.Sleep(5); }
             Check(waiting.Left <= Windowless.OffScreen.X / 2, "premise: the waiting question starts off-screen");
@@ -521,12 +539,18 @@ internal static partial class SelfTest
             Windowless.HandOver(form);
             var waitingLeft = waiting.Left;
             waiting.Hide();
+            // What the hand-over switched back on, read - then off again at once: the rest of this step, and the run, stay
+            // silent (the review of every step: they stayed on until the finally).
+            var speaksAfter = !ScreenReader.Suppressed;
+            var soundsAfter = !CuePlayer.GloballyMuted;
+            ScreenReader.Suppressed = true;
+            CuePlayer.GloballyMuted = true;
             Check(!Windowless.Hiding, "handing over must stop the hiding");
             Check((GetWindowLong(form.Handle, -20) & 0x80) == 0, "the handed-over window must be back on the taskbar and in Alt+Tab");
             Check(form.Left > Windowless.OffScreen.X / 2, "and back where it can be seen");
             Check(waitingLeft > Windowless.OffScreen.X / 2, "and a question already waiting must come where it can be seen too, or the window is blocked by something nobody can find");
-            Check(!ScreenReader.Suppressed, "THE SILENCE: a person who took over must hear RemSound speak - the speak-status hotkey, deletions announced");
-            Check(!CuePlayer.GloballyMuted, "and hear its sounds, when it was not started --silent");
+            Check(speaksAfter, "THE SILENCE: a person who took over must hear RemSound speak - the speak-status hotkey, deletions announced");
+            Check(soundsAfter, "and hear its sounds, when it was not started --silent");
         }
         finally
         {

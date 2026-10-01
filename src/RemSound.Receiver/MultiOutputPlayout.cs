@@ -71,10 +71,13 @@ internal sealed class MultiOutputPlayout : IRenderBackend
     private CancellationTokenSource? cts;
     private Task? produceTask;
 
-    public MultiOutputPlayout(IWaveProvider source, Action<string>? onDiagnostic = null)
+    private readonly MetronomeOutputs? metronome;
+
+    public MultiOutputPlayout(IWaveProvider source, Action<string>? onDiagnostic = null, MetronomeOutputs? metronome = null)
     {
         this.source = source;
         this.onDiagnostic = onDiagnostic;
+        this.metronome = metronome;
     }
 
     public bool IsRunning => produceTask is { IsCompleted: false };
@@ -179,7 +182,12 @@ internal sealed class MultiOutputPlayout : IRenderBackend
             lock (gate)
             {
                 var worst = 0.0;
-                foreach (var o in outputs.Values) if (o.ReportedLatencyMs > worst) worst = o.ReportedLatencyMs;
+                // Measured first (DriftResamplingProvider.MeasuredOutputMs), the device's stated figure until then.
+                foreach (var o in outputs.Values)
+                {
+                    var ms = o.Drift.MeasuredOutputMs is var measured and >= 0 ? measured : o.ReportedLatencyMs;
+                    if (ms > worst) worst = ms;
+                }
                 return worst;
             }
         }
@@ -262,18 +270,14 @@ internal sealed class MultiOutputPlayout : IRenderBackend
                 {
                     device = enumerator.GetDevice(id);
                     var name = device.FriendlyName;
-                    var buffer = new BufferedWaveProvider(sharedFormat)
-                    {
-                        ReadFully = true,
-                        DiscardOnBufferOverflow = true,
-                        BufferDuration = TimeSpan.FromMilliseconds(OutputBufferMs),
-                    };
+                    var buffer = NewDeviceBuffer(sharedFormat);
                     // Per-device drift corrector sits between the buffer and the WasapiOut. The
                     // device pulls THROUGH it; it pulls the matching amount from `buffer` and
                     // resamples by the measured clock ratio. The producer writes the raw mix
                     // into `buffer` via drift.Feed (which also counts bytes for the measurement).
                     var drift = new DriftResamplingProvider(buffer, name,
                         msg => onDiagnostic?.Invoke($"drift: {msg}"));
+                    drift.AttachMetronome(metronome, id);
                     // Output device buffer. Request 5 ms; shared-mode WASAPI clamps it up to the
                     // device's minimum period (~10 ms on tested hardware, 2026-06-08) — but ~10 ms
                     // is still ~5 ms tighter than the old 15 ms, a free latency win. The per-device
@@ -287,6 +291,7 @@ internal sealed class MultiOutputPlayout : IRenderBackend
                         ? $"output \"{name}\" reports {reportedMs:0.0} ms of playback latency (engine period {DeviceLatencyProbe.EnginePeriodMs(device):0.0} ms, doubled for the buffer it plays while we fill the next)"
                         : $"output \"{name}\" would not report its period — the latency estimate falls back to its own figure");
                     var entry = new OutputEntry { Device = device, Output = wasapi, Buffer = buffer, Drift = drift, Name = name, ReportedLatencyMs = reportedMs };
+                    drift.StatedLatencyMs = reportedMs;
                     // Notice the device dying mid-stream (USB card unplugged → WASAPI invalidates the
                     // endpoint and raises PlaybackStopped WITH an exception). Just flag it — never take
                     // the gate or dispose from here: this can fire on the device thread during our own
@@ -301,6 +306,9 @@ internal sealed class MultiOutputPlayout : IRenderBackend
                         onDiagnostic?.Invoke($"output \"{name}\" lost the device: {stopEx.GetType().Name}: {stopEx.Message}");
                     };
                     wasapi.Init(drift);
+                    // What the card has played, for the measured output delay (IAudioClock; Vista and later, so Windows 7 too).
+                    var playing = wasapi;
+                    drift.PlayedSeconds = () => playing.GetPosition() / (double)playing.OutputWaveFormat.AverageBytesPerSecond;
                     wasapi.Play();
                     outputs[id] = entry;
                     onDiagnostic?.Invoke($"output added: \"{name}\"");
@@ -321,6 +329,60 @@ internal sealed class MultiOutputPlayout : IRenderBackend
                 ? Array.Empty<DriftResamplingProvider>()
                 : outputs.Values.Select(o => o.Drift).ToArray();
         }
+    }
+
+    /// <summary>A device's buffer, the one the producer feeds and the drift corrector drains. One place, so the simulator's
+    /// copy of the stage is built exactly as a real output's is.</summary>
+    private static BufferedWaveProvider NewDeviceBuffer(WaveFormat format) => new(format)
+    {
+        ReadFully = true,
+        DiscardOnBufferOverflow = true,
+        BufferDuration = TimeSpan.FromMilliseconds(OutputBufferMs),
+    };
+
+    /// <summary>
+    /// Simulator seam (2026-09-28): one WASAPI output's stage - the device buffer and the drift corrector the card pulls
+    /// through - built exactly as <see cref="SetOutputDevices"/> builds it for a real device, with no device and no
+    /// producer thread. The simulator feeds it at the producer's 10 ms cadence (<see cref="ProducerFrameBytes"/> a time,
+    /// read from the engine as <c>ProduceLoop</c> reads it) and its fake card pulls from it. This is the stage that ASIO does
+    /// not have, and the one behind "slow after a night" (see <see cref="WasapiOutputStage"/>); until now the simulator's
+    /// WASAPI card read the engine directly.
+    /// </summary>
+    internal sealed class SimulatedStage : IWaveProvider
+    {
+        private readonly DriftResamplingProvider drift;
+
+        public SimulatedStage(string name, Action<string>? onDiagnostic = null, MetronomeOutputs? metronome = null, string? deviceId = null)
+        {
+            var format = WaveFormat.CreateIeeeFloatWaveFormat(MixSampleRate, MixChannels);
+            drift = new DriftResamplingProvider(NewDeviceBuffer(format), name, onDiagnostic);
+            drift.AttachMetronome(metronome, deviceId ?? name);
+        }
+
+        /// <summary>The device's own stated delay, as a real output reads it at open (used until the delay is measured).</summary>
+        public double StatedLatencyMs { set => drift.StatedLatencyMs = value; }
+
+        /// <summary>The clicks this stage has placed.</summary>
+        public MetronomeClickLane ClickLane => drift.ClickLane;
+
+        /// <summary>What the producer hands the stage each tick, and how often: 10 ms of the mix.</summary>
+        public static int ProducerFrameBytes => FrameBytes;
+        public static double ProducerPeriodSec => FrameMs / 1000.0;
+
+        public WaveFormat WaveFormat => drift.WaveFormat;
+        /// <summary>The producer's feed, as <c>ProduceLoop</c> gives it.</summary>
+        public void Feed(byte[] data, int offset, int count) => drift.Feed(data, offset, count);
+        /// <summary>The card's pull.</summary>
+        public int Read(byte[] buffer, int offset, int count) => drift.Read(buffer, offset, count);
+        /// <summary>Audio waiting in the device buffer - what the latency readout counts as the output queue.</summary>
+        public double BufferedMs => drift.BufferedMs;
+        public WasapiOutputStage Snapshot() => drift.Snapshot();
+        /// <summary>The card's pulls the device buffer could not fill (padded with silence): the stage's own break-ups.</summary>
+        public long ShortReads => drift.ShortReads;
+        /// <summary>The simulated card's played position, as a real card's GetPosition gives it (seconds).</summary>
+        public Func<double>? PlayedSeconds { set => drift.PlayedSeconds = value; }
+        /// <summary>The output delay measured from it (ms), -1 before it is known.</summary>
+        public double MeasuredOutputMs => drift.MeasuredOutputMs;
     }
 
     private static void DisposeOutput(OutputEntry o)
@@ -492,8 +554,68 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         // deviceDrainedBytes is incremented by the render thread (us) in Read. Their ratio over
         // a multi-second window is the receiver-feed-rate ÷ device-drain-rate — exactly the
         // ratio the resampler needs to hold the buffer level.
-        private long producerFedBytes;     // Interlocked (producer writes, render reads)
+        private long producerFedBytes;     // under levelLock (producer writes, render reads)
         private long deviceDrainedBytes;    // render thread only
+
+        // === What the depth term steers, and what the clock reading counts (2026-09-28) ===
+        //
+        // THE STAGE CLICKED IN BURSTS, with its card and the machine's clock 40 ppm apart (SIMULATOR
+        // OVERNIGHT: a burst about every four minutes) and with no difference at all (the performance
+        // suite's soak: 58 to 219 break-ups in every ten seconds from about twenty minutes in; in the
+        // simulator's WASAPI-only run with the stage in, 745 in two minutes, from 30 s). Two causes, both
+        // from the buffer being fed and drained in whole 10 ms blocks:
+        //
+        // 1. The cushion was the ONE sample taken just before a pull. The producer's 10 ms feed usually
+        //    lands just before the card's pull, so that sample is the top of the sawtooth: 12 ms there
+        //    left 2 ms after the pull. Whenever the two came within the producer's millisecond of timer
+        //    jitter of each other - every four minutes at 40 ppm, all the time at none - a pull now and
+        //    then came BEFORE its feed and found 2 ms where it needed 10: a gap padded with silence. And
+        //    the sample itself read 12 or 2 by the toss of that coin, which kicked the rate about.
+        //    Now the depth term steers the buffer's TIME-AVERAGED level (a tenth-of-a-second mean,
+        //    updated at every feed and every pull, weighted by how long each level lasted) to the same
+        //    target. That average is the level after a pull plus how long before the pull the feed came,
+        //    so when the feed comes just before the pull - the one moment a pull can overtake it - the
+        //    buffer holds the whole target after the pull (12 ms for a 10 ms card) and an overtaking pull
+        //    still finds its 10; when the feed comes just after, it holds 2 ms after the pull, which is
+        //    all that phase needs. And as the two clocks slide past each other, the rate match alone
+        //    keeps that average level where it is.
+        // 2. The clock reading counted the producer's bytes up to the window's edge, and whether the
+        //    feed due at the edge had come yet was the same coin: one 10 ms block in ten seconds, a
+        //    reading 1,000 ppm out (Ed's 2026-09-10 log: -999, +998, +800 ppm on a card whose real
+        //    difference was a few ppm). The fed count is now carried to the edge's own moment from the
+        //    last feed at the producer's rate, so it counts audio as it is produced, not as it is lumped.
+        private readonly object levelLock = new();
+        private const double DepthMeanSec = 0.1;
+        private double levelMeanFrames = -1;   // under levelLock
+        private long levelMeanTicks;           // under levelLock
+        private long lastFeedTicks;            // under levelLock
+        private int lastFeedBytes;             // under levelLock
+        /// <summary>The producer's catch-up limit (MultiOutputPlayout.ProduceLoop): later than four frames, it drops them.</summary>
+        private const int FeedCarryFrames = 4;
+
+        /// <summary>Fold the level that has stood since the last feed or pull into the mean. Caller holds levelLock and
+        /// calls this at the moment the level is about to change.</summary>
+        private void NoteLevelLocked(long nowTicks)
+        {
+            var level = buffer.BufferedBytes / (double)MixBytesPerFrame;
+            if (levelMeanFrames < 0 || levelMeanTicks == 0) levelMeanFrames = level;
+            else
+            {
+                var dtSec = (nowTicks - levelMeanTicks) / (double)Stopwatch.Frequency;
+                if (dtSec > 0) levelMeanFrames += (1 - Math.Exp(-dtSec / DepthMeanSec)) * (level - levelMeanFrames);
+            }
+            levelMeanTicks = nowTicks;
+        }
+
+        /// <summary>The producer's bytes as of now: what it has fed, and the part of its next feed produced since the last
+        /// one (at its own rate, no more than its catch-up limit). Caller holds levelLock.</summary>
+        private long FedBytesNowLocked(long nowTicks)
+        {
+            if (lastFeedTicks == 0) return producerFedBytes;
+            var sinceSec = (nowTicks - lastFeedTicks) / (double)Stopwatch.Frequency;
+            var carried = Math.Min(sinceSec * MixSampleRate * MixBytesPerFrame, (double)FeedCarryFrames * lastFeedBytes);
+            return producerFedBytes + (long)Math.Max(0, carried);
+        }
         // The acquisition gate is on HERE and nowhere else: this stage's endpoint is the thing that
         // re-opens, and a freshly opened WASAPI endpoint swings for about thirty seconds before it reads
         // its real clock. See DriftRatioTracker.acquireAgreementPpm for the readings that proved it.
@@ -503,6 +625,18 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         // band keeps it from flitting. Defaults to 12 ms until the first window measures the card.
         private long pullSumBytes;
         private long pullCount;
+        // A CARD THAT STOPPED IS NOT A SLOW CLOCK (2026-09-28). The longest gap between the card's pulls in the window (render
+        // thread): a window in which the card stopped for longer than PullStallMinSec and four of its average pulls is
+        // thrown away as a clock reading. A card that hiccups loses the pulls it missed, so the window read the stall's
+        // share of it as a slow clock - 50 ms in 10 s is 5,000 ppm, inside the 5 % sanity band - and the stage then
+        // played that much fast for a minute and more, running its cushion dry: 592, 945 and 1,431 break-ups after a
+        // 50, 100 and 200 ms stall, measured in the simulator. The same rule as the per-person playout's
+        // (SessionPlayout.DriftReadStallMinSec). A late driver thread that fires its missed pulls in a burst is not
+        // caught by it, and is left as it was (see the performance suite's card-stall run).
+        private const double PullStallMinSec = 0.020;
+        private const double PullStallFactor = 4;
+        private long lastPullTicks;
+        private long longestPullGapTicks;
         private int targetMs = AdaptiveCushionTarget.DefaultMs;
         private double lastGulpMs;
         private double lastClockPpm;
@@ -514,6 +648,11 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         /// one Ed's overnight slowdown must live in, so it has to be readable on demand.</summary>
         public WasapiOutputStage Snapshot() =>
             new(name, BufferedMs, targetMs, lastGulpMs, lastClockPpm, lastCorrPpm);
+
+        /// <summary>Pulls the device buffer could not fill: the card was handed silence for the missing part. Render
+        /// thread only; read elsewhere as a diagnostic.</summary>
+        private long shortReads;
+        public long ShortReads => Interlocked.Read(ref shortReads);
 
         // Scratch — grown lazily, persists across calls so the hot path doesn't allocate.
         private byte[] inputBytes = new byte[16384];
@@ -537,8 +676,15 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         /// bytes for the drift measurement. No resampling here — the buffer keeps its cushion.</summary>
         public void Feed(byte[] data, int offset, int count)
         {
-            buffer.AddSamples(data, offset, count);
-            Interlocked.Add(ref producerFedBytes, count);
+            lock (levelLock)
+            {
+                var now = AudioClock.GetTimestamp();
+                NoteLevelLocked(now);
+                buffer.AddSamples(data, offset, count);
+                producerFedBytes += count;
+                lastFeedTicks = now;
+                lastFeedBytes = count;
+            }
         }
 
         /// <summary>Render thread: the WasapiOut pulls <paramref name="count"/> bytes. We pull
@@ -553,6 +699,9 @@ internal sealed class MultiOutputPlayout : IRenderBackend
             // so an occasional coalesced double-pull can't distort it.
             pullSumBytes += count;
             pullCount++;
+            var pullNow = AudioClock.GetTimestamp();
+            if (lastPullTicks != 0 && pullNow - lastPullTicks > longestPullGapTicks) longestPullGapTicks = pullNow - lastPullTicks;
+            lastPullTicks = pullNow;
 
             UpdateRatioIfDue();
 
@@ -565,7 +714,13 @@ internal sealed class MultiOutputPlayout : IRenderBackend
                 // BufferedWaveProvider has ReadFully=true, so this returns inputByteCount,
                 // zero-padding if the buffer is momentarily short (a brief underrun produces
                 // silence, not a glitch — same as the pre-corrector behaviour).
-                var got = buffer.Read(inputBytes, 0, inputByteCount);
+                int got;
+                lock (levelLock)
+                {
+                    NoteLevelLocked(AudioClock.GetTimestamp());
+                    if (buffer.BufferedBytes < inputByteCount) shortReads++;
+                    got = buffer.Read(inputBytes, 0, inputByteCount);
+                }
                 var gotFloats = got / sizeof(float);
                 MemoryMarshal.Cast<byte, float>(inputBytes.AsSpan(0, got)).CopyTo(inBuf.AsSpan(inBufOff, gotFloats));
                 if (gotFloats < inputFloats) inBuf.AsSpan(inBufOff + gotFloats, inputFloats - gotFloats).Clear();
@@ -590,10 +745,74 @@ internal sealed class MultiOutputPlayout : IRenderBackend
             // Zero-fill any shortfall (startup priming of the resampler delay line, mainly).
             if (copy < outSpan.Length) outSpan.Slice(copy).Clear();
 
+            // The metronome's clicks, placed by this card's own delay: the first frame of this block is heard once what the
+            // card already holds has played. After the resampler, so the stage's rate trimming never moves a click.
+            if (metronome is not null && metronome.Mix(clickLane, deviceId, outSpan, MixChannels, MixSampleRate, OutputDelayUs(count)))
+            {
+                for (var i = 0; i < outSpan.Length; i++) outSpan[i] = Math.Clamp(outSpan[i], -1f, 1f);
+            }
+
             // Count the device's consumption (always the full requested amount — WASAPI took
             // `count` bytes regardless of how much real audio backed it). Matches SessionPlayout.
             deviceDrainedBytes += count;
+            NoteOutputWait(count);
             return count;
+        }
+
+        // THE OUTPUT'S OWN DELAY, MEASURED (2026-09-28, PLAN-fixes E3): from the moment the card takes a block from this
+        // stage to the moment it is heard. The readout used the device's engine period doubled - the longest a sample can
+        // wait, not the usual - and read 7 to 9 ms high on every WASAPI output in the simulator. The card says how much it
+        // has played (IAudioClock through WasapiOut.GetPosition; the simulator's card model), so what is still in flight
+        // when a block is taken is known, and a sample of that block waits that plus, on average, half the block.
+        private double pulledSeconds;          // render thread
+        private double measuredOutputMs = -1;
+
+        /// <summary>How much of what this stage has handed the card the card has played, in seconds; null when the card
+        /// cannot say. Set once, before the card starts pulling.</summary>
+        internal Func<double>? PlayedSeconds { get; set; }
+
+        /// <summary>The measured delay from this stage to the ear, in ms (a moving average), or -1 before it is known.</summary>
+        public double MeasuredOutputMs => Volatile.Read(ref measuredOutputMs);
+
+        // The metronome (2026-09-28): this output's clicks.
+        private MetronomeOutputs? metronome;
+        private string deviceId = "";
+        private readonly MetronomeClickLane clickLane = new("WASAPI output");
+        public MetronomeClickLane ClickLane => clickLane;
+        /// <summary>What the device said its playback delay is, at open - the click's delay until the stage has measured one.</summary>
+        public double StatedLatencyMs { get; set; }
+
+        public void AttachMetronome(MetronomeOutputs? outputs, string id)
+        {
+            metronome = outputs;
+            deviceId = id;
+        }
+
+        /// <summary>From this call to the first frame of the block it returns being heard: the measured wait of a sample in a
+        /// block (MeasuredOutputMs, a moving average) less half a block - the first frame waits least - or, before that is
+        /// known, the device's stated delay.</summary>
+        private double OutputDelayUs(int count)
+        {
+            var measured = MeasuredOutputMs;
+            if (measured >= 0) return Math.Max(0, measured * 1000 - count / (double)WaveFormat.AverageBytesPerSecond * 1e6 / 2);
+            return StatedLatencyMs > 0 ? StatedLatencyMs * 1000 : 10_000;
+        }
+
+        private void NoteOutputWait(int count)
+        {
+            var blockSec = count / (double)WaveFormat.AverageBytesPerSecond;
+            if (PlayedSeconds is { } played)
+            {
+                try
+                {
+                    var inFlightSec = pulledSeconds - played();
+                    var waitMs = (inFlightSec + blockSec / 2) * 1000.0;
+                    if (inFlightSec >= 0 && waitMs < 1000)
+                        Volatile.Write(ref measuredOutputMs, measuredOutputMs < 0 ? waitMs : measuredOutputMs + 0.02 * (waitMs - measuredOutputMs));
+                }
+                catch { PlayedSeconds = null; }   // a card that cannot say, once, stops being asked
+            }
+            pulledSeconds += blockSec;
         }
 
         /// <summary>If the measurement window has elapsed, recompute the clock ratio (feed-forward)
@@ -602,13 +821,27 @@ internal sealed class MultiOutputPlayout : IRenderBackend
         private void UpdateRatioIfDue()
         {
             // The tracker owns the window and re-anchors it here, so every early return below still
-            // advances the window cleanly.
-            if (!tracker.WindowClosed(Interlocked.Read(ref producerFedBytes), deviceDrainedBytes)) return;
+            // advances the window cleanly. The producer's count is carried to this moment (see
+            // FedBytesNowLocked), and the depth is the level's time-averaged mean (NoteLevelLocked).
+            long fedNow;
+            double meanFrames;
+            lock (levelLock)
+            {
+                var now = AudioClock.GetTimestamp();
+                NoteLevelLocked(now);
+                fedNow = FedBytesNowLocked(now);
+                meanFrames = levelMeanFrames;
+            }
+            if (!tracker.WindowClosed(fedNow, deviceDrainedBytes)) return;
 
             // Size the target to THIS card from its average pull, then hold it. Done on every path
             // (including the discarded warm-up window) so the next window's average starts clean.
             // This is exactly why the tracker's update is split in two: the target does not exist until
             // the window has closed, and the depth term must use it in the SAME window, not the next.
+            // Did the card stop pulling in this window (see PullStallMinSec)?
+            var meanPullTicks = pullCount > 0 ? DriftRatioTracker.MeasurementWindowSec * Stopwatch.Frequency / pullCount : 0;
+            var cardStalled = longestPullGapTicks > Math.Max(PullStallMinSec * Stopwatch.Frequency, PullStallFactor * meanPullTicks);
+            longestPullGapTicks = 0;
             var avgPullBytes = pullCount > 0 ? pullSumBytes / pullCount : 0;
             pullSumBytes = 0;
             pullCount = 0;
@@ -629,7 +862,7 @@ internal sealed class MultiOutputPlayout : IRenderBackend
             // buffer at start-up, which inflates the device-drain count and reads as a large bogus ppm
             // (−1199 ppm observed) that would shove the buffer off target — and it discards, rather
             // than clamps, any reading outside the sanity band. Nothing is applied on a guess.
-            if (!tracker.ApplyMeasurement(buffer.BufferedBytes / MixBytesPerFrame, targetMs * MixSampleRate / 1000)) return;
+            if (!tracker.ApplyMeasurement((int)Math.Round(meanFrames), targetMs * MixSampleRate / 1000, readingIsAClock: !cardStalled)) return;
 
             var appliedRatio = tracker.AppliedRatio;
             resampler.SetRates(MixSampleRate * appliedRatio, MixSampleRate);
@@ -641,7 +874,7 @@ internal sealed class MultiOutputPlayout : IRenderBackend
             lastClockPpm = clockPpm;
             lastCorrPpm = corrPpm;
             onDiagnostic?.Invoke(
-                $"\"{name}\": clock={smoothedRatio:F6} ({clockPpm:+0;-0}ppm) depthMs={depthMs} " +
+                $"\"{name}\": clock={smoothedRatio:F6} ({clockPpm:+0;-0}ppm) depthMs={depthMs} meanMs={meanFrames * 1000.0 / MixSampleRate:F1} " +
                 $"target={targetMs} gulpMs={lastGulpMs:F0} corr={corrPpm:+0;-0}ppm applied={appliedRatio:F6}");
         }
     }

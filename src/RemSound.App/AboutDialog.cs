@@ -96,6 +96,11 @@ internal sealed class AboutDialog : Form
     /// size (the screen-reader-crash regression guard).</summary>
     internal static string ReleaseNotesForTest => ReleaseNotes;
 
+    /// <summary>The line under the version at the top of the box.</summary>
+    internal const string CreatedBy = "Created by Ed Pourtahmasbi";
+
+    internal Label? HeadingForTest { get; private set; }
+
     /// <summary>Pure, testable: cut <paramref name="notes"/> after its first <paramref name="maxVersions"/>
     /// version blocks (lines starting "RemSound v"), appending a plain pointer to the full history.
     /// The pointer is appended only when it trims: notes with <paramref name="maxVersions"/> blocks or
@@ -125,17 +130,20 @@ internal sealed class AboutDialog : Form
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterParent;
         KeyPreview = true;
-        ClientSize = new Size(560, 420);
+        ClientSize = Dpi.Px(560, 420);
 
         var version = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "?";
 
+        // Who made it, under the version (Ed, 2026-09-28), as in the readme, the licence and the program's file details.
         var headingLabel = new Label
         {
-            Text = $"RemSound version {version}",
+            Text = $"RemSound version {version}\r\n{CreatedBy}",
             AutoSize = true,
-            Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 11f, FontStyle.Bold),
-            AccessibleName = $"RemSound version {version}",
+            // The house heading (UI audit 2026-09-28, finding 13): Semibold at the type ramp's subtitle size, not 11 pt Bold.
+            Font = Theme.HeadingFont(),
+            AccessibleName = $"RemSound version {version}, {char.ToLowerInvariant(CreatedBy[0])}{CreatedBy[1..]}",
         };
+        HeadingForTest = headingLabel;
 
         var notesBox = new TextBox
         {
@@ -158,11 +166,13 @@ internal sealed class AboutDialog : Form
         };
         closeButton.Click += (_, _) => Close();
         notesBox.TabIndex = 0;
+        // Opens at the top with nothing highlighted (finding 14), rather than as one solid block of selection.
+        FormLayoutRows.OpenWithNothingSelected(notesBox);
 
         var root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(12),
+            Padding = Dpi.Pad(12),
             ColumnCount = 1,
             RowCount = 3,
         };

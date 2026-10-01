@@ -27,7 +27,7 @@ internal sealed class RelayNoticeDialog : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        Padding = new Padding(12);
+        Padding = Dpi.Pad(12);
 
         // A read-only multiline box rather than a label: a screen reader can arrow through it, and the text is
         // selectable, the same shape as the app's other readouts.
@@ -37,15 +37,18 @@ internal sealed class RelayNoticeDialog : Form
                  + "on the server who have the same password as the one set in your profile.",
             ReadOnly = true,
             Multiline = true,
-            Width = 420,
-            Height = 60,
+            Width = Dpi.Px(420),
+            Height = Dpi.Px(60),
             BorderStyle = BorderStyle.None,
             BackColor = SystemColors.Control,
             TabStop = true,
             AccessibleName = "Server notice",
         };
+        FormLayoutRows.FitReadOnlyText(message);
+        FormLayoutRows.OpenWithNothingSelected(message);   // not one solid block of highlight (finding 14)
 
         var ok = new Button { Text = "&OK", DialogResult = DialogResult.OK, AutoSize = true, AccessibleName = "OK" };
+        ok.Anchor = AnchorStyles.Right;   // at the bottom right, where a dialog's buttons go (UI audit 2026-09-28, finding 11)
         var layout = new TableLayoutPanel { ColumnCount = 1, RowCount = 3, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill };
         layout.Controls.Add(message, 0, 0);
         layout.Controls.Add(dontShowAgainBox, 0, 1);

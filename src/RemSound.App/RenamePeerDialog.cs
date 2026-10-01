@@ -8,7 +8,7 @@ internal sealed class RenamePeerDialog : Form
 {
     private readonly TextBox nameBox = new()
     {
-        Width = 260,
+        Width = Dpi.Px(260),
         TabIndex = 0,
         AccessibleName = "Friendly name (Alt+N)",
     };
@@ -24,16 +24,21 @@ internal sealed class RenamePeerDialog : Form
         MinimizeBox = false;
         MaximizeBox = false;
         ShowInTaskbar = false;
-        ClientSize = new Size(380, 170);
+        // Sized to what it holds (UI audit 2026-09-28, finding 3): a fixed 380 x 170 cut the name box and OK in half and
+        // dropped Cancel to a second row.
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
 
         nameBox.Text = currentCustomName ?? "";
 
         var grid = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(12),
+            Padding = Dpi.Pad(12),
             ColumnCount = 2,
             RowCount = 4,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
         };
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -47,7 +52,7 @@ internal sealed class RenamePeerDialog : Form
             Text = $"Machine name: {machineName}",
             AutoSize = true,
             Anchor = AnchorStyles.Left,
-            Margin = new Padding(0, 0, 0, 8),
+            Margin = Dpi.Pad(0, 0, 0, 8),
         };
         grid.Controls.Add(machineLabel, 0, 1);
         grid.SetColumnSpan(machineLabel, 2);
@@ -55,7 +60,7 @@ internal sealed class RenamePeerDialog : Form
         // Aimed at the text box explicitly. A plain label sends its mnemonic to the next control in TAB
         // order, and with the explicit tab indexes below that was the button row — so Alt+N landed on
         // "Clear custom name", and pressing Enter there wiped the name. 2026-09-13 review.
-        var nameLabel = new MnemonicLabel { Text = "Friendly &name (Alt+N)", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 8, 0), MnemonicTarget = nameBox };
+        var nameLabel = new MnemonicLabel { Text = "Friendly &name (Alt+N):", AutoSize = true, Anchor = AnchorStyles.Left, Margin = Dpi.Pad(0, 4, 8, 0), MnemonicTarget = nameBox };
         grid.Controls.Add(nameLabel, 0, 2);
         grid.Controls.Add(nameBox, 1, 2);
 
@@ -76,11 +81,14 @@ internal sealed class RenamePeerDialog : Form
             FriendlyName = t.Length == 0 ? null : t;   // blank box = clear, same as the Clear button
         };
 
-        var buttonRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, AutoSize = true, TabIndex = 2 };
+        // One row across the whole dialog, right-aligned, the buttons in the order they always had (so the tab order is the
+        // same): it used to sit in the second column only, too narrow for three buttons.
+        var buttonRow = new FlowLayoutPanel { Anchor = AnchorStyles.Right, FlowDirection = FlowDirection.LeftToRight, AutoSize = true, WrapContents = false, TabIndex = 2, Margin = Dpi.Pad(0, 8, 0, 0) };
         buttonRow.Controls.Add(clearButton);
         buttonRow.Controls.Add(okButton);
         buttonRow.Controls.Add(cancelButton);
-        grid.Controls.Add(buttonRow, 1, 3);
+        grid.Controls.Add(buttonRow, 0, 3);
+        grid.SetColumnSpan(buttonRow, 2);
 
         Controls.Add(grid);
         AcceptButton = okButton;

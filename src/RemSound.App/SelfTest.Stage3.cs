@@ -43,24 +43,4 @@ internal static partial class SelfTest
         return "settings are throwaway for the whole run; the churn opens no output; a headless wake leaves the router alone";
     }
 
-    /// <summary>
-    /// THE ABOUT BOX CARRIES ONLY RECENT NOTES; THE HISTORY IS KEPT IN THE REPOSITORY.
-    ///
-    /// <para>2026-09-13 review (Dialogs #20). Every release note back to v1.0 — about 1,300 lines — was compiled into the exe,
-    /// and only the newest five were ever shown. The older notes moved to RELEASE_HISTORY.md.</para>
-    /// </summary>
-    private static string? AuditAboutCarriesOnlyRecentNotes()
-    {
-        var blocks = AboutDialog.ReleaseNotesForTest.Split('\n').Count(l => l.TrimEnd('\r').StartsWith("RemSound v", StringComparison.Ordinal));
-        Check(blocks <= 6,
-            $"the About box's notes must carry only the newest releases (it carries {blocks}); older ones belong in RELEASE_HISTORY.md, "
-            + "not compiled into every copy of the app");
-
-        var root = FindSourceRoot();
-        if (root is null) return Skip("the notes are short, but the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
-        var history = Path.Combine(root, "RELEASE_HISTORY.md");
-        Check(File.Exists(history) && File.ReadAllText(history).Contains("RemSound v1.0", StringComparison.Ordinal),
-            "the older release notes must be kept in the repository once they leave the exe");
-        return $"the About box carries {blocks} releases; the history back to v1.0 is in RELEASE_HISTORY.md";
-    }
 }

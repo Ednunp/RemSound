@@ -17,7 +17,7 @@ namespace RemSound.App;
 public sealed partial class MainForm
 {
     private readonly Button relayConnectButton = new() { Text = "Co&nnect to server (Alt+N)", AutoSize = true, AccessibleName = "Connect to server" };
-    private readonly CheckedListBox relayPeersList = new() { CheckOnClick = true, Width = 430, Height = 90, AccessibleName = "Discovered peers on server (Alt+0)" };
+    private readonly CheckedListBox relayPeersList = new() { CheckOnClick = true, Width = Dpi.Px(430), Height = Dpi.Px(90), AccessibleName = "Discovered peers on server (Alt+0)" };
     private readonly Label relayPeersStatus = new() { AutoSize = true, Text = "Nobody on the server yet." };
     private MnemonicLabel? relayPeersLabel;
     private Label? relayStatusLine;
@@ -69,7 +69,7 @@ public sealed partial class MainForm
     /// all until you are on a relay: there is nothing it could show.</summary>
     private void BuildRelayPeersRow(TableLayoutPanel panel, int row)
     {
-        relayPeersLabel = FormLayoutRows.AddCheckedListRow(panel, row, "Discovered peers on server (Alt+&0)", relayPeersList, relayPeersStatus, FocusListControl);
+        relayPeersLabel = FormLayoutRows.AddCheckedListRow(panel, row, "Discovered peers on server (Alt+&0):", relayPeersList, relayPeersStatus, FocusListControl);
         WireCheckedListAccessibility(relayPeersList, relayPeersStatus, "relay peer");
         relayPeersList.ItemCheck += (_, args) =>
         {
@@ -85,7 +85,8 @@ public sealed partial class MainForm
     /// opens. Ed, 2026-09-20: "just have a close button not a cancel, that's easier".</summary>
     private void BuildRelayButtonRow(TableLayoutPanel panel, int row)
     {
-        var buttonRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty };
+        // Wraps: in a narrow window the status line goes under the button instead of off the edge.
+        var buttonRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Margin = Padding.Empty };
         buttonRow.Controls.Add(relayConnectButton);
         relayStatusLine = new Label { AutoSize = true, Text = "Not connected to a server.", AccessibleName = "Server status", Anchor = AnchorStyles.Left };
         buttonRow.Controls.Add(relayStatusLine);
@@ -628,6 +629,7 @@ public sealed partial class MainForm
 
     internal RelayGroupClient RelayGroupForTest => relayGroup;
     internal CheckedListBox RelayPeersListForTest => relayPeersList;
+    internal Label? RelayPeersLabelForTest => relayPeersLabel;
     internal CheckedListBox DiscoveredPeersListForTest => discoveredPeersList;
     internal Button RelayConnectButtonForTest => relayConnectButton;
     internal string RelayStatusForTest => relayStatusLine?.Text ?? "";

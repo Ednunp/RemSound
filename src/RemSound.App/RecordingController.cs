@@ -39,6 +39,9 @@ internal sealed class RecordingController
     // Single-file BYPASS state — sum each peer's RAW block per render, flush on the block boundary.
     private float[] rawMixAccum = new float[4096];
     private int rawMixLen;
+    // The metronome's click (2026-09-28): a track of its own in a split recording, and mixed into a single file.
+    private volatile AudioRecorder? metronomeTrack;
+    private float[] clickScratch = new float[4096];
 
     /// <summary>Supplies the currently-connected peers (address + display name) at the moment a split
     /// recording starts, so one track file is created per peer. Set by MainForm.</summary>
@@ -57,7 +60,7 @@ internal sealed class RecordingController
         this.diagnostic = diagnostic;
     }
 
-    public bool IsRecording => active is not null || meRecorder is not null || peerTracks is not null;
+    public bool IsRecording => active is not null || meRecorder is not null || peerTracks is not null || metronomeTrack is not null;
 
     /// <summary>Optional callback fired when the user starts or stops a recording. The
     /// MainForm hooks this to flip the menu item text "Start recording" ↔ "Stop recording"
@@ -94,6 +97,7 @@ internal sealed class RecordingController
     {
         if (active is not null) yield return active;
         if (meRecorder is not null) yield return meRecorder;
+        if (metronomeTrack is not null) yield return metronomeTrack;
         if (peerTracks is not null) foreach (var t in peerTracks.Values) yield return t.Recorder;
     }
 
@@ -164,13 +168,16 @@ internal sealed class RecordingController
         var single = active;
         var me = meRecorder;
         var tracks = peerTracks;
+        var click = metronomeTrack;
         active = null;
         meRecorder = null;
         peerTracks = null;
+        metronomeTrack = null;
         rawMixLen = 0;
 
         StopRecorder(single);
         StopRecorder(me);
+        StopRecorder(click);
         if (tracks is not null) foreach (var t in tracks.Values) StopRecorder(t.Recorder);
 
         RecordingStateChanged?.Invoke(false);
@@ -196,9 +203,10 @@ internal sealed class RecordingController
         }
         else
         {
-            receiver.OnReceivedSamples = active.WriteReceived;   // the shaped mix — what you hear
+            receiver.OnReceivedSamples = WriteReceivedWithClick;   // the shaped mix — what you hear (and the click, when recorded)
         }
-        diagnostic($"recording: started → {path} (source={s.Source}, format={s.FileFormat}, bypass={s.BypassShaping})");
+        diagnostic($"recording: started → {path} (source={s.Source}, format={s.FileFormat}, bypass={s.BypassShaping}, "
+            + $"metronome click {(receiver.Metronome.Record ? "included" : "not included")})");
     }
 
     private void StartMultiTrack(RecordingSettings s, DateTime now)
@@ -244,6 +252,14 @@ internal sealed class RecordingController
             receiver.OnRecordBlockComplete = FlushPeerTracks;
         }
 
+        // The metronome's click, a track of its own, following the recording lane's reads as the peers' tracks do.
+        if (receiver.Metronome.Record)
+        {
+            var clickPath = Path.Combine(folder, $"{MetronomeDaw.Name} {time}.{ext}");
+            metronomeTrack = Watch(new AudioRecorder(WithSource(s, RecordingSource.ReceivedOnly), diagnostic, OnRecorderFinished, clickPath));
+            receiver.OnRecordBlockComplete = FlushPeerTracks;
+        }
+
         // Your own track — your sent audio.
         if (s.Source != RecordingSource.ReceivedOnly)
         {
@@ -252,7 +268,8 @@ internal sealed class RecordingController
             sender.OnSentSamples = meRecorder.WriteSent;
         }
 
-        diagnostic($"recording: started multi-track → {folder} ({(peerTracks?.Count ?? 0)} peer track(s){(meRecorder is not null ? " + your send" : "")}, source={s.Source}, format={s.FileFormat}, bypass={s.BypassShaping})");
+        diagnostic($"recording: started multi-track → {folder} ({(peerTracks?.Count ?? 0)} peer track(s){(meRecorder is not null ? " + your send" : "")}"
+            + $"{(metronomeTrack is not null ? " + the metronome's click" : "")}, source={s.Source}, format={s.FileFormat}, bypass={s.BypassShaping})");
     }
 
     // Audio thread. Route each peer's block to that peer's recorder. peerTracks is fully built at
@@ -287,8 +304,17 @@ internal sealed class RecordingController
     // apart from each other however long the recording runs, and they all end up the same length.
     private void FlushPeerTracks(int floats)
     {
+        if (floats <= 0) return;
+        // The metronome's own track: this block's clicks, placed as the recording lane's output plays them.
+        if (metronomeTrack is { } click)
+        {
+            if (clickScratch.Length < floats) clickScratch = new float[floats];
+            Array.Clear(clickScratch, 0, floats);
+            receiver.Metronome.MixForRecording(clickScratch.AsSpan(0, floats));
+            click.WriteReceived(clickScratch.AsMemory(0, floats), RenderRoute.Mixed);
+        }
         var tracks = peerTracks;
-        if (tracks is null || floats <= 0) return;
+        if (tracks is null) return;
         foreach (var t in tracks.Values)
         {
             if (t.Accum.Length < floats) { var a = t.Accum; Array.Resize(ref a, floats); t.Accum = a; }
@@ -319,9 +345,24 @@ internal sealed class RecordingController
         if (rec is null || floats <= 0) return;
         if (rawMixAccum.Length < floats) { var a = rawMixAccum; Array.Resize(ref a, floats); rawMixAccum = a; }
         for (int i = rawMixLen; i < floats; i++) rawMixAccum[i] = 0f;
+        receiver.Metronome.MixForRecording(rawMixAccum.AsSpan(0, floats));
         rec.WriteReceived(rawMixAccum.AsMemory(0, floats), RenderRoute.Mixed);
         Array.Clear(rawMixAccum, 0, floats);
         rawMixLen = 0;
+    }
+
+    /// <summary>Audio thread: the shaped mix for a single-file recording, with the metronome's click added when it is
+    /// recorded - into a copy, as the block itself goes on to the speakers.</summary>
+    private void WriteReceivedWithClick(ReadOnlyMemory<float> samples, RenderRoute lane)
+    {
+        var rec = active;
+        if (rec is null) return;
+        if (!receiver.Metronome.Record) { rec.WriteReceived(samples, lane); return; }
+        var floats = samples.Length;
+        if (clickScratch.Length < floats) clickScratch = new float[floats];
+        samples.Span.CopyTo(clickScratch);
+        receiver.Metronome.MixForRecording(clickScratch.AsSpan(0, floats));
+        rec.WriteReceived(clickScratch.AsMemory(0, floats), lane);
     }
 
     private void StopRecorder(AudioRecorder? r)
@@ -339,6 +380,7 @@ internal sealed class RecordingController
         receiver.OnRecordBlockComplete = null;
         StopRecorder(active); active = null;
         StopRecorder(meRecorder); meRecorder = null;
+        StopRecorder(metronomeTrack); metronomeTrack = null;
         if (peerTracks is not null) { foreach (var t in peerTracks.Values) StopRecorder(t.Recorder); peerTracks = null; }
     }
 
@@ -384,11 +426,14 @@ internal sealed class RecordingController
         try
         {
             Directory.CreateDirectory(folder);
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = folder,
-                UseShellExecute = true,
-            });
+            if (OpenInExplorerForTest is { } stand) stand(folder);
+            else
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = folder,
+                    UseShellExecute = true,
+                });
+            diagnostic($"recording: opened the recordings folder {folder}");
         }
         catch (Exception ex)
         {
@@ -400,6 +445,9 @@ internal sealed class RecordingController
                 MessageBoxIcon.Warning);
         }
     }
+
+    /// <summary>Gate seam: stands in for File Explorer, so a test never opens a window.</summary>
+    internal Action<string>? OpenInExplorerForTest { get; set; }
 
     /// <summary>Show a folder-picker rooted at the current recordings folder. If the
     /// user picks a different folder, save it on the profile and return true so the

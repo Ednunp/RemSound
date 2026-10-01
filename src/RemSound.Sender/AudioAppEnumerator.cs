@@ -73,10 +73,15 @@ public static class AudioAppEnumerator
             .ToList();
     }
 
+    /// <summary>Gate seam: stands in for the running processes, so a check can open and close an "app" without starting
+    /// one. Null (always, in the app) reads the real process list.</summary>
+    internal static Func<string, IReadOnlyList<int>>? PidsForTest;
+
     /// <summary>The current PIDs for a process NAME (an app may run several processes). Used at capture
     /// time to resolve a name-based selection to the live processes to loopback-capture.</summary>
     public static IReadOnlyList<int> PidsForProcessName(string processName)
     {
+        if (PidsForTest is { } standIn) return standIn(processName);
         try
         {
             return Process.GetProcessesByName(processName).Select(p =>

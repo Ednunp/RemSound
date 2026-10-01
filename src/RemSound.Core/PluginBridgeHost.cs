@@ -89,6 +89,10 @@ public sealed class PluginBridgeHost : IDisposable
     /// the gate uses an OS-assigned one so a running RemSound is never disturbed by a test.</summary>
     public int Port => link.Port;
 
+    private long hellosForTest;
+    /// <summary>Gate seam: every hello that has arrived, answered or not.</summary>
+    internal long HellosForTest => Interlocked.Read(ref hellosForTest);
+
     /// <summary>The claim register, to hand to the receiver so claimed peers leave the mix.</summary>
     public PluginPeerClaims Claims => claims;
 
@@ -175,6 +179,7 @@ public sealed class PluginBridgeHost : IDisposable
         switch (type)
         {
             case PluginBridgeMessage.Hello:
+                Interlocked.Increment(ref hellosForTest);
                 // A plugin always says which DAW process it lives in. A hello without that came from one of the
                 // plugin's test builds before 6.0, which are not supported: no reply, and nothing registered.
                 if (payload.Length < sizeof(int) || BinaryPrimitives.ReadInt32LittleEndian(payload.Span) <= 0) return;
@@ -647,7 +652,7 @@ public sealed class PluginBridgeHost : IDisposable
     {
         lock (gate)
         {
-            return instances.TryGetValue(hash, out var instance) ? DateTime.UtcNow - instance.LastSeenUtc : null;
+            return instances.TryGetValue(hash, out var instance) ? UtcNow - instance.LastSeenUtc : null;
         }
     }
 
@@ -668,7 +673,7 @@ public sealed class PluginBridgeHost : IDisposable
                 instance = new Instance { Id = id, Group = id };
                 instances[hash] = instance;
             }
-            instance.LastSeenUtc = DateTime.UtcNow;
+            instance.LastSeenUtc = UtcNow;
             SweepLocked();
             return instance;
         }
@@ -747,9 +752,13 @@ public sealed class PluginBridgeHost : IDisposable
         get { lock (gate) return (hostGroups.Count, blockCounters.Count); }
     }
 
+    /// <summary>Gate seam: the clock the link judges a quiet instance by. Null (always, in the app) is the real one.</summary>
+    internal Func<DateTime>? UtcNowForTest { get; set; }
+    private DateTime UtcNow => UtcNowForTest?.Invoke() ?? DateTime.UtcNow;
+
     private void SweepLocked()
     {
-        var cutoff = DateTime.UtcNow - PluginPeerClaims.ClaimTimeout;
+        var cutoff = UtcNow - PluginPeerClaims.ClaimTimeout;
 
         // Look before copying. This runs from Touch, which runs on EVERY message — so once per audio
         // block per instance — and `instances.ToList()` allocated each time, on the bridge thread that

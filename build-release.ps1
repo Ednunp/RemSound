@@ -177,8 +177,9 @@ if (@(Get-Process RemSound -ErrorAction SilentlyContinue | Where-Object { $_.Ses
 }
 if (Test-Path $gate) {
     Write-Host ""
-    Write-Host "Running the build-and-test gate (run-tests.ps1)..." -ForegroundColor Cyan
-    & $gate
+    Write-Host "Running the build-and-test gate (run-tests.ps1, the full pack)..." -ForegroundColor Cyan
+    # Always the full pack: a release is exactly what it is for (the feature pack says it is not a release gate).
+    & $gate -Pack Full
     if ($LASTEXITCODE -ne 0) {
         Write-Host ""
         Write-Host "RELEASE ABORTED - the build-and-test gate failed. Fix the failures above and re-run." -ForegroundColor Red

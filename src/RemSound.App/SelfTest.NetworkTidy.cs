@@ -27,7 +27,6 @@ internal static partial class SelfTest
         var client = new RelayGroupClient(Guid.NewGuid());
         var relay = new IPEndPoint(IPAddress.Parse("203.0.113.90"), RemPacket.DefaultPort);
         client.Connect(relay);
-        client.NoteRelay(relay);
         var present = Guid.NewGuid();
         Feed(client, relay, RosterPacket([(present, "Here now")], paired: false), RelayInbound.Consumed, "a member list");
         var absent = Enumerable.Range(0, 80).Select(_ => Guid.NewGuid()).ToList();

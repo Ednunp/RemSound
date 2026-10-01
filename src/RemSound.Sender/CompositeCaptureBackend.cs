@@ -133,19 +133,23 @@ internal sealed class CompositeCaptureBackend : ICaptureBackend
     /// <summary>Gate seam: the WASAPI lane itself.</summary>
     internal ICaptureBackend? WasapiLaneForTest => wasapi;
 
-    /// <summary>The capture device latency for whichever lane is actually capturing. ASIO first when it
-    /// is running, since that is the lane the user is listening on; otherwise WASAPI. See
-    /// <see cref="ICaptureBackend.ReportedInputLatencyMs"/>.</summary>
-    public double ReportedInputLatencyMs
-    {
-        get
-        {
-            var a = asio?.ReportedInputLatencyMs ?? 0;
-            if (a > 0) return a;
-            return wasapi?.ReportedInputLatencyMs ?? 0;
-        }
-    }
+    /// <summary>Each lane's own capture device latency (N7, 2026-09-28): the two lanes are two capture stages, each with
+    /// its own stream, so each announces its own. See <see cref="ICaptureBackend.ReportedInputLatencyMs"/>.</summary>
+    public double WasapiLaneInputLatencyMs => wasapi?.ReportedInputLatencyMs ?? 0;
+
+    /// <inheritdoc cref="WasapiLaneInputLatencyMs"/>
+    public double AsioLaneInputLatencyMs => asio?.ReportedInputLatencyMs ?? 0;
+
+    /// <summary>The ASIO driver's own input latency (see <see cref="AsioCaptureBackend.DriverInputLatencyMs"/>), 0 unknown.</summary>
+    public double AsioLaneDriverInputLatencyMs => asio?.DriverInputLatencyMs ?? 0;
+
+    /// <summary>One figure for the whole backend, as the interface asks: the slower lane's, the longest journey. Nothing on
+    /// the wire uses it - each lane announces its own (above). It used to be "ASIO if running, else WASAPI", which every
+    /// lane then stamped on its stream.</summary>
+    public double ReportedInputLatencyMs => Math.Max(WasapiLaneInputLatencyMs, AsioLaneInputLatencyMs);
     public long TotalCaptureCallbacks => (wasapi?.TotalCaptureCallbacks ?? 0) + (asio?.TotalCaptureCallbacks ?? 0);
+    /// <summary>How many sources the WASAPI mixer has open, or null when the WASAPI side is not the mixer (push mode, none).</summary>
+    internal int? MixerSourceCount => (wasapi as MixingEngine)?.ActiveSourceCount;
     public long TotalCaptureBytes => (wasapi?.TotalCaptureBytes ?? 0) + (asio?.TotalCaptureBytes ?? 0);
     public string? FirstCaptureFormatDescription => asio?.FirstCaptureFormatDescription ?? wasapi?.FirstCaptureFormatDescription;
     public string? FirstCaptureLastError => asio?.FirstCaptureLastError ?? wasapi?.FirstCaptureLastError;

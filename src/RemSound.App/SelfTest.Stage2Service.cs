@@ -75,10 +75,11 @@ internal static partial class SelfTest
         Check(RemSoundService.ShouldHandleResume(50_000 + RemSoundService.ResumeDebounceMs, 50_000),
             "a notice a whole window later is a new wake");
 
-        var outcome = "a wake is handled once";
-        // The tidy-up works on this run's logs folder. Only touch it when this run has its own throwaway settings
-        // folder, as the gate does — never somebody's real logs.
-        if (CommandLine.TryGetConfigDir(Environment.GetCommandLineArgs(), out _))
+        // The tidy-up, in a settings folder of this step's own, so it runs every time and never near anybody's real logs.
+        // It used to run only when --config-dir was on the command line, which the gate never passed - so the gate checked
+        // the wake and not the tidy-up its name promised (the review, 2026-09-28).
+        string outcome;
+        using (AppConfig.UseThrowawayUserDataDirectory(Path.Combine(Path.GetTempPath(), "remsound-logtidy-" + Guid.NewGuid().ToString("N"))))
         {
             var dir = AppConfig.LogsDirectory;
             Directory.CreateDirectory(dir);

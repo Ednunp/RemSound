@@ -103,6 +103,9 @@ internal static partial class SelfTest
                     // that marshals to the UI thread (BeginInvoke) throws instead of running — which
                     // would report a perfectly good control as broken.
                     try { _ = dlg.Handle; } catch { }
+                    // (1) NAMES, MNEMONICS AND TAB ORDER, before anything is driven - the old "Dialog accessibility" step's
+                    // audit, merged here 2026-09-28 so each dialog is built once, not twice.
+                    AuditForm(name, dlg, problems);
                     var all = new List<Control>();
                     void Walk(Control p) { foreach (Control c in p.Controls) { all.Add(c); Walk(c); } }
                     Walk(dlg);

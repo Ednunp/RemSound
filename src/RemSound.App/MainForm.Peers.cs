@@ -61,6 +61,8 @@ public sealed partial class MainForm
 
     private void RefreshKnownPeers()
     {
+        // Who joined, moved or left the discovered list: written down, with where they were heard. MainForm.DiscoveryLog.cs.
+        LogDiscoveryChanges();
         knownPeers.Clear();
         // Discovered peers go in first so manual peers added by IP don't shadow them.
         foreach (var peer in discovery.Peers) knownPeers[peer.InstanceId] = peer;
@@ -250,6 +252,11 @@ public sealed partial class MainForm
 
     private void SelectPeer(PeerAnnouncement peer, bool fromProfileRestore)
     {
+        // Who ticked them: the profile (and accept connections, which calls NotChosenByYou after) or you. Only a peer you
+        // ticked yourself is worth a warning about a different password; the others are held quietly (CheckPeerSecurity).
+        if (fromProfileRestore) notChosenByYou.Add(peer.InstanceId);
+        else notChosenByYou.Remove(peer.InstanceId);
+        heldForPassword.Remove(peer.InstanceId);
         selectedPeerEndpoints[peer.InstanceId] = new IPEndPoint(peer.Address, peer.AudioPort);
         selectedPeerLabels[peer.InstanceId] = ResolvePeerDisplayName(peer);
         logFile.Event($"peer selected: {peer.Name} {peer.Address}:{peer.AudioPort}");
@@ -277,6 +284,8 @@ public sealed partial class MainForm
     /// </summary>
     private void DeselectPeer(Guid instanceId, bool byUser)
     {
+        notChosenByYou.Remove(instanceId);
+        heldForPassword.Remove(instanceId);
         if (selectedPeerEndpoints.TryGetValue(instanceId, out var endpoint) && selectedPeerEndpoints.Remove(instanceId))
         {
             selectedPeerLabels.TryGetValue(instanceId, out var label);
@@ -416,12 +425,15 @@ public sealed partial class MainForm
         lastSourceChangeUtc = DateTime.UtcNow;
     }
 
-    private IPEndPoint[] SelectedSendEndpoints()
+    private IPEndPoint[] SelectedSendEndpoints() => SendTargets(selectedPeerEndpoints.Values, relayGroup, relayPairTicked);
+
+    /// <summary>Where sound for the ticked peers goes - the app's rule, and the gate's relay stand-ins use it too.</summary>
+    internal static IPEndPoint[] SendTargets(IEnumerable<IPEndPoint> ticked, RelayGroupClient relayGroup, bool relayPairTicked)
     {
         // Somebody on a relay is reached AT THE RELAY, not at the made-up address we know them by here, and one copy
         // covers everyone there: the relay passes it to each person who has ticked us. Collapse duplicates by ip:port
         // so the same address isn't targeted twice.
-        var targets = selectedPeerEndpoints.Values.Select(ep => relayGroup.RelayOf(ep) ?? ep);
+        var targets = ticked.Select(ep => relayGroup.RelayOf(ep) ?? ep);
         // Ticking the phone or older app paired with us through the relay means sending to the relay itself: that one
         // send carries both the copy the group reads and the ordinary copy the phone reads. If someone in the group is
         // ticked too, it is the same address, and the dedupe below keeps it to the one send.

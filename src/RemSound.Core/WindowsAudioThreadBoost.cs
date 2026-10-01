@@ -12,6 +12,14 @@ public sealed class WindowsAudioThreadBoost : IDisposable
     private readonly ThreadPriority previousPriority;
     private readonly int ownerThreadId;
 
+    /// <summary>ERROR_TOO_MANY_THREADS: Windows lets one process hold MMCSS on at most 32 threads at once - measured
+    /// 2026-09-29, the 33rd refused, and a thread that exits gives its registration back.</summary>
+    private const int TooManyThreads = 565;
+    private static int live;
+
+    /// <summary>How many threads hold an MMCSS registration through this class right now, in this process.</summary>
+    public static int LiveRegistrations => Volatile.Read(ref live);
+
     public WindowsAudioThreadBoost(string taskName)
     {
         ownerThreadId = Environment.CurrentManagedThreadId;
@@ -22,14 +30,22 @@ public sealed class WindowsAudioThreadBoost : IDisposable
         if (!OperatingSystem.IsWindows()) return;
 
         avrtHandle = AvSetMmThreadCharacteristics(taskName, out _);
+        var refused = avrtHandle == IntPtr.Zero ? Marshal.GetLastWin32Error() : 0;
         if (avrtHandle == IntPtr.Zero && !string.Equals(taskName, "Audio", StringComparison.OrdinalIgnoreCase))
         {
             avrtHandle = AvSetMmThreadCharacteristics("Audio", out _);
             if (avrtHandle != IntPtr.Zero) taskName = "Audio";
+            else refused = Marshal.GetLastWin32Error();
         }
+        // Say why MMCSS said no, so a log line reading "ThreadPriority.Highest" on an audio thread explains itself.
+        if (avrtHandle == IntPtr.Zero)
+            Mode = refused == TooManyThreads
+                ? $"ThreadPriority.Highest (MMCSS refused: {LiveRegistrations} threads of this process already hold it, Windows allows 32)"
+                : $"ThreadPriority.Highest (MMCSS refused, win32={refused})";
 
         if (avrtHandle != IntPtr.Zero)
         {
+            Interlocked.Increment(ref live);
             // Critical sits one notch above the MMCSS task's default priority (High).
             // It's still well below RealTime — the OS keeps a reservation for system
             // services above us so the audio stack and screen reader can't be starved.
@@ -46,7 +62,7 @@ public sealed class WindowsAudioThreadBoost : IDisposable
     public void Dispose()
     {
         if (Environment.CurrentManagedThreadId != ownerThreadId) return;
-        if (avrtHandle != IntPtr.Zero) AvRevertMmThreadCharacteristics(avrtHandle);
+        if (avrtHandle != IntPtr.Zero && AvRevertMmThreadCharacteristics(avrtHandle)) Interlocked.Decrement(ref live);
         Thread.CurrentThread.Priority = previousPriority;
     }
 

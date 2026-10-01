@@ -184,6 +184,13 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
     /// <see cref="ICaptureBackend.ReportedInputLatencyMs"/>.</summary>
     public double ReportedInputLatencyMs => reportedInputLatencyMs;
 
+    /// <summary>The driver's own input latency (ASIOGetLatencies), in ms: from the sound reaching the input to the buffer being
+    /// handed over - the buffer, the driver's safety margin and its converters. When the first sample of a buffer was
+    /// captured, for the server's metronome. 0 when the driver does not say.</summary>
+    public double DriverInputLatencyMs => driverInputLatencyMs;
+    private volatile float driverInputLatencyStore;
+    private double driverInputLatencyMs { get => driverInputLatencyStore; set => driverInputLatencyStore = (float)value; }
+
     /// <summary>ASIO has no equivalent of WASAPI's "the capture stopped without being asked".
     /// A driver-level failure surfaces as an exception out of a control call (handled in Start) or
     /// out of the audio callback (handled there, rate-limited), not as a stopped-stream event. And
@@ -251,6 +258,7 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
                     reportedInputLatencyMs = shared.FramesPerBuffer > 0
                         ? shared.FramesPerBuffer * 1000.0 / MixSampleRate
                         : 0;
+                    driverInputLatencyMs = shared.InputLatencySamples > 0 ? shared.InputLatencySamples * 1000.0 / MixSampleRate : 0;
                     onDiagnostic?.Invoke(reportedInputLatencyMs > 0
                         ? $"asio open: driver reports {shared.FramesPerBuffer} frames per buffer = {reportedInputLatencyMs:0.0} ms of capture latency"
                         : "asio open: driver did not report a buffer size — capture latency will fall back to an estimate");
@@ -373,6 +381,7 @@ internal sealed class AsioCaptureBackend : ICaptureBackend
         activeChannelPairIndices = [];
         recordChannelCount = 0;
         reportedInputLatencyMs = 0;   // the driver's figure belongs to the stream we just closed
+        driverInputLatencyMs = 0;
     }
 
     public void Dispose()

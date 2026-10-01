@@ -7,6 +7,7 @@ using System.Security.Principal;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
+using RemSound.Core;
 
 namespace RemSound.App;
 
@@ -37,8 +38,9 @@ internal static class RemoteControl
 
     internal static string DefaultPipeName => PipeName(Process.GetCurrentProcess().SessionId);
 
-    /// <summary>How long a command may take before the reply says it is waiting on something it opened.</summary>
-    internal static readonly TimeSpan CommandWait = TimeSpan.FromSeconds(3);
+    /// <summary>How long a command may take before the reply says it is waiting on something it opened. Settable so the gate
+    /// can outlast it in a fraction of the time (2026-09-28).</summary>
+    internal static TimeSpan CommandWait = TimeSpan.FromSeconds(3);
 
     /// <summary><c>RemSound --control "command"</c> (as many as given, in order): send each to the headless copy on
     /// this account and print its answer. 0 when every command was carried out, 1 when one was refused, 2 when no
@@ -357,6 +359,9 @@ internal sealed class RemoteControlEngine
         "  type <text>                 type into a Windows file or folder picker's name box, then answer Open\n" +
         "  status                      the connection status and health lines\n" +
         "  sounds on|off               let RemSound's sounds play, for testing one (off unless asked)\n" +
+        "  talk down|up|tap|state      the push to talk key, as if pressed, released or tapped; or whether you're talking\n" +
+        "  metronome start|stop|mute|unmute|state, master on|off, tempo <30-300>|up|down, signature <6/8>, sound <name>,\n" +
+        "            hear remsound|daw   the metronome, as its menu, hotkey and settings window would\n" +
         "  wait [gone] <text> [secs]   until a window or question with that text is open (or gone), or a log line has it\n" +
         "  log [n] [words]             the newest log lines (20 unless told), even with the log file off\n" +
         "  cues [n] [words]            the cues RemSound would have played, newest last\n" +
@@ -398,6 +403,8 @@ internal sealed class RemoteControlEngine
             "type" => TypeIntoNativeDialog(rest),
             "status" => Status(),
             "sounds" or "sound" => Sounds(rest),
+            "talk" => Talk(rest),
+            "metronome" => Metronome(rest),
             "log" => Recent(HeadlessRecords.Log, rest, "logged"),
             "cues" => Recent(HeadlessRecords.Cues, rest, "no cue has fired"),
             "speech" => Recent(HeadlessRecords.Speech, rest, "nothing has been said"),
@@ -615,6 +622,77 @@ internal sealed class RemoteControlEngine
                 break;
         }
         return sb.ToString().TrimEnd();
+    }
+
+    /// <summary>The push to talk key, without a keyboard: a --headless copy never watches the real key (it would take it
+    /// from the person at the computer), so this is how it is pressed. The same path as the key's hook.</summary>
+    private string Talk(string rest)
+    {
+        if (mainForm() is not MainForm main) return "error: the main window isn't open yet";
+        switch (rest.Trim().ToLowerInvariant())
+        {
+            case "down": main.PushToTalkKeyForTest(true, Environment.TickCount64); break;
+            case "up": main.PushToTalkKeyForTest(false, Environment.TickCount64); break;
+            case "tap":
+                main.PushToTalkKeyForTest(true, Environment.TickCount64);
+                main.PushToTalkKeyForTest(false, Environment.TickCount64);
+                break;
+            case "state" or "": break;
+            default: return "error: talk down, talk up, talk tap or talk state";
+        }
+        return "ok: " + (main.PushToTalkStatusForTest ?? "push to talk is off");
+    }
+
+    /// <summary>The metronome without its menu or window: start, stop, mute and unmute as the menu item and the hotkey do,
+    /// the master tick, and the settings (kept in the profile, as the window's OK keeps them).</summary>
+    private string Metronome(string rest)
+    {
+        if (mainForm() is not MainForm main) return "error: the main window isn't open yet";
+        var tokens = Tokens(rest);
+        var what = tokens.Count > 0 ? tokens[0].ToLowerInvariant() : "state";
+        var value = tokens.Count > 1 ? string.Join(" ", tokens.Skip(1)) : "";
+        var engine = main.MetronomeForTest;
+        switch (what)
+        {
+            case "start": if (engine.Role == MetronomeRole.Follower || engine.Playing) return "error: " + Said(); main.MetronomeStartStopForTest("the control channel"); break;
+            case "stop": if (engine.Role == MetronomeRole.Follower || !engine.Playing) return "error: " + Said(); main.MetronomeStartStopForTest("the control channel"); break;
+            case "mute": if (engine.Role != MetronomeRole.Follower || engine.Muted) return "error: " + Said(); main.MetronomeStartStopForTest("the control channel"); break;
+            case "unmute": if (engine.Role != MetronomeRole.Follower || !engine.Muted) return "error: " + Said(); main.MetronomeStartStopForTest("the control channel"); break;
+            case "master":
+                if (!TryOnOff(value, out var on)) return "error: metronome master on or metronome master off";
+                main.SetMetronomeMasterForTest(on);
+                break;
+            case "tempo" when value.Equals("up", StringComparison.OrdinalIgnoreCase) || value.Equals("down", StringComparison.OrdinalIgnoreCase):
+                main.StepMetronomeTempoForTest(value.Equals("up", StringComparison.OrdinalIgnoreCase) ? +1 : -1, "the control channel");   // as the hotkeys do
+                break;
+            case "tempo":
+                if (!int.TryParse(value, out var bpm) || bpm < MetronomeTimeline.MinBpm || bpm > MetronomeTimeline.MaxBpm)
+                    return $"error: a tempo is {MetronomeTimeline.MinBpm} to {MetronomeTimeline.MaxBpm} beats a minute";
+                main.ChangeMetronomeSettingsForTest(s => s.Bpm = bpm);
+                break;
+            case "signature":
+                if (!MetronomeSignature.TryParse(value, out var sig) || !MetronomeSignature.Offered.Contains(sig))
+                    return "error: a signature is one of " + string.Join(", ", MetronomeSignature.Offered);
+                main.ChangeMetronomeSettingsForTest(s => { s.BeatsPerBar = sig.BeatsPerBar; s.BeatUnit = sig.BeatUnit; });
+                break;
+            case "sound":
+                var name = MetronomeSoundLibrary.Names().FirstOrDefault(n => n.Equals(value.Trim('"'), StringComparison.OrdinalIgnoreCase));
+                if (name is null) return "error: the sounds are " + string.Join(", ", MetronomeSoundLibrary.Names());
+                main.ChangeMetronomeSettingsForTest(s => s.Sound = name);
+                break;
+            case "hear":
+                MetronomeHearIn hear;
+                if (value.Equals("remsound", StringComparison.OrdinalIgnoreCase)) hear = MetronomeHearIn.RemSound;
+                else if (value.Equals("daw", StringComparison.OrdinalIgnoreCase)) hear = MetronomeHearIn.Daw;
+                else return "error: metronome hear remsound or metronome hear daw";
+                main.ChangeMetronomeSettingsForTest(s => s.HearIn = hear);
+                break;
+            case "state" or "": break;
+            default: return "error: metronome start, stop, mute, unmute, state, master on|off, tempo, signature, sound or hear";
+        }
+        return "ok: " + Said();
+
+        string Said() => $"{main.MetronomeStatusForTest ?? "Metronome: stopped"}; {main.MetronomeSettingsForTest.Describe()}";
     }
 
     private string Status()
@@ -1064,7 +1142,8 @@ internal sealed class RemoteControlEngine
     private static string CleanLabel(string text)
     {
         var s = Windowless.Clean(text).Replace("\r", " ").Replace("\n", " ");
-        s = Regex.Replace(s, @"\s*\(Alt\+\S+\)\s*$", "");
+        // A label ends "(Alt+X):" since the colons were made consistent (2026-09-28), so the colon goes before the hint does.
+        s = Regex.Replace(s.TrimEnd(':', ' '), @"\s*\(Alt\+\S+\)\s*$", "");
         return s.TrimEnd(':', ' ');
     }
 

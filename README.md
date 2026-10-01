@@ -4,6 +4,8 @@
 
 [**Download the latest version**](https://github.com/Ednunp/RemSound/releases/latest)  ·  [**Read the user manual**](MANUAL.md)
 
+Created by Ed Pourtahmasbi, built with Claude Code.
+
 ---
 
 RemSound is for anyone who wants to get live audio from one Windows PC to another with as little delay as possible — listening to one machine while you work at another, playing music together over the internet, co-hosting a podcast, and plenty more besides.
@@ -52,7 +54,7 @@ After that, RemSound updates itself. Help → Check for updates pulls the next v
 
 ## What you'll need
 
-* **Windows 10 or 11.** Some users run it successfully on Windows 7, but it's not officially supported there.
+* **Windows 10 or 11, or Windows 7.** Every release is tried on Windows 7 before it goes out. Windows 7 support may come to an end at some point, but we will do our best to keep supporting it for now.
 * **Another person running RemSound** on their own Windows machine.
 * **A way for the two machines to reach each other on the network.** Both on the same Wi-Fi works. Both on the same [Tailscale](https://tailscale.com) network works (free and easy to set up). Or both connected through a RemSound relay server you run yourself, which can carry a whole group of people who share a password. There's no public one, but the code to run one on a Linux machine or a Raspberry Pi is in the [server folder](https://github.com/Ednunp/RemSound/tree/main/server) of this repository, with setup instructions.
 

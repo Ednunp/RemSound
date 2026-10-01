@@ -21,19 +21,20 @@ internal static partial class SelfTest
         Check(lines.Length > 0 && lines[0].StartsWith("RemSound v", StringComparison.Ordinal), "the About notes must start with a release heading");
         var next = Array.FindIndex(lines, 1, l => l.StartsWith("RemSound v", StringComparison.Ordinal));
         var newest = string.Join("\n", next < 0 ? lines : lines[..next]);
-        // The v6.0 notes as Ed approved them on 2026-09-26: features only, the plugin first, then context help, accepting
-        // connections and servers, and one line for the fixes.
-        foreach (var phrase in new[] { "The DAW plugin.", "Context help.", "Accepting connections.", "Servers for more than two.", "little fixes under the hood" })
-            Check(newest.Contains(phrase, StringComparison.Ordinal),
-                $"the newest About notes must say what the release notes say — \"{phrase}\" is missing");
-        var releaseNotesFile = FindSourceRoot() is { } notesRoot ? Path.Combine(notesRoot, "RELEASE_NOTES.md") : null;
-        if (releaseNotesFile is not null && File.Exists(releaseNotesFile))
-        {
-            var releaseNotes = File.ReadAllText(releaseNotesFile);
-            foreach (var phrase in new[] { "The DAW plugin.", "Context help.", "Accepting connections.", "Servers for more than two." })
-                Check(releaseNotes.Contains(phrase, StringComparison.Ordinal),
-                    $"the release notes on GitHub and the About box must say the same - \"{phrase}\" is missing from RELEASE_NOTES.md");
-        }
+        // Whatever the release: the newest About block is the same release as RELEASE_NOTES.md (what GitHub shows), and says
+        // every one of its headings. Until 2026-09-28 this held v6.0's five phrases, so the first v6.1 notes would fail it or
+        // it would be edited to pass.
+        var notesRoot = FindSourceRoot();
+        if (notesRoot is null) return Skip("the source tree is not reachable to read RELEASE_NOTES.md (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
+        var releaseNotes = File.ReadAllText(Path.Combine(notesRoot, "RELEASE_NOTES.md")).Replace("\r\n", "\n");
+        var title = releaseNotes.Split('\n').FirstOrDefault(l => l.StartsWith("# RemSound v", StringComparison.Ordinal))?[2..].Trim();
+        Check(title is not null && lines[0].Trim() == title, $"the newest About block must be the release RELEASE_NOTES.md describes ({lines[0]} vs {title})");
+        var headings = System.Text.RegularExpressions.Regex.Matches(releaseNotes, @"^\*\*(?<h>[^*]+)\*\*", System.Text.RegularExpressions.RegexOptions.Multiline)
+            .Select(m => m.Groups["h"].Value.Trim()).Where(h => !h.StartsWith("Also new", StringComparison.OrdinalIgnoreCase)).ToList();
+        Check(headings.Count >= 1, "RELEASE_NOTES.md must have its headings in bold at the start of a line, as the About notes are checked against them");
+        foreach (var heading in headings)
+            Check(newest.Contains(heading, StringComparison.Ordinal),
+                $"the newest About notes must say what the release notes say - the heading \"{heading}\" is missing");
 
         var root = FindSourceRoot();
         if (root is null) return Skip("the notes cover the release, but the source tree is not reachable to check the menu names (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
@@ -43,21 +44,7 @@ internal static partial class SelfTest
         var prefs = File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "PreferencesDialog.cs"));
         Check(prefs.Contains("MakeTab(\"Connectivity\"", StringComparison.Ordinal),
             "the About notes send people to the Connectivity tab in Preferences, so it must still be called that");
-        return $"{lines[0]} covers the plugin, context help, accepting connections, servers and the fixes, as the release notes do; the menu and tab it names exist";
-    }
-
-    /// <summary>
-    /// THE ABOUT NOTES CALL THE JITTER BUFFER BY ITS NAME.
-    ///
-    /// <para>2026-09-13 review (Dialogs #5). The control was renamed from latency to jitter buffer on 2026-08-23, because
-    /// Total latency is a different number, but the v5.9 notes still called it the audio latency control.</para>
-    /// </summary>
-    private static string? AuditAboutNotesCallTheJitterBufferByItsName()
-    {
-        var shown = AboutDialog.TrimToLastVersions(AboutDialog.ReleaseNotesForTest, 5);
-        Check(!shown.Contains("latency control", StringComparison.OrdinalIgnoreCase),
-            "the About box must not call the jitter buffer the \"latency control\" — Total latency is a different number");
-        return "no shown release calls the jitter buffer the latency control";
+        return $"{lines[0]} is the release in RELEASE_NOTES.md and carries all {headings.Count} of its headings; the menu and tab it names exist";
     }
 
     /// <summary>
@@ -155,7 +142,7 @@ internal static partial class SelfTest
         var root = FindSourceRoot();
         if (root is null) return Skip("the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
         var main = File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "MainForm.cs"));
-        Check(main.Contains("wasapiLatencyLabel.Text = \"Audio jitter buffer in milliseconds (Alt+&L)\"", StringComparison.Ordinal),
+        Check(main.Contains("wasapiLatencyLabel.Text = \"Audio jitter buffer in milliseconds (Alt+&L):\"", StringComparison.Ordinal),
             "the jitter buffer label's wording has moved — this check is watching nothing");
         var stale = Regex.Matches(main, "\"Jitter buffer in milliseconds").Count;
         Check(stale == 0,

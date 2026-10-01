@@ -48,6 +48,13 @@ internal sealed class ServiceNetworkPresence : IDisposable
     internal void EchoAddrCheckForTest(byte[] packet, IPEndPoint remote) => EchoAddrCheck(packet, packet.Length, remote);
     internal long EchoRefusedForTest => echoGate.RefusedCount;
 
+    /// <summary>Test seam: the relay group the running presence made, or null while it is down. Read only.</summary>
+    internal RelayGroupClient? RelayGroupForTest => relayGroup;
+
+    /// <summary>Test seam: the heartbeat the running presence made, or null while it is down - so a test can move on the
+    /// clock its health windows are judged by (HeartbeatService.UtcNowForTest) instead of waiting them out.</summary>
+    internal HeartbeatService? HeartbeatForTest => heartbeat;
+
     /// <summary>Who the service is on a server: whoever set its profile up, else the computer's own id.</summary>
     internal static Guid ServiceRelayClientId() => ServiceStore.LoadRelayClientId() ?? AppConfig.LoadOrCreateRelayClientId();
 
@@ -71,7 +78,7 @@ internal sealed class ServiceNetworkPresence : IDisposable
 
     /// <summary>
     /// A relay's address check, echoed back exactly as it came — the proof this address really receives, which keeps the
-    /// service reachable once a relay enforces it — and the sign that the peer is a relay, so the service joins its group.
+    /// service reachable once a relay enforces it. (The group itself is joined by Connect, from the profile's server.)
     /// The service never echoed these before 2026-09-18 (the app has since 2026-07-27): an enforcing relay would have
     /// shut it out.
     /// </summary>
@@ -81,7 +88,6 @@ internal sealed class ServiceNetworkPresence : IDisposable
         if (!echoGate.ShouldEcho(remote, TalkingTo, Environment.TickCount64)) return;
         try { sender.SendVia(packet, length, remote); }
         catch (Exception ex) { log?.Invoke($"service: addr-check echo to {remote} failed: {ex.GetType().Name}: {ex.Message}"); }
-        relayGroup?.NoteRelay(remote);
     }
 
     /// <summary>Everybody the service ticks on its server, and whether that includes a phone or older app the server

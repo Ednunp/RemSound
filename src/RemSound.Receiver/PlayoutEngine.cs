@@ -44,6 +44,13 @@ internal sealed class PlayoutEngine : IWaveProvider
     /// the app pays nothing for a feature it isn't using.</summary>
     private PluginPeerClaims? pluginClaims;
     public void SetPluginPeerClaims(PluginPeerClaims? claims) => pluginClaims = claims;
+
+    /// <summary>The metronome's clicks, mixed by each output in its own render call (see <see cref="MetronomeOutputs"/>). Here
+    /// so every output built on this engine reaches the same schedule, whichever backend and lane it is.</summary>
+    public MetronomeOutputs Metronome { get; } = new();
+
+    /// <summary>The lane whose reads the recording follows (the first active output lane).</summary>
+    public RenderRoute RecordingRoute => recordingRoute;
     internal PluginPeerClaims? PluginClaimsForTest => pluginClaims;
 
     /// <summary>Which claimed peer a stream belongs to, keyed by stream id.
@@ -82,6 +89,38 @@ internal sealed class PlayoutEngine : IWaveProvider
     internal static readonly TimeSpan StreamOwnerGrace = TimeSpan.FromMinutes(1);
 
     internal int ClaimedStreamOwnersForTest => claimedStreamOwners.Count;
+
+    /// <summary>Gate seam (the soak and stress steps, 2026-09-28): how many entries each of the engine's tables holds right
+    /// now, and the ring bytes its playouts own and hold - everything it keeps per stream or per peer.</summary>
+    internal IReadOnlyList<(string Table, long Count)> TablesForTest()
+    {
+        lock (sessionsLock)
+        {
+            var mirrors = 0;
+            foreach (var list in mirrorsByKey.Values) mirrors += list.Count;
+            long ringBytes = 0, bufferedBytes = 0;
+            foreach (var s in sessionsSnapshot)
+            {
+                ringBytes += s.Capacity;
+                bufferedBytes += s.BufferedBytes;
+            }
+            return
+            [
+                ("engine: stream playouts", sessions.Count),
+                ("engine: mirror copies", mirrors),
+                ("engine: mirror lists", mirrorsByKey.Count),
+                ("engine: render snapshot", sessionsSnapshot.Length),
+                ("engine: per-peer pan and EQ", peerDspByAddress.Count),
+                ("engine: claimed stream owners", claimedStreamOwners.Count),
+                ("engine: orphaned stream owners", streamOwnerOrphanedAt.Count),
+                ("engine: plugin claims", pluginClaims?.ClaimedPeers().Count ?? 0),
+                ("engine: ring bytes owned", ringBytes),
+                ("engine: ring bytes holding audio", bufferedBytes),
+            ];
+        }
+    }
+    /// <summary>Simulator seam: each copy's clock-ratio estimate on one route (its drift loop's smoothed reading).</summary>
+    internal double[] DriftRatiosForTest(RenderRoute route) => sessionsSnapshot.Where(s => s.Route == route).Select(s => s.DriftResamplerRatio).ToArray();
     internal void ForgetStreamOwnersForTest(long nowTick) { lock (sessionsLock) ForgetStreamOwnersWithoutSessionLocked(nowTick); }
 
     /// <summary>Is this session's audio spoken for by a plugin — at its own address, or as a stream we
@@ -223,6 +262,7 @@ internal sealed class PlayoutEngine : IWaveProvider
 
     /// <summary>Set from the DAW plugin menu, and at startup from AppConfig.</summary>
     public void SetPluginShaping(bool applyShaping) => pluginShapingEnabled = applyShaping;
+    internal bool PluginShapingForTest => pluginShapingEnabled;
 
     private volatile bool wasapiLaneActive = true;
     private volatile bool asioLaneActive = true;
@@ -587,9 +627,9 @@ internal sealed class PlayoutEngine : IWaveProvider
     /// only the sessions tagged with that route — so lowering the WASAPI lane's target won't disarm
     /// the ASIO lane's session (and vice versa).
     ///
-    /// LOWER: by default disarms + drains the governed sessions. The buffer is now above the new
-    /// target and has to actually shrink before playback resumes. Brief silence is unavoidable on
-    /// this path; the user is asking for tighter latency and accepting the cost. Set
+    /// LOWER: by default the governed sessions come straight down to the new target, the excess skipped
+    /// with a short crossfade (2026-09-28; it used to be dropped outright and the session disarmed until
+    /// it refilled - a click and a moment's silence). Set
     /// <paramref name="drainOnLower"/> = false to take the SOFT path instead — the buffer keeps
     /// playing and SessionPlayout's depth correction walks it down gradually. Used for
     /// auto-tune-driven lowers, where the user didn't ask for an immediate change and shouldn't
@@ -627,7 +667,7 @@ internal sealed class PlayoutEngine : IWaveProvider
             if (independentLanes && s.Route != route) continue;
             if (clamped < previousTarget && drainOnLower)
             {
-                s.DisarmAndRequestDrain();
+                s.RequestDrainToTarget();
             }
             else if (drainOnLower)
             {
@@ -837,6 +877,28 @@ internal sealed class PlayoutEngine : IWaveProvider
         return total;
     }
 
+    /// <summary>Audible gaps on every stream: the one output with no ASIO driver chosen.</summary>
+    public long AggregateDropoutGaps
+    {
+        get
+        {
+            long total = 0;
+            foreach (var s in sessionsSnapshot) total += s.DropoutGapsTotal;
+            return total;
+        }
+    }
+
+    /// <summary>Audible gaps on this route's streams (see SessionPlayout.DropoutGapsTotal).</summary>
+    public long AggregateDropoutGapsFor(RenderRoute route)
+    {
+        long total = 0;
+        foreach (var s in sessionsSnapshot)
+        {
+            if (s.Route == route) total += s.DropoutGapsTotal;
+        }
+        return total;
+    }
+
     public long AggregateTuneBlockingUnderruns
     {
         get
@@ -910,6 +972,27 @@ internal sealed class PlayoutEngine : IWaveProvider
         {
             long total = 0;
             foreach (var s in sessionsSnapshot) total += s.DrainDropBytes;
+            return total;
+        }
+    }
+
+    /// <summary>Snaps down from a lowered target, and the bytes they skipped (SessionPlayout's DescentDepthBias block).</summary>
+    public long AggregateSnapCount
+    {
+        get
+        {
+            long total = 0;
+            foreach (var s in sessionsSnapshot) total += s.SnapCount;
+            return total;
+        }
+    }
+
+    public long AggregateSnapSkippedBytes
+    {
+        get
+        {
+            long total = 0;
+            foreach (var s in sessionsSnapshot) total += s.SnapSkippedBytes;
             return total;
         }
     }

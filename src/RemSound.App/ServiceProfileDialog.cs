@@ -18,21 +18,21 @@ internal sealed class ServiceProfileDialog : Form
     private readonly QuietTabControl tabs = new() { Dock = DockStyle.Fill };
 
     // --- Connectivity tab (mirrors the main window: a wired peer list + Add peer by IP) ---
-    private readonly CheckedListBox peersList = new() { CheckOnClick = true, Width = 460, Height = 120, AccessibleName = "Peers to send to (Alt+C)" };
+    private readonly CheckedListBox peersList = new() { CheckOnClick = true, Width = Dpi.Px(460), Height = Dpi.Px(120), AccessibleName = "Peers to send to (Alt+C)" };
     private readonly Label peersStatus = new() { AutoSize = true, Text = "No peers." };
     private readonly Button manualAddButton = new() { Text = "Add peer by IP (Alt+&A)", AutoSize = true, AccessibleName = "Add peer by IP" };
     private readonly Button passwordButton = new() { Text = "Set service profile pass&word...", AutoSize = true, AccessibleName = "Set service profile password" };
     private readonly Label passwordStatus = new() { AutoSize = true };
     // The server the service goes to. It has no window of its own to press Connect in, so the address IS the
     // instruction: set one and the service joins it every time it starts, clear it and it never does.
-    private readonly TextBox serverBox = new() { Width = 320, AccessibleName = "Server address (Alt+V)" };
+    private readonly TextBox serverBox = new() { Width = Dpi.Px(320), AccessibleName = "Server address (Alt+V)" };
     private readonly Label serverNote = new() { AutoSize = true };
 
     // --- Audio send tab ---
-    private readonly ListBox sendModeList = new() { Width = 460, Height = 40, IntegralHeight = false, AccessibleName = "How to send WASAPI audio (Alt+1)" };
-    private readonly CheckedListBox outputsList = new() { CheckOnClick = true, Width = 460, Height = 110, AccessibleName = "WASAPI audio outputs to send (Alt+2)" };
+    private readonly ListBox sendModeList = new() { Width = Dpi.Px(460), Height = Dpi.Px(40), IntegralHeight = false, AccessibleName = "How to send WASAPI audio (Alt+1)" };
+    private readonly CheckedListBox outputsList = new() { CheckOnClick = true, Width = Dpi.Px(460), Height = Dpi.Px(110), AccessibleName = "WASAPI audio outputs to send (Alt+2)" };
     private readonly Label outputsStatus = new() { AutoSize = true, Text = "No output device selected." };
-    private readonly CheckedListBox appsList = new() { CheckOnClick = true, Width = 460, Height = 110, AccessibleName = "Applications to send (Alt+3)" };
+    private readonly CheckedListBox appsList = new() { CheckOnClick = true, Width = Dpi.Px(460), Height = Dpi.Px(110), AccessibleName = "Applications to send (Alt+3)" };
     private readonly Label appsStatus = new() { AutoSize = true, Text = "No application selected." };
     // No WASAPI-inputs (microphone/line-in) list: the service sends this machine's OUTPUT audio (or
     // specific apps) only — capturing a mic from an unattended, logged-out box isn't a use case (Ed).
@@ -70,7 +70,11 @@ internal sealed class ServiceProfileDialog : Form
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterParent;
         KeyPreview = true;
-        ClientSize = new Size(560, 580);
+        // Wide enough for a list beside its label to show a device name such as "Use Windows default audio device, follows
+        // Windows changes" (the layout check D).
+        ClientSize = Dpi.Px(680, 580);
+        Size = Dpi.FitToScreen(Size);   // never taller than the screen: the tabs' pages scroll
+
         AccessibleName = "Configure RemSound service profile";
         if (Theme.AppIcon is { } icon) Icon = icon;
 
@@ -83,6 +87,12 @@ internal sealed class ServiceProfileDialog : Form
         LoadFromProfile();
         ApplySendModeVisibility();
         UpdatePasswordStatus();
+        // The line under each list says what the list holds from the start: it said "No output devices available." over a
+        // list of four until the list was focused, because it was written before the list was filled (UI audit 2026-09-28,
+        // finding 9). The same words the list gives on focus.
+        CheckedListAccessibility.ApplyStatus(peersList, peersStatus, "peer");
+        CheckedListAccessibility.ApplyStatus(outputsList, outputsStatus, "output device");
+        CheckedListAccessibility.ApplyStatus(appsList, appsStatus, "application");
 
         AcceptButton = saveButton;
         CancelButton = cancelButton;
@@ -106,7 +116,7 @@ internal sealed class ServiceProfileDialog : Form
 
     private static TableLayoutPanel NewPanel()
     {
-        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoScroll = true, Padding = new Padding(12) };
+        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoScroll = true, Padding = Dpi.Pad(12) };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         return panel;
@@ -123,7 +133,7 @@ internal sealed class ServiceProfileDialog : Form
 
         // The peer list, wired for the screen reader exactly like the main window. A ticked peer is one
         // the service sends to; untick to keep it in the list but not send. Delete removes it entirely.
-        FormLayoutRows.AddCheckedListRow(panel, 1, "Peers to send to (Alt+&C)", peersList, peersStatus, l => l.Focus());
+        FormLayoutRows.AddCheckedListRow(panel, 1, "Peers to send to (Alt+&C):", peersList, peersStatus, l => l.Focus());
         CheckedListAccessibility.Wire(peersList, peersStatus, "peer");
         peersList.KeyDown += (_, e) =>
         {
@@ -159,7 +169,7 @@ internal sealed class ServiceProfileDialog : Form
         var serverHeader = Theme.SectionHeader("Server");
         panel.Controls.Add(serverHeader, 0, 4);
         panel.SetColumnSpan(serverHeader, 2);
-        var serverLabel = new MnemonicLabel { Text = "Ser&ver address (Alt+V)", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = serverBox };
+        var serverLabel = new MnemonicLabel { Text = "Ser&ver address (Alt+V):", AutoSize = true, Anchor = AnchorStyles.Left, MnemonicTarget = serverBox };
         serverLabel.Click += (_, _) => serverBox.Focus();
         panel.Controls.Add(serverLabel, 0, 5);
         panel.Controls.Add(serverBox, 1, 5);
@@ -182,9 +192,9 @@ internal sealed class ServiceProfileDialog : Form
         sendModeList.SelectedIndex = 0;
         sendModeList.SelectedIndexChanged += (_, _) => { if (!suppressAppEvents) ApplySendModeVisibility(); };
 
-        sendModeLabel = AddListRow(panel, 0, "How to send WASAPI audio (Alt+&1)", sendModeList);
-        outputsLabel = FormLayoutRows.AddCheckedListRow(panel, 1, "WASAPI audio outputs to send (Alt+&2)", outputsList, outputsStatus, l => l.Focus());
-        appsLabel = FormLayoutRows.AddCheckedListRow(panel, 2, "Applications to send (Alt+&3)", appsList, appsStatus, l => l.Focus());
+        sendModeLabel = AddListRow(panel, 0, "How to send WASAPI audio (Alt+&1):", sendModeList);
+        outputsLabel = FormLayoutRows.AddCheckedListRow(panel, 1, "WASAPI audio outputs to send (Alt+&2):", outputsList, outputsStatus, l => l.Focus());
+        appsLabel = FormLayoutRows.AddCheckedListRow(panel, 2, "Applications to send (Alt+&3):", appsList, appsStatus, l => l.Focus());
 
         CheckedListAccessibility.Wire(outputsList, outputsStatus, "output device");
         CheckedListAccessibility.Wire(appsList, appsStatus, "application");
@@ -211,11 +221,13 @@ internal sealed class ServiceProfileDialog : Form
     private void BuildButtonRow()
     {
         var outer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+        outer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // the whole width, so the buttons can sit at its right
         outer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         outer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         outer.Controls.Add(tabs, 0, 0);
 
-        var row = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(8) };
+        // At the bottom right, in the order they always had (UI audit 2026-09-28, finding 11).
+        var row = new FlowLayoutPanel { AutoSize = true, Anchor = AnchorStyles.Right, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Padding = Dpi.Pad(8) };
         row.Controls.Add(saveButton);
         row.Controls.Add(cancelButton);
         row.Controls.Add(additionalButton);
@@ -231,6 +243,9 @@ internal sealed class ServiceProfileDialog : Form
         var wrap = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, TabStop = false };
         wrap.Controls.Add(list);
         panel.Controls.Add(wrap, 1, row);
+        // As the checked lists: level with the list's top, and as wide as the column (UI audit 2026-09-28).
+        FormLayoutRows.LevelWithTop(l, wrap.Margin.Top + list.Margin.Top);
+        FormLayoutRows.FillWidth(wrap, list, null);
         return l;
     }
 
@@ -446,7 +461,9 @@ internal sealed class ServiceProfileDialog : Form
             MaximizeBox = false,
             ShowInTaskbar = false,
             StartPosition = FormStartPosition.CenterParent,
-            ClientSize = new Size(560, 280),
+            // Sized to what it holds: a fixed 560 x 280 left OK and Cancel floating above an empty area (UI audit 2026-09-28).
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             AccessibleName = "Additional service options",
         };
         var logging = new AccessibleCheckBox { Text = "Enable service &logging (Alt+L)", AccessibleName = "Enable service logging", AutoSize = true, Checked = loggingEnabled };
@@ -463,15 +480,16 @@ internal sealed class ServiceProfileDialog : Form
             Minimum = 0,
             Maximum = 100,
             Value = Math.Clamp(volumePercent, 0, 100),
-            Width = 70,
+            Width = Dpi.Px(70),
             AccessibleName = "Volume percent",
         };
-        var volPercentLabel = new MnemonicLabel { Text = "Volume &percent (also unmutes):", MnemonicTarget = volPercent, AutoSize = true };
-        var volWhen = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280, AccessibleName = "When to set the volume" };
+        // Anchored left only, so each label sits level with the middle of the box beside it (it sat at the top).
+        var volPercentLabel = new MnemonicLabel { Text = "Volume &percent (also unmutes):", MnemonicTarget = volPercent, AutoSize = true, Anchor = AnchorStyles.Left };
+        var volWhen = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = Dpi.Px(280), AccessibleName = "When to set the volume" };
         volWhen.Items.Add("Only the first start after each boot");
         volWhen.Items.Add("Every time the service starts");
         volWhen.SelectedIndex = volumeBootOnly ? 0 : 1;
-        var volWhenLabel = new MnemonicLabel { Text = "&When:", MnemonicTarget = volWhen, AutoSize = true };
+        var volWhenLabel = new MnemonicLabel { Text = "&When:", MnemonicTarget = volWhen, AutoSize = true, Anchor = AnchorStyles.Left };
         void SyncVolumeEnabled()
         {
             volPercent.Enabled = volEnabled.Checked;
@@ -494,7 +512,7 @@ internal sealed class ServiceProfileDialog : Form
         // A real Cancel, and Escape bound to it. There was only OK, so Escape did nothing at all.
         var cancel = new Button { Text = "&Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
 
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(12), AutoSize = true };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = Dpi.Pad(12), AutoSize = true };
         foreach (var single in new Control[] { logging, acceptRelay, volEnabled })
         {
             var w = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
@@ -509,7 +527,8 @@ internal sealed class ServiceProfileDialog : Form
         whenRow.Controls.Add(volWhenLabel);
         whenRow.Controls.Add(volWhen);
         layout.Controls.Add(whenRow);
-        var okRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        // At the bottom right, in the order they always had (UI audit 2026-09-28, finding 11).
+        var okRow = new FlowLayoutPanel { AutoSize = true, Anchor = AnchorStyles.Right, WrapContents = false, Margin = Dpi.Pad(3, 8, 0, 0) };
         okRow.Controls.Add(ok);
         okRow.Controls.Add(cancel);
         layout.Controls.Add(okRow);

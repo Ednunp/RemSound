@@ -47,6 +47,7 @@ public sealed partial class MainForm
     private void OnSomeoneWantsToConnect(IPEndPoint remote, bool samePassword)
     {
         if (IsDisposed) return;
+        if (!samePassword) NoteDifferentPassword(remote.Address);
         var mode = AcceptMode();
         if (mode == PeerAcceptMode.Manual) return;
         if (!samePassword)
@@ -66,6 +67,47 @@ public sealed partial class MainForm
     // proof sealed by the password (TickProof). Nobody without the password is ever offered or accepted.
 
     private readonly TickProofGuard tickProofGuard = new();
+
+    // ---- A different password (Ed, 2026-09-29) --------------------------------------------------------------------------
+    // "a prompt or auto connect should only happen if people are using the same password". Where an address has shown
+    // another password - a proof that does not open with ours, audio sealed with another key, the security check - and when.
+    private readonly Dictionary<string, DateTime> differentPasswordSeenUtc = new(StringComparer.Ordinal);
+    private readonly HashSet<string> differentPasswordSaid = new(StringComparer.Ordinal);
+    /// <summary>How long a sign of another password counts: a person who changes their password is accepted soon after.</summary>
+    internal static readonly TimeSpan DifferentPasswordMemory = TimeSpan.FromMinutes(2);
+    /// <summary>Peers ticked by the profile or by accept connections, not by you since (SelectPeer keeps it).</summary>
+    private readonly HashSet<Guid> notChosenByYou = new();
+    /// <summary>Peers of <see cref="notChosenByYou"/> found on another password: kept ticked for the profile, but sent nothing and
+    /// not warned about (CheckPeerSecurity); the status line names them. Let go when the passwords match.</summary>
+    private readonly HashSet<Guid> heldForPassword = new();
+
+    private void NoteDifferentPassword(IPAddress address)
+    {
+        lock (differentPasswordSeenUtc)
+        {
+            if (differentPasswordSeenUtc.Count >= 256) differentPasswordSeenUtc.Clear();
+            differentPasswordSeenUtc[address.ToString()] = DateTime.UtcNow;
+        }
+    }
+
+    internal bool KnownToUseADifferentPassword(IPAddress address)
+    {
+        lock (differentPasswordSeenUtc)
+            return differentPasswordSeenUtc.TryGetValue(address.ToString(), out var seen) && DateTime.UtcNow - seen < DifferentPasswordMemory;
+    }
+
+    private bool IsHeldForPassword(IPEndPoint endpoint) =>
+        heldForPassword.Any(id => selectedPeerEndpoints.TryGetValue(id, out var ep) && ep.Equals(endpoint));
+
+    /// <summary>The send list without anybody held for their password.</summary>
+    private IPEndPoint[] WithoutPeersHeldForPassword(IPEndPoint[] endpoints) =>
+        heldForPassword.Count == 0 ? endpoints : endpoints.Where(ep => !IsHeldForPassword(ep)).ToArray();
+    internal bool IsSelectedForTest(IPAddress address) => selectedPeerEndpoints.Values.Any(ep => ep.Address.Equals(address));
+
+    /// <summary>Test seams.</summary>
+    internal void NoteDifferentPasswordForTest(IPAddress address) => NoteDifferentPassword(address);
+    internal bool IsHeldForPasswordForTest(Guid id) => heldForPassword.Contains(id);
+    internal bool IsNotChosenByYouForTest(Guid id) => notChosenByYou.Contains(id);
     private readonly object tickProofGate = new();
     private readonly Dictionary<string, long> tickProofLastSeen = new(StringComparer.OrdinalIgnoreCase);
     private DateTime nextTickProofUtc = DateTime.MinValue;
@@ -108,6 +150,7 @@ public sealed partial class MainForm
         }
         if (!tickProofGuard.TryAccept(key, payload, DateTime.UtcNow, out var senderId, out var why))
         {
+            if (why == TickProofGuard.NotOurPassword) NoteDifferentPassword(remote.Address);
             if (acceptAsked.Add($"proof-rejected:{remote.Address}"))
                 logFile.Event($"accept connections: {remote.Address} has ticked us but did not prove our password ({why}) — not offered or accepted");
             return;
@@ -161,6 +204,16 @@ public sealed partial class MainForm
     {
         if (selectedPeerEndpoints.Values.Any(ep => ep.Address.Equals(remote.Address))) return;
         if (acceptRefusedByUser.Contains($"peer:{remote.Address}")) return;
+        // Never on a different password, however they came (Ed, 2026-09-29). A device that only listens and has shown
+        // nothing either way - a phone before its app sends the proof - is still treated as 2026-09-26 decided; one that has
+        // shown ANOTHER password (its proof, its audio, or the security check) is not offered or accepted. Not remembered as
+        // asked, so it can be once the passwords match.
+        if (KnownToUseADifferentPassword(remote.Address))
+        {
+            if (differentPasswordSaid.Add(remote.Address.ToString()))
+                logFile.Event($"accept connections: {ResolvePeerDisplayName(peer)} at {remote.Address} {how}, but uses a different password — not offered or accepted");
+            return;
+        }
         // A relay's own address is not a person: the people behind it arrive in the relay list with names of their own.
         if (relayGroup.ConnectedRelay is { } relay && relay.Address.Equals(remote.Address)) return;
         if (!acceptAsked.Add($"peer:{remote.Address}")) return;
@@ -195,6 +248,7 @@ public sealed partial class MainForm
         // accepted and his wife's got the stream (2026-09-25). Only somebody discovery does not hear is kept by hand.
         if (!DiscoveryHears(peer.InstanceId)) manualPeers[peer.InstanceId] = peer;
         SelectPeer(peer);
+        notChosenByYou.Add(peer.InstanceId);   // accepted for you, not ticked by you
         EnsurePeerRemembered(peer);
         RefreshKnownPeers();
         SyncAllPeerLists();

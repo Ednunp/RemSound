@@ -65,6 +65,9 @@ public sealed class ProcessLoopbackCapture : IWaveIn
         includeTree = includeProcessTree;
     }
 
+    /// <summary>Which way it captures: the program and its children (true), or every program but them (false).</summary>
+    internal bool IncludesProcessTree => includeTree;
+
     /// <summary>Test-only override: when set, <see cref="IsSupported"/> returns this instead of the real OS
     /// check, so a self-test running on Windows 10/11 can exercise the Windows-7 (unsupported) code paths —
     /// e.g. the send-mode UI that crashed at launch on Win7 (issue #22). Null = use the real OS check.</summary>

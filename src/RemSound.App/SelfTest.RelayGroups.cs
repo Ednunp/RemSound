@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
@@ -117,7 +118,6 @@ internal static partial class SelfTest
 
             var again = new RelayGroupClient(Guid.NewGuid());
             again.Connect(relay);
-            again.NoteRelay(relay);
             Feed(again, relay, RosterPacket([(alice, "Alice")], paired: false), RelayInbound.Consumed, "a member list");
             Check(again.Members.Single().Address.Equals(aliceMember.Address),
                 "the same person must get the same address every time, so the volume and pan given to them come back with them");
@@ -175,18 +175,18 @@ internal static partial class SelfTest
         {
             Check(WaitUntil(() => ReadShared(logPath).Contains("event=startup"), 10000) && !relayProcess.HasExited,
                 $"the relay must start under {python}");
-            Thread.Sleep(500);   // it logs before it binds
-            Check(!ReadShared(logPath).Contains("event=bind_failed"), "the relay must bind its port");
             var relay = new IPEndPoint(IPAddress.Loopback, port);
 
             // The older app first: it takes a pair slot and waits, as a phone does, and the first member to arrive pairs
-            // with it.
+            // with it. Each arrival waited for in the relay's own log, not a fixed 1.5 s (2026-09-28).
             var older = new RelayTestApp("Phone", "garden party", relay, groups: false);
             apps.Add(older);
-            Thread.Sleep(1500);
+            Check(WaitUntil(() => ReadShared(logPath).Contains("event=peer_joined"), 10000),
+                "the older app must take a pair slot on the relay - which also shows the relay bound its port");
+            Check(!ReadShared(logPath).Contains("event=bind_failed"), "the relay must bind its port");
             var alice = new RelayTestApp("Alice", "garden party", relay, groups: true);
             apps.Add(alice);
-            Thread.Sleep(1500);
+            Check(WaitUntil(() => ReadShared(logPath).Contains("event=client_joined"), 10000), "Alice must join the relay as a member");
             var bob = new RelayTestApp("Bob", "garden party", relay, groups: true);
             var carol = new RelayTestApp("Carol", "garden party", relay, groups: true);
             var dave = new RelayTestApp("Dave", "another password entirely", relay, groups: true);
@@ -207,15 +207,16 @@ internal static partial class SelfTest
             foreach (var (app, level) in new[] { (alice, 0.3f), (bob, 0.5f), (carol, 0.7f), (older, 0.4f) }) app.StartTalking(level);
 
             // Nobody has ticked anybody yet, so nobody hears anybody: on a relay, as on a network, sound only flows where
-            // each has ticked the other. This is what stops a room full of strangers arriving in your ears.
-            Thread.Sleep(2500);
+            // each has ticked the other. This is what stops a room full of strangers arriving in your ears. A window long enough
+            // for a stream to announce itself three times over (2026-09-28: 2.5 s).
+            Thread.Sleep(800);
             Check(group.All(a => a.Receiver.LiveSessionCountForTest == 0),
                 "before anyone is ticked, nobody on the relay must be heard ("
                 + string.Join(", ", group.Select(a => $"{a.Name}: {a.Receiver.LiveSessionCountForTest}")) + ")");
 
             // Alice ticks Bob, but Bob has not ticked Alice: still nothing, in either direction.
             alice.Tick(alice.Group!.Members.Where(m => m.Name == "Bob").Select(m => m.Id));
-            Thread.Sleep(2500);
+            Thread.Sleep(800);
             Check(alice.Receiver.LiveSessionCountForTest == 0 && bob.Receiver.LiveSessionCountForTest == 0,
                 $"ticking someone who has not ticked you back must be heard by neither of you (Alice {alice.Receiver.LiveSessionCountForTest}, Bob {bob.Receiver.LiveSessionCountForTest})");
 
@@ -236,7 +237,7 @@ internal static partial class SelfTest
                 $"the member paired with the older app ({partner.Name}) must hear it through the relay");
             Check(WaitUntil(() => older.Receiver.IsAudioFlowingFrom(relay.Address, TimeSpan.FromSeconds(2)), 5000) && older.Receiver.LiveSessionCountForTest == 1,
                 $"the older app must still hear exactly one person through the relay, its partner ({older.Receiver.LiveSessionCountForTest} streams)");
-            Thread.Sleep(500);
+            Thread.Sleep(300);
             Check(dave.Receiver.LiveSessionCountForTest == 0,
                 $"someone on another password must hear nobody from the group ({dave.Receiver.LiveSessionCountForTest} streams)");
 
@@ -296,15 +297,30 @@ internal static partial class SelfTest
             ticked.Add(someone);
             var keyArrives = Require(typeof(MainForm).GetMethod("RelayPasswordChanged", flags), "MainForm.RelayPasswordChanged not found");
 
+            // The same bug marked the profile changed and had NVDA say "Password changed" (2026-09-25); both are asked too
+            // (2026-09-28). Speech is recorded, not spoken, while the run is windowless.
+            Windowless.SetActiveForTest(true);
+            var saidMark = HeadlessRecords.Speech.Mark;
+            var dirtyBefore = form.UnsavedChangesForTest;
             keyArrives.Invoke(form, [new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }]);
             Check(ticked.Contains(someone), "THE BUG: the password's key arriving after the connect is not a change of password - the ticks on the server must stay");
+            Check(form.UnsavedChangesForTest == dirtyBefore, "and the key arriving must not mark the profile as changed");
+            Check(!HeadlessRecords.Speech.Since(saidMark).Any(l => l.Contains("Password changed", StringComparison.Ordinal)),
+                $"and nothing may say \"Password changed\" - it has not ({string.Join(" | ", HeadlessRecords.Speech.Since(saidMark))})");
 
-            // And a real change after that still starts the list again.
+            // And a real change after that still starts the list again, and says so.
             keyArrives.Invoke(form, [new byte[] { 8, 7, 6, 5, 4, 3, 2, 1 }]);
             Check(ticked.Count == 0, "a real change of password afterwards must still clear the ticks: they belong to the people on the old password");
-            return "a server joined before the key was known keeps its ticks when the key arrives, and a real password change still clears them";
+            Check(HeadlessRecords.Speech.Since(saidMark).Any(l => l.Contains("Password changed", StringComparison.Ordinal)),
+                "and a real change must be said - which is also what shows the silence above was listened for");
+            return "a server joined before the key was known keeps its ticks when the key arrives, without marking the profile or saying "
+                 + "\"Password changed\"; a real password change still clears them, and says so";
         }
-        finally { try { form?.Dispose(); } catch { /* teardown */ } }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            Windowless.SetActiveForTest(false);
+        }
     }
 
     /// <summary>
@@ -1528,51 +1544,549 @@ internal static partial class SelfTest
     /// <summary>
     /// THE APP AND THE SEND-ONLY SERVICE BOTH TAKE PART IN RELAY GROUPS.
     ///
-    /// <para>Read from the source, because neither can be started here: each must route what it sends through its relay
-    /// group, hand what arrives on its sending socket to it first, learn relays from their address checks (the service
-    /// echoing those at all is new: an enforcing relay would have shut it out), and keep the group told who it sends to
-    /// and under which password. Every gap is listed, not only the first.</para>
+    /// <para>Each must route what it sends through its relay group, hand what arrives on its sending socket to the group
+    /// first, answer the relay's address check from that socket (the service doing so at all is new: an enforcing relay
+    /// would have shut it out), and keep the group told who it sends to and under which password.</para>
+    ///
+    /// <para>Driven, not read (2026-09-28). This was twenty-two lines of source matched word for word: a harmless rename
+    /// broke it and a matching line in dead code passed, on the premise that neither side could be started here. Both can.
+    /// The real service host runs with a server in its profile against a stand-in relay on loopback that speaks the
+    /// relay's own format and, as the relay does for a group, lists nobody until their address check has come back. The
+    /// real window, headless, loads a profile that names a server and goes to another stand-in through its own sending
+    /// socket. Only three lines are still read, from the one method a headless window cannot run - <c>Connect</c>, which
+    /// takes the real port: the group starting on the socket, the heartbeat counting a member's pong for their relay, and
+    /// the hook that hands an address check to the echo driven here.</para>
     /// </summary>
     private static string? AuditAppAndServiceTakePartInRelayGroups()
     {
         var root = FindSourceRoot();
         if (root is null) return Skip("the source tree is not reachable (set REMSOUND_SOURCE_ROOT, as run-tests.ps1 does)");
-        string Read(string file) => File.ReadAllText(Path.Combine(root, "src", "RemSound.App", file)).Replace("\r", "");
-        var app = Read("MainForm.cs");
-        var service = Read("ServiceNetworkPresence.cs");
-        var host = Read("ServiceSendHost.cs");
-        var relayUi = Read("MainForm.Relay.cs");
-        var missing = new List<string>();
-        void Need(string text, string code, string what) { if (!text.Contains(code, StringComparison.Ordinal)) missing.Add(what); }
+        string? deviceId;
+        try { deviceId = AudioDeviceCatalog.LoadOutputs().FirstOrDefault(o => o.DeviceId is not null)?.DeviceId; }
+        catch (Exception ex) { return Skip("could not enumerate outputs: " + ex.Message); }
+        if (deviceId is null) return Skip("no usable output device for the service to capture from");
 
-        Need(app, "sender.RelayRouter = relayGroup;", "the app must route what it sends through its relay group");
-        Need(app, "relayGroup.HandleInbound(buffer, ref length, remote, out var member)", "the app must hand what arrives on its sending socket to the relay group first");
-        Need(app, "receiver.RelayOfMember = relayGroup.RelayOf;", "the app's receiver must let in the members of a chosen relay");
-        Need(app, "heartbeatService.RelayOfMember = relayGroup.RelayOf;", "the app's heartbeat must count a member's pong for its relay");
-        Need(app, "relayGroup.NoteRelay(remote);", "the app must learn a relay from its address check");
-        Need(app, "relayGroup.Start(sender.SendRaw);", "the app must start its relay group on the raw socket");
-        Need(relayUi, "relayGroup.Connect(resolved);", "the app must connect to a relay only when the user asks for one");
-        Need(relayUi, "relayGroup.SetTicked(relayTicked, relayPairTicked);", "the app must tell the relay who it has ticked");
-        Need(relayUi, "relayGroup.Disconnect();", "the app must be able to leave a relay");
-        Need(app, "GatherRelayProfile(profile);", "a profile must remember its relay and who was ticked on it");
-        Need(app, "ApplyRelayProfile(p);", "loading a profile must put its relay and its ticks back");
-        Need(app, "relayGroup.SetIdentity(Environment.MachineName, currentAudioFingerprint);", "the app must tell its relay group its password");
-        Need(service, "sender.RelayRouter = group;", "the service must route what it sends through its relay group");
-        Need(service, "group.HandleInbound(buf, ref len, remote, out var member)", "the service must hand what arrives on its sending socket to the relay group first");
-        Need(service, "heartbeat.RelayOfMember = group.RelayOf;", "the service's heartbeat must count a member's pong for its relay");
-        Need(service, "else if (type == RemPacketType.AddrCheck) EchoAddrCheck(buf, len, remote);", "the service must echo a relay's address check that arrives on its sending socket");
-        Need(service, "relayGroup?.NoteRelay(remote);", "the service must learn a relay from its address check");
-        Need(service, "group.Start(sender.SendRaw);", "the service must start its relay group on the raw socket");
-        Need(service, "group.Connect(relay);", "the service must connect to the relay its profile names");
-        Need(service, "ApplyTicks(group);",
-            "the service must tell the relay who its profile has ticked, plus anyone it is set to accept");
-        Need(service, "WhoTheServiceTicks(profileTicks, group.Members, acceptRelayAutomatically, profilePairTicked);",
-            "and the phone paired through the server must follow the same Accept tick as everybody else (Ed, 2026-09-23)");
-        Need(service, "group.Changed += OnRelayGroupChanged;",
-            "the service must work that out again each time the relay's member list changes, not only at start-up");
-        Need(host, "presence.Start(PresencePortForTest > 0 ? PresencePortForTest : RemPacket.DefaultPort, endpoints, relay, tickedOnRelay, profile.RelayPairPartnerTicked);", "the service must pass its profile's relay and ticks to its network presence");
+        const string password = "selftest-relay-groups-both";
+        var fingerprint = Require(RemSoundCrypto.ForPlainPassword(password).Fingerprint, "a password must have a fingerprint");
+        var service = TheServiceTakesPartInItsRelayGroup(deviceId, password, fingerprint);
+        var window = TheWindowTakesPartInItsRelayGroup(password, fingerprint);
+
+        // What a headless window cannot run: Connect, which takes the real port. Read from that method's own code - comments
+        // and strings taken out, spacing ignored - so a line left in a comment, or in some other method, does not pass.
+        var connect = CodeOnly(MethodBodyIn(File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "MainForm.cs")), "private void Connect()"));
+        Check(connect.Length > 0, "MainForm's Connect() was not found, so the three lines it must hold would be checked against nothing");
+        var missing = new List<string>();
+        void Need(string code, string what) { if (!Squeezed(connect).Contains(Squeezed(code), StringComparison.Ordinal)) missing.Add(what); }
+        Need("relayGroup.Start(sender.SendRaw);", "Connect must start the relay group on the raw socket - the start this step makes by hand");
+        Need("heartbeatService.RelayOfMember = relayGroup.RelayOf;", "Connect's heartbeat must count a member's pong for their relay");
+        Need("receiver.OnAddrCheckReceived = OnAddrCheckArrived;", "Connect must hand a relay's address check to the echo this step drives");
         Check(missing.Count == 0, string.Join(" | ", missing));
-        return "the app and the send-only service both route through, listen to, learn and leave their relay groups";
+        return $"{service}; {window}; and Connect starts the group, counts a member's pong and hooks the echo";
+
+        static string Squeezed(string text) => string.Concat(text.Where(c => !char.IsWhiteSpace(c)));
+    }
+
+    /// <summary>The service's half: the real host, with a server in its profile, against a stand-in relay.</summary>
+    private static string TheServiceTakesPartInItsRelayGroup(string deviceId, string password, byte[] fingerprint)
+    {
+        using var relay = StandInRelay.OnOnePort(IPAddress.Loopback)[0];
+        var tickedInProfile = Guid.NewGuid();
+        var ticksUs = Guid.NewGuid();
+        var hasNot = Guid.NewGuid();
+        relay.Others = [(ticksUs, "Ticked the service", true), (hasNot, "Has not", false)];
+        relay.Paired = true;   // and a phone or older app waits in the relay's ordinary pair slots, paired with the service
+        var profile = new Profile
+        {
+            Title = "selftest-relay-groups",
+            WasapiSendMode = "devices",
+            Password = RemSoundCrypto.Obfuscate(password),
+            RelayServer = $"127.0.0.1:{relay.Endpoint.Port}",
+            RelayConnectOnStart = true,
+            RelayPairPartnerTicked = true,
+        };
+        profile.SelectedWasapiSendOutputs.Add(deviceId);
+        profile.RelayTickedIds.Add(tickedInProfile.ToString("D"));
+
+        var restorePresencePort = ServiceSendHost.PresencePortForTest;
+        var restoreAccept = ServiceStore.LoadAcceptRelayConnectionsAutomatically();
+        ServiceSendHost.PresencePortForTest = FreeUdpPort();
+        var lines = new ConcurrentQueue<string>();
+        var host = new ServiceSendHost(() => profile, lines.Enqueue);
+        try
+        {
+            var me = ServiceNetworkPresence.ServiceRelayClientId();
+
+            // 1. Left to its profile, as it is by default: it reaches exactly who the profile names - and the phone the
+            // relay pairs with it, because the profile ticked that row.
+            ServiceStore.SaveAcceptRelayConnectionsAutomatically(false);
+            Check(host.ApplyProfile(profile), $"premise: the service must start sending with a server in its profile (it said: {string.Join(" | ", lines.TakeLast(4))})");
+            // Its first hello goes as it starts, not a turn of the group's one-second timer later (measured 1,054 and 1,056 ms
+            // before 2026-09-28) - waited for here without turning the timer by hand.
+            Check(WaitUntil(() => relay.HellosSince(0).Any(h => h.ClientId == me), 900),
+                $"THE FIRST HELLO: the service must say hello to its server as it starts, not a second later ({relay.Describe()})");
+            var hello = ServiceHelloAt(relay, host, me, since: 0);
+            Check(hello.Name == Environment.MachineName && hello.Tag.AsSpan().SequenceEqual(fingerprint),
+                $"THE HELLO: the service must join the group for its password, under this computer's name (it said it was \"{hello.Name}\", "
+                + $"tag {Convert.ToHexString(hello.Tag)})");
+            Check(hello.Ticked is [var named] && named == tickedInProfile,
+                $"and tell the relay exactly who its profile ticked there ({StandInRelay.Describe(hello.Ticked)})");
+            Check(WaitUntil(() => relay.Proved(hello.From), 5000),
+                $"THE ECHO: the service must send the relay's address check back, from the socket its hello came from ({hello.From}); "
+                + "a relay that enforces the check lists nobody who does not, and hears nothing from them");
+            var group = Require(host.PresenceForTest.RelayGroupForTest, "the running service must have a relay group");
+            Check(WaitUntil(() => group.IsInGroup(relay.Endpoint), 5000),
+                "THE INBOUND PATH: what arrives on the service's sending socket must go to its relay group first - the relay's list, "
+                + "sent there once the address check came back, must put the service in the group");
+            Check(WaitUntil(() => relay.Count(a => a.IsGroupFramed(me, RemPacketType.Audio)) > 0, 5000),
+                $"THE ROUTING: once the relay lists it, the service's audio must go to the relay group-framed, with its own id ({relay.Describe()})");
+            var framedFrom = relay.IndexOf(a => a.IsGroupFramed(me, RemPacketType.Audio));
+            Check(WaitUntil(() => relay.CountSince(framedFrom, a => a.IsOrdinary(RemPacketType.Audio) && a.From.Equals(hello.From)) >= 5, 3000),
+                "THE PHONE: with the phone the relay pairs it with ticked in its profile, the service's audio must also go to the relay in "
+                + $"ordinary form after it joined the group - the only form a phone reads ({relay.CountSince(framedFrom, a => a.IsOrdinary(RemPacketType.Audio))} such packets)");
+            Check(WaitUntil(() => group.Members.Any(m => m.Id == ticksUs && m.TicksUs), 3000),
+                $"premise: the relay's list must have reached the service's group ({string.Join(", ", group.Members.Select(m => m.Name))})");
+            var ticksNow = StandInRelay.ReadHello(group.HelloForTest(), new IPEndPoint(IPAddress.Loopback, 0))?.Ticked;
+            Check(ticksNow is [var stillNamed] && stillNamed == tickedInProfile,
+                $"left to its profile, somebody who ticks the service on the relay must not be ticked back ({StandInRelay.Describe(ticksNow)})");
+
+            // A member's pong to the service's own ping, through the relay, counts as the relay answering. Nothing else here
+            // answers a ping, so without the member-to-relay mapping the relay stays unheard.
+            Check(host.PresenceForTest.PeerHealthSnapshot().Any(h => h.AudioEndpoint.Equals(relay.Endpoint) && h.AgeOfLastPong is null),
+                "premise: the service must track the relay, and nothing may have answered its pings yet");
+            long tick = 0;
+            Check(WaitUntil(() => relay.LatestPingTick(hello.From) is { } t && (tick = t) != 0, 3000), "premise: the service must ping its relay");
+            relay.SendAsMember(ticksUs, RemPacketType.Heartbeat, StandInRelay.Pong(tick), hello.From);
+            Check(WaitUntil(() => host.PresenceForTest.PeerHealthSnapshot().Any(h => h.AudioEndpoint.Equals(relay.Endpoint) && h.AgeOfLastPong is not null), 3000),
+                "THE HEARTBEAT: a group member's pong to the service's own ping, through the relay, must count as the relay answering");
+
+            // 2. Set to accept whoever ticks it: somebody the relay's list says has ticked the service is ticked back the moment
+            // the list says so - and nobody who has not. It goes away and comes back to do it, saying goodbye as it goes.
+            var byes = relay.Count(a => a.IsBye(me));
+            host.Suspend("self-test: accepting whoever ticks it now");
+            Check(WaitUntil(() => relay.Count(a => a.IsBye(me)) > byes, 3000),
+                "THE GOODBYE: a service that stops must tell its relay at once, so the group sees it leave");
+            ServiceStore.SaveAcceptRelayConnectionsAutomatically(true);
+            var mark = relay.Mark;
+            Check(host.ApplyProfile(profile), "premise: the service must start sending again");
+            var again = ServiceHelloAt(relay, host, me, since: mark);
+            Check(WaitUntil(() => relay.Proved(again.From), 5000), "THE ECHO: and prove its address again, as the relay forgot it on the goodbye");
+            Check(WaitUntil(() => relay.HellosSince(mark).Any(h => h.ClientId == me && h.Ticked?.Contains(ticksUs) == true), 5000),
+                "THE LIST CHANGING: set to accept whoever ticks it, the service must tick back somebody the relay's list says has ticked it, "
+                + $"and tell the relay at once ({StandInRelay.Describe(relay.HellosSince(mark).LastOrDefault(h => h.ClientId == me)?.Ticked)})");
+            var latest = relay.HellosSince(mark).Last(h => h.ClientId == me && h.Ticked?.Contains(ticksUs) == true);
+            Check(latest.Ticked!.Length == 2 && latest.Ticked.Contains(tickedInProfile) && !latest.Ticked.Contains(hasNot),
+                $"and still the people its profile names, and nobody who has not ticked it ({StandInRelay.Describe(latest.Ticked)})");
+            return "the service joins its server's group as this computer on its password, telling it who the profile ticked; echoes the "
+                 + "address check from its sending socket; sends group-framed (and in ordinary form to the phone its profile ticked); "
+                 + "counts a member's pong for the relay; says goodbye; and, set to, ticks back whoever the relay's list says ticked it";
+        }
+        finally
+        {
+            host.Dispose();
+            try { ServiceStore.SaveAcceptRelayConnectionsAutomatically(restoreAccept); } catch { /* the run's own store */ }
+            ServiceSendHost.PresencePortForTest = restorePresencePort;
+        }
+    }
+
+    /// <summary>The first hello from <paramref name="me"/> the relay has had since <paramref name="since"/>. A relay group says
+    /// its first hello on the next turn of its one-second timer; a turn by hand says the same hello at once.</summary>
+    private static StandInRelay.Hello ServiceHelloAt(StandInRelay relay, ServiceSendHost host, Guid me, int since)
+    {
+        StandInRelay.Hello? hello = null;
+        Check(WaitUntil(() =>
+            {
+                host.PresenceForTest.RelayGroupForTest?.TickForTest();
+                return (hello = relay.HellosSince(since).FirstOrDefault(h => h.ClientId == me)) is not null;
+            }, 5000),
+            $"THE HELLO: the service must say hello to the server its profile names ({relay.Describe()})");
+        return hello!;
+    }
+
+    /// <summary>The window's half: the real window, headless, loading a profile that names a server, against a stand-in relay
+    /// that lists people without waiting for their address check, as the relay's --v2-watch-only does - a headless window never
+    /// runs Connect, which is what hooks the echo up (that hook is read from the source; the echo itself is driven here).</summary>
+    private static string TheWindowTakesPartInItsRelayGroup(string password, byte[] fingerprint)
+    {
+        var restoreMuted = CuePlayer.GloballyMuted;
+        CuePlayer.GloballyMuted = true;
+        using var relay = StandInRelay.OnOnePort(IPAddress.Loopback)[0];
+        relay.WatchOnly = true;
+        var member = Guid.NewGuid();
+        relay.Others = [(member, "Somebody on the server", true)];
+        MainForm? form = null;
+        try
+        {
+            var profile = Profile.NewBlank();
+            profile.Password = RemSoundCrypto.Obfuscate(password);
+            profile.RelayServer = $"127.0.0.1:{relay.Endpoint.Port}";
+            profile.RelayConnectOnStart = true;
+            profile.RelayTickedIds.Add(member.ToString("D"));
+            try { form = new MainForm(null, profile, null, null, headless: true); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+
+            // Loading the profile connects to its server and puts back who was ticked there; saving keeps both.
+            var saved = form.ApplyThenCaptureForTest(profile);
+            Check(relay.Endpoint.Equals(form.RelayGroupForTest.ConnectedRelay),
+                $"THE PROFILE: loading a profile that names a server must connect to it (connected to {form.RelayGroupForTest.ConnectedRelay?.ToString() ?? "nothing"})");
+            Check(saved.RelayServer == profile.RelayServer && saved.RelayConnectOnStart && saved.RelayTickedIds.SequenceEqual([member.ToString("D")]),
+                $"THE SAVE: saving must keep the server, that it connects on start, and who was ticked there ({saved.RelayServer}, "
+                + $"{saved.RelayConnectOnStart}, {string.Join(",", saved.RelayTickedIds)})");
+            // The password's key, as a running copy works it out before anything arrives; the relay group takes it as its tag.
+            Require(typeof(MainForm).GetMethod("RecomputeAudioCrypto", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic),
+                "MainForm.RecomputeAudioCrypto not found").Invoke(form, null);
+
+            // What Connect does, and a headless window never runs (it takes the real port): start the group on the sending
+            // socket. From here on everything is the window's own.
+            var me = form.RelayGroupForTest.ClientId;
+            form.RelayGroupForTest.Start(form.SenderForTest.SendRaw);
+            StandInRelay.Hello? hello = null;
+            Check(WaitUntil(() =>
+                {
+                    form.RelayGroupForTest.TickForTest();
+                    return (hello = relay.HellosSince(0).FirstOrDefault(h => h.ClientId == me)) is not null;
+                }, 5000),
+                $"THE HELLO: the window must say hello to its server ({relay.Describe()})");
+            Check(hello!.From.Port == form.SenderForTest.LocalPortForTest,
+                $"from its sending socket (port {form.SenderForTest.LocalPortForTest}), where the relay's replies come back (it came from {hello.From})");
+            Check(hello.Tag.AsSpan().SequenceEqual(fingerprint) && hello.Name == Environment.MachineName,
+                $"THE PASSWORD: the window's hello must carry its password's fingerprint as the group tag, under this computer's name (tag "
+                + $"{Convert.ToHexString(hello.Tag)}, as \"{hello.Name}\")");
+            Check(hello.Ticked is [var named] && named == member,
+                $"and the person its profile ticked there ({StandInRelay.Describe(hello.Ticked)})");
+
+            // The relay's list comes back to the sending socket, and only the relay group reading it puts the window in the group.
+            Check(WaitUntil(() => form.RelayGroupForTest.IsInGroup(relay.Endpoint), 5000),
+                "THE INBOUND PATH: what arrives on the window's sending socket must go to its relay group first - the relay's list, "
+                + "sent there, must put it in the group");
+            var audio = PlainPacket(RemPacketType.Audio, 7, [1, 2, 3, 4, 5]);
+            form.SenderForTest.SendVia(audio, audio.Length, relay.Endpoint);
+            Check(WaitUntil(() => relay.Count(a => a.IsGroupFramed(me, RemPacketType.Audio)) > 0, 3000),
+                $"THE ROUTING: what the window sends to its server must go group-framed, with its own id ({relay.Describe()})");
+            var listed = form.RelayGroupForTest.Members.Single(m => m.Id == member);
+            Check(relay.Endpoint.Equals(form.ReceiverForTest.RelayOfMember?.Invoke(listed.Address)),
+                "THE RECEIVER: the window's receiver must ask the relay group which server a member is behind, to let them in with it");
+
+            // Unticking them in the list tells the relay at once.
+            form.SyncRelayPeersListForTest();
+            var row = Enumerable.Range(0, form.RelayPeersListForTest.Items.Count)
+                .First(i => form.RelayPeersListForTest.Items[i]!.ToString()!.Contains("Somebody on the server", StringComparison.Ordinal));
+            var mark = relay.Mark;
+            form.RelayPeerTickedForTest(row, false);
+            Check(WaitUntil(() => relay.HellosSince(mark).Any(h => h.ClientId == me && h.Ticked is { Length: 0 }), 3000),
+                $"THE TICKS: unticking somebody on the server must tell the relay at once ({StandInRelay.Describe(relay.HellosSince(mark).LastOrDefault(h => h.ClientId == me)?.Ticked)})");
+
+            // A relay's address check, as the window's receiver hands it over: sent back from the sending socket, exactly as it came.
+            form.AddrCheckArrivedForTest(relay.AddrCheckPacket(), relay.Endpoint);
+            Check(WaitUntil(() => relay.Proved(hello.From), 3000),
+                "THE ECHO: the window must send a relay's address check back from its sending socket, exactly as it came");
+
+            var byes = relay.Count(a => a.IsBye(me));
+            form.DisconnectFromRelayForTest();
+            Check(WaitUntil(() => relay.Count(a => a.IsBye(me)) > byes, 3000), "THE GOODBYE: leaving the server must tell it at once");
+            return "the window loads a server from its profile and saves it back, says hello from its sending socket with its password's "
+                 + "tag and its ticks, is put in the group by what comes back there, sends group-framed, lets its receiver ask who is "
+                 + "behind a member, tells the relay of an untick at once, echoes the address check and says goodbye";
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            CuePlayer.GloballyMuted = restoreMuted;
+        }
+    }
+
+    /// <summary>The text of a method's body, found by its signature and brace-matched; empty when there is no such method.</summary>
+    private static string MethodBodyIn(string source, string signature)
+    {
+        var at = source.IndexOf(signature, StringComparison.Ordinal);
+        if (at < 0) return "";
+        var open = source.IndexOf('{', at);
+        if (open < 0) return "";
+        var depth = 0;
+        for (var i = open; i < source.Length; i++)
+        {
+            if (source[i] == '{') depth++;
+            else if (source[i] == '}' && --depth == 0) return source[open..(i + 1)];
+        }
+        return "";
+    }
+
+    /// <summary>
+    /// A relay on a loopback address, for a test to talk to: it speaks the relay's own format (server/remsound-relay.py),
+    /// written with the relay's own numbers rather than the client's constants, so a client that drifted from the relay
+    /// would disagree with this too.
+    ///
+    /// <para>As the relay does for its groups: a hello from an address that has not proved itself is answered with an address
+    /// check - a random cookie, in ordinary framing - and nothing else. Once the cookie comes back from that address the
+    /// member list goes to it, listing it and anyone the test adds, in answer to that and every later hello. A goodbye
+    /// forgets it, so it must prove itself again. <see cref="WatchOnly"/> lists people without the proof, as the relay's
+    /// --v2-watch-only does. It never sends anything unasked, so falling silent is one switch, <see cref="Answering"/>.</para>
+    ///
+    /// <para>Everything that arrives is kept (the first bytes of it), so a test can say what reached the relay, in which
+    /// framing, from whom and from where.</para>
+    /// </summary>
+    private sealed class StandInRelay : IDisposable
+    {
+        // The relay's own numbers (remsound-relay.py): header lengths, the lobby's field sizes, and its packet types.
+        private const int V1HeaderLen = 12, V2HeaderLen = 28, ClientIdLen = 16, NameBytes = 32, TagBytes = 8, CookieLen = 16;
+        private const byte V1 = 1, V2 = 2, TypeHello = 6, TypeRoster = 7, TypeBye = 9, TypeAddrCheck = 10;
+        private const byte MemberFlagTicksYou = 0x01, RosterFlagV1Paired = 0x01;
+        private static ReadOnlySpan<byte> Magic => "RMND"u8;
+
+        /// <summary>One packet as it arrived: its framing, its type, the sender's id when group-framed, the start of its payload.</summary>
+        public sealed record Arrival(byte Version, byte Type, Guid? ClientId, byte[] Payload, IPEndPoint From)
+        {
+            public bool IsGroupFramed(Guid client, RemPacketType type) => Version == V2 && ClientId == client && Type == (byte)type;
+            public bool IsOrdinary(RemPacketType type) => Version == V1 && Type == (byte)type;
+            public bool IsBye(Guid client) => Version == V2 && ClientId == client && Type == TypeBye;
+        }
+
+        /// <summary>A hello as the relay reads one: whose, their name, their group tag, and who they have ticked (null for no
+        /// list at all, which the relay reads as everyone).</summary>
+        public sealed record Hello(Guid ClientId, string Name, byte[] Tag, Guid[]? Ticked, IPEndPoint From);
+
+        private readonly UdpClient socket;
+        private readonly Thread listener;
+        private readonly object gate = new();
+        private readonly List<Arrival> arrivals = [];
+        private readonly List<Hello> hellos = [];
+        private readonly Dictionary<IPEndPoint, Hello> lastHello = new();
+        private readonly HashSet<IPEndPoint> proved = [];
+        private readonly byte[] cookie = System.Security.Cryptography.RandomNumberGenerator.GetBytes(CookieLen);
+        private volatile bool closed;
+
+        public IPEndPoint Endpoint { get; }
+
+        /// <summary>False: hear everything and answer nothing, as a relay that has gone quiet.</summary>
+        public volatile bool Answering = true;
+
+        /// <summary>List people without waiting for their address check, as the relay's --v2-watch-only does.</summary>
+        public volatile bool WatchOnly;
+
+        /// <summary>Whether the relay says a phone or older app holds a pair slot beside whoever it sends the list to.</summary>
+        public volatile bool Paired;
+
+        /// <summary>Others in the group, listed beside whoever the list goes to, and whether each has ticked them.</summary>
+        public (Guid Id, string Name, bool TicksYou)[] Others { get; set; } = [];
+
+        private StandInRelay(UdpClient socket)
+        {
+            this.socket = socket;
+            Endpoint = (IPEndPoint)socket.Client.LocalEndPoint!;
+            listener = new Thread(Listen) { IsBackground = true, Name = $"gate: stand-in relay {Endpoint}" };
+            listener.Start();
+        }
+
+        /// <summary>One stand-in on each address, all on one port: a server that moves keeps its port and changes its address.</summary>
+        public static StandInRelay[] OnOnePort(params IPAddress[] addresses)
+        {
+            for (var attempt = 0; ; attempt++)
+            {
+                var port = FreeUdpPort();
+                var bound = new List<UdpClient>();
+                try
+                {
+                    foreach (var address in addresses) bound.Add(new UdpClient(new IPEndPoint(address, port)));
+                    return bound.Select(s => new StandInRelay(s)).ToArray();
+                }
+                catch (SocketException) when (attempt < 20)
+                {
+                    foreach (var s in bound) s.Dispose();   // taken on one of the addresses: try another port
+                }
+            }
+        }
+
+        private void Listen()
+        {
+            while (!closed)
+            {
+                var from = new IPEndPoint(IPAddress.Any, 0);
+                byte[] data;
+                try { data = socket.Receive(ref from); }
+                catch (SocketException) { if (closed) return; continue; }   // the close, or a reset from a port that has gone
+                catch (ObjectDisposedException) { return; }
+                try { Take(data, from); }
+                catch (Exception) { /* a stand-in never takes the test down with it; what it heard is already kept */ }
+            }
+        }
+
+        private void Take(byte[] data, IPEndPoint from)
+        {
+            if (data.Length < 6 || !data.AsSpan(0, 4).SequenceEqual(Magic)) return;
+            var version = data[4];
+            var type = data[5];
+            Guid? id = version == V2 && data.Length >= V2HeaderLen ? new Guid(data.AsSpan(V1HeaderLen, ClientIdLen), bigEndian: true) : null;
+            var payloadAt = Math.Min(data.Length, version == V2 ? V2HeaderLen : V1HeaderLen);
+            var payload = data.AsSpan(payloadAt, Math.Min(data.Length - payloadAt, 128)).ToArray();
+            lock (gate) arrivals.Add(new Arrival(version, type, id, payload, from));
+
+            if (version == V1 && type == TypeAddrCheck)
+            {
+                // The cookie coming home: that address really receives.
+                if (data.Length < V1HeaderLen + CookieLen || !data.AsSpan(V1HeaderLen, CookieLen).SequenceEqual(cookie)) return;
+                Hello? waiting;
+                bool fresh;
+                lock (gate) { fresh = proved.Add(from); lastHello.TryGetValue(from, out waiting); }
+                // Listed the moment it proves itself, as the relay sends its list again at once when a member is verified.
+                if (fresh && Answering && waiting is not null) SendRoster(waiting);
+                return;
+            }
+            if (version == V2 && type == TypeHello && ReadHello(data, from) is { } hello)
+            {
+                bool isProved;
+                lock (gate) { hellos.Add(hello); lastHello[from] = hello; isProved = proved.Contains(from); }
+                if (!Answering) return;
+                if (WatchOnly || isProved) SendRoster(hello);
+                else Send(AddrCheckPacket(), from);
+                return;
+            }
+            if (version == V2 && type == TypeBye)
+            {
+                lock (gate) { proved.Remove(from); lastHello.Remove(from); }
+            }
+        }
+
+        /// <summary>Read a hello as the relay does: the name, then the group tag, then (when there is one) a count and that many
+        /// ticked ids.</summary>
+        public static Hello? ReadHello(byte[] data, IPEndPoint from)
+        {
+            if (data.Length < V2HeaderLen + NameBytes || data[4] != V2 || data[5] != TypeHello) return null;
+            var id = new Guid(data.AsSpan(V1HeaderLen, ClientIdLen), bigEndian: true);
+            var body = data.AsSpan(V2HeaderLen);
+            var nameField = body[..NameBytes];
+            var end = nameField.IndexOf((byte)0);
+            var name = System.Text.Encoding.UTF8.GetString(end < 0 ? nameField : nameField[..end]).Trim();
+            var tagEnd = NameBytes + TagBytes;
+            var tag = body.Length >= tagEnd ? body[NameBytes..tagEnd].ToArray() : [];
+            Guid[]? ticked = null;
+            if (body.Length > tagEnd)
+            {
+                var count = body[tagEnd];
+                var ids = new List<Guid>();
+                for (var i = 0; i < count && tagEnd + 1 + (i + 1) * ClientIdLen <= body.Length; i++)
+                    ids.Add(new Guid(body.Slice(tagEnd + 1 + i * ClientIdLen, ClientIdLen), bigEndian: true));
+                ticked = ids.ToArray();
+            }
+            return new Hello(id, name, tag, ticked, from);
+        }
+
+        /// <summary>The member list for whoever said this hello: them, the others, and the pair flag.</summary>
+        private void SendRoster(Hello to)
+        {
+            var others = Others;
+            var entry = ClientIdLen + NameBytes + 1;
+            var packet = new byte[V2HeaderLen + 1 + (1 + others.Length) * entry + 1];
+            Magic.CopyTo(packet);
+            packet[4] = V2;
+            packet[5] = TypeRoster;   // stream, sequence and the relay's own id (all zeros) stay zero
+            var at = V2HeaderLen;
+            packet[at++] = (byte)(1 + others.Length);
+            void Entry(Guid id, string name, bool ticksYou)
+            {
+                id.TryWriteBytes(packet.AsSpan(at, ClientIdLen), bigEndian: true, out _);
+                var encoded = System.Text.Encoding.UTF8.GetBytes(name);
+                encoded.AsSpan(0, Math.Min(encoded.Length, NameBytes)).CopyTo(packet.AsSpan(at + ClientIdLen));
+                packet[at + ClientIdLen + NameBytes] = ticksYou ? MemberFlagTicksYou : (byte)0;
+                at += entry;
+            }
+            Entry(to.ClientId, to.Name, false);
+            foreach (var (id, name, ticksYou) in others) Entry(id, name, ticksYou);
+            packet[at] = Paired ? RosterFlagV1Paired : (byte)0;
+            Send(packet, to.From);
+        }
+
+        /// <summary>This relay's address check: the ordinary header and its cookie.</summary>
+        public byte[] AddrCheckPacket()
+        {
+            var packet = new byte[V1HeaderLen + CookieLen];
+            Magic.CopyTo(packet);
+            packet[4] = V1;
+            packet[5] = TypeAddrCheck;
+            cookie.CopyTo(packet, V1HeaderLen);
+            return packet;
+        }
+
+        /// <summary>A group member's packet as the relay forwards it: group-framed, with that member's id.</summary>
+        public void SendAsMember(Guid member, RemPacketType type, byte[] payload, IPEndPoint to)
+        {
+            var packet = new byte[V2HeaderLen + payload.Length];
+            Magic.CopyTo(packet);
+            packet[4] = V2;
+            packet[5] = (byte)type;
+            member.TryWriteBytes(packet.AsSpan(V1HeaderLen, ClientIdLen), bigEndian: true, out _);
+            payload.CopyTo(packet, V2HeaderLen);
+            Send(packet, to);
+        }
+
+        /// <summary>A heartbeat pong's payload answering the ping stamped <paramref name="tick"/>.</summary>
+        public static byte[] Pong(long tick)
+        {
+            var payload = new byte[RemPacket.HeartbeatPayloadSize];
+            RemPacket.WriteHeartbeatPayload(payload, HeartbeatKind.Pong, tick);
+            return payload;
+        }
+
+        public void Send(byte[] packet, IPEndPoint to)
+        {
+            try { socket.Send(packet, packet.Length, to); } catch (SocketException) { /* UDP */ } catch (ObjectDisposedException) { }
+        }
+
+        /// <summary>How many packets have arrived so far: a mark to look from.</summary>
+        public int Mark { get { lock (gate) return arrivals.Count; } }
+
+        public int Count(Func<Arrival, bool> match) { lock (gate) return arrivals.Count(match); }
+
+        public int CountSince(int mark, Func<Arrival, bool> match) { lock (gate) return arrivals.Skip(Math.Max(0, mark)).Count(match); }
+
+        /// <summary>Where the first packet like this arrived, or -1.</summary>
+        public int IndexOf(Func<Arrival, bool> match) { lock (gate) return arrivals.FindIndex(a => match(a)); }
+
+        /// <summary>The hellos that arrived after the packet at <paramref name="mark"/>.</summary>
+        public IReadOnlyList<Hello> HellosSince(int mark)
+        {
+            lock (gate)
+            {
+                var since = arrivals.Take(Math.Max(0, mark)).Count(a => a.Version == V2 && a.Type == TypeHello);
+                return hellos.Skip(since).ToList();
+            }
+        }
+
+        public bool Proved(IPEndPoint from) { lock (gate) return proved.Contains(from); }
+
+        /// <summary>The stamp on the latest heartbeat ping from that address, in either framing, or null.</summary>
+        public long? LatestPingTick(IPEndPoint from)
+        {
+            lock (gate)
+            {
+                for (var i = arrivals.Count - 1; i >= 0; i--)
+                {
+                    var a = arrivals[i];
+                    if (a.Type != (byte)RemPacketType.Heartbeat || !a.From.Equals(from)) continue;
+                    if (RemPacket.TryReadHeartbeat(a.Payload, out var kind, out var tick) && kind == HeartbeatKind.Ping) return tick;
+                }
+                return null;
+            }
+        }
+
+        /// <summary>What has arrived, in a line, for a failure message.</summary>
+        public string Describe()
+        {
+            lock (gate)
+            {
+                return $"the relay at {Endpoint} has had {arrivals.Count} packets: "
+                    + string.Join(", ", arrivals.GroupBy(a => $"{(a.Version == V2 ? "group" : "ordinary")} type {a.Type}").Select(g => $"{g.Count()} {g.Key}"))
+                    + $"; {proved.Count} address(es) proved";
+            }
+        }
+
+        public static string Describe(Guid[]? ticked) =>
+            ticked is null ? "no tick list at all" : ticked.Length == 0 ? "nobody ticked" : $"{ticked.Length} ticked: {string.Join(", ", ticked.Select(t => t.ToString()[..8]))}";
+
+        public void Dispose()
+        {
+            closed = true;
+            socket.Dispose();
+            listener.Join(2000);
+        }
     }
 
     /// <summary>One app instance on the relay, wired exactly as MainForm wires itself (sender socket in, relay group,
@@ -1595,9 +2109,7 @@ internal static partial class SelfTest
             var group = Group!;
             group.SetTicked(wanted, pairPartner);
             var members = group.Members.Where(m => wanted.Contains(m.Id)).ToList();
-            var targets = members.Select(m => group.RelayOf(m.Address) ?? m.Address).ToList();
-            if (pairPartner && group.ConnectedRelay is { } pairRelay) targets.Add(pairRelay);
-            Sender.SetReceivers(targets.GroupBy(e => $"{e.Address}:{e.Port}").Select(g => g.First()).ToList());
+            Sender.SetReceivers(MainForm.SendTargets(members.Select(m => m.Address), group, pairPartner));
             var allowed = members.Select(m => new IPEndPoint(m.Address.Address, 0)).ToList();
             if (pairPartner && group.ConnectedRelay is { } allowRelay) allowed.Add(new IPEndPoint(allowRelay.Address, 0));
             Receiver.SetAllowedSenders(allowed);
@@ -1635,7 +2147,6 @@ internal static partial class SelfTest
             Receiver.OnAddrCheckReceived = (packet, length, remote) =>
             {
                 Sender.SendVia(packet, length, remote);
-                Group?.NoteRelay(remote);
             };
             Sender.OnInboundPacket = (buffer, length, remote) =>
             {
@@ -1822,13 +2333,18 @@ internal static partial class SelfTest
             Check(WaitFor(() => { lock (sent) return sent.Contains(relay) && sent.Contains(peer); }, TimeSpan.FromSeconds(3)),
                 "a place must be pinged alongside the peers");
             Check(hb.GetAllPeerHealth().All(h => !h.AudioEndpoint.Equals(relay)), "and never kept as a peer: nothing that reacts to peers may see it");
+        }
+        // Once it is a peer as well: three rounds sent by hand, on a service whose own timer is not running, and counted
+        // (2026-09-28: 3.5 s of real rounds counted between two sleeps).
+        var rounds = new List<IPEndPoint>();
+        using (var hb = new HeartbeatService { SendTransport = (_, _, to) => { lock (rounds) rounds.Add(to); return true; } })
+        {
             hb.SetTrackedPeers([peer, relay]);
-            Thread.Sleep(1200);
-            lock (sent) sent.Clear();
-            Thread.Sleep(2300);
+            hb.SetPingOnlyTargets([relay]);
+            for (var i = 0; i < 3; i++) hb.SendPingsForTest();
             int toRelay, toPeer;
-            lock (sent) { toRelay = sent.Count(e => e.Equals(relay)); toPeer = sent.Count(e => e.Equals(peer)); }
-            Check(toRelay == toPeer && toRelay > 0, $"once it is a peer as well, it is pinged once a round, not twice ({toRelay} to it, {toPeer} to the peer)");
+            lock (rounds) { toRelay = rounds.Count(e => e.Equals(relay)); toPeer = rounds.Count(e => e.Equals(peer)); }
+            Check(toRelay == 3 && toPeer == 3, $"once it is a peer as well, it is pinged once a round, not twice ({toRelay} to it, {toPeer} to the peer, in three rounds)");
         }
 
         // The window: on a server with nobody ticked, the server is pinged - and gets no audio for it.

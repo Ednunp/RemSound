@@ -24,7 +24,7 @@ public sealed record HotkeyInfo(Keys Key, bool Control, bool Shift, bool Alt)
         if (Control) parts.Add("Control");
         if (Shift) parts.Add("Shift");
         if (Alt) parts.Add("Alt");
-        parts.Add(Key.ToString());
+        parts.Add(Key == Keys.Scroll ? "Scroll Lock" : Key.ToString());
         return string.Join("+", parts);
     }
 }

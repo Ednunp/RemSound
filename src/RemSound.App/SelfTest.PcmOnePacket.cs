@@ -44,7 +44,9 @@ internal static partial class SelfTest
     /// A LOCK-TO-CLOCK PIECE GOES OUT AS ONE PACKET.
     ///
     /// <para>Timed off the capture clock, the sender sends each delivered buffer as it arrives, cut into pieces. A 480- or
-    /// 512-frame buffer was cut at 240, so each piece still went as two packets.</para>
+    /// 512-frame buffer was cut at 240, so each piece still went as two packets. Since 2026-10-01 the pieces are EQUAL and
+    /// as few as fit one packet each (PCM IN EQUAL PIECES has why): 480 frames as 160 x 3, 512 as 171 + 171 + 170 - no more
+    /// packets than cutting at the largest piece made.</para>
     /// </summary>
     private static string? PcmLockToClockPieceIsOnePacket() => WithPcmSender(lockToClock: true, (sender, sink) =>
     {
@@ -54,10 +56,12 @@ internal static partial class SelfTest
         var (packets, split, largest) = PcmParts(sink);
         Check(split == 0,
             $"every piece of a large buffer must go out as ONE packet — {split} of {packets} were halves of a split piece");
-        Check(OnWireThroughRelayGroup(largest) <= OnePacketPathBytes && OnWireThroughRelayGroup(largest + 6) > OnePacketPathBytes,
-            $"a large buffer must be cut into the largest pieces that fit one packet on a 1,492-byte path, even through a relay group "
-            + $"({OnWireThroughRelayGroup(largest)} of {OnePacketPathBytes} bytes; one more sample would be {OnWireThroughRelayGroup(largest + 6)})");
-        return $"480- and 512-frame buffers went as {packets} pieces, each one packet, the largest {largest} bytes";
+        const int EncryptionBytes = 12 + 16;   // the nonce and the tag
+        Check(packets == 6, $"a 480- and a 512-frame buffer must go as three pieces each - no more than the largest pieces that fit would make ({packets})");
+        Check(largest == 171 * 6 + EncryptionBytes && OnWireThroughRelayGroup(largest) <= OnePacketPathBytes,
+            $"cut into equal pieces, the 512-frame buffer's largest must be 171 samples, and fit one packet on a 1,492-byte path even "
+            + $"through a relay group ({largest} bytes encrypted, {OnWireThroughRelayGroup(largest)} of {OnePacketPathBytes} on the wire)");
+        return $"480- and 512-frame buffers went as {packets} equal pieces, each one packet, the largest {largest} bytes";
     });
 
     /// <summary>

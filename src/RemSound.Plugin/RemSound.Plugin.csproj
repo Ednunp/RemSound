@@ -66,8 +66,9 @@
   <!-- OUR OWN VST3 LOADER, NOT THE PACKAGE'S.
 
        The package's loader reports no tail, so hosts that go by the tail stop calling an effect whose input is
-       silent - and a receiving RemSound is exactly that. Ours is the same loader with one override,
-       getTailSamples() = kInfiniteTail (third-party\AudioPlugSharpVst\README.md has why and how to rebuild it).
+       silent - and a receiving RemSound is exactly that. Ours is the same loader with getTailSamples() = kInfiniteTail,
+       and (2026-09-28) the factory's processor/controller pairing fixed, without which a third RemSound in one project
+       crashed the host (third-party\AudioPlugSharpVst\README.md has why and how to rebuild it).
        The package's own target copies its loader first; this one runs after it and puts ours in its place, so
        everything downstream (the app's plugin\ folder, publish, the installer) ships ours.
 

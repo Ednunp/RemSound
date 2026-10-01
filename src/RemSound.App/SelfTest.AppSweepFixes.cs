@@ -56,7 +56,7 @@ internal static partial class SelfTest
         AsioLoadingSplash? splash = null;
         try
         {
-            splash = AsioLoadingSplash.StartForTest("Self-test splash");   // back after its two-second wait, the window not yet up
+            splash = AsioLoadingSplash.StartForTest("Self-test splash");   // back at once, the window held back from coming up
             splash.Dismiss();
             hold.Set();
             var ended = splash.EndedForTest(TimeSpan.FromSeconds(3));
@@ -68,13 +68,23 @@ internal static partial class SelfTest
             AsioLoadingSplash.BeforeShowForTest = null;
             hold.Set();
         }
+        // And the everyday way: up first, then dismissed - it goes. (The self-test's splash is see-through, off the screen
+        // and never in front, so even a failure here puts nothing before the person at the computer.)
+        var everyday = AsioLoadingSplash.StartForTest("Self-test splash");
+        try
+        {
+            Check(everyday.ShownForTest(TimeSpan.FromSeconds(5)), "premise: a splash left alone comes up");
+            everyday.Dismiss();
+            Check(everyday.EndedForTest(TimeSpan.FromSeconds(3)), "a splash that is up must go when it is dismissed");
+        }
+        finally { everyday.ForceCloseForTest(); }
         var root = FindSourceRoot();
         if (root is null) return Skip("the splash was right, but the source tree is not reachable to check start-up's dismiss (set REMSOUND_SOURCE_ROOT)");
         var program = File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "Program.cs"));
         Check(program.Contains("try { built = new MainForm(store, profile, title, nextPath); }", StringComparison.Ordinal)
               && program.Contains("finally { splash?.Dismiss(); }", StringComparison.Ordinal),
             "THE FAILED START: start-up must dismiss the splash whether or not the main window could be built");
-        return "a splash dismissed before its window was up never came up, and start-up dismisses it even when the window fails to build";
+        return "a splash dismissed before its window was up never came up, one that was up went when dismissed, and start-up dismisses it even when the window fails to build";
     }
 
     /// <summary>THE NOTE THAT NEVER STOPS: "could not be put back fully" can now be answered.</summary>
@@ -360,38 +370,60 @@ internal static partial class SelfTest
              + "installer left through the window's normal close; the install and uninstall ask before they copy or remove anything";
     }
 
-    /// <summary>The tidy-ups: each small, each able to fail.</summary>
-    private static string? SweepTidyUpsHold()
+    // The tidy-ups: each small, each able to fail. One step each since 2026-09-28 (the review of every step): as one step,
+    // a run for the areas a change touched - profiles, keys, the plugin, the ASIO output, peers - never picked their
+    // halves up.
+
+    private static string? TidyDontShowAgainIsNotASaveFailure()
     {
         // Ctrl+S: a "don't show again" that cannot be saved is not a failed profile save.
         var blocker = Path.Combine(AppConfig.UserDataDirectory, "global config.json.tmp");
+        // From "don't show again" not yet ticked, whatever an earlier step in the run left it as.
+        var start = AppConfig.Load();
+        var wasSuppressed = start.SaveProfileConfirmationSuppressed;
+        start.SaveProfileConfirmationSuppressed = false;
+        start.Save();
         MainForm? form = null;
         try
         {
             Directory.CreateDirectory(blocker);   // the config's temp file cannot be written: its save throws
             try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
             catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+            var logged = new List<string>();
+            form.LogForTest.EventTapForTest = line => { lock (logged) logged.Add(line); };
             try { form.RememberSaveConfirmationSuppressedForTest(); }
             catch (Exception ex) { Check(false, $"THE FALSE FAILURE: the profile is already saved; a failure to remember \"don't show again\" must not reach the save ({ex.GetType().Name})"); }
+            Check(!AppConfig.Load().SaveProfileConfirmationSuppressed, "premise: the setting really could not be saved");
+            lock (logged) Check(logged.Any(l => l.Contains("could not remember \"don't show again\"", StringComparison.Ordinal)),
+                "the failure to remember it must be logged, not swallowed");
         }
         finally
         {
             try { form?.Dispose(); } catch { /* teardown */ }
             try { Directory.Delete(blocker); } catch { /* ours */ }
+            var back = AppConfig.Load();
+            back.SaveProfileConfirmationSuppressed = wasSuppressed;
+            try { back.Save(); } catch { /* the run's own settings */ }
         }
+        return "a failure to remember \"don't show again\" stayed out of the profile save";
+    }
 
+    private static string? TidyPressAKeyTabAndCancel()
+    {
         // "Press a key": Tab moves, and Cancel can be pressed.
-        using (var capture = new HotkeyCaptureForm())
-        {
-            _ = capture.Handle;
-            capture.BoxForTest.Select();
-            Check(!capture.KeyDownForTest(Keys.Tab), "THE TRAPPED TAB: Tab in the box must move on to Cancel, not be taken as a shortcut");
-            Check(capture.KeyDownForTest(Keys.Control | Keys.Shift | Keys.K), "a real combination in the box is still taken");
-            capture.CancelForTest.Select();
-            Check(!capture.KeyDownForTest(Keys.Space), "THE DEAD BUTTON: on Cancel, Space must press it, not be taken as a shortcut");
-            Check(capture.CancelButton == capture.CancelForTest, "and Escape on it cancels");
-        }
+        using var capture = new HotkeyCaptureForm();
+        _ = capture.Handle;
+        capture.BoxForTest.Select();
+        Check(!capture.KeyDownForTest(Keys.Tab), "THE TRAPPED TAB: Tab in the box must move on to Cancel, not be taken as a shortcut");
+        Check(capture.KeyDownForTest(Keys.Control | Keys.Shift | Keys.K), "a real combination in the box is still taken");
+        capture.CancelForTest.Select();
+        Check(!capture.KeyDownForTest(Keys.Space), "THE DEAD BUTTON: on Cancel, Space must press it, not be taken as a shortcut");
+        Check(capture.CancelButton == capture.CancelForTest, "and Escape on it cancels");
+        return "Tab moves on and Cancel can be pressed in \"press a key\", and a real combination is still taken";
+    }
 
+    private static string? TidyPasswordManagerNamesWhatItCouldNotSave()
+    {
         // The password manager says what it could not save.
         var dir = Path.Combine(Path.GetTempPath(), "remsound-passwords-" + Guid.NewGuid().ToString("N"));
         try
@@ -415,7 +447,11 @@ internal static partial class SelfTest
             foreach (var (_, _, box) in rows) box.Dispose();
         }
         finally { try { Directory.Delete(dir, recursive: true); } catch { /* temp */ } }
+        return "the password manager named what it could not save, and saved the rest";
+    }
 
+    private static string? TidyClaimedStreamIdsGoWithTheirStreams()
+    {
         // A claimed peer's stream ids are forgotten with their streams - in every configuration.
         foreach (var configuration in AudioConfigurations.All)
         {
@@ -437,7 +473,11 @@ internal static partial class SelfTest
             Check(engine.ClaimedStreamOwnersForTest == 0,
                 $"{configuration.Describe()}: THE LEFTOVER ID: a stream gone for good must not stay marked as the claimed peer's - a later stream with the same id from somebody else was silenced everywhere");
         }
+        return "a claimed peer's stream ids stayed theirs for a while after the stream went, then went with it, in all three configurations";
+    }
 
+    private static string? TidyTheAsioOutputNeverThrowsIntoTheDriver()
+    {
         // The ASIO render path: a read that throws gives a silent block, never an exception into the driver's callback.
         var thrower = new ThrowingProvider();
         var tapped = new byte[1024];
@@ -450,19 +490,19 @@ internal static partial class SelfTest
         try { AsioRenderBackend.ReadThroughBroadcastForTest(thrower, 4, broadcast); }
         catch (Exception ex) { Check(false, $"THE DRIVER CALLBACK: the ASIO output must not throw into the driver ({ex.GetType().Name})"); }
         Check(broadcast.All(b => b == 0), "and the block it could not read must be silence");
+        return "a read that threw gave the ASIO driver a silent block, never an exception, on the shared device and the ASIO output alike";
+    }
 
+    private static string? TidyTheTickedUsTableStaysBounded()
+    {
         // The "someone ticked us" table stays bounded.
-        using (var receiver = new AudioReceiver())
-        {
-            receiver.OnUnselectedSenderHeard = (_, _) => { };
-            var fingerprint = new byte[8];
-            for (var i = 0; i < 1000; i++)
-                receiver.UnselectedSenderForTest(new IPEndPoint(IPAddress.Parse($"198.18.{i / 250}.{i % 250 + 1}"), 47830), fingerprint);
-            Check(receiver.UnselectedSenderNotedForTest <= AudioReceiver.UnselectedSenderCap,
-                $"THE ENDLESS TABLE: a thousand addresses must not all be kept ({receiver.UnselectedSenderNotedForTest})");
-        }
-        return "a failure to remember \"don't show again\" stayed out of the profile save, Tab and Cancel work in \"press a key\", the "
-             + "password manager named what it could not save, a claimed peer's stream ids went with their streams in all three "
-             + "configurations, and the \"someone ticked us\" table stayed bounded";
+        using var receiver = new AudioReceiver();
+        receiver.OnUnselectedSenderHeard = (_, _) => { };
+        var fingerprint = new byte[8];
+        for (var i = 0; i < 1000; i++)
+            receiver.UnselectedSenderForTest(new IPEndPoint(IPAddress.Parse($"198.18.{i / 250}.{i % 250 + 1}"), 47830), fingerprint);
+        Check(receiver.UnselectedSenderNotedForTest <= AudioReceiver.UnselectedSenderCap,
+            $"THE ENDLESS TABLE: a thousand addresses must not all be kept ({receiver.UnselectedSenderNotedForTest})");
+        return "the \"someone ticked us\" table stayed bounded under a thousand addresses";
     }
 }

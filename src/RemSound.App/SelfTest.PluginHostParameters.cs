@@ -130,6 +130,20 @@ internal static partial class SelfTest
     }
 
     /// <summary>
+    /// GATE GUARD: every packet the run's senders sent went to this computer's own addresses. Steps used documentation
+    /// addresses (192.0.2.x, 198.51.100.x, 203.0.113.x) for pretend peers; nothing routes them on the internet, but they
+    /// leave the machine for the router - found by the review of every step, 2026-09-28. Counted on the sender's own sends.
+    /// </summary>
+    private static string? NoPacketLeftThisComputer()
+    {
+        Check(RemSound.Sender.AudioSender.CountOffMachineForTest, "the run's off-machine count must still be on at the end - a step turned it off");
+        var where = RemSound.Sender.AudioSender.OffMachineTargetsForTest.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} x{kv.Value}").ToList();
+        Check(RemSound.Sender.AudioSender.OffMachineSendsForTest == 0,
+            $"THE LEAK: {RemSound.Sender.AudioSender.OffMachineSendsForTest} packet(s) in this run went to addresses off this computer: {string.Join(", ", where.Take(12))}");
+        return "every packet the run sent went to this computer's own addresses";
+    }
+
+    /// <summary>
     /// GATE GUARD: the gate never touches the real plugin pointer - the file every plugin in every DAW reads to find
     /// RemSound's log folder. On 2026-09-24 a gate run left it pointing at a deleted temp folder with logging off.
     /// </summary>

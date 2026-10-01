@@ -17,7 +17,7 @@ internal sealed class AddBandDialog : Form
         Value = (decimal)PeerEqBands.ParametricMinHz,
         Increment = 10,
         DecimalPlaces = 0,
-        Width = 120,
+        Width = Dpi.Px(120),
         TextAlign = HorizontalAlignment.Right,
         TabIndex = 0,
         AccessibleName = "Start frequency in Hertz (Alt+S)",
@@ -30,7 +30,7 @@ internal sealed class AddBandDialog : Form
         Value = (decimal)PeerEqBands.ParametricMinHz,
         Increment = 10,
         DecimalPlaces = 0,
-        Width = 120,
+        Width = Dpi.Px(120),
         TextAlign = HorizontalAlignment.Right,
         TabIndex = 1,
         AccessibleName = "End frequency in Hertz (Alt+E)",
@@ -43,7 +43,7 @@ internal sealed class AddBandDialog : Form
         Value = 3,
         Increment = 0.5m,       // allow half-dB steps; typing any value like 1.5 works too
         DecimalPlaces = 1,
-        Width = 120,
+        Width = Dpi.Px(120),
         TextAlign = HorizontalAlignment.Right,
         TabIndex = 2,
         AccessibleName = "Gain in dB (Alt+G)",
@@ -69,14 +69,19 @@ internal sealed class AddBandDialog : Form
         MinimizeBox = false;
         MaximizeBox = false;
         ShowInTaskbar = false;
-        ClientSize = new Size(340, 200);
+        // Sized to what it holds, with OK and Cancel on one row at the bottom right (UI audit 2026-09-28, findings 5 and 15):
+        // a fixed 340 x 200 cut all three number boxes at 150 %, and the buttons were stacked in the middle.
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
 
         var grid = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(12),
+            Padding = Dpi.Pad(12),
             ColumnCount = 2,
             RowCount = 5,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
         };
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -85,9 +90,9 @@ internal sealed class AddBandDialog : Form
         grid.Controls.Add(heading, 0, 0);
         grid.SetColumnSpan(heading, 2);
 
-        AddRow(grid, 1, "&Start frequency in Hz (Alt+S)", startFreq);
-        AddRow(grid, 2, "&End frequency in Hz (Alt+E)", endFreq);
-        AddRow(grid, 3, "&Gain in dB (Alt+G)", gainDb);
+        AddRow(grid, 1, "&Start frequency in Hz (Alt+S):", startFreq);
+        AddRow(grid, 2, "&End frequency in Hz (Alt+E):", endFreq);
+        AddRow(grid, 3, "&Gain in dB (Alt+G):", gainDb);
 
         var okButton = new Button { Text = "&OK", AutoSize = true, DialogResult = DialogResult.None, TabIndex = 0 };
         var cancelButton = new Button { Text = "&Cancel", AutoSize = true, DialogResult = DialogResult.Cancel, TabIndex = 1 };
@@ -96,14 +101,17 @@ internal sealed class AddBandDialog : Form
         // OK before Cancel, in both tab order and left-to-right layout.
         var buttonRow = new FlowLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Anchor = AnchorStyles.Right,
             FlowDirection = FlowDirection.LeftToRight,
             AutoSize = true,
+            WrapContents = false,
+            Margin = Dpi.Pad(0, 8, 0, 0),
             TabIndex = 3,
         };
         buttonRow.Controls.Add(okButton);
         buttonRow.Controls.Add(cancelButton);
-        grid.Controls.Add(buttonRow, 1, 4);
+        grid.Controls.Add(buttonRow, 0, 4);
+        grid.SetColumnSpan(buttonRow, 2);
 
         Controls.Add(grid);
         AcceptButton = okButton;
@@ -140,7 +148,7 @@ internal sealed class AddBandDialog : Form
     // BELOW. Alt+S landed on End frequency, Alt+E on Gain and Alt+G on OK. 2026-09-13 review.
     private static void AddRow(TableLayoutPanel grid, int row, string labelText, NumericUpDown box)
     {
-        var label = new MnemonicLabel { Text = labelText, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 8, 0), MnemonicTarget = box };
+        var label = new MnemonicLabel { Text = labelText, AutoSize = true, Anchor = AnchorStyles.Left, Margin = Dpi.Pad(0, 3, 8, 3), MnemonicTarget = box };
         grid.Controls.Add(label, 0, row);
         grid.Controls.Add(box, 1, row);
     }

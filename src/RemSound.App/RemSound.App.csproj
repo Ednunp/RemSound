@@ -86,6 +86,11 @@
       <Link>default sounds\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- The metronome's click sounds (2026-09-28), a folder of their own so they are never offered as cue sounds. -->
+    <Content Include="..\..\default sounds\metronome\*.wav">
+      <Link>default sounds\metronome\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <!-- User manual. F1 anywhere in the app opens this via the user's default browser
          (HelpLauncher.OpenManual). The PreserveNewest mode means a fresh publish overwrites
          the published copy whenever the source is newer; manually-edited copies inside
@@ -100,6 +105,18 @@
          anything itself. Tolk.dll loads its two helper DLLs from the same folder, so all three ship
          flat next to the exe. Copied on build AND publish; the EnsureTolkDllsPublished target below
          makes the publish copy marker-independent (the same belt-and-braces the cue WAVs use). -->
+    <!-- The latency lab's Jamulus-style Opus (2026-09-26): our own libopus 1.6.1 built with custom modes, loaded only when
+         that switch is on. Its licence travels with it. See third-party\remsound-opus\BUILD.md. -->
+    <Content Include="..\..\third-party\remsound-opus\remsound-opus.dll">
+      <Link>remsound-opus.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\..\third-party\remsound-opus\COPYING">
+      <Link>LICENSE-remsound-opus.txt</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
     <Content Include="..\..\tolk\Tolk.dll;..\..\tolk\nvdaControllerClient64.dll;..\..\tolk\SAAPI64.dll;..\..\tolk\LICENSE-Tolk.txt">
       <Link>%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -135,11 +152,38 @@
     <Copy SourceFiles="@(_CueWavs)"
           DestinationFolder="$(PublishDir)default sounds"
           SkipUnchangedFiles="false" />
+    <ItemGroup>
+      <_MetronomeWavs Include="..\..\default sounds\metronome\*.wav" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_MetronomeWavs)"
+          DestinationFolder="$(PublishDir)default sounds\metronome"
+          SkipUnchangedFiles="false" />
   </Target>
 
   <!-- Same marker-independent guarantee for the Tolk DLLs: always copy them into a PUBLISHED build
        so a release zip can never ship without the screen-reader libraries the "speak status line"
        feature needs. -->
+  <!-- The native libopus beside the exe, where Concentus looks for it: in the BUILD output (2026-09-26) and in every
+       PUBLISH (2026-09-28). Both left opus.dll only under runtimes\win-x64\native\. Concentus loads it with a plain
+       LoadLibrary("opus.dll"), and on its first use copies it beside the exe from .\runtimes\... relative to the CURRENT
+       folder - so a copy first started from its own folder (a double-click) went native for good, and one first started
+       from anywhere else (at sign-in, by a script, by the gate, every Debug run) quietly used Concentus's managed fallback,
+       which repairs lost packets about 17 cents off pitch. Ed's own copies only ever worked because an old opus.dll sat
+       beside the exe. The app and the service log which one is in use (OpusInUse). -->
+  <Target Name="CopyNativeOpusBesideExe" AfterTargets="Build">
+    <Copy SourceFiles="$(OutDir)runtimes\win-x64\native\opus.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true"
+          Condition="Exists('$(OutDir)runtimes\win-x64\native\opus.dll')" />
+  </Target>
+  <Target Name="EnsureNativeOpusBesideExePublished" AfterTargets="Publish">
+    <Copy SourceFiles="$(PublishDir)runtimes\win-x64\native\opus.dll" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="false"
+          Condition="Exists('$(PublishDir)runtimes\win-x64\native\opus.dll')" />
+  </Target>
+
+  <Target Name="EnsureRemSoundOpusPublished" AfterTargets="Publish">
+    <Copy SourceFiles="..\..\third-party\remsound-opus\remsound-opus.dll" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="false" />
+    <Copy SourceFiles="..\..\third-party\remsound-opus\COPYING" DestinationFiles="$(PublishDir)LICENSE-remsound-opus.txt" SkipUnchangedFiles="false" />
+  </Target>
+
   <Target Name="EnsureTolkDllsPublished" AfterTargets="Publish">
     <ItemGroup>
       <_TolkFiles Include="..\..\tolk\Tolk.dll;..\..\tolk\nvdaControllerClient64.dll;..\..\tolk\SAAPI64.dll;..\..\tolk\LICENSE-Tolk.txt" />

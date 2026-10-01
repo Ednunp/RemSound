@@ -76,6 +76,9 @@ public static class TickProof
 /// from one thread (the window's).</summary>
 public sealed class TickProofGuard(TimeSpan? maxSkew = null)
 {
+    /// <summary>The reason a proof sealed with another password is refused - a sign that address uses a different one.</summary>
+    public const string NotOurPassword = "not our password";
+
     /// <summary>Generous, as for remote control: peers' clocks are not synchronised.</summary>
     public static readonly TimeSpan DefaultMaxSkew = TimeSpan.FromMinutes(10);
 
@@ -86,7 +89,7 @@ public sealed class TickProofGuard(TimeSpan? maxSkew = null)
     {
         if (!TickProof.TryUnseal(key, payload, out senderInstanceId, out var ts, out var nonceId))
         {
-            rejectReason = "not our password";
+            rejectReason = NotOurPassword;
             return false;
         }
         var age = utcNow - DateTimeOffset.FromUnixTimeSeconds(ts).UtcDateTime;

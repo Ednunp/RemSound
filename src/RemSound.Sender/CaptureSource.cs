@@ -97,10 +97,7 @@ internal sealed class CaptureSource : IDisposable
     /// <summary>Wraps an arbitrary <see cref="IWaveIn"/> capture — used for per-application
     /// process-loopback (<see cref="ProcessLoopbackCapture"/>), where the source isn't an
     /// <see cref="MMDevice"/> and <paramref name="deviceId"/> is the synthetic <c>"proc:&lt;pid&gt;"</c> id.</summary>
-    /// <param name="driftWindowSec">The drift corrector's measurement window. Overridable ONLY so the
-    /// gate can see a correction in seconds; every shipped caller takes the default.</param>
-    public CaptureSource(IWaveIn waveIn, CaptureKind kind, string deviceId, string displayName, Action<string>? onDiagnostic = null,
-        double driftWindowSec = CaptureDriftCorrector.DefaultMeasurementWindowSec)
+    public CaptureSource(IWaveIn waveIn, CaptureKind kind, string deviceId, string displayName, Action<string>? onDiagnostic = null)
     {
         Name = displayName;
         Kind = kind;
@@ -148,7 +145,6 @@ internal sealed class CaptureSource : IDisposable
             () => ToMixEquivalentBytes(BytesCaptured, captureFormat),
             () => CorrectionWanted?.Invoke() ?? false,
             displayName,
-            driftWindowSec,
             onDiagnostic);
         DriftCorrector = drift;
         Provider = drift;

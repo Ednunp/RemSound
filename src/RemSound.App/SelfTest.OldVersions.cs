@@ -29,7 +29,7 @@ internal static partial class SelfTest
         {
             ["AcceptRemoteVolumeCommands"] = true,
             ["MaxLatencyMs"] = 57,
-            ["OpusFrameMilliseconds"] = 120,
+            ["OpusFrameMilliseconds"] = 960, // not 120: that is a new profile's default since 2026-09-28, and would pass with the key ignored
             ["EnableAllPeerShaping"] = true,
             ["EnablePanForPeers"] = true,
             ["EnableEqForPeers"] = false,
@@ -39,7 +39,7 @@ internal static partial class SelfTest
         File.WriteAllText(store.PathFor(title), JsonSerializer.Serialize(old));
 
         var loaded = Require(store.Load(title), "a profile file still carrying retired settings must open — it loaded as nothing");
-        Check(loaded.AcceptRemoteVolumeCommands && loaded.MaxLatencyMs == 57 && loaded.OpusFrameSamplesPerChannel == 120 && loaded.EnableAllPeerShaping,
+        Check(loaded.AcceptRemoteVolumeCommands && loaded.MaxLatencyMs == 57 && loaded.OpusFrameSamplesPerChannel == 960 && loaded.EnableAllPeerShaping,
             "the settings that still mean something must come through an old profile file intact "
             + $"(remote volume {loaded.AcceptRemoteVolumeCommands}, buffer {loaded.MaxLatencyMs}, Opus frame {loaded.OpusFrameSamplesPerChannel}, "
             + $"shaping {loaded.EnableAllPeerShaping})");

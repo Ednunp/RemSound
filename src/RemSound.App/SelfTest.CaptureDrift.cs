@@ -20,10 +20,17 @@ internal static partial class SelfTest
     /// was padded with silence (a hole). Neither happens until the error is already a quarter of a
     /// second, and the relative offset between two sources grows from the first second.</para>
     ///
-    /// <para>This drives the corrector with a source that genuinely runs fast and requires the ratio
-    /// to MOVE in the right direction and by roughly the right amount — not merely that a corrector
-    /// exists. And it requires a lone source to be left exactly alone, because that is the setup
-    /// almost everybody has and correcting it would be all risk and no benefit.</para>
+    /// <para>So this measures what the name promises: the offset between two sources in one mix. Two
+    /// devices, one 500 ppm fast and one 500 ppm slow, go through one real mixing engine with the shipped
+    /// ten-second window, and each writes the moment it captured every sample into its own side of the
+    /// stereo pair - so each mixed frame says, to a small fraction of a millisecond, how far apart in time
+    /// the two things summed into it really were. It runs ten minutes on this thread's audio clock
+    /// (AudioClock, as the simulator does), which takes about a second. Until 2026-09-28 it ran four
+    /// seconds of wall clock through one corrector fed a made-up ring, and never measured an offset at
+    /// all.</para>
+    ///
+    /// <para>And it requires a lone source to be left exactly alone, because that is the setup almost
+    /// everybody has and correcting it would be all risk and no benefit.</para>
     ///
     /// <para>Not per-configuration: this is the WASAPI capture mixer. ASIO capture is a separate send
     /// lane fed straight from one driver callback — one clock, no mixing engine, nothing to drift
@@ -32,96 +39,83 @@ internal static partial class SelfTest
     /// </summary>
     private static string? AuditCaptureSourcesStayAligned()
     {
-        const int sampleRate = 48000, channels = 2;
-
-        // The SHIPPED window is pinned in absolute seconds. The runs below use a half-second window so
-        // the gate measures a real correction in seconds instead of minutes — and a short window in a
-        // test must never be able to hide a changed default in the product.
-        //
-        // TWO windows have to close before anything moves, not one: the first is start-up fill and is
-        // deliberately thrown away. The corrector did not do that when it was first written; it does
-        // now, because it shares the receive side's loop. Hence 2 s of running for a 0.5 s window.
+        // The SHIPPED window is what runs below: on a simulated clock ten seconds cost nothing, so the
+        // test no longer needs a short window of its own - and a changed default is caught here too.
         Check(CaptureDriftCorrector.DefaultMeasurementWindowSec == 10.0,
             $"the shipped measurement window must stay 10 s, matching the receive side and the plugin lane (got "
             + $"{CaptureDriftCorrector.DefaultMeasurementWindowSec}) — shorter and one lumpy callback reads as a clock error");
 
-        // A source that produces MORE than the mixer takes — a fast crystal, exaggerated so a short
-        // window is enough to measure. Reports its own fed-bytes and ring depth the way a real
-        // CaptureSource does.
-        var fedBytes = 0L;
-        var ringMs = 30;
-        var correcting = true;
+        CheckDriftWindowsRunOnTheAudioClock();
+        var format = WaveFormat.CreateIeeeFloatWaveFormat(48000, 2);
+        using var clock = new StoppedAudioClock();
+        using var engine = new MixingEngine(_ => { });
+        var fast = new TimestampingDevice(format, ppm: +500, channel: 0);
+        var slow = new TimestampingDevice(format, ppm: -500, channel: 1);
+        var fastSource = new CaptureSource(fast, CaptureKind.Input, "gate:fast", "a device 500 ppm fast");
+        var slowSource = new CaptureSource(slow, CaptureKind.Input, "gate:slow", "a device 500 ppm slow");
+        engine.AddSourceForTest(fastSource);
+        engine.AddSourceForTest(slowSource);
 
-        var upstream = new SilenceProvider(WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, channels)).ToSampleProvider();
-        var corrector = new CaptureDriftCorrector(
-            upstream,
-            () => ringMs,
-            () => fedBytes,
-            () => correcting,
-            "fast device",
-            measurementWindowSec: 0.5,
-            onDiagnostic: null);
-
-        Check(Math.Abs(corrector.AppliedRatio - 1.0) < 1e-9,
-            $"a corrector must start at ratio 1.0 and earn any change (started at {corrector.AppliedRatio})");
-
-        // Feed 1000 ppm MORE than we pull, across enough wall clock for the discarded start-up window
-        // AND a measured one to close.
-        var block = new float[480 * channels];
-        var pulledFrames = 0L;
-        var started = DateTime.UtcNow;
-        while (DateTime.UtcNow - started < TimeSpan.FromSeconds(2.0))
+        // Each mixed block, 10 ms at a time as the mix loop pulls it. The left of its middle frame is when the fast device
+        // captured it, the right when the slow one did: the difference is how far apart the two sources are in the mix.
+        var mix = new float[480 * 2];
+        var before20s = 0.0;
+        var worstLate = 0.0;
+        var lastOutOfLine = 0.0;
+        var shortBlocks = 0;
+        const int ticks = 10 * 60 * 100;       // ten simulated minutes of 10 ms mix ticks
+        const double lateFrom = 3 * 60;        // in line from the third minute on
+        for (var tick = 1; tick <= ticks; tick++)
         {
-            corrector.Read(block, 0, block.Length);
-            pulledFrames += 480;
-            // The device fed 0.1% more than was taken — a fast clock, and the ring creeps up with it.
-            fedBytes += (long)(480 * channels * sizeof(float) * 1.001);
-            ringMs = Math.Min(250, 30 + (int)(pulledFrames / 48000 * 3));
-            Thread.Sleep(1);
+            clock.Advance(TimeSpan.FromMilliseconds(10));
+            fast.CaptureUntil(clock.Seconds);
+            slow.CaptureUntil(clock.Seconds);
+            if (engine.ReadMixForTest(mix) != mix.Length) shortBlocks++;
+            var offsetMs = (mix[480] - mix[481]) * 1000.0;
+            if (tick == 1950) before20s = offsetMs;
+            if (Math.Abs(offsetMs) >= 1.0) lastOutOfLine = clock.Seconds;
+            if (clock.Seconds >= lateFrom) worstLate = Math.Max(worstLate, Math.Abs(offsetMs));
         }
 
-        // The premise: enough wall clock passed for the one-second window to close, and we really did
-        // pull through the corrector rather than sitting idle. Both, or the checks below prove nothing.
-        Check(DateTime.UtcNow - started >= TimeSpan.FromSeconds(1.0),
-            "two measurement windows must have had time to close, or no ratio was ever computed — the first one is "
-            + "start-up fill and is deliberately discarded");
-        Check(pulledFrames > 480 * 20,
-            $"the test must actually pull audio through the corrector (pulled {pulledFrames} frames)");
-        Check(corrector.AppliedRatio > 1.0,
-            $"a source feeding FASTER than the mixer pulls must be consumed faster to stop its ring growing — the ratio "
-            + $"should have risen above 1.0 and is {corrector.AppliedRatio:0.000000}. Without this the ring simply fills "
-            + "to 250 ms and starts discarding, which is the source jumping forward");
-        Check(corrector.AppliedRatio < 1.05,
-            $"the correction must stay inside its sanity clamp (got {corrector.AppliedRatio:0.000000}) — a runaway ratio "
-            + "would be a pitch shift, not a drift correction");
+        Check(shortBlocks == 0, $"the mix must hand back a full block every tick ({shortBlocks} short)");
+        // The premise: the two really do run apart until the second window closes (the first is start-up fill, thrown away),
+        // a millisecond a second between them. Without it the offset below would prove nothing.
+        Check(Math.Abs(before20s) is > 15 and < 25,
+            $"premise: before the corrector has a measurement, sources 1000 ppm apart must drift about a millisecond a second "
+            + $"apart (at 19.5 s they were {before20s:0.0} ms apart)");
+        Check(worstLate < 1.0,
+            $"two sources in one mix must stay within a millisecond of each other once corrected: from the third minute to the "
+            + $"tenth they were as much as {worstLate:0.000} ms apart (last out of line at {lastOutOfLine:0} s)");
+        Check(lastOutOfLine < lateFrom,
+            $"and they must have come into line within three minutes (last a millisecond or more apart at {lastOutOfLine:0} s)");
+        var fastPpm = (fastSource.AppliedDriftRatio - 1.0) * 1e6;
+        var slowPpm = (slowSource.AppliedDriftRatio - 1.0) * 1e6;
+        Check(Math.Abs(fastPpm - 500) < 100 && Math.Abs(slowPpm + 500) < 100,
+            $"each corrector must hold its own device on the mix clock - the fast one pulled about 500 ppm faster, the slow one "
+            + $"about 500 ppm slower (got {fastPpm:+0;-0} and {slowPpm:+0;-0} ppm)");
+        engine.Stop();
 
-        var ppm = (corrector.AppliedRatio - 1.0) * 1e6;
-        Check(ppm > 100,
-            $"a 1000 ppm feed excess must produce a correction of the same order, not a token one (got {ppm:0} ppm)");
-
-        // A LONE SOURCE IS LEFT ALONE. Nothing to align with, so correcting is all risk.
-        var aloneFed = 0L;
-        var alone = new CaptureDriftCorrector(
-            new SilenceProvider(WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, channels)).ToSampleProvider(),
-            () => 200,          // a deep ring, which WOULD provoke a correction if it were enabled
-            () => aloneFed,
-            () => false,        // ...but it is the only source
-            "only device",
-            measurementWindowSec: 0.5,
-            onDiagnostic: null);
-        var soloStart = DateTime.UtcNow;
-        while (DateTime.UtcNow - soloStart < TimeSpan.FromSeconds(2.0))
+        // A LONE SOURCE IS LEFT ALONE. Nothing to align with, so correcting is all risk - even when it runs fast.
+        using var aloneEngine = new MixingEngine(_ => { });
+        var only = new TimestampingDevice(format, ppm: +500, channel: 0);
+        var alone = new CaptureSource(only, CaptureKind.Input, "gate:only", "the only device");
+        aloneEngine.AddSourceForTest(alone);
+        for (var tick = 1; tick <= 60 * 100; tick++)
         {
-            alone.Read(block, 0, block.Length);
-            aloneFed += (long)(480 * channels * sizeof(float) * 1.001);
-            Thread.Sleep(1);
+            clock.Advance(TimeSpan.FromMilliseconds(10));
+            only.CaptureUntil(clock.Seconds);
+            aloneEngine.ReadMixForTest(mix);
         }
-        Check(alone.AppliedRatio == 1.0,
-            $"a LONE capture source must be left exactly alone (ratio {alone.AppliedRatio:0.000000}) — it has nothing to "
-            + "stay aligned with, and resampling the commonest setup of all would be pure risk for no benefit");
+        var aloneCorrector = Require(alone.DriftCorrector, "a capture source must have a drift corrector");
+        Check(alone.AppliedDriftRatio == 1.0 && !aloneCorrector.IsTracking,
+            $"a LONE capture source must be left exactly alone (ratio {alone.AppliedDriftRatio:0.000000} after a simulated minute "
+            + "500 ppm fast) — it has nothing to stay aligned with, and resampling the commonest setup of all would be pure risk "
+            + "for no benefit");
+        aloneEngine.Stop();
 
-        return $"a source feeding 1000 ppm fast is corrected by {ppm:0} ppm and held on the mix clock; a lone source is "
-             + "left untouched at ratio 1.0";
+        return $"two sources 1000 ppm apart drifted {Math.Abs(before20s):0.0} ms apart in the first 20 s, came into line by "
+             + $"{lastOutOfLine:0} s and stayed within {worstLate:0.000} ms of each other to the tenth simulated minute "
+             + $"(corrected {fastPpm:+0;-0} and {slowPpm:+0;-0} ppm); a lone source is left untouched at ratio 1.0";
     }
 
     /// <summary>
@@ -312,9 +306,13 @@ internal static partial class SelfTest
         Check(CaptureSource.ToMixEquivalentBytes(384_000, WaveFormat.CreateIeeeFloatWaveFormat(48000, 2)) == 384_000,
             "a source already in the mix format is counted as it is");
 
+        // On this thread's audio clock, and with the SHIPPED ten-second window: 25 simulated seconds, two windows closed (the
+        // first is start-up fill and thrown away), in a moment. Until 2026-09-28 it ran 2.5 s of wall clock on a half-second
+        // window of its own.
+        CheckDriftWindowsRunOnTheAudioClock();
+        using var clock = new StoppedAudioClock();
         var device = new FakeCaptureDevice(new WaveFormat(44100, 16, 1));
-        using var source = new CaptureSource(device, CaptureKind.Input, "gate:44k1", "44.1 kHz mono 16-bit",
-            onDiagnostic: null, driftWindowSec: 0.5);
+        using var source = new CaptureSource(device, CaptureKind.Input, "gate:44k1", "44.1 kHz mono 16-bit");
         source.CorrectionWanted = () => true;
 
         var chunk = new byte[4096];
@@ -326,15 +324,14 @@ internal static partial class SelfTest
         const double fast = 1.005;
         var pull = new float[480 * 2];
         var owedFrames = 0.0;
-        var started = DateTime.UtcNow;
-        while (DateTime.UtcNow - started < TimeSpan.FromSeconds(2.5))
+        for (var tick = 1; tick <= 25 * 100; tick++)
         {
+            clock.Advance(TimeSpan.FromMilliseconds(10));
             owedFrames += 441 * fast;             // 10 ms of 44.1 kHz audio, a little over
             var frames = (int)owedFrames;
             owedFrames -= frames;
             device.Feed(chunk, frames * 2);
             source.Provider.Read(pull, 0, pull.Length);   // 10 ms of 48 kHz stereo out, as the mixer pulls
-            Thread.Sleep(1);
         }
 
         var corrector = Require(source.DriftCorrector, "the capture source must have a drift corrector");
@@ -342,12 +339,84 @@ internal static partial class SelfTest
             "no measurement was ever accepted for a 44.1 kHz mono 16-bit source: every window was thrown away as a wild "
             + "clock error, so this source is never held on the mix clock. The feed side is being counted in the device's "
             + "own units instead of the mixer's");
-        Check(source.AppliedDriftRatio > 1.0 && source.AppliedDriftRatio < 1.05,
-            $"a source feeding half a percent fast must be pulled faster, inside the sanity band (ratio "
+        // Measured as it is - half a percent fast, plus at most the 0.3 % depth nudge for a ring that grew while the first
+        // two windows closed - not as 8 % slow or half speed, and inside the sanity band.
+        Check(source.AppliedDriftRatio is >= 1.004 and <= 1.0085,
+            $"a source feeding half a percent fast must be pulled half a percent faster, give or take the depth nudge (ratio "
             + $"{source.AppliedDriftRatio:0.000000})");
 
         return $"a 44.1 kHz mono 16-bit source is measured in the mixer's units and corrected (ratio {source.AppliedDriftRatio:0.0000} "
-             + "for a feed 0.5 % fast)";
+             + "for a feed 0.5 % fast, over 25 simulated seconds)";
+    }
+
+    /// <summary>The premise of every run on a <see cref="StoppedAudioClock"/>: a drift window closes when the AUDIO clock says
+    /// its ten seconds are up. Were it on the wall clock again, a run of simulated minutes would close no window at all, and
+    /// the checks after it would blame the audio for what is the clock.</summary>
+    private static void CheckDriftWindowsRunOnTheAudioClock()
+    {
+        using var clock = new StoppedAudioClock();
+        var window = new DriftRatioTracker();
+        window.WindowClosed(0, 0);
+        clock.Advance(TimeSpan.FromSeconds(DriftRatioTracker.MeasurementWindowSec));
+        Check(window.WindowClosed(1, 1),
+            "premise: a drift window must close when this thread's audio clock says ten seconds have passed - the clock the "
+            + "simulator runs on - not the wall clock; on the wall clock this run of simulated time would measure nothing");
+    }
+
+    /// <summary>This thread's audio clock (<see cref="AudioClock"/>, as the simulator uses it), standing still until the test
+    /// moves it on. Every drift window in the capture path reads that clock, so minutes of it pass in a moment and come out
+    /// the same every run. Put back to the real clock when disposed.</summary>
+    private sealed class StoppedAudioClock : IDisposable
+    {
+        // Never zero: a drift window takes a zero start to mean "not started".
+        private readonly long start = System.Diagnostics.Stopwatch.GetTimestamp();
+        private long elapsed;
+
+        public StoppedAudioClock() => AudioClock.UseSimulated(() => start + elapsed);
+
+        /// <summary>Seconds since the clock was made.</summary>
+        public double Seconds => elapsed / (double)System.Diagnostics.Stopwatch.Frequency;
+
+        public void Advance(TimeSpan by) => elapsed += (long)Math.Round(by.TotalSeconds * System.Diagnostics.Stopwatch.Frequency);
+
+        public void Dispose() => AudioClock.UseSimulated(null);
+    }
+
+    /// <summary>A 48 kHz stereo float capture device whose crystal runs <c>ppm</c> fast or slow, and which writes into one side
+    /// of each frame the moment, in seconds, it captured that frame (the other side is silent). Two of them summed into one
+    /// mix put their two capture times side by side in every mixed frame, so the mix itself says how far apart the sources
+    /// are. It starts 30 ms ahead of the mixer, as a real device has a callback or three in hand when the mix first pulls.</summary>
+    private sealed class TimestampingDevice(WaveFormat format, double ppm, int channel) : IWaveIn
+    {
+        private const double Lead = 0.030;
+        private readonly double rate = format.SampleRate * (1 + ppm / 1e6);
+        private long captured;
+        private float[] samples = [];
+        private byte[] bytes = [];
+
+        public WaveFormat WaveFormat { get; set; } = format;
+        public event EventHandler<WaveInEventArgs>? DataAvailable;
+        public event EventHandler<StoppedEventArgs>? RecordingStopped { add { } remove { } }
+        public void StartRecording() { }
+        public void StopRecording() { }
+        public void Dispose() { }
+
+        /// <summary>Hand over everything this device has captured by <paramref name="seconds"/> into the mix.</summary>
+        public void CaptureUntil(double seconds)
+        {
+            var due = (long)Math.Floor((seconds + Lead) * rate);
+            var frames = (int)(due - captured);
+            if (frames <= 0) return;
+            if (samples.Length < frames * 2) { samples = new float[frames * 2]; bytes = new byte[frames * 2 * sizeof(float)]; }
+            for (var i = 0; i < frames; i++)
+            {
+                samples[i * 2 + channel] = (float)((captured + i) / rate - Lead);
+                samples[i * 2 + 1 - channel] = 0f;
+            }
+            Buffer.BlockCopy(samples, 0, bytes, 0, frames * 2 * sizeof(float));
+            DataAvailable?.Invoke(this, new WaveInEventArgs(bytes, frames * 2 * sizeof(float)));
+            captured = due;
+        }
     }
 
     /// <summary>A capture device that produces exactly what the test hands it, when the test hands it.</summary>

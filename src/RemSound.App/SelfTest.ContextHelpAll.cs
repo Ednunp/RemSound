@@ -80,23 +80,30 @@ internal static partial class SelfTest
             var filter = new HelpKeyMessageFilter();
             var results = new List<string>();
             notice.Show();
+            // The countdown's own ticks raised by hand, on its own timer, rather than waited out one real second at a time
+            // (2026-09-28: 6 s). The real timer is stopped so only these ticks move it.
+            var countdown = Require(FieldOf<System.Windows.Forms.Timer>(notice, "countdownTimer"), "the notice's countdownTimer was not found");
+            var onTick = Require(typeof(System.Windows.Forms.Timer).GetMethod("OnTick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic),
+                "System.Windows.Forms.Timer.OnTick not found");
+            countdown.Stop();
+            void Tick() => notice.Invoke(() => onTick.Invoke(countdown, [EventArgs.Empty]));
             DriveWhilePumping(notice, () =>
             {
                 var start = notice.Invoke(() => notice.SecondsRemainingForTest);
-                Check(WaitFor(() => notice.Invoke(() => notice.SecondsRemainingForTest) < start, TimeSpan.FromSeconds(3)),
-                    "premise: the countdown must be running");
+                Tick();
+                Check(notice.Invoke(() => notice.SecondsRemainingForTest) == start - 1, "premise: a tick of the countdown must take a second off");
                 notice.Invoke(() => { var m = Message.Create(postpone.Handle, WmKeyDown, VkF1, IntPtr.Zero); return filter.PreFilterMessage(ref m); });
                 Check(WaitFor(() => notice.Invoke(() => ContextHelp.Open) is not null, TimeSpan.FromSeconds(5)), "F1 on Postpone must open its help");
                 var paused = notice.Invoke(() => notice.SecondsRemainingForTest);
-                Thread.Sleep(2600);
+                for (var i = 0; i < 3; i++) Tick();
                 var after = notice.Invoke(() => notice.SecondsRemainingForTest);
                 Check(after == paused && !notice.Invoke(() => notice.IsDisposed) && notice.Invoke(() => notice.DialogResult) == DialogResult.None,
-                    $"THE CLOCK: while context help is open the countdown must wait ({paused} became {after})");
+                    $"THE CLOCK: while context help is open the countdown must wait - three ticks came ({paused} became {after})");
                 var w = notice.Invoke(() => ContextHelp.Open!);
                 notice.Invoke(() => PressEscapeIn(w));
                 Check(WaitFor(() => notice.Invoke(() => ContextHelp.Open) is null, TimeSpan.FromSeconds(5)), "Escape must close the help");
-                Check(WaitFor(() => notice.Invoke(() => notice.SecondsRemainingForTest) < paused, TimeSpan.FromSeconds(3)),
-                    "and the countdown must carry on from where it waited");
+                Tick();
+                Check(notice.Invoke(() => notice.SecondsRemainingForTest) == paused - 1, "and the countdown must carry on from where it waited");
                 results.Add($"{paused}");
             }, TimeSpan.FromSeconds(40));
             notice.Invoke(() => notice.Close());

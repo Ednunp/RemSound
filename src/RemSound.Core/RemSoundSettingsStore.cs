@@ -48,6 +48,25 @@ public sealed class RemSoundSettingsStore
         AppConfig.Load().VolumeDownHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
     public void SaveVolumeDownHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.VolumeDownHotkey = HotkeyRecord.From(hotkey));
 
+    /// <summary>The push to talk key. Default Scroll Lock on its own (Ed, 2026-09-28); may be unset.</summary>
+    public HotkeyInfo LoadPushToTalkHotkey() =>
+        AppConfig.Load().PushToTalkHotkey?.ToHotkeyInfo(allowSingleKey: true) ?? PushToTalkDefaultKey;
+    public void SavePushToTalkHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.PushToTalkHotkey = HotkeyRecord.From(hotkey));
+    public static HotkeyInfo PushToTalkDefaultKey { get; } = new(Keys.Scroll, false, false, false);
+
+    /// <summary>Start or stop the metronome (mute or unmute while following a master). Unset unless chosen.</summary>
+    public HotkeyInfo LoadMetronomeHotkey() =>
+        AppConfig.Load().MetronomeHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveMetronomeHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.MetronomeHotkey = HotkeyRecord.From(hotkey));
+
+    /// <summary>The metronome's tempo up or down a beat a minute. Unset unless chosen.</summary>
+    public HotkeyInfo LoadMetronomeTempoUpHotkey() =>
+        AppConfig.Load().MetronomeTempoUpHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveMetronomeTempoUpHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.MetronomeTempoUpHotkey = HotkeyRecord.From(hotkey));
+    public HotkeyInfo LoadMetronomeTempoDownHotkey() =>
+        AppConfig.Load().MetronomeTempoDownHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveMetronomeTempoDownHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.MetronomeTempoDownHotkey = HotkeyRecord.From(hotkey));
+
     public HotkeyInfo LoadToggleRecordingHotkey() =>
         AppConfig.Load().ToggleRecordingHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
     public void SaveToggleRecordingHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.ToggleRecordingHotkey = HotkeyRecord.From(hotkey));
@@ -141,7 +160,27 @@ public sealed class RemSoundSettingsStore
         Save(s);
     }
 
-    public AudioTransportCodec LoadCodec(AudioTransportCodec defaultValue = AudioTransportCodec.Pcm) =>
+    public bool LoadAutoTuneLowestDelay() => Try(() => Load()?.AutoTuneLowestDelay) ?? false;
+
+    /// <summary>This profile's logs: on, off, or null when it has never chosen (it then follows this computer's setting).</summary>
+    public bool? LoadEnableLogs() => Try(() => Load()?.EnableLogs);
+
+    public void SaveEnableLogs(bool value)
+    {
+        var s = Load() ?? new Settings();
+        s.EnableLogs = value;
+        Save(s);
+    }
+
+    public void SaveAutoTuneLowestDelay(bool value)
+    {
+        var s = Load() ?? new Settings();
+        s.AutoTuneLowestDelay = value;
+        Save(s);
+    }
+
+    // The fallbacks when nothing can be loaded follow a new profile's: Opus live latency (2026-09-28).
+    public AudioTransportCodec LoadCodec(AudioTransportCodec defaultValue = AudioTransportCodec.Opus) =>
         Try(() => Load()?.Codec) ?? defaultValue;
 
     public void SaveCodec(AudioTransportCodec value)
@@ -154,7 +193,7 @@ public sealed class RemSoundSettingsStore
     /// <summary>Loads the Opus frame size in samples-per-channel at 48 kHz. Default 480 = 10 ms, the
     /// size from before the codec list offered only 960 and 120; MainForm.ResolveCodecIndex shows
     /// anything but 120 as the 960 choice.</summary>
-    public int LoadOpusFrameSamplesPerChannel(int defaultValue = 480) =>
+    public int LoadOpusFrameSamplesPerChannel(int defaultValue = 120) =>
         Try(() => Load()?.OpusFrameSamplesPerChannel is int v ? v : (int?)null) ?? defaultValue;
 
     /// <summary>Saves the Opus frame size in samples-per-channel at 48 kHz. Accepts
@@ -301,16 +340,6 @@ public sealed class RemSoundSettingsStore
     /// scheduling and memory behaviour: EcoQoS opt-out, kernel power request, High
     /// priority class, 1&nbsp;ms scheduler quantum, memory priority, working-set lock,
     /// and MMCSS thread priority. Off by default; the user opts in per profile.</summary>
-    public bool LoadPriorityMode(bool defaultValue = false) =>
-        Try(() => Load()?.PriorityMode) ?? defaultValue;
-
-    public void SavePriorityMode(bool value)
-    {
-        var s = Load() ?? new Settings();
-        s.PriorityMode = value;
-        Save(s);
-    }
-
     /// <summary>When true, this profile is locked to the exact peer addresses the user set — RemSound
     /// uses only those, never follows the other computer by its advertised name and never switches to a
     /// discovered address. Off by default; opt in per profile. (#17)</summary>
@@ -472,6 +501,28 @@ public sealed class RemSoundSettingsStore
         Save(s);
     }
 
+    /// <summary>The profile's push to talk settings, as a copy. Off when the profile has none.</summary>
+    public PushToTalkSettings LoadPushToTalkSettings() =>
+        (Try(() => Load()?.PushToTalk) ?? new PushToTalkSettings()).Clone();
+
+    public void SavePushToTalkSettings(PushToTalkSettings value)
+    {
+        var s = Load() ?? new Settings();
+        s.PushToTalk = value?.Clone() ?? new PushToTalkSettings();
+        Save(s);
+    }
+
+    /// <summary>The profile's metronome settings, as a copy. The defaults when the profile has none.</summary>
+    public MetronomeSettings LoadMetronomeSettings() =>
+        (Try(() => Load()?.Metronome) ?? new MetronomeSettings()).Clone();
+
+    public void SaveMetronomeSettings(MetronomeSettings value)
+    {
+        var s = Load() ?? new Settings();
+        s.Metronome = value?.Clone() ?? new MetronomeSettings();
+        Save(s);
+    }
+
     /// <summary>How eagerly the receiver trims a playout buffer that has grown past the target
     /// latency. The trim DROPS the oldest audio — a brief click — and never changes playback speed.
     /// 1 = trim as soon as the buffer is a couple of packets over target (glued to target, frequent
@@ -524,6 +575,19 @@ public sealed class RemSoundSettingsStore
         Save(s);
     }
 
+    /// <summary>The ASIO buffer size this profile asks its driver for, in frames: 0 = the driver's own (the default, and
+    /// what anything not on offer falls back to - a hand-edited profile must not be asked of a driver). See
+    /// <see cref="Profile.AsioBufferFrames"/>.</summary>
+    public int LoadAsioBufferFrames() =>
+        Try(() => Load()?.AsioBufferFrames is int v && Array.IndexOf(AsioBufferSizing.Choices, v) >= 0 ? v : (int?)null) ?? 0;
+
+    public void SaveAsioBufferFrames(int frames)
+    {
+        var s = Load() ?? new Settings();
+        s.AsioBufferFrames = Array.IndexOf(AsioBufferSizing.Choices, frames) >= 0 ? frames : 0;
+        Save(s);
+    }
+
     private static T? Try<T>(Func<T?> action) where T : class
     {
         try { return action(); } catch { return null; }
@@ -566,12 +630,14 @@ public sealed class RemSoundSettingsStore
             ContinuousAutoTuneIntervalSec = profile.ContinuousAutoTuneIntervalSec,
             MaxLatencyMsAsio = profile.MaxLatencyMsAsio,
             ContinuousAutoTuneAsioEnabled = profile.ContinuousAutoTuneAsioEnabled,
+            AutoTuneLowestDelay = profile.AutoTuneLowestDelay,
+            EnableLogs = profile.EnableLogs,
             // RememberedPeers no longer rides the cache — it's machine-wide in AppConfig now; the
             // profile's legacy copy is unioned in below (migration) instead of replacing anything.
             AsioDriverName = profile.AsioDriverName,
+            AsioBufferFrames = profile.AsioBufferFrames,
             SendRate = profile.SendRate,
             TightLatencyMode = profile.TightLatencyMode,
-            PriorityMode = profile.PriorityMode,
             LockPeerAddresses = profile.LockPeerAddresses,
             Smoothness = profile.Smoothness,
             ConcealmentArtifact = (ConcealmentArtifact)profile.ConcealmentArtifactRaw,
@@ -589,6 +655,8 @@ public sealed class RemSoundSettingsStore
             // the session and is written back via CopyTo on save.
             CustomCuePaths = profile.CustomCuePaths is null ? new() : new Dictionary<string, string>(profile.CustomCuePaths),
             RecordingSettings = profile.RecordingSettings?.Clone() ?? new RecordingSettings(),
+            PushToTalk = profile.PushToTalk?.Clone() ?? new PushToTalkSettings(),
+            Metronome = profile.Metronome?.Clone() ?? new MetronomeSettings(),
         };
         MigrateRememberedPeersToGlobal(profile);
     }
@@ -635,14 +703,16 @@ public sealed class RemSoundSettingsStore
         if (s.ContinuousAutoTuneIntervalSec is int cai) profile.ContinuousAutoTuneIntervalSec = cai;
         if (s.MaxLatencyMsAsio is int mla) profile.MaxLatencyMsAsio = mla;
         if (s.ContinuousAutoTuneAsioEnabled is bool cata) profile.ContinuousAutoTuneAsioEnabled = cata;
+        if (s.AutoTuneLowestDelay is bool atld) profile.AutoTuneLowestDelay = atld;
+        if (s.EnableLogs is bool logs) profile.EnableLogs = logs;
         // Write the CURRENT machine-wide peers book into the profile on save. The global AppConfig copy
         // is the authority now; this snapshot just keeps older builds (which read the profile's list)
         // working against the same profile file, and makes the load-time migration union a no-op.
         profile.RememberedPeers = new List<string>(LoadRememberedPeers());
         profile.AsioDriverName = s.AsioDriverName;
+        if (s.AsioBufferFrames is int abf) profile.AsioBufferFrames = abf;
         if (s.SendRate is SendRate sr) profile.SendRate = sr;
         if (s.TightLatencyMode is bool tl) profile.TightLatencyMode = tl;
-        if (s.PriorityMode is bool pm) profile.PriorityMode = pm;
         if (s.LockPeerAddresses is bool lpa) profile.LockPeerAddresses = lpa;
         if (s.Smoothness is int sm) profile.Smoothness = sm;
         if (s.ConcealmentArtifact is ConcealmentArtifact ca) profile.ConcealmentArtifactRaw = (int)ca;
@@ -662,6 +732,8 @@ public sealed class RemSoundSettingsStore
             ? new Dictionary<string, string>()
             : new Dictionary<string, string>(s.CustomCuePaths);
         if (s.RecordingSettings is RecordingSettings rs) profile.RecordingSettings = rs.Clone();
+        if (s.PushToTalk is PushToTalkSettings ptt) profile.PushToTalk = ptt.Clone();
+        if (s.Metronome is MetronomeSettings metronome) profile.Metronome = metronome.Clone();
     }
 
     private sealed class Settings
@@ -680,13 +752,15 @@ public sealed class RemSoundSettingsStore
         // on upgrade. The auto-tune companion lets the user opt either lane in or out independently.
         public int? MaxLatencyMsAsio { get; set; }
         public bool? ContinuousAutoTuneAsioEnabled { get; set; }
+        public bool? AutoTuneLowestDelay { get; set; }
+        public bool? EnableLogs { get; set; }
         // RememberedPeers / RememberedApplications retired from this cache 2026-07-16 — both books are
         // machine-wide in AppConfig now (this cache is intra-process only, so applications were being
         // forgotten on every exit and peers were per-profile in practice).
         public string? AsioDriverName { get; set; }
+        public int? AsioBufferFrames { get; set; }
         public SendRate? SendRate { get; set; }
         public bool? TightLatencyMode { get; set; }
-        public bool? PriorityMode { get; set; }
         public bool? LockPeerAddresses { get; set; }
         public int? Smoothness { get; set; }
         public ConcealmentArtifact? ConcealmentArtifact { get; set; }
@@ -703,6 +777,8 @@ public sealed class RemSoundSettingsStore
         public bool? EnableUpdateCue { get; set; }
         public Dictionary<string, string>? CustomCuePaths { get; set; }
         public RecordingSettings? RecordingSettings { get; set; }
+        public PushToTalkSettings? PushToTalk { get; set; }
+        public MetronomeSettings? Metronome { get; set; }
     }
 
 }

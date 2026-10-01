@@ -173,13 +173,20 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
             try
             {
                 if (MixingEngine.RefuseOpenForTest?.Invoke(spec) == true) throw new InvalidOperationException("refused by the self-test");
-                using var enumerator = new MMDeviceEnumerator();
-                var device = enumerator.GetDevice(spec.DeviceId);
-                captureDevice = device; // hold it for disposal in StopInternal — see field comment
+                // The simulator's device, when it has one for this spec: no Windows device, no keepalive, its own latency.
+                var simulated = CaptureDevicesForTest.Open?.Invoke(spec);
+                MMDevice? device = null;
+                if (simulated is null)
+                {
+                    using var enumerator = new MMDeviceEnumerator();
+                    device = enumerator.GetDevice(spec.DeviceId);
+                    captureDevice = device; // hold it for disposal in StopInternal — see field comment
+                }
 
-                capture = spec.Kind == CaptureKind.Loopback
-                    ? new LowLatencyWasapiLoopbackCapture(device, CaptureBufferMs, msg => onDiagnostic?.Invoke($"push-wasapi: {msg}"))
-                    : (IWaveIn)new WasapiCapture(device, useEventSync: true, audioBufferMillisecondsLength: CaptureBufferMs);
+                capture = simulated
+                    ?? (spec.Kind == CaptureKind.Loopback
+                        ? new LowLatencyWasapiLoopbackCapture(device!, CaptureBufferMs, msg => onDiagnostic?.Invoke($"push-wasapi: {msg}"))
+                        : new WasapiCapture(device!, useEventSync: true, audioBufferMillisecondsLength: CaptureBufferMs));
 
                 var fmt = capture.WaveFormat;
                 sourceChannels = fmt.Channels;
@@ -209,7 +216,13 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
                     // filter as well as the timing.
                     resampler.SetMode(true, 2, true, 64, 32);
                     resampler.SetFilterParms();
-                    resampler.SetFeedMode(false); // pull mode internally; we drive the pull from our callback
+                    // Input-driven: every frame the device hands over goes in, and whatever it makes comes out; the
+                    // resampler carries the part-sample between callbacks itself. Output-driven (as this was until
+                    // 2026-09-30) asked for a fixed amount of output and fed in what that needed, and whenever the rates
+                    // did not divide evenly the part left over was dropped: 239 frames lost in 400 callbacks at 44.1 kHz,
+                    // 2.2 cents sharp and grainy, and frames lost at 16, 22.05, 32 and 88.2 kHz too (SIMULATOR PUSH MODE
+                    // RATES, found by the simulator's capture side).
+                    resampler.SetFeedMode(true);
                     resampler.SetRates(sourceSampleRate, MixSampleRate);
                 }
                 else
@@ -217,7 +230,7 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
                     resampler = null;
                 }
 
-                if (spec.Kind == CaptureKind.Loopback)
+                if (spec.Kind == CaptureKind.Loopback && device is not null)
                 {
                     // WASAPI loopback only fires callbacks while something else is rendering on
                     // the device. Same trick MixingEngine uses (see naudio/NAudio#1110).
@@ -235,10 +248,14 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
 
                 // Ask the DEVICE how long audio waits in it, rather than assuming the 10 ms we asked
                 // for. Once, here, off the audio thread — see DeviceLatencyProbe. 2026-08-24.
-                reportedInputLatencyMs = DeviceLatencyProbe.CaptureLatencyMs(device, CaptureBufferMs);
-                onDiagnostic?.Invoke(reportedInputLatencyMs > 0
-                    ? $"push-wasapi: \"{spec.Name}\" reports {reportedInputLatencyMs:0.0} ms of capture latency (engine period {DeviceLatencyProbe.EnginePeriodMs(device):0.0} ms, we asked for {CaptureBufferMs} ms)"
-                    : $"push-wasapi: \"{spec.Name}\" would not report its period — capture latency falls back to the {CaptureBufferMs} ms estimate");
+                if (device is not null)
+                {
+                    reportedInputLatencyMs = DeviceLatencyProbe.CaptureLatencyMs(device, CaptureBufferMs);
+                    onDiagnostic?.Invoke(reportedInputLatencyMs > 0
+                        ? $"push-wasapi: \"{spec.Name}\" reports {reportedInputLatencyMs:0.0} ms of capture latency (engine period {DeviceLatencyProbe.EnginePeriodMs(device):0.0} ms, we asked for {CaptureBufferMs} ms)"
+                        : $"push-wasapi: \"{spec.Name}\" would not report its period — capture latency falls back to the {CaptureBufferMs} ms estimate");
+                }
+                else reportedInputLatencyMs = (capture as CaptureDevicesForTest.IReportsLatency)?.ReportedInputLatencyMs ?? 0;
 
                 activeSpec = spec;
                 capture.DataAvailable += OnDataAvailable;
@@ -420,25 +437,17 @@ internal sealed class PushModeWasapiBackend : ICaptureBackend
             }
             else
             {
-                // Compute a generous upper bound on output frames (add a small pad for the
-                // resampler's lookahead). We ask for MORE output than this input can produce, so
-                // ResamplePrepare always asks for at least sourceFrames and the Math.Min below never
-                // actually truncates — which matters, because anything we did not feed would be
-                // DROPPED, not held: it stays in sourceFloatScratch, which the next callback
-                // overwrites. (This comment used to claim the resampler held it. It does not. The
-                // arithmetic is what makes the path safe, so do not shrink outBound without
-                // rechecking it. 2026-08-23 audit, finding S9.)
+                // Input-driven (see SetFeedMode above): hand over every frame this callback brought, and take
+                // what comes out, up to a generous bound (the rates' ratio, plus a pad for the part-sample carried
+                // over). Every frame must go in: anything not fed would be DROPPED, not held - it stays in
+                // sourceFloatScratch, which the next callback overwrites (2026-08-23 audit, finding S9).
                 var outBound = (int)Math.Ceiling(sourceFrames * (double)MixSampleRate / sourceSampleRate) + 16;
                 if (resampledScratch.Length < outBound * sourceChannels)
                     resampledScratch = new float[outBound * sourceChannels];
 
-                var inFramesNeeded = resampler.ResamplePrepare(outBound, sourceChannels, out var inBuf, out var inOff);
-                var copyFrames = Math.Min(sourceFrames, inFramesNeeded);
-                if (copyFrames > 0)
-                {
-                    Array.Copy(sourceFloatScratch, 0, inBuf, inOff, copyFrames * sourceChannels);
-                }
-                var produced = resampler.ResampleOut(resampledScratch, 0, copyFrames, outBound, sourceChannels);
+                resampler.ResamplePrepare(sourceFrames, sourceChannels, out var inBuf, out var inOff);
+                Array.Copy(sourceFloatScratch, 0, inBuf, inOff, sourceFrames * sourceChannels);
+                var produced = resampler.ResampleOut(resampledScratch, 0, sourceFrames, outBound, sourceChannels);
                 working = resampledScratch;
                 workingFrames = produced;
                 workingChannels = sourceChannels;

@@ -411,9 +411,21 @@ internal static partial class SelfTest
             Check(afterLeaving > 0.4f,
                 $"and the instances still listening must carry on undisturbed (peak {afterLeaving:0.000})");
 
+            // AUDIT R2 (merged here 2026-09-28): a claimed peer reaches the plugin ONCE however many output lanes are ticked.
+            // Doubling - the primary and its mirror summed - would land near 2x; anything towards 1.5x is the bug.
+            var peer = new IPEndPoint(IPAddress.Parse("192.168.77.20"), 47830);
+            var instance = Guid.NewGuid();
+            var oneLane = ClaimedPeerPeak(peer, instance, bothLanes: false);
+            var twoLanes = ClaimedPeerPeak(peer, instance, bothLanes: true);
+            Check(oneLane > 0.2f && twoLanes > 0.2f, $"a claimed peer must reach the plugin with one lane and with two (peaks {oneLane:0.000}, {twoLanes:0.000})");
+            Check(twoLanes < oneLane * 1.4f,
+                $"a claimed peer must reach the plugin ONCE however many outputs are ticked - with two lanes it came out {twoLanes / oneLane:0.00}x "
+                + $"louder, the primary and its mirror summed (one lane {oneLane:0.000}, two lanes {twoLanes:0.000})");
+
             return $"three instances on three different people each get only their own, at their own level, in all three "
                  + $"configurations ({levels.TrimEnd()}); {Instances} instances on ONE person each get a whole copy of the "
-                 + $"stream over the real link, and one leaving does not disturb the rest";
+                 + $"stream over the real link, and one leaving does not disturb the rest; a claimed peer reads the same with "
+                 + $"one output lane or two ({oneLane:0.000} vs {twoLanes:0.000})";
         }
         finally
         {
@@ -434,80 +446,102 @@ internal static partial class SelfTest
     /// and asserts audio keeps flowing.</para></summary>
     private static string? PluginSurvivesSessionChurn()
     {
-        var peer = new IPEndPoint(IPAddress.Parse("100.118.45.53"), 47830);
-        var engine = new PlayoutEngine(new ReceiverDiagnostics());
-        engine.SetLaneActive(RenderRoute.WasapiLane, true);
-        engine.SetLaneActive(RenderRoute.AsioLane, false);
-        engine.SetMaxLatencyMs(RenderRoute.Mixed, 30);
-
-        var claims = new PluginPeerClaims();
-        engine.SetPluginPeerClaims(claims);
-        var instance = Guid.NewGuid();
-        claims.Claim(peer.Address, instance);
-
-        var block = new float[128 * 2];
-        var served = 0;
-        var starved = 0;
-
-        // Four rounds of the churn from the log: a session opens, carries audio, is pruned, and a new
-        // one opens under a NEW stream id (his log shows the sender reusing 7582, but a new id is the
-        // harder case and both must work).
-        for (ushort round = 1; round <= 4; round++)
+        // ALL THREE CONFIGURATIONS (2026-09-28). The churn itself is the bridge's, but the last check - a claimed peer kept off
+        // the SPEAKERS - is a rendering one, and the doubling bugs lived where two lanes each hold a copy. It ran in WASAPI
+        // only, under an exemption that said this was not a rendering path.
+        var said = new List<string>();
+        foreach (var configuration in AudioConfigurations.All)
         {
-            var session = engine.GetOrCreateSession(peer, round, 4 * 1024 * 1024);
-            FillSession(session, 0.5f);
+            var name = configuration.Describe();
+            var peer = new IPEndPoint(IPAddress.Parse("100.118.45.53"), 47830);
+            var engine = NewEngineFor(configuration);
 
-            var producedThisRound = 0;
-            for (var i = 0; i < 40; i++)
+            var claims = new PluginPeerClaims();
+            engine.SetPluginPeerClaims(claims);
+            var instance = Guid.NewGuid();
+            claims.Claim(peer.Address, instance);
+
+            var block = new float[128 * 2];
+            var served = 0;
+
+            // Four rounds of the churn from the log: a session opens, carries audio, is pruned, and a new
+            // one opens under a NEW stream id (his log shows the sender reusing 7582, but a new id is the
+            // harder case and both must work).
+            for (ushort round = 1; round <= 4; round++)
             {
-                var got = engine.ReadClaimedPeer(peer.Address, block, 128);
-                if (got > 0) { producedThisRound++; served++; } else starved++;
+                var session = engine.GetOrCreateSession(peer, round, 4 * 1024 * 1024);
+                FillSession(session, 0.5f);
+
+                var producedThisRound = 0;
+                for (var i = 0; i < 40; i++)
+                    if (engine.ReadClaimedPeer(peer.Address, block, 128) > 0) { producedThisRound++; served++; }
+                Check(producedThisRound > 20,
+                    $"{name}, round {round}: the plugin must get audio from the peer's CURRENT session "
+                  + $"({producedThisRound} of 40 reads produced audio). A session that opened after the claim must still be readable");
+
+                engine.RemoveSession(peer, round);   // the prune
             }
-            Check(producedThisRound > 20,
-                $"round {round}: the plugin must get audio from the peer's CURRENT session "
-              + $"({producedThisRound} of 40 reads produced audio). A session that opened after the claim must still be readable");
 
-            engine.RemoveSession(peer, round);   // the prune
+            // --- THE ACTUAL STALL: one person, two addresses ------------------------------------------
+            // Anthony's peer was an iPhone reachable both over Tailscale (100.118.45.53) and on the LAN
+            // (192.168.69.44). The SAME stream id, 7582, appears on both — one sender, one stream, two
+            // paths. When the audio moved to the other path the plugin was left holding an address that
+            // no longer carried anything, and RemSound served it nothing for the next three minutes while
+            // still reporting the peer as claimed.
+            var lanAddress = new IPEndPoint(IPAddress.Parse("192.168.69.44"), 47830);
+            const ushort SharedStream = 7582;
+
+            var viaTailscale = engine.GetOrCreateSession(peer, SharedStream, 4 * 1024 * 1024);
+            FillSession(viaTailscale, 0.5f);
+            Check(engine.ReadClaimedPeer(peer.Address, block, 128) > 0, $"{name}: audio must flow on the address the plugin was given");
+
+            engine.RemoveSession(peer, SharedStream);
+            var viaLan = engine.GetOrCreateSession(lanAddress, SharedStream, 4 * 1024 * 1024);
+            FillSession(viaLan, 0.5f);
+
+            var afterMove = 0;
+            for (var i = 0; i < 40; i++) if (engine.ReadClaimedPeer(peer.Address, block, 128) > 0) afterMove++;
+            Check(afterMove > 20,
+                $"{name}: THE STALL: when a peer moves to another address the plugin must keep receiving them ({afterMove} of 40 reads "
+              + "produced audio). A peer is a PERSON, not an address - the same sender on a second network path is still the "
+              + "person the plugin claimed, and holding the old address is what silenced the track after a few seconds");
+
+            // ...and they must not come back through the speakers on the new address either - on every speaker lane this
+            // configuration has - or the user hears them twice the moment the path changes.
+            FillSession(viaLan, 0.5f);
+            var leak = SpeakerPeak(engine, configuration);
+            Check(leak < 0.05f,
+                $"{name}: a claimed peer must stay off the speakers on EVERY address they are reachable at, not just the one the "
+              + $"plugin named (speaker peak {leak:0.000})");
+            // The same read with the claim let go must hear them, or the silence above proves nothing.
+            claims.Release(peer.Address, instance);
+            FillSession(viaLan, 0.5f);
+            var heard = SpeakerPeak(engine, configuration);
+            Check(heard > 0.2f, $"{name}: premise - with the claim let go, the speakers must play them (peak {heard:0.000})");
+            said.Add($"{name} ({served} reads, speakers {leak:0.00} claimed / {heard:0.00} released)");
         }
+        return $"survives 4 rounds of session churn and follows a peer to a second network path, without letting them back onto "
+             + $"the speakers - {string.Join("; ", said)}";
+    }
 
-        // --- THE ACTUAL STALL: one person, two addresses ------------------------------------------
-        // Anthony's peer was an iPhone reachable both over Tailscale (100.118.45.53) and on the LAN
-        // (192.168.69.44). The SAME stream id, 7582, appears on both — one sender, one stream, two
-        // paths. When the audio moved to the other path the plugin was left holding an address that
-        // no longer carried anything, and RemSound served it nothing for the next three minutes while
-        // still reporting the peer as claimed.
-        var lanAddress = new IPEndPoint(IPAddress.Parse("192.168.69.44"), 47830);
-        const ushort SharedStream = 7582;
-
-        // The peer starts on the address the plugin was given, and audio flows.
-        var viaTailscale = engine.GetOrCreateSession(peer, SharedStream, 4 * 1024 * 1024);
-        FillSession(viaTailscale, 0.5f);
-        Check(engine.ReadClaimedPeer(peer.Address, block, 128) > 0, "audio must flow on the address the plugin was given");
-
-        // Now the sender moves to its other path, exactly as the log shows: the old session is pruned
-        // and the same stream reappears from a different address.
-        engine.RemoveSession(peer, SharedStream);
-        var viaLan = engine.GetOrCreateSession(lanAddress, SharedStream, 4 * 1024 * 1024);
-        FillSession(viaLan, 0.5f);
-
-        var afterMove = 0;
-        for (var i = 0; i < 40; i++) if (engine.ReadClaimedPeer(peer.Address, block, 128) > 0) afterMove++;
-        Check(afterMove > 20,
-            $"THE STALL: when a peer moves to another address the plugin must keep receiving them ({afterMove} of 40 reads "
-          + "produced audio). A peer is a PERSON, not an address - the same sender on a second network path is still the "
-          + "person the plugin claimed, and holding the old address is what silenced the track after a few seconds");
-
-        // ...and they must not come back through the speakers on the new address either, or the user
-        // hears them twice the moment the path changes.
-        var mix = new byte[960 * 8];
-        FillSession(viaLan, 0.5f);
-        var leak = PeakOfMix(engine, mix);
-        Check(leak < 0.05f,
-            $"a claimed peer must stay off the speakers on EVERY address they are reachable at, not just the one the "
-          + $"plugin named (peak {leak:0.000})");
-
-        return $"survives 4 rounds of session churn ({served} reads produced audio); and follows a peer that moves to a "
-             + "second network path, without letting them back onto the speakers";
+    /// <summary>The loudest the speakers get in one read, on every speaker lane the configuration has: the all-sessions
+    /// read for WASAPI only, the ASIO lane for ASIO only, and both lanes for both.</summary>
+    private static float SpeakerPeak(PlayoutEngine engine, AudioConfiguration configuration)
+    {
+        var buffer = new byte[960 * 8];
+        float Read(Func<byte[], int> read)
+        {
+            Array.Clear(buffer);
+            read(buffer);
+            var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(buffer.AsSpan());
+            var peak = 0f;
+            foreach (var f in floats) peak = Math.Max(peak, Math.Abs(f));
+            return peak;
+        }
+        if (configuration.HasTwoLanes())
+            return Math.Max(Read(b => engine.WasapiLaneOutput.Read(b, 0, b.Length)), Read(b => engine.AsioLaneOutput.Read(b, 0, b.Length)));
+        if (configuration.UsesAsio()) return Read(b => engine.AsioLaneOutput.Read(b, 0, b.Length));
+        return Read(b => engine.Read(b, 0, b.Length));
     }
 
     /// <summary>Drive the plugin's audio thread the way a DAW would: read a block, let the reply land,
@@ -599,23 +633,37 @@ internal static partial class SelfTest
 
             // The setting behind the tick must persist, in an isolated config — never the real one.
             var scratch = Path.Combine(Path.GetTempPath(), "remsound-plugin-menu-" + Guid.NewGuid().ToString("N"));
+            var restoreLinkPort = MainForm.PluginLinkPortForTest;
             using (AppConfig.UseThrowawayUserDataDirectory(scratch))
             {
                 Check(AppConfig.Load().ApplyPeerShapingToPlugin, "pan and EQ must reach the DAW by DEFAULT — what you hear is the least surprising behaviour");
-                var cfg = AppConfig.Load();
-                cfg.ApplyPeerShapingToPlugin = false;
-                cfg.Save();
-                Check(!AppConfig.Load().ApplyPeerShapingToPlugin, "turning it off must survive a save and reload");
-
                 // ON by default: a plugin that quietly does nothing until you find a hidden switch is
                 // worse than no plugin at all.
                 Check(AppConfig.Load().EnableDawPluginLink, "plugins must be able to connect by DEFAULT");
-                var linkCfg = AppConfig.Load();
-                linkCfg.EnableDawPluginLink = false;
-                linkCfg.Save();
-                Check(!AppConfig.Load().EnableDawPluginLink, "switching the link off must survive a save and reload");
+
+                // THE TICKS THEMSELVES (2026-09-28): clicked as a person clicks them, each must change the setting AND what it
+                // governs - the pan/EQ tick once saved a value nothing read, so the DAW always got shaped audio.
+                shapingItem.Checked = true;
+                shapingItem.PerformClick();
+                Check(!shapingItem.Checked && !AppConfig.Load().ApplyPeerShapingToPlugin && !form.ReceiverForTest.PluginShapingForTest,
+                    "unticking \"Apply pan and EQ to plugin audio\" must save it off AND give the DAW the raw peer from then on");
+                shapingItem.PerformClick();
+                Check(shapingItem.Checked && AppConfig.Load().ApplyPeerShapingToPlugin && form.ReceiverForTest.PluginShapingForTest,
+                    "and ticking it again must save it on and give the DAW what you hear");
+
+                MainForm.PluginLinkPortForTest = FreeLoopbackPort();
+                var linkItem = link!;
+                linkItem.Checked = false;
+                linkItem.PerformClick();
+                Check(linkItem.Checked && AppConfig.Load().EnableDawPluginLink && form.PluginLinkOpenForTest,
+                    "ticking \"Let plugins connect to RemSound\" must save it on AND open the link");
+                linkItem.PerformClick();
+                Check(!linkItem.Checked && !AppConfig.Load().EnableDawPluginLink && !form.PluginLinkOpenForTest,
+                    "and unticking it must save it off AND close the link - nothing left listening");
             }
-            return "DAW plugin menu present with install, remove, the pan/EQ tick and the link switch; the menu states what is actually installed; both settings round-trip and default to on";
+            MainForm.PluginLinkPortForTest = restoreLinkPort;
+            return "DAW plugin menu present with install, remove, the pan/EQ tick and the link switch; the menu states what is actually installed; "
+                 + "both default to on, and each tick, clicked, saves its setting and changes what it governs (the DAW's shaping, the link itself)";
         }
         finally { try { form?.Dispose(); } catch { } }
     }
@@ -815,12 +863,19 @@ internal static partial class SelfTest
             // app, and it is the state in which the sweep silently stopped happening.
             DiagnosticsGate.Enabled = false;
 
-            // Let the instance go stale. The claim timeout is the sweep's own threshold, so waiting it
-            // out is the only honest way to reach the state a dead DAW leaves behind.
-            Thread.Sleep(PluginPeerClaims.ClaimTimeout + TimeSpan.FromMilliseconds(600));
-            Check(DiagnosticsGate.Enabled == false, "the diagnostics gate must still be off — something re-enabled it mid-test");
-
-            form.SnapshotTickForTest();
+            // Let the instance go stale: the tick is run with both sweeps' clocks moved on past their own thresholds - the
+            // link's claim timeout and the track's idle timeout - which is the state a dead DAW leaves behind. (This slept
+            // the five seconds out until 2026-09-28.)
+            var later = PluginPeerClaims.ClaimTimeout + TimeSpan.FromMilliseconds(600);
+            host.UtcNowForTest = () => DateTime.UtcNow + later;
+            var ahead = (long)(later.TotalSeconds * System.Diagnostics.Stopwatch.Frequency);
+            AudioClock.UseSimulated(() => System.Diagnostics.Stopwatch.GetTimestamp() + ahead);   // this thread only: the tick's
+            try
+            {
+                Check(DiagnosticsGate.Enabled == false, "the diagnostics gate must still be off — something re-enabled it mid-test");
+                form.SnapshotTickForTest();
+            }
+            finally { AudioClock.UseSimulated(null); host.UtcNowForTest = null; }
 
             Check(host.InstanceCount == 0,
                 "with logging OFF, the per-second tick must STILL sweep a plugin instance that has gone quiet. It sat "
@@ -832,23 +887,67 @@ internal static partial class SelfTest
                 "with logging OFF, the per-second tick must STILL forget a DAW that stopped sending its track - "
                 + "an armed lane with nothing feeding it keeps the sender running");
 
-            // The recording warning can't be driven here: it opens a message box, and a disk too slow to keep up can't
-            // be made on demand. Its place in the tick is pinned instead - above the log switch's return, with the sweeps.
-            var root = FindSourceRoot();
-            if (root is not null)
+            // The recording warning, driven: a recording that has lost just under a second says nothing; a whole second lost
+            // brings the warning, once - with logging off; stopping and starting again lets it warn again. It pinned the
+            // warning's place in the tick's source until 2026-09-28. The warning is a question on the hidden desktop here.
+            var handle = form.Handle;   // the warning's question is asked on the window's own thread
+            Check(handle != IntPtr.Zero, "premise: the main window has its handle");
+            var recording = true;
+            long dropped = 47_999;
+            form.RecordingActiveForTest = () => recording;
+            form.RecordingDroppedFramesForTest = () => dropped;
+            var logged = new List<string>();
+            form.LogForTest.EventTapForTest = line => { lock (logged) logged.Add(line); };
+            Windowless.InstallHook();
+            Windowless.SetActiveForTest(true);
+            var warnings = new List<string>();
+            try
             {
-                var tick = SourceMethodBody(File.ReadAllText(Path.Combine(root, "src", "RemSound.App", "MainForm.cs")), "private void SnapshotLogIfDue()");
-                // The code line, not the comment near the top of the method that quotes it.
-                var gateLine = System.Text.RegularExpressions.Regex.Match(tick, @"^\s*if \(!DiagnosticsGate\.Enabled\)\s*$",
-                    System.Text.RegularExpressions.RegexOptions.Multiline);
-                var gate = gateLine.Success ? gateLine.Index : -1;
-                var warn = tick.IndexOf("WarnIfRecordingIsLosingAudio();", StringComparison.Ordinal);
-                Check(gate > 0 && warn > 0 && warn < gate,
-                    "the recording-losing-audio warning must sit ABOVE the log switch's return in the per-second tick, or a user "
-                    + "with logging off loses audio in silence");
+                void TickAndAnswer()
+                {
+                    DriveWhilePumping(form, () =>
+                    {
+                        var ticked = new ManualResetEventSlim(false);
+                        form.BeginInvoke(() => { try { form.SnapshotTickForTest(); } finally { ticked.Set(); } });
+                        // The tick either returns, or holds on the warning's question until it is answered.
+                        while (!ticked.Wait(20))
+                        {
+                            static IEnumerable<string> Texts(Control c) => new[] { c.Text }.Concat(c.Controls.Cast<Control>().SelectMany(Texts));
+                            var asked = form.Invoke(() => Application.OpenForms.OfType<HeadlessQuestionForm>().FirstOrDefault() is { } q
+                                ? string.Join(" ", Texts(q)) : null);
+                            if (asked is null) continue;
+                            warnings.Add(asked);
+                            form.Invoke(() => { foreach (var q in Application.OpenForms.OfType<HeadlessQuestionForm>().ToList()) q.DialogResult = DialogResult.OK; });
+                        }
+                    }, TimeSpan.FromSeconds(20));
+                }
+                bool Warned() { lock (logged) return logged.Any(l => l.Contains("recording: losing audio", StringComparison.Ordinal)); }
+
+                TickAndAnswer();
+                Check(warnings.Count == 0 && !Warned(), $"a recording that has lost under a second must not warn ({warnings.Count} warnings)");
+                dropped = 48_000;
+                TickAndAnswer();
+                Check(warnings.Count == 1 && warnings[0].Contains("losing audio", StringComparison.Ordinal),
+                    $"with logging OFF, a recording that has lost a whole second must warn the person ({warnings.Count} warnings{(warnings.Count > 0 ? ": " + Head(warnings[0]) : "")})");
+                Check(Warned(), "and the warning must be in the log");
+                dropped = 96_000;
+                TickAndAnswer();
+                Check(warnings.Count == 1, $"the warning is given once per recording, not every second ({warnings.Count} warnings)");
+                recording = false;
+                TickAndAnswer();
+                recording = true;
+                TickAndAnswer();
+                Check(warnings.Count == 2, $"a new recording that loses audio must warn again ({warnings.Count} warnings)");
+            }
+            finally
+            {
+                Windowless.SetActiveForTest(false);
+                form.LogForTest.EventTapForTest = null;
+                form.RecordingActiveForTest = null;
+                form.RecordingDroppedFramesForTest = null;
             }
             return "with the log switch off and auto-tune off, the per-second tick still reaps a plugin whose DAW died and forgets "
-                 + "its track; the recording warning sits above the switch" + (root is null ? " (not checked: no source tree)" : "");
+                 + "its track, and warns - once per recording - when a recording has lost a whole second of audio";
         }
         finally { DiagnosticsGate.Enabled = restoreGate; }
     }

@@ -65,6 +65,23 @@ public sealed class RemSoundService : ServiceBase
         var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
         var versionText = version is null ? "?" : $"{version.Major}.{version.Minor}";
         log.Event($"service: OnStart, version {versionText}");
+        // Listening comes first: at boot, every moment before the capture opens is startup sound the listeners never hear
+        // (Ed's 30 Sep restart).
+        host = ServiceSendHost.FromConfig(msg => log?.Event(msg));
+        // Startup volume (Additional service options): unmute + set the default output's level,
+        // either on the first start after each boot or on every start. Before the capture opens so
+        // the machine is audible by the time audio flows.
+        StartupVolume.ApplyIfConfigured(msg => log?.Event(msg));
+        worker = new Thread(() =>
+        {
+            try { host.RunLoop(cts.Token); }
+            catch (Exception ex) { log?.Event($"service: run loop crashed {ex.GetType().Name}: {ex.Message}"); }
+        })
+        { IsBackground = true, Name = "remsound-service" };
+        worker.Start();
+
+        // The rest can wait until the capture is on its way.
+        log.Event($"service: opus: {OpusInUse.Describe()}");
         // The service's own logs and crash reports are tidied like the app's. The service never runs the app's
         // startup housekeeping, so they used to pile up for good. 2026-09-13 review.
         if (TidyServiceLogs(log.Path) is { } tidied) log.Event(tidied);
@@ -73,18 +90,6 @@ public sealed class RemSoundService : ServiceBase
         try { ServiceStore.SaveStatus(new ServiceStore.ServiceStatus { Version = versionText, StartedUtc = DateTime.UtcNow }); } catch { }
         // If this start is the completion of a self-update restart, close the loop in the update log.
         try { if (ServiceStore.ConsumeUpdatePending()) ServiceStore.AppendUpdateLog($"update complete: now running version {versionText}"); } catch { }
-        // Startup volume (Additional service options): unmute + set the default output's level,
-        // either on the first start after each boot or on every start. Before the host spins up so
-        // the machine is audible by the time audio flows.
-        StartupVolume.ApplyIfConfigured(msg => log?.Event(msg));
-        host = ServiceSendHost.FromConfig(msg => log?.Event(msg));
-        worker = new Thread(() =>
-        {
-            try { host.RunLoop(cts.Token); }
-            catch (Exception ex) { log?.Event($"service: run loop crashed {ex.GetType().Name}: {ex.Message}"); }
-        })
-        { IsBackground = true, Name = "remsound-service" };
-        worker.Start();
 
         // Self-update: the auto-updater swaps the files in place but can't restart us (no admin). We run
         // as SYSTEM, so when a newer RemSound.exe lands in the app folder we restart onto it ourselves. Checked

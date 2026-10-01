@@ -51,12 +51,11 @@ namespace RemSound.App;
 ///
 /// Trade-offs the user should know about:
 /// <list type="bullet">
-///   <item>Laptop on battery: faster drain while this is engaged. The app engages it only while
-///         audio is moving and releases it after a quiet hold-down
-///         (<see cref="MainForm.PriorityModeHoldDown"/>, 30 s); the service engages it whenever it
-///         is sending. Worth the energy for a "live session" profile; not worth it for a
-///         "background listening" one. That's why the app's switch lives on the Profile, not on
-///         AppConfig.</item>
+///   <item>Laptop on battery: faster drain while this is engaged. Only the service engages it now,
+///         whenever it is sending - Windows throttles a background service hardest. The app's
+///         per-profile switch was removed 2026-09-29 (Ed): its audible part was the fast timer while
+///         hidden, which the app keeps while streaming (<see cref="KeepFastTimerWhileStreaming"/>,
+///         <see cref="MainForm.StreamingHoldDown"/>).</item>
 ///   <item>Desktop on mains: usually a couple of watts more, no practical downside.</item>
 /// </list>
 ///
@@ -90,6 +89,10 @@ internal static class PerformanceMode
                 return;
             }
 
+            // One mask for both ways: switching Priority mode off while streaming keeps the fast timer's flag.
+            var mask = ThrottlingMaskFor(enable, streamingFastTimer);
+            LastThrottlingMaskForTest = mask;
+
             // A gate run keeps the bookkeeping and the log line, and changes nothing about the process or the machine.
             if (NoEffectForTest)
             {
@@ -100,7 +103,7 @@ internal static class PerformanceMode
 
             if (enable)
             {
-                TrySetPowerThrottling(disable: true, log);
+                TrySetThrottlingMask(mask, "priority mode", log);
                 TryStartPowerRequest(log);
                 TryRaisePriority(log);
                 TryBeginTimePeriod(log);
@@ -111,49 +114,187 @@ internal static class PerformanceMode
             }
             else
             {
-                TrySetPowerThrottling(disable: false, log);
+                TrySetThrottlingMask(mask, "priority mode", log);
                 TryStopPowerRequest(log);
                 TryRestorePriority(log);
                 TryEndTimePeriod(log);
                 TryRelaxWorkingSet(log);
                 currentlyEnabled = false;
-                log?.Invoke("priority mode: OFF (all overrides cleared, defaults restored)");
+                log?.Invoke(streamingFastTimer
+                    ? "priority mode: OFF (all overrides cleared, defaults restored; the fast timer stays while streaming)"
+                    : "priority mode: OFF (all overrides cleared, defaults restored)");
             }
         }
     }
 
-    // === 1. Process power throttling (EcoQoS opt-out + timer-resolution honoring) ===
+    private static bool streamingFastTimer;
+    private static bool realTimerFlagForTest;
 
-    private static void TrySetPowerThrottling(bool disable, Action<string>? log)
+    /// <summary>
+    /// THE FAST TIMER WHILE STREAMING (Ed, 2026-09-28: the latency lab's "fast timer while hidden", made normal behaviour).
+    /// Windows 11 ignores a process's 1 ms timer request (timeBeginPeriod, which every audio loop holds - see
+    /// SystemTimerResolution) while none of its windows can be seen, unless the process says otherwise - which RemSound
+    /// only ever did in Priority mode. So a tray-minimised RemSound's WASAPI mix tick of 10 ms rounded up to the 15.6 ms
+    /// system tick and came out in 16-31 ms lumps (the burst pattern in Ed's logs). This sets ONLY that flag, none of
+    /// Priority mode's other changes, from when audio starts moving until it stops (<see cref="MainForm.FastTimerShouldHold"/>).
+    ///
+    /// <para>Measured 2026-09-28 on Ed's 13th-gen Intel desktop (Windows 11), in a process with no visible window running
+    /// the mix tick's own wait (MMCSS Pro Audio, the 1 ms timer, WaitOne of up to 10 ms): with nothing set the tick woke
+    /// p50 6.3 ms late, p99 15.3, max 16.2; with this flag p50 0.4, p99 1.9, max 2.5, idle and with 48 busy threads in
+    /// another process. The gate measures the same (the FAST TIMER step).</para>
+    ///
+    /// <para>Process-scoped and cheap. Priority mode, when on, already holds it, and keeps holding it when switched off
+    /// while streaming (<see cref="ThrottlingMaskFor"/>). Windows 7 has no SetProcessInformation: the call throws, is
+    /// caught and logged, and nothing changes. Idempotent: the once-a-second tick calls it every second and only a change
+    /// does anything. Mostly for WASAPI: nothing on the ASIO path waits on a timer, and nothing there loses by it.</para>
+    /// </summary>
+    public static void KeepFastTimerWhileStreaming(bool streaming, Action<string>? log = null)
+    {
+        lock (gate)
+        {
+            if (streaming == streamingFastTimer) return;
+            streamingFastTimer = streaming;
+            var mask = ThrottlingMaskFor(currentlyEnabled, streaming);
+            LastThrottlingMaskForTest = mask;
+            var what = streaming ? "on while streaming" : "off, not streaming";
+            if (NoEffectForTest && !realTimerFlagForTest)
+            {
+                log?.Invoke($"fast timer: {what} (a test run: nothing about the process was changed)");
+                return;
+            }
+            if (currentlyEnabled)
+            {
+                log?.Invoke($"fast timer: {what} - priority mode is on and already keeps the fast timer");
+                return;
+            }
+            if (TrySetThrottlingMask(mask, "fast timer", log))
+                log?.Invoke(streaming
+                    ? "fast timer: on while streaming - Windows told to honour the 1 ms timer even while RemSound is minimised or hidden"
+                    : "fast timer: off, not streaming - the timer flag handed back to Windows");
+        }
+    }
+
+    /// <summary>Whether the fast timer is held for streaming (for the log and the gate).</summary>
+    internal static bool StreamingFastTimer { get { lock (gate) return streamingFastTimer; } }
+
+    /// <summary>
+    /// The power-throttling flags this process holds, in one place. Two flags, each "don't throttle me" when in the
+    /// control mask with its state bit clear:
+    /// <list type="bullet">
+    /// <item>EXECUTION_SPEED - no downclock, no migration onto efficiency cores. Priority mode's main lever.</item>
+    /// <item>IGNORE_TIMER_RESOLUTION - honour my timeBeginPeriod even while no window of mine can be seen. Priority
+    /// mode's, and streaming's on its own.</item>
+    /// </list>
+    /// Neither: a control mask of 0, which hands both back to Windows' own decisions rather than forcing them on.
+    /// </summary>
+    internal static uint ThrottlingMaskFor(bool priorityMode, bool streaming) =>
+        priorityMode ? ProcessPowerThrottlingExecutionSpeed | ProcessPowerThrottlingIgnoreTimerResolution
+        : streaming ? ProcessPowerThrottlingIgnoreTimerResolution
+        : 0u;
+
+    /// <summary>The fast timer's flag alone, for the gate to recognise.</summary>
+    internal const uint TimerFlagForTest = ProcessPowerThrottlingIgnoreTimerResolution;
+
+    /// <summary>Gate seam: the flags the last change asked for, recorded whether or not a test run let it reach Windows.</summary>
+    internal static uint LastThrottlingMaskForTest { get; private set; }
+
+    /// <summary>Gate seam: for one step, the fast timer's flag really reaches Windows for this hidden test process, while
+    /// every other Priority mode lever stays bookkeeping (<see cref="NoEffectForTest"/>). The flag is process-scoped and
+    /// harmless. Disposing the scope hands the flag back to Windows and forgets the streaming state.</summary>
+    internal static IDisposable RealTimerFlagForTest()
+    {
+        lock (gate) realTimerFlagForTest = true;
+        return new RealTimerFlagScope();
+    }
+
+    private sealed class RealTimerFlagScope : IDisposable
+    {
+        public void Dispose()
+        {
+            lock (gate)
+            {
+                if (!realTimerFlagForTest) return;
+                TrySetThrottlingMask(0u, "fast timer", null);
+                streamingFastTimer = false;
+                realTimerFlagForTest = false;
+                LastThrottlingMaskForTest = 0u;
+            }
+        }
+    }
+
+    /// <summary>Gate seam: behave as on Windows 7, whose kernel32 has no SetProcessInformation.</summary>
+    internal static bool ApiMissingForTest;
+
+    /// <summary>Gate seam: the control mask Windows holds for this process now (GetProcessInformation), or null where it
+    /// cannot say (Windows 7, or a failed call).</summary>
+    internal static uint? ReadThrottlingControlMaskForTest()
     {
         try
         {
-            // We control two flags at once:
-            //   * EXECUTION_SPEED — StateMask=0 means "don't throttle this process"
-            //     (no downclock, no E-core migration). The main lever.
-            //   * IGNORE_TIMER_RESOLUTION — StateMask=0 means "honour my
-            //     timeBeginPeriod request even if other apps don't want fine grain".
-            //     Pairs naturally with the timeBeginPeriod(1) call further down.
-            // When we revert (disable=false) we set ControlMask=0, which hands both
-            // flags back to Windows' system-default decision-making rather than
-            // forcing them on.
+            var state = new PROCESS_POWER_THROTTLING_STATE { Version = ProcessPowerThrottlingCurrentVersion };
+            return GetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, ref state, Marshal.SizeOf<PROCESS_POWER_THROTTLING_STATE>())
+                ? state.ControlMask : null;
+        }
+        catch { return null; }
+    }
+
+    // === 1. Process power throttling (EcoQoS opt-out + timer-resolution honoring) ===
+
+    /// <summary>Gate seam: stands in for SetProcessInformation(ProcessPowerThrottling) - given the ControlMask, says whether
+    /// Windows took it and, if not, its error - so a test can be the Windows 10 that refuses the timer flag.</summary>
+    internal static Func<uint, (bool Ok, int Error)>? SetThrottlingForTest;
+
+    private const int ErrorInvalidParameter = 87;
+
+    /// <summary>Set the process's power-throttling control mask (see <see cref="ThrottlingMaskFor"/>); the state mask is
+    /// always 0, "not throttled", for every flag in control. Returns whether Windows took it. Never throws: Windows 7 has
+    /// no such call.</summary>
+    internal static bool TrySetThrottlingMask(uint controlMask, string who, Action<string>? log)
+    {
+        try
+        {
+            if (ApiMissingForTest) throw new EntryPointNotFoundException("Unable to find an entry point named 'SetProcessInformation' in DLL 'kernel32.dll'.");
             var state = new PROCESS_POWER_THROTTLING_STATE
             {
                 Version = ProcessPowerThrottlingCurrentVersion,
-                ControlMask = disable
-                    ? (ProcessPowerThrottlingExecutionSpeed | ProcessPowerThrottlingIgnoreTimerResolution)
-                    : 0u,
+                ControlMask = controlMask,
                 StateMask = 0u,
             };
-            var ok = SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling,
-                ref state, Marshal.SizeOf<PROCESS_POWER_THROTTLING_STATE>());
-            if (!ok) log?.Invoke($"priority mode: SetProcessInformation(power throttling) failed (win32={Marshal.GetLastWin32Error()})");
+            var (ok, error) = SetThrottling(state);
+            // Windows 10 (22H2 reported) does not know the timer flag - it came with Windows 11 - and refuses the whole call as
+            // an invalid parameter, which left the process without the full-speed flag too (and so the service, always in
+            // priority mode while it sends). Each call REPLACES the process's throttling state, so the fallback is the same
+            // mask without the timer flag, not a second call beside the first. Windows 10 needs no timer flag: it honours a
+            // process's timer request whether or not its window shows. (Research 2026-09-28, scratchpad research-service.md.)
+            if (!ok && error == ErrorInvalidParameter && (controlMask & ProcessPowerThrottlingIgnoreTimerResolution) != 0)
+            {
+                state.ControlMask = controlMask & ~ProcessPowerThrottlingIgnoreTimerResolution;
+                (ok, error) = SetThrottling(state);
+                log?.Invoke(ok
+                    ? $"{who}: this Windows does not know the timer flag (it needs none) - "
+                      + (state.ControlMask == 0 ? "nothing else to set" : "full speed set on its own")
+                    : $"{who}: SetProcessInformation(power throttling, without the timer flag) failed (win32={error})");
+                return ok;
+            }
+            if (!ok) log?.Invoke($"{who}: SetProcessInformation(power throttling) failed (win32={error})");
+            return ok;
         }
         catch (Exception ex)
         {
-            log?.Invoke($"priority mode: power throttling threw: {ex.GetType().Name}: {ex.Message}");
+            log?.Invoke($"{who}: power throttling threw: {ex.GetType().Name}: {ex.Message}");
+            return false;
         }
     }
+
+    private static (bool Ok, int Error) SetThrottling(PROCESS_POWER_THROTTLING_STATE state)
+    {
+        if (SetThrottlingForTest is { } stand) return stand(state.ControlMask);
+        var ok = SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, ref state, Marshal.SizeOf<PROCESS_POWER_THROTTLING_STATE>());
+        return (ok, ok ? 0 : Marshal.GetLastWin32Error());
+    }
+
+    /// <summary>The full-speed flag, for the test that stands in for Windows (the timer flag is TimerFlagForTest above).</summary>
+    internal const uint FullSpeedFlagForTest = ProcessPowerThrottlingExecutionSpeed;
 
     // === 2. Kernel power request (no deep C-states) ===
 
@@ -396,6 +537,10 @@ internal static class PerformanceMode
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetProcessInformation(IntPtr hProcess, int ProcessInformationClass,
+        ref PROCESS_POWER_THROTTLING_STATE ProcessInformation, int ProcessInformationSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetProcessInformation(IntPtr hProcess, int ProcessInformationClass,
         ref PROCESS_POWER_THROTTLING_STATE ProcessInformation, int ProcessInformationSize);
 
     // Same kernel32 entry point as SetProcessInformation, but with a different struct type

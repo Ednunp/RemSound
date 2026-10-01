@@ -63,11 +63,11 @@ internal static class ProfileSaveAsPrompt
             MinimizeBox = false,
             MaximizeBox = false,
             ShowInTaskbar = false,
-            ClientSize = new Size(420, 140),
+            ClientSize = Dpi.Px(420, 140),
         };
         var textBox = new TextBox
         {
-            Width = 380,
+            Width = Dpi.Px(380),
             Text = defaultName ?? "",
             AccessibleName = promptLabel.TrimEnd(':', ' '),
         };
@@ -86,7 +86,7 @@ internal static class ProfileSaveAsPrompt
         var panel = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(12),
+            Padding = Dpi.Pad(12),
             RowCount = 3,
             ColumnCount = 1,
         };
@@ -98,8 +98,11 @@ internal static class ProfileSaveAsPrompt
             FlowDirection = FlowDirection.RightToLeft,
             Dock = DockStyle.Fill,
         };
-        buttons.Controls.Add(okButton);
+        // OK then Cancel, as Windows orders them (Ed, 2026-09-28): right to left, so Cancel goes in first; OK first for Tab too.
         buttons.Controls.Add(cancelButton);
+        buttons.Controls.Add(okButton);
+        okButton.TabIndex = 0;
+        cancelButton.TabIndex = 1;
         panel.Controls.Add(buttons, 0, 2);
         dialog.Controls.Add(panel);
         dialog.AcceptButton = okButton;

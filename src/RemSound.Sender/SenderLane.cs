@@ -38,6 +38,8 @@ internal sealed class SenderLane
 
     private readonly AudioSender owner;
     private readonly int opusBitrate;
+    // Push to talk's hold on this lane: which of your paths it is, and where its fade has got to.
+    private readonly PushToTalkGate.Lane pushToTalk;
 
     // Hot-path scratch. Sized to the largest possible single frame (Opus 20 ms = 1920 stereo
     // samples). A Standard PCM frame uses only the first 466, Opus 10 ms only the first 960. Reusing one
@@ -66,7 +68,10 @@ internal sealed class SenderLane
     private uint pcmFrameId;
     private uint formatSequence;
     private ushort streamId;
-    private DateTime lastFormatPacketUtc = DateTime.MinValue;
+    // When the format packet last went out, on the audio clock (0 = never). The audio clock, not the wall clock, so the
+    // simulator's virtual time paces the resends too - on the wall clock they went out at random points of a simulated
+    // run, each one taking a turn of the fake network's dice, and no two runs sounded alike (2026-09-26).
+    private long lastFormatPacketTicks;
 
     private OpusEncoderState opusEncoder;
     private int opusFrameStereoSamples;
@@ -155,9 +160,11 @@ internal sealed class SenderLane
 
     public ushort StreamId => streamId;
 
-    public SenderLane(AudioSender owner, int initialOpusFrameSamplesPerChannel, int opusBitrate)
+    public SenderLane(AudioSender owner, int initialOpusFrameSamplesPerChannel, int opusBitrate, SendLaneKind kind)
     {
         this.owner = owner;
+        this.kind = kind;
+        pushToTalk = new PushToTalkGate.Lane(kind);
         this.opusBitrate = opusBitrate;
         opusEncoder = new OpusEncoderState(initialOpusFrameSamplesPerChannel, opusBitrate);
         opusFrameStereoSamples = opusEncoder.FrameSizePerChannel * MixChannels;
@@ -178,7 +185,7 @@ internal sealed class SenderLane
         if (route == newRoute) return;
         route = newRoute;
         streamId = NewStreamId();
-        lastFormatPacketUtc = DateTime.MinValue;
+        lastFormatPacketTicks = 0;
         frameAccumulatorWritten = 0;
         lastEmitTicks = 0;
     }
@@ -192,8 +199,16 @@ internal sealed class SenderLane
         pcmFrameId = 0;
         formatSequence = 0;
         frameAccumulatorWritten = 0;
-        lastFormatPacketUtc = DateTime.MinValue;
+        lastFormatPacketTicks = 0;
         lastEmitTicks = 0;
+    }
+
+    /// <summary>Gate seam: see <see cref="AudioSender.StartWireCountersAtForTest"/>.</summary>
+    internal void StartWireCountersAtForTest(uint value)
+    {
+        audioSequence = value;
+        pcmFrameId = value;
+        formatSequence = value;
     }
 
     /// <summary>
@@ -218,7 +233,7 @@ internal sealed class SenderLane
             }
         }
         streamId = NewStreamId();
-        lastFormatPacketUtc = DateTime.MinValue;
+        lastFormatPacketTicks = 0;
         frameAccumulatorWritten = 0;
     }
 
@@ -228,16 +243,51 @@ internal sealed class SenderLane
     public void OnPcmFrameSizeChanged()
     {
         streamId = NewStreamId();
-        lastFormatPacketUtc = DateTime.MinValue;
+        lastFormatPacketTicks = 0;
         frameAccumulatorWritten = 0;
     }
 
     // === hot path ===
 
+    // Which capture this lane carries: the WASAPI capture, the ASIO inputs, or a DAW track through the plugin link.
+    private readonly SendLaneKind kind;
+    // The frames in the last block this lane was handed. On the plugin lane that block IS the DAW's buffer, so it is the
+    // wait the plugin path knows about (see CaptureLatencyMs).
+    private volatile int lastBlockFrames;
+
+    /// <summary>
+    /// THIS LANE'S OWN capture delay, for its format packet (N7, Ed 2026-09-28: "FIX IT... that's going to be important
+    /// later"). Every lane used to announce one figure for the whole machine - the ASIO input's whenever ASIO ran, so the
+    /// WASAPI stream in "both" claimed ASIO's 1-3 ms for a capture that takes 10 or more, and the plugin lane claimed a
+    /// device it never touched. Now the WASAPI lane carries the WASAPI capture's figure, the ASIO lane the ASIO input's,
+    /// and the plugin lane the DAW block it was handed (the host owns the device and does not say more). The value only:
+    /// the packet's layout is unchanged, and every port reads the same field.
+    /// </summary>
+    internal double CaptureLatencyMs => kind == SendLaneKind.Plugin
+        ? lastBlockFrames * 1000.0 / 48000
+        : owner.CaptureLatencyMsFor(kind);
+
     public void OnMixedSamples(ReadOnlyMemory<float> stereoFloats)
     {
         var span = stereoFloats.Span;
         if (span.IsEmpty) return;
+        // Push to talk, before anything else sees the block: what is encoded, probed and (unless the recording bypass says
+        // otherwise) recorded is what goes out. Off, or not this lane's path, it is the block itself.
+        var ungated = stereoFloats;
+        stereoFloats = owner.PushToTalk.Apply(pushToTalk, stereoFloats);
+        span = stereoFloats.Span;
+        lastBlockFrames = span.Length / MixChannels;
+        // For the server's metronome: which frame this block starts at, and when its first sample reached the input.
+        blockFirstFrame = framesIn;
+        framesIn += lastBlockFrames;
+        if (owner.TimingWanted) blockCapturedUs = CaptureTimeOfBlock((owner.CaptureClockForTest?.Invoke() ?? MetronomeClock.NowUs()) - (long)(owner.InputDelayMsFor(kind) * 1000));
+        // The Jamulus-style stream (JamulusStyle): on the ASIO lane, in place of Opus - a PCM choice stays PCM - with the
+        // library loaded, and only while some target plays through ASIO and has said so. Those targets then get ONLY that
+        // stream from this lane; everyone else keeps this lane's normal one.
+        customActive = route == RenderRoute.AsioLane && owner.Codec == AudioTransportCodec.Opus && OpusCustomNative.Available
+                       && owner.AnyCustomOpusTarget();
+        if (customActive) ProcessCustomOpus(span);
+        else if (customEncoder is not null) { customEncoder.Dispose(); customEncoder = null; }
 
         // Whole-callback timing — captures encode plus kernel send for the SNAP's emitMs
         // column. Skipped entirely when diagnostics are off so the audio thread doesn't pay
@@ -254,7 +304,7 @@ internal sealed class SenderLane
         // callback) can be correctly handled by the recorder — each lane writes into its own
         // ring, and the recorder mixes them rather than appending them sequentially (which
         // would double the file's effective sample rate). 2026-05-15 fix.
-        owner.DispatchSentSamples(stereoFloats, route);
+        owner.DispatchSentSamples(owner.PushToTalk.RecordsUngated ? ungated : stereoFloats, route);
 
         // Discontinuity probe — what does the audio look like just before we encode it?
         // Compared to the receiver's per-stage probes, this tells us whether artefacts are
@@ -272,6 +322,7 @@ internal sealed class SenderLane
         }
         preEncodePeak = peak;
 
+        var carriedBefore = frameAccumulatorWritten;
         switch (owner.Codec)
         {
             case AudioTransportCodec.Pcm:
@@ -281,8 +332,116 @@ internal sealed class SenderLane
                 ProcessOpus(span);
                 break;
         }
+        NoteSendWait(carriedBefore, span.Length, frameAccumulatorWritten);
         if (diag) owner.RecordEmitTicks(System.Diagnostics.Stopwatch.GetTimestamp() - emitStart);
     }
+
+    // WHEN EACH PACKET'S SOUND WAS CAPTURED, for the server's metronome (2026-09-29): the server pairs these with when the
+    // packets reached it, and so learns how long this machine's sound takes to get there - clocks and all. Kept only while
+    // AudioSender.TimingWanted; the newest few are read by the window for its report.
+    private long framesIn;
+    private long blockFirstFrame;
+    private long blockCapturedUs;
+    private readonly object timingGate = new();
+
+    // THE CAPTURE TIMELINE (2026-09-29, Ed after the first jam through the Pi: "see if that code to lock can be made
+    // better"). A block reaches this lane late by however long the capture thread took to run - a WASAPI capture by
+    // milliseconds, now and then more - and never early. Timing each block by the moment it arrived carried that lateness
+    // into every capture time, and the server keeps the LEAST delay it sees, so it kept the block that ran latest: this
+    // machine's beat came late by the worst of it. Instead each block says when frame 0 of the lane must have been captured
+    // (its arrival, less the input's delay, less the frames before it); the earliest of the last 2 to 4 seconds is the one
+    // that ran on time, and every packet is timed from it by its frame count. Two buckets, so the reading follows the card's
+    // clock as it drifts against this one (at 100 ppm, 0.4 ms at most). A jump later by more than CaptureOriginJumpUs - a
+    // capture that restarted or lost sound - starts it again, as does a pause in the timing (not on a server for a while).
+    private const long CaptureOriginBucketUs = 2_000_000;
+    private const long CaptureOriginJumpUs = 20_000;
+    private long originCurrentUs = long.MaxValue, originPreviousUs = long.MaxValue, originBucketStartUs;
+
+    /// <summary>When this block's first sample reached the input, from the lane's capture timeline (see above), given the
+    /// block's own reading: <paramref name="arrivedLessInputUs"/>, the moment it arrived less the input's delay.</summary>
+    private long CaptureTimeOfBlock(long arrivedLessInputUs)
+    {
+        var framesUs = (long)Math.Round(blockFirstFrame * 1_000_000.0 / 48_000);
+        var origin = arrivedLessInputUs - framesUs;
+        var envelope = Math.Min(originCurrentUs, originPreviousUs);
+        if (envelope == long.MaxValue || origin - envelope > CaptureOriginJumpUs
+            || arrivedLessInputUs - originBucketStartUs >= 2 * CaptureOriginBucketUs)   // not timed for a while: start again
+        {
+            originCurrentUs = originPreviousUs = origin;
+            originBucketStartUs = arrivedLessInputUs;
+        }
+        else
+        {
+            if (arrivedLessInputUs - originBucketStartUs >= CaptureOriginBucketUs)
+            {
+                originPreviousUs = originCurrentUs;
+                originCurrentUs = long.MaxValue;
+                originBucketStartUs = arrivedLessInputUs;
+            }
+            originCurrentUs = Math.Min(originCurrentUs, origin);
+        }
+        return Math.Min(originCurrentUs, originPreviousUs) + framesUs;
+    }
+    private readonly (ushort Stream, uint Sequence, long CapturedUs)[] timingRing = new (ushort, uint, long)[ServerMetronomeWire.MaxReportEntries];
+    private int timingNext, timingCount;
+
+    /// <summary>A packet went out (its sequence moved on): note when its first sample was captured - <paramref name="frameInBlock"/>
+    /// frames from this block's first, which may be before it (a sample carried over from the last block).</summary>
+    private void NoteSent(ushort stream, uint sequenceBefore, uint sequenceAfter, int frameInBlock)
+    {
+        if (sequenceAfter == sequenceBefore || !owner.TimingWanted) return;
+        var captured = blockCapturedUs + (long)Math.Round(frameInBlock * 1_000_000.0 / 48_000);
+        lock (timingGate)
+        {
+            timingRing[timingNext] = (stream, sequenceAfter, captured);
+            timingNext = (timingNext + 1) % timingRing.Length;
+            timingCount = Math.Min(timingCount + 1, timingRing.Length);
+        }
+    }
+
+    /// <summary>The packets noted since the last call, oldest first; forgotten.</summary>
+    internal List<(ushort Stream, uint Sequence, long CapturedUs)> TakeTiming()
+    {
+        lock (timingGate)
+        {
+            var list = new List<(ushort, uint, long)>(timingCount);
+            for (var i = timingCount; i > 0; i--) list.Add(timingRing[(timingNext - i + timingRing.Length) % timingRing.Length]);
+            timingCount = 0;
+            return list;
+        }
+    }
+
+    // THE SENDING WAIT, MEASURED (2026-09-28, PLAN-fixes E3): how long a sample waits in this lane's accumulator between
+    // arriving and going out in a packet, on average, weighted by samples. The latency readout counted half a packet for
+    // it. But a WASAPI capture block of 10 ms cut into 4.85 ms PCM frames sends nearly every sample in the callback it
+    // arrived in, so the true wait is close to nothing - one of the things that made the WASAPI readout read high. Only the
+    // samples carried over from an earlier callback wait at all, and they all go out with the next packet.
+    private long carriedArrivalTicks;
+    private long sendWaitTicks;     // sample-weighted
+    private long sendWaitSamples;
+
+    private void NoteSendWait(int carriedBefore, int arrived, int carriedAfter)
+    {
+        var now = AudioClock.GetTimestamp();
+        var sent = carriedBefore + arrived - carriedAfter;
+        if (sent > 0)
+        {
+            // The carried samples sit at the front of the accumulator, so a packet sent now took them all; the rest of
+            // what was sent arrived now and waited nothing.
+            if (carriedBefore > 0) Interlocked.Add(ref sendWaitTicks, (now - carriedArrivalTicks) * carriedBefore);
+            Interlocked.Add(ref sendWaitSamples, sent);
+            carriedArrivalTicks = now;
+        }
+        else if (carriedBefore + arrived > 0)
+        {
+            // Nothing sent: the new samples join the carried ones, their arrival averaged in.
+            carriedArrivalTicks = carriedBefore == 0 ? now
+                : carriedArrivalTicks + (long)((now - carriedArrivalTicks) * (arrived / (double)(carriedBefore + arrived)));
+        }
+    }
+
+    /// <summary>The sending wait since the last call: sample-weighted ticks and the samples they cover; both reset.</summary>
+    internal (long Ticks, long Samples) TakeSendWait() => (Interlocked.Exchange(ref sendWaitTicks, 0), Interlocked.Exchange(ref sendWaitSamples, 0));
 
     private void ProcessPcm(ReadOnlySpan<float> samples)
     {
@@ -292,14 +451,26 @@ internal sealed class SenderLane
         // largest that still goes out as one encrypted packet (AudioSender.PcmStandardSamplesPerChannel),
         // so a 480-frame WASAPI push buffer or a 512-frame ASIO buffer is cut into pieces that each fit.
         // Normal ASIO buffer sizes (64/128) never reach the cap.
+        //
+        // The pieces are EQUAL (Ed, 2026-10-01): a 480-frame block goes out as 160 + 160 + 160, a 512-frame one as
+        // 171 + 171 + 170. They were cut 233 + 233 + 14, and the receiver makes up a lost piece at the size of the one
+        // after it (StreamSession.ConcealLostPcmFrames) - so a lost 233 was made up as 14 and a lost 14 as 233. The
+        // receiver's clock matching then misread the sender by hundreds of ppm, the buffer wandered between 25 and 70 ms
+        // and broke up: PCM over the internet on WASAPI played about 3 cents flat (the simulator, 2026-10-01). The same
+        // number of packets as before; every port already takes PCM packets of any size.
         if (owner.IsTightLatencyEnabled)
         {
-            const int MaxStereoSamplesPerPacket = AudioSender.PcmStandardSamplesPerChannel * MixChannels;
+            const int MaxFramesPerPacket = AudioSender.PcmStandardSamplesPerChannel;
+            var frames = samples.Length / MixChannels;
+            var pieces = Math.Max(1, (frames + MaxFramesPerPacket - 1) / MaxFramesPerPacket);
             var pos = 0;
-            while (pos < samples.Length)
+            for (var piece = 0; piece < pieces; piece++)
             {
-                var chunk = Math.Min(MaxStereoSamplesPerPacket, samples.Length - pos);
+                var chunk = (frames / pieces + (piece < frames % pieces ? 1 : 0)) * MixChannels;
+                if (chunk == 0) continue;
+                var sequenceBefore = audioSequence;
                 EmitPcmFrame(samples.Slice(pos, chunk));
+                NoteSent(streamId, sequenceBefore, audioSequence, pos / MixChannels);
                 pos += chunk;
             }
             return;
@@ -317,8 +488,10 @@ internal sealed class SenderLane
 
             if (frameAccumulatorWritten == pcmFrameStereoSamples)
             {
+                var before = audioSequence;
                 EmitPcmFrame(frameAccumulator.AsSpan(0, pcmFrameStereoSamples));
                 frameAccumulatorWritten = 0;
+                NoteSent(streamId, before, audioSequence, (idx - pcmFrameStereoSamples) / MixChannels);
             }
         }
     }
@@ -337,8 +510,10 @@ internal sealed class SenderLane
 
             if (frameAccumulatorWritten == frameSamples)
             {
+                var before = audioSequence;
                 EmitOpusFrame(frameAccumulator.AsSpan(0, frameSamples));
                 frameAccumulatorWritten = 0;
+                NoteSent(streamId, before, audioSequence, (idx - frameSamples) / MixChannels);
             }
         }
     }
@@ -405,10 +580,14 @@ internal sealed class SenderLane
 
     // === wire path ===
 
+    /// <summary>Is a format packet due - never sent, or the resend interval gone by on the audio clock?</summary>
+    private static bool FormatDue(long lastTicks)
+        => lastTicks == 0 || AudioClock.GetTimestamp() - lastTicks >= FormatResendIntervalMs * System.Diagnostics.Stopwatch.Frequency / 1000;
+
     private void EnsureFormatPacketSent()
     {
-        if (DateTime.UtcNow - lastFormatPacketUtc < TimeSpan.FromMilliseconds(FormatResendIntervalMs)) return;
-        lastFormatPacketUtc = DateTime.UtcNow;
+        if (!FormatDue(lastFormatPacketTicks)) return;
+        lastFormatPacketTicks = AudioClock.GetTimestamp();
 
         // Wire field FrameSamplesPerChannel: receiver uses this for buffer sizing and the
         // decoder hot path. PCM passes through the sender's own sample-count directly; Opus
@@ -416,17 +595,20 @@ internal sealed class SenderLane
         // AudioFormatInfo doc comment for the semantic-shift rationale.
         var codec = owner.Codec;
         var opusFrameSamples = owner.OpusFrameSamplesPerChannel;
+        var pcmFrameSamples = owner.PcmFrameSamplesPerChannel;
         // Pass this lane's current Route as the Lane field — see the route field for what
         // receivers do with it.
         // OUR OWN capture latency travels with the format, so the receiving end can report the real
-        // journey instead of substituting its own 10 ms guess for a stage that happens HERE. One
-        // figure, not one per lane: this machine mixes every ticked capture source into a single
-        // outgoing stream, so there is one capture stage. The render LANE is a receiver-side idea,
-        // and the sender's worst-source figure is what its mix actually waits for. 2026-08-24.
-        var captureLatencyMs = owner.ReportedInputLatencyMs;
+        // journey instead of substituting its own 10 ms guess for a stage that happens HERE (2026-08-24).
+        // This lane's own figure: each lane is its own capture stage (see CaptureLatencyMs).
+        var captureLatencyMs = CaptureLatencyMs;
         var format = codec == AudioTransportCodec.Opus
             ? new AudioFormatInfo(48000, 2, 16, 1, 4, 192_000, (int)AudioTransportCodec.Opus, opusFrameSamples, route, captureLatencyMs)
-            : new AudioFormatInfo(48000, 2, 24, 1, 6, 288_000, (int)AudioTransportCodec.Pcm, owner.PcmFrameSamplesPerChannel, route, captureLatencyMs);
+            : new AudioFormatInfo(48000, 2, 24, 1, 6, 288_000, (int)AudioTransportCodec.Pcm, pcmFrameSamples, route, captureLatencyMs);
+        // While this machine plays through ASIO (and the library loaded), every Format packet it sends says it can take
+        // the Jamulus-style stream - with the heartbeat's flag, how a far RemSound learns it may send one here.
+        if (JamulusStyle.CanTakeIt)
+            format = format with { LabFlags = AudioFormatInfo.LabFlagCanDecodeCustomOpus };
 
         // Allocate room for the longest format payload (RemPacket.FormatPayloadWithCaptureSize, 46
         // bytes) — see RemPacket for the backward-compat contract. Old receivers parse the first 32
@@ -440,7 +622,7 @@ internal sealed class SenderLane
         // capture); we send exactly that many payload bytes, and every reader takes a MINIMUM
         // length, so a peer that has never heard of the last field is unaffected.
         var payloadLen = RemPacket.WriteFormatPayload(packet[RemPacket.HeaderSize..], format, owner.AudioFingerprint);
-        owner.SendToAll(packet[..(RemPacket.HeaderSize + payloadLen)]);
+        SendMain(packet[..(RemPacket.HeaderSize + payloadLen)]);
     }
 
     /// <summary>Rebuild this lane's AES-GCM cipher if the owner's audio key reference changed.
@@ -476,7 +658,7 @@ internal sealed class SenderLane
         RemPacket.WriteHeader(dst, RemPacketType.Audio, streamId, ++audioSequence);
         RemPcmFrame.WriteSubHeader(dst.Slice(headerSize, subHeaderSize), frameId, partIndex, totalParts);
         partBytes.CopyTo(dst[(headerSize + subHeaderSize)..]);
-        owner.SendToAll(dst);
+        SendMain(dst);
     }
 
     private void SendAudio(ReadOnlySpan<byte> opusBytes)
@@ -485,6 +667,95 @@ internal sealed class SenderLane
         var dst = outboundScratch.AsSpan(0, totalLen);
         RemPacket.WriteHeader(dst, RemPacketType.Audio, streamId, ++audioSequence);
         opusBytes.CopyTo(dst[RemPacket.HeaderSize..]);
-        owner.SendToAll(dst);
+        SendMain(dst);
+    }
+
+    /// <summary>This lane's normal stream: to everyone, or - while the Jamulus-style stream is running - to everyone
+    /// except the targets that take that instead.</summary>
+    private void SendMain(ReadOnlySpan<byte> packet)
+    {
+        if (customActive) owner.SendToSome(packet, customOpusTargets: false);
+        else owner.SendToAll(packet);
+    }
+
+    // === The Jamulus-style stream (2026-09-26; automatic since 2026-10-01, see JamulusStyle) ===
+    // Its own stream id, sequence, accumulator and custom-mode encoder; encrypted with this lane's key and nonces (same
+    // thread, so every nonce stays unique); sent only to targets that asked for it (AudioSender.IsCustomOpusTarget).
+    private volatile bool customActive;
+    private OpusCustomEncoder? customEncoder;
+    private ushort customStreamId;
+    private uint customSequence;
+    private uint customFormatSequence;
+    private long lastCustomFormatTicks;
+    private readonly float[] customAccumulator = new float[256 * MixChannels];
+    private int customWritten;
+    private readonly byte[] customPlain = new byte[1500];
+    private long customFramesSent;
+
+    /// <summary>True while this lane is sending the Jamulus-style stream to someone.</summary>
+    public bool CustomOpusActive => customActive;
+
+    /// <summary>Jamulus-style frames sent by this lane so far.</summary>
+    public long CustomOpusFramesSent => Interlocked.Read(ref customFramesSent);
+
+    private void ProcessCustomOpus(ReadOnlySpan<float> samples)
+    {
+        var frames = JamulusStyle.FrameSamples;
+        if (customEncoder is null || customEncoder.FrameSamplesPerChannel != frames)
+        {
+            customEncoder?.Dispose();
+            customEncoder = null;
+            try { customEncoder = new OpusCustomEncoder(frames, MixChannels); }
+            catch { customActive = false; return; }
+            customStreamId = NewStreamId();
+            customSequence = 0;
+            customWritten = 0;
+            lastCustomFormatTicks = 0;
+        }
+        if (FormatDue(lastCustomFormatTicks)) SendCustomFormat(frames);
+        var frameFloats = frames * MixChannels;
+        var idx = 0;
+        while (idx < samples.Length)
+        {
+            var copy = Math.Min(frameFloats - customWritten, samples.Length - idx);
+            samples.Slice(idx, copy).CopyTo(customAccumulator.AsSpan(customWritten));
+            customWritten += copy;
+            idx += copy;
+            if (customWritten == frameFloats)
+            {
+                var before = customSequence;
+                EmitCustomFrame(customAccumulator.AsSpan(0, frameFloats));
+                customWritten = 0;
+                NoteSent(customStreamId, before, customSequence, (idx - frameFloats) / MixChannels);
+            }
+        }
+    }
+
+    private void EmitCustomFrame(Span<float> frame)
+    {
+        if (owner.IsMuted) frame.Clear();
+        var len = customEncoder!.Encode(frame, customPlain);
+        if (len <= 0) return;
+        EnsureCrypto();
+        if (cryptoGcm is null) return; // no password yet: never send audio in the clear
+        var ctLen = RemSoundCrypto.EncryptInto(cryptoGcm, cryptoNonces!, customPlain.AsSpan(0, len), cipherScratch);
+        var totalLen = RemPacket.HeaderSize + ctLen;
+        var dst = outboundScratch.AsSpan(0, totalLen);
+        RemPacket.WriteHeader(dst, RemPacketType.Audio, customStreamId, ++customSequence);
+        cipherScratch.AsSpan(0, ctLen).CopyTo(dst[RemPacket.HeaderSize..]);
+        Interlocked.Increment(ref customFramesSent);
+        owner.SendToSome(dst, customOpusTargets: true);
+    }
+
+    private void SendCustomFormat(int frames)
+    {
+        lastCustomFormatTicks = AudioClock.GetTimestamp();
+        // Its flag says what every Format packet from here says: whether THIS copy can take the stream back.
+        var format = new AudioFormatInfo(48000, 2, 16, 1, 4, 192_000, (int)AudioTransportCodec.OpusCustom, frames, route, CaptureLatencyMs)
+            { LabFlags = JamulusStyle.CanTakeIt ? AudioFormatInfo.LabFlagCanDecodeCustomOpus : (byte)0 };
+        Span<byte> packet = stackalloc byte[RemPacket.HeaderSize + RemPacket.FormatPayloadWithCaptureSize];
+        RemPacket.WriteHeader(packet, RemPacketType.Format, customStreamId, ++customFormatSequence);
+        var payloadLen = RemPacket.WriteFormatPayload(packet[RemPacket.HeaderSize..], format, owner.AudioFingerprint);
+        owner.SendToSome(packet[..(RemPacket.HeaderSize + payloadLen)], customOpusTargets: true);
     }
 }

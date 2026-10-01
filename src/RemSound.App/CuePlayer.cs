@@ -33,6 +33,9 @@ internal sealed class CuePlayer : IDisposable
 
     public CuePlayer(string filePath) => this.filePath = filePath;
 
+    /// <summary>Gate seam: the file this cue plays.</summary>
+    internal string FilePathForTest => filePath;
+
     /// <summary>How many Plays have got PAST the mute gate and gone on to open a device.
     ///
     /// <para>Here because "muting holds" was a claim nothing checked: the gate asserted only that

@@ -111,6 +111,101 @@ public sealed class AudioRingBuffer
         Interlocked.Add(ref drops, actual);
     }
 
+    /// <summary>Consumer side: the loudest float sample in the next <paramref name="bytes"/> about to be read (0 when
+    /// empty) - is the sound about to play quiet enough to skip from without anyone hearing where?</summary>
+    public float PeakAhead(int bytes)
+    {
+        var currentHead = head;
+        var available = (Volatile.Read(ref tail) - currentHead) & 0x7FFFFFFF;
+        var n = Math.Min(bytes, available) & ~3;
+        var peak = 0f;
+        for (var i = 0; i < n; i += 4)
+        {
+            var v = Math.Abs(BitConverter.ToSingle(storage, (currentHead + i) & mask));
+            if (v > peak) peak = v;
+        }
+        return peak;
+    }
+
+    private float[] fadeFrom = [];
+    private float[] fadeInto = [];
+
+    /// <summary>
+    /// Consumer side: skip about <paramref name="skipBytes"/> of stereo float audio without a click (2026-09-28, Ed:
+    /// coming down from a silly delay should snap). The sound about to play is crossfaded, equal-power, into the sound the
+    /// skip lands on, over <paramref name="fadeFrames"/>. The landing point moves by up to <paramref name="alignFrames"/>
+    /// either way to where the two line up best (normalised correlation), so a held note carries on without a dip. The
+    /// blend is written over the landing point and the head moved on to it: the next read plays the blend, then carries on
+    /// from there. Returns the bytes skipped; with too little buffered to blend, it drops them plainly.
+    /// </summary>
+    public int SkipWithCrossfade(int skipBytes, int fadeFrames, int alignFrames)
+    {
+        const int FrameBytes = 2 * sizeof(float);
+        var currentHead = head;
+        var available = (Volatile.Read(ref tail) - currentHead) & 0x7FFFFFFF;
+        var availableFrames = available / FrameBytes;
+        var skipFrames = Math.Min(skipBytes, available) / FrameBytes;
+        if (skipFrames <= 0) return 0;
+        alignFrames = Math.Max(0, Math.Min(alignFrames, skipFrames - 1));
+        fadeFrames = Math.Min(fadeFrames, availableFrames - skipFrames - alignFrames);
+        if (fadeFrames < 16)
+        {
+            DropOldest(skipFrames * FrameBytes);
+            return skipFrames * FrameBytes;
+        }
+        float Sample(int frame, int channel) => BitConverter.ToSingle(storage, (currentHead + (frame * 2 + channel) * sizeof(float)) & mask);
+
+        // Where to land: the offset whose next few milliseconds look most like the next few here.
+        var probe = Math.Min(fadeFrames, 240);
+        var best = skipFrames;
+        var bestScore = double.NegativeInfinity;
+        for (var offset = -alignFrames; offset <= alignFrames; offset++)
+        {
+            var land = skipFrames + offset;
+            double dot = 0, here = 0, there = 0;
+            for (var f = 0; f < probe; f++)
+            {
+                double a = Sample(f, 0) + Sample(f, 1), b = Sample(land + f, 0) + Sample(land + f, 1);
+                dot += a * b;
+                here += a * a;
+                there += b * b;
+            }
+            var score = dot / Math.Sqrt(here * there + 1e-12);
+            if (score > bestScore) { bestScore = score; best = land; }
+        }
+        skipFrames = best;
+        // Two stretches that line up (a held note) are blended in straight lines, which keeps their level; two that do not
+        // (most skips in music) are blended equal-power, which keeps theirs. Either the other way dips or swells 3 dB.
+        var alike = bestScore >= 0.5;
+
+        // The blend, from copies (the two stretches may overlap), written over the landing point.
+        var floats = fadeFrames * 2;
+        if (fadeFrom.Length < floats) { fadeFrom = new float[floats]; fadeInto = new float[floats]; }
+        for (var f = 0; f < fadeFrames; f++)
+            for (var c = 0; c < 2; c++)
+            {
+                fadeFrom[f * 2 + c] = Sample(f, c);
+                fadeInto[f * 2 + c] = Sample(skipFrames + f, c);
+            }
+        Span<byte> four = stackalloc byte[4];
+        for (var f = 0; f < fadeFrames; f++)
+        {
+            var t = (f + 0.5) / fadeFrames;
+            var gainOut = alike ? (float)(1 - t) : (float)Math.Cos(t * Math.PI / 2);
+            var gainIn = alike ? (float)t : (float)Math.Sin(t * Math.PI / 2);
+            for (var c = 0; c < 2; c++)
+            {
+                BitConverter.TryWriteBytes(four, fadeFrom[f * 2 + c] * gainOut + fadeInto[f * 2 + c] * gainIn);
+                var at = (currentHead + ((skipFrames + f) * 2 + c) * sizeof(float)) & mask;
+                four.CopyTo(storage.AsSpan(at, 4));
+            }
+        }
+        var skipped = skipFrames * FrameBytes;
+        Volatile.Write(ref head, (currentHead + skipped) & 0x7FFFFFFF);
+        Interlocked.Add(ref drops, skipped);
+        return skipped;
+    }
+
     /// <summary>
     /// Producer-side trim. If the buffer currently holds more than <paramref name="targetBytes"/>,
     /// advances head to discard the oldest excess. Returns the number of bytes dropped. Same

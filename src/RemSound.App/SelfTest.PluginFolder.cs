@@ -259,16 +259,14 @@ internal static partial class SelfTest
                     "a cancelled choice must be logged");
                 Check(!PluginInstaller.IsInstalledAt(standard) && !PluginInstaller.IsInstalledAt(target), "and install nothing");
 
-                // Another folder, through Windows' own folder picker.
+                // Another folder. Windows' own picker is stood in for (2026-09-28: it cost up to 30 s a time here, twice; driving
+                // the real one through the control channel is the remote-control step's job) - but it must be ASKED.
+                var pickerAsked = 0;
+                PluginInstallPlaceDialog.PickFolderForTest = () => { Interlocked.Increment(ref pickerAsked); return mine; };
                 Ask("menu DAW plugin > Install plugin");
                 Check(WaitFor(() => Place() is not null, TimeSpan.FromSeconds(10)), "the question must open again");
                 Ask("answer Choose another folder");
-                Check(WaitFor(() => Windowless.NativeDialogs().Any(d => d.Title.Contains("RemSound DAW plugin", StringComparison.Ordinal)), TimeSpan.FromSeconds(30)),
-                    "Choose another folder must open Windows' folder picker");
-                // A picker ignores an answer that comes before it has filled itself in (see the remote control step).
-                Thread.Sleep(1500);
-                Check(Ask($"type {mine}").StartsWith("ok", StringComparison.Ordinal), "the folder must be typed into the picker");
-                Check(Ask("answer Select Folder").StartsWith("ok", StringComparison.Ordinal), "and chosen");
+                Check(WaitFor(() => Volatile.Read(ref pickerAsked) == 1, TimeSpan.FromSeconds(10)), "Choose another folder must ask for a folder");
                 Ok($"is installed in {target}");
                 Check(PluginInstaller.IsInstalledAt(target) && AppConfig.Load().PluginFolder == target, $"THE CHOICE: the plugin must be in the folder picked, remembered ({target})");
 
@@ -293,17 +291,14 @@ internal static partial class SelfTest
                 Ok($"is installed in {standard}");
                 Check(PluginInstaller.IsInstalledAt(standard) && !PluginInstaller.IsInstalledAt(target) && AppConfig.Load().PluginFolder is null,
                     "back in the standard place, the other copy removed, and no folder remembered");
-                Thread.Sleep(300);
+                Thread.Sleep(100);   // a message would open on the window's next turn
                 Check(!main.Invoke(() => Application.OpenForms.OfType<PluginFolderNoticeDialog>().Any()), "the standard place needs no message about where updates go");
 
                 // With the message hidden, a folder of one's own again shows none - and says so in the log.
                 Ask("menu DAW plugin > Reinstall plugin");
                 Check(WaitFor(() => Place() is not null, TimeSpan.FromSeconds(10)), "the question must open again");
                 Ask("answer Choose another folder");
-                Check(WaitFor(() => Windowless.NativeDialogs().Any(d => d.Title.Contains("RemSound DAW plugin", StringComparison.Ordinal)), TimeSpan.FromSeconds(30)), "the picker must open again");
-                Thread.Sleep(1500);
-                Ask($"type {mine}");
-                Ask("answer Select Folder");
+                Check(WaitFor(() => Volatile.Read(ref pickerAsked) == 2, TimeSpan.FromSeconds(10)), "the folder must be asked for again");
                 Ok($"is installed in {target}");
                 Check(WaitFor(() => HeadlessRecords.Log.Since(mark).Any(l => l.Contains("plugin-updates message is hidden (Do not show me this message again), so not shown", StringComparison.Ordinal)), TimeSpan.FromSeconds(5)),
                     "a hidden message must not show, and the log must say why");
@@ -359,6 +354,9 @@ internal static partial class SelfTest
             Check(log.Any(l => l.Contains("DAW plugin: updating the plugin in", StringComparison.Ordinal) && l.Contains("declined (Not now)", StringComparison.Ordinal))
                   && log.Any(l => l.Contains("vst plugin update: ok", StringComparison.Ordinal)),
                 "the update being declined, and then done, must be logged");
+            // From the retired "PLUGIN MENU: Install and Remove..." step (merged here 2026-09-28): the outcomes, as the app logs them.
+            Check(log.Any(l => l.Contains("vst plugin install: ok", StringComparison.Ordinal)) && log.Any(l => l.Contains("vst plugin remove: ok", StringComparison.Ordinal)),
+                "each install and the removal must be in the app's log as done");
             Check(FolderFingerprint(PluginInstaller.RealInstallDirectory) == realBefore,
                 $"THE CLOBBER: the real VST3 folder changed during this step ({PluginInstaller.RealInstallDirectory})");
         }
@@ -366,6 +364,7 @@ internal static partial class SelfTest
         {
             PluginInstaller.CanWriteForTest = null;
             PluginInstaller.ElevateForTest = null;
+            PluginInstallPlaceDialog.PickFolderForTest = null;
             server?.Dispose();
             try { form?.Dispose(); } catch { /* teardown */ }
             Windowless.SetActiveForTest(false);
@@ -374,7 +373,7 @@ internal static partial class SelfTest
             try { if (PluginInstaller.IsInstalledAt(standard)) PluginInstaller.UninstallForTest(standard); } catch { /* the run's own folder */ }
             try { Directory.Delete(root, recursive: true); } catch { /* the run's own folder goes anyway */ }
         }
-        return "Install plugin asked where; Cancel changed nothing; Windows' folder picker chose a folder, which was remembered; Ed's message "
+        return "Install plugin asked where; Cancel changed nothing; Choose another folder asked for one, which was remembered; Ed's message "
              + "showed in his words, was hidden when ticked, and not shown again; Reinstall said where it was and moved it back; an update in a "
              + "protected folder was asked once per version and done with Windows' permission; Remove took it from the folder it was in";
     }

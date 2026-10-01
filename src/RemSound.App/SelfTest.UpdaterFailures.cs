@@ -28,8 +28,9 @@ internal static partial class SelfTest
     {
         var restoreAttempts = UpdateApplier.CopyRetryAttempts;
         var restoreDelay = UpdateApplier.CopyRetryDelayMs;
-        UpdateApplier.CopyRetryAttempts = 10;
-        UpdateApplier.CopyRetryDelayMs = 100;   // a lock costs about a second per file, not a minute
+        // Four tries 10 ms apart (2026-09-28: ten, 100 ms apart - a second per locked file per scenario, 4.5 s in all).
+        UpdateApplier.CopyRetryAttempts = 4;
+        UpdateApplier.CopyRetryDelayMs = 10;
         var root = Path.Combine(Path.GetTempPath(), "remsound-updatefail-" + Guid.NewGuid().ToString("N"));
         var locks = new List<FileStream>();
         try
@@ -91,13 +92,21 @@ internal static partial class SelfTest
             {
                 if (!path.EndsWith("a.dll", StringComparison.OrdinalIgnoreCase)) return;
                 briefly = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-                var held = briefly;
-                // The swap spends about a second failing on b.dll; let a.dll go half way through the rollback's own second.
-                _ = Task.Delay(1500).ContinueWith(_ => held.Dispose());
+            };
+            // Let a.dll go on the rollback's second failed try at putting it back - so it succeeds on a later one, which it
+            // can only do if it keeps trying (it used to be a 1.5 s timer).
+            var restoreTries = 0;
+            UpdateApplier.RetryForTest = (what, attempt) =>
+            {
+                if (!(what.StartsWith("restore", StringComparison.Ordinal) || what.StartsWith("remove partial", StringComparison.Ordinal)) || !what.EndsWith("a.dll", StringComparison.OrdinalIgnoreCase)) return;
+                restoreTries++;
+                if (attempt == 2) briefly?.Dispose();
             };
             Apply(retried);
             UpdateApplier.AfterCopyForTest = null;
+            UpdateApplier.RetryForTest = null;
             briefly?.Dispose();
+            Check(restoreTries >= 2, $"premise: the rollback must have had to try a.dll more than once ({restoreTries} failed tries)");
             Check(Read(retried, "a.dll") == "old-a" && !Marker(retried, UpdateApplier.IncompleteMarkerName),
                 $"THE ONE TRY: a file held for a moment during the rollback must still be put back (a={Read(retried, "a.dll")})");
 
@@ -169,6 +178,7 @@ internal static partial class SelfTest
             foreach (var l in locks) { try { l.Dispose(); } catch { /* released */ } }
             UpdateApplier.CopyRetryAttempts = restoreAttempts;
             UpdateApplier.CopyRetryDelayMs = restoreDelay;
+            UpdateApplier.RetryForTest = null;
             try { Directory.Delete(root, recursive: true); } catch { /* temp */ }
         }
     }
@@ -259,7 +269,7 @@ internal static partial class SelfTest
         var install = Path.Combine(Path.GetTempPath(), "remsound-stall-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(install);
         RemSoundUpdater.InstallDirForTest = install;
-        RemSoundUpdater.DownloadStallLimit = TimeSpan.FromSeconds(1);
+        RemSoundUpdater.DownloadStallLimit = TimeSpan.FromMilliseconds(200);   // 2026-09-28: 1 s
         var stagesBefore = UpdateStages();
         try
         {
@@ -279,7 +289,7 @@ internal static partial class SelfTest
                 Check(DateTime.UtcNow - started < TimeSpan.FromSeconds(10), "within a few seconds of the limit");
             }
 
-            using (var slow = new TrickleServer(total: 1300, chunk: 100, every: TimeSpan.FromMilliseconds(300), stallAfter: -1))
+            using (var slow = new TrickleServer(total: 1300, chunk: 100, every: TimeSpan.FromMilliseconds(100), stallAfter: -1))
             {
                 var lines = new ConcurrentQueue<string>();
                 var updater = new RemSoundUpdater { Log = lines.Enqueue };
@@ -288,7 +298,7 @@ internal static partial class SelfTest
                 Check(download.Wait(TimeSpan.FromSeconds(20)), "the slow download must finish");
                 Check(!lines.Any(l => l.Contains("stalled", StringComparison.Ordinal)),
                     "a download that keeps arriving must never be cut off, however slow - it is silence that counts, not the total");
-                Check(DateTime.UtcNow - started > TimeSpan.FromSeconds(2), "premise: the slow download took longer than the limit in all");
+                Check(DateTime.UtcNow - started > RemSoundUpdater.DownloadStallLimit * 3, "premise: the slow download took longer than the limit in all, several times over");
                 Check(lines.Any(l => l.Contains("REFUSED", StringComparison.Ordinal) && l.Contains("no signature", StringComparison.Ordinal)),
                     $"and it must reach the signature check (this pretend release has none, so it is refused there) (it said: {string.Join(" | ", lines.TakeLast(3))})");
             }
@@ -320,7 +330,7 @@ internal static partial class SelfTest
         var install = Path.Combine(Path.GetTempPath(), "remsound-stall-ui-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(install);
         RemSoundUpdater.InstallDirForTest = install;
-        RemSoundUpdater.DownloadStallLimit = TimeSpan.FromSeconds(1);
+        RemSoundUpdater.DownloadStallLimit = TimeSpan.FromMilliseconds(200);   // 2026-09-28: 1 s
         var stagesBefore = UpdateStages();
         Windowless.InstallHook();
         Windowless.SetActiveForTest(true);
@@ -351,7 +361,7 @@ internal static partial class SelfTest
                             ? "a stalled download must end with the person told it failed"
                             : "THE DEAD BUTTON: after a stalled download, Install now must really try again, not be ignored until a restart");
                     Check(main.Invoke(() => engine.Execute("answer OK")).StartsWith("ok", StringComparison.Ordinal), "the message must be answerable");
-                    Thread.Sleep(300);
+                    Check(WaitFor(() => !QuestionSays("Could not download or stage the update"), TimeSpan.FromSeconds(5)), "and close once answered");
                 }
             }, TimeSpan.FromSeconds(60));
             var log = HeadlessRecords.Log.Since(mark);

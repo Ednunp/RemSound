@@ -25,11 +25,16 @@ internal static class WinEventNotifier
     /// (Ed, 2026-09-24: "this is going to get confusing to listen to").</summary>
     internal static bool Quiet { get; set; }
 
+    /// <summary>Gate seam: how many events really went out to the screen reader, from either shim. The gate's end-of-run
+    /// guard wants none.</summary>
+    internal static long RaisedForTest;
+
     public static void NotifyFocus(Control control)
     {
         if (Quiet) return;
         if (control.IsHandleCreated)
         {
+            Interlocked.Increment(ref RaisedForTest);
             NotifyWinEvent(EVENT_OBJECT_FOCUS, control.Handle, OBJID_CLIENT, CHILDID_SELF);
         }
     }
@@ -104,6 +109,7 @@ internal class AccessibleCheckBox : CheckBox
     {
         RaisedWinEventsForTest?.Add(eventMin);
         if (WinEventNotifier.Quiet) return;
+        Interlocked.Increment(ref WinEventNotifier.RaisedForTest);
         NotifyWinEventNative(eventMin, hwnd, idObject, idChild);
     }
 

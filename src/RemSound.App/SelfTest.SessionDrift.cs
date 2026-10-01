@@ -280,12 +280,13 @@ internal static partial class SelfTest
     }
 
     /// <summary>
-    /// THE PER-PERSON TIMING CORRECTION NEVER BRINGS A LOWERED TARGET DOWN FASTER THAN TODAY.
+    /// THE PER-PERSON TIMING CORRECTION BRINGS A LOWERED TARGET DOWN AT THE DESCENT PACE, AND ARRIVES.
     ///
-    /// <para>Ed's hard rule: the latency descent must never get faster. The auto-tune lowers the target 60 ms, with no drain
-    /// and no fast approach, and trimming is off, so only this loop brings the buffer down. It must never fall faster than
-    /// the 0.3 % cap allows, about 3 ms a second, must not have come further in its first 25 seconds than it does today,
-    /// and must still arrive.</para>
+    /// <para>The auto-tune lowers the target 60 ms, with no drain and no fast approach, and trimming is off, so only this
+    /// loop brings the buffer down. Until 2026-09-28 it was held to "no faster than today", 0.3 % and 49 ms in 25 s, under a
+    /// rule Ed says never existed ("it should be moving quicker"). Now, as agreed that evening (SessionPlayout's
+    /// DescentDepthBias block): never faster than the descent's 0.4 %, about 4 ms a second - still click-free - and 60 ms
+    /// worked off within 25 seconds.</para>
     /// </summary>
     private static string? AuditPerPersonTimingBringsALoweredTargetDownNoFasterThanToday()
     {
@@ -302,14 +303,17 @@ internal static partial class SelfTest
                 foreach (var run in runs)
                 {
                     var fall = SteepestFall(run, 24, 115);
-                    Check(fall <= 3.2,
-                        $"in {DriftWhere(configuration, run)}, the per-person timing correction must never bring latency down faster than its 0.3 % cap, "
-                        + $"about 3 ms a second, after the target is lowered (it fell {fall:0.00} ms in one second)");
+                    // Measured 2026-09-28: 4.00 ms a second on every lane (3.97 on the ASIO output beside WASAPI).
+                    Check(fall >= 3.6,
+                        $"in {DriftWhere(configuration, run)}, a lowered target must come down at the descent pace, about 4 ms a second, "
+                        + $"not the old 3 (it fell {fall:0.00} ms in its steepest second)");
+                    Check(fall <= 4.3,
+                        $"in {DriftWhere(configuration, run)}, the per-person timing correction must never bring latency down faster than the descent's 0.4 %, "
+                        + $"about 4 ms a second, after the target is lowered (it fell {fall:0.00} ms in one second)");
                     var in25 = run.LevelPerSecond[24] - run.LevelPerSecond[49];
-                    // Today, 2026-09-15: 49.2 ms on every lane (48.9 on the ASIO lane beside WASAPI, whose card runs slow).
-                    Check(in25 <= 51,
-                        $"in {DriftWhere(configuration, run)}, the per-person timing correction must not bring latency down faster than it does today: "
-                        + $"25 seconds after the target was lowered 60 ms it had come down {in25:0.0} ms, where today it comes down 49");
+                    Check(in25 >= 55,
+                        $"in {DriftWhere(configuration, run)}, 60 ms lowered must be worked off within 25 seconds: it had come down {in25:0.0} ms "
+                        + "(at the old 0.3 % it came down 49)");
                     var offMs = Math.Abs(run.DepthPerSecond[115] - run.TargetMs);
                     Check(offMs <= 2,
                         $"in {DriftWhere(configuration, run)}, the buffer must still reach its lowered {run.TargetMs} ms target (90 seconds on it was {offMs:0.0} ms away)");
@@ -318,7 +322,7 @@ internal static partial class SelfTest
             }
             finally { foreach (var run in runs) run.Session.Dispose(); }
         }
-        return $"a target lowered 60 ms came down no faster than today: {string.Join("; ", measured)}";
+        return $"a target lowered 60 ms came down at the descent pace and arrived: {string.Join("; ", measured)}";
     }
 
     /// <summary>

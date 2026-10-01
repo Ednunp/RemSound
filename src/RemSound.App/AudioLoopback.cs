@@ -22,7 +22,7 @@ internal static class AudioLoopback
         bool Ran, string Codec,
         long PacketsSent, long PacketsReceived, long BytesReceived,
         long Underruns, long Drops, int BufferMs, int TargetLatencyMs,
-        string? SkipReason, bool AudioDecoded = false)
+        string? SkipReason, bool AudioDecoded = false, double DecodedFramesPerSecond = 0)
     {
         /// <summary>Audio really made it: packets went both ways AND the receiver decoded audio into a playout buffer.
         /// Packets alone prove nothing - until 2026-09-24 this loopback set no password, a sender with no key sends only
@@ -68,7 +68,17 @@ internal static class AudioLoopback
             sender.Configure(new[] { new CaptureSourceSpec(deviceId, CaptureKind.Loopback, dev.Name) });
             sender.SetReceivers(new[] { new IPEndPoint(IPAddress.Loopback, port) });
             sender.Start();
-            Thread.Sleep(Math.Max(1, seconds) * 1000);
+            // The first decoded audio, then the rate it keeps arriving at over the rest of the run (at least half a second):
+            // one packet decoded and then a stall used to pass, since only "some audio was decoded" was asked.
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var total = TimeSpan.FromSeconds(Math.Max(1, seconds));
+            while (receiver.AudioBytesDecodedForTest == 0 && clock.Elapsed < total) Thread.Sleep(5);
+            var firstBytes = receiver.AudioBytesDecodedForTest;
+            var firstAt = clock.Elapsed;
+            var until = firstAt + TimeSpan.FromSeconds(Math.Max(0.5, (total - firstAt).TotalSeconds));
+            while (clock.Elapsed < until) Thread.Sleep(5);
+            const double BytesPerFrame = sizeof(float) * 2;   // the playout holds stereo 32-bit float
+            var rate = firstBytes == 0 ? 0 : (receiver.AudioBytesDecodedForTest - firstBytes) / BytesPerFrame / (clock.Elapsed - firstAt).TotalSeconds;
 
             // Read the counters while still running (before the finally stops the engines).
             return new Result(
@@ -81,7 +91,8 @@ internal static class AudioLoopback
                 BufferMs: receiver.CurrentBufferMs,
                 TargetLatencyMs: receiver.TargetLatencyMs,
                 SkipReason: null,
-                AudioDecoded: receiver.AudioBytesDecodedForTest > 0);
+                AudioDecoded: receiver.AudioBytesDecodedForTest > 0,
+                DecodedFramesPerSecond: rate);
         }
         finally
         {

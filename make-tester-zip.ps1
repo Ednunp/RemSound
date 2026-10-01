@@ -39,8 +39,9 @@ $staging = Join-Path ([System.IO.Path]::GetTempPath()) ("remsound-testers-" + [g
 #    gate publishes + tests its OWN throwaway copy, so it doesn't touch the clean staging folder below.
 $gate = Join-Path $repo 'run-tests.ps1'
 if (-not $SkipGate -and (Test-Path $gate)) {
-    Write-Host "Running the build-and-test gate first..." -ForegroundColor Cyan
-    & $gate
+    Write-Host "Running the build-and-test gate first (the feature pack)..." -ForegroundColor Cyan
+    # A tester's copy is a test deploy, not a release: the feature pack, as deploy-test.ps1 runs.
+    & $gate -Pack Feature
     if ($LASTEXITCODE -ne 0) { throw "build-and-test gate FAILED - not making a tester zip. Fix the failures, or re-run with -SkipGate to override." }
 }
 

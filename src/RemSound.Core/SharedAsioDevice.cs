@@ -42,6 +42,16 @@ public sealed class SharedAsioDevice
 {
     public const int SampleRate = 48000;
 
+    /// <summary>The ASIO buffer size the active profile asks for, in frames (0 = the driver's own) - the one setting
+    /// every open reads. Set by the main window from the profile before the first open and whenever it changes; a change
+    /// reaches a driver that is already open only when it is closed and opened again, which the window does. One profile
+    /// is active in a process, so one value serves every driver. The service never opens ASIO.</summary>
+    public static volatile int RequestedBufferFrames;
+
+    /// <summary>What an open does to the driver's capability record before its init: the profile's size, fitted to what
+    /// the driver allows, or nothing at all for "the driver's own". Returns the log sentence.</summary>
+    internal static string SizeForOpen(AsioDriverCapability? capabilities) => AsioBufferSizing.Apply(capabilities, RequestedBufferFrames);
+
     private static readonly object Registry = new();
     private static readonly Dictionary<string, SharedAsioDevice> Devices = new(StringComparer.OrdinalIgnoreCase);
 
@@ -63,6 +73,9 @@ public sealed class SharedAsioDevice
     public int FramesPerBuffer { get; private set; }
     /// <summary>The driver's own figure for how long playback takes, in samples, valid once open.</summary>
     public int PlaybackLatencySamples { get; private set; }
+
+    /// <summary>The driver's own input latency (ASIOGetLatencies), in samples, from the last open; 0 if unknown.</summary>
+    public int InputLatencySamples { get; private set; }
 
     public bool IsOpen { get { lock (gate) return asio is not null; } }
 
@@ -176,6 +189,7 @@ public sealed class SharedAsioDevice
                     // silence until a side attaches; the inputs are read and discarded until a side
                     // attaches. Either count may be zero (a bridge with outputs only, a microphone with
                     // inputs only), and NAudio handles a null provider or zero record channels.
+                    Log($"asio open: {SizeForOpen(AsioBufferSizing.CapabilitiesOf(driver))}");
                     Log($"asio open: init full duplex ({inputs} in, {outputs} out @ {SampleRate} Hz)");
                     driver.InitRecordAndPlayback(outputs > 0 ? output : null, inputs, SampleRate);
                     if (inputs > 0)
@@ -190,6 +204,14 @@ public sealed class SharedAsioDevice
                     PlaybackLatencySamples = driver.PlaybackLatency;
                     Log($"asio open: running \"{DriverName}\" {SampleRate} Hz, {inputs} in, {outputs} out, {FramesPerBuffer} frames per buffer"
                         + (PlaybackLatencySamples > 0 ? $", driver reports {PlaybackLatencySamples} samples of playback latency" : ""));
+                    // Both of the driver's own latency figures (ASIOGetLatencies), in and out - AsioOut exposes only the
+                    // output one, and RemSound's capture figure had been the buffer alone. Logged at every open so the
+                    // fixed terms of the latency sum are the driver's numbers, not estimates. (Latency lab, 2026-09-26.)
+                    var cap = AsioBufferSizing.CapabilitiesOf(driver);
+                    InputLatencySamples = cap?.InputLatency ?? 0;
+                    if (cap is not null)
+                        Log($"asio open: driver latencies input {cap.InputLatency} samples ({cap.InputLatency * 1000.0 / SampleRate:0.0} ms), "
+                            + $"output {cap.OutputLatency} samples ({cap.OutputLatency * 1000.0 / SampleRate:0.0} ms), buffer {FramesPerBuffer} frames ({FramesPerBuffer * 1000.0 / SampleRate:0.00} ms)");
                     asio = driver;
                 }
                 catch

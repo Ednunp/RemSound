@@ -83,7 +83,10 @@ public sealed class ReceiverDiagnostics
         // Diagnostics-gate first. packetCountSinceLastReport feeds the SNAP diag line too so
         // it isn't worth the audio-thread cost to keep incrementing it when nobody is reading.
         if (!RemSound.Core.DiagnosticsGate.Enabled) return;
-        var now = Stopwatch.GetTimestamp();
+        // On the audio clock, not the Stopwatch directly (the same thing, except inside the simulator): this gap and the
+        // render period below are the continuous auto-tune's evidence, and the auto-tune changes what is heard, so the
+        // simulator must be able to run it in virtual time (2026-09-28).
+        var now = RemSound.Core.AudioClock.GetTimestamp();
         var prev = Interlocked.Exchange(ref lastPacketTicks, now);
         if (prev != 0)
         {
@@ -153,7 +156,7 @@ public sealed class ReceiverDiagnostics
         RecordRenderRead(bytesRequested);
         if (!RemSound.Core.DiagnosticsGate.Enabled) return;
         var idx = (int)route & 7;
-        var now = Stopwatch.GetTimestamp();
+        var now = RemSound.Core.AudioClock.GetTimestamp(); // the auto-tune's evidence - see RecordPacketArrived
         var prev = Interlocked.Exchange(ref lastRenderCbTicksByRoute[idx], now);
         if (prev == 0) return;
         var gap = now - prev;
@@ -171,8 +174,9 @@ public sealed class ReceiverDiagnostics
         while (bytesRequested > curMax && Interlocked.CompareExchange(ref maxRenderReadBytes, bytesRequested, curMax) != curMax);
 
         // Track the gap since the previous render callback. First call seeds the timestamp
-        // without recording a gap (no prior reference). Lock-free max-update via CAS.
-        var now = Stopwatch.GetTimestamp();
+        // without recording a gap (no prior reference). Lock-free max-update via CAS. On the audio clock - see
+        // RecordPacketArrived.
+        var now = RemSound.Core.AudioClock.GetTimestamp();
         var prev = Interlocked.Exchange(ref lastRenderCallbackTicks, now);
         if (prev != 0)
         {

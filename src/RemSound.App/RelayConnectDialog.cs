@@ -14,8 +14,8 @@ namespace RemSound.App;
 /// </summary>
 internal sealed class RelayConnectDialog : Form
 {
-    private readonly TextBox addressBox = new() { Width = 320, AccessibleName = "Server address" };
-    private readonly ListBox rememberedList = new() { Width = 320, Height = 110, IntegralHeight = false, AccessibleName = "Remembered servers" };
+    private readonly TextBox addressBox = new() { Width = Dpi.Px(320), AccessibleName = "Server address" };
+    private readonly ListBox rememberedList = new() { Width = Dpi.Px(320), Height = Dpi.Px(110), IntegralHeight = false, AccessibleName = "Remembered servers" };
     private readonly Button actionButton = new() { AutoSize = true };
     private readonly Label statusLabel = new() { AutoSize = true, AccessibleName = "Server status" };
     private readonly System.Windows.Forms.Timer refresh = new() { Interval = 400 };
@@ -56,7 +56,7 @@ internal sealed class RelayConnectDialog : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        Padding = new Padding(12);
+        Padding = Dpi.Pad(12);
 
         var addressLabel = new MnemonicLabel { Text = "Server &address (Alt+A):", MnemonicTarget = addressBox, AutoSize = true };
         addressLabel.Click += (_, _) => addressBox.Focus();
@@ -95,21 +95,29 @@ internal sealed class RelayConnectDialog : Form
         actionButton.Click += (_, _) => OnAction();
         var close = new Button { Text = "C&lose", AutoSize = true, DialogResult = DialogResult.OK, AccessibleName = "Close" };
 
-        var buttons = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty };
+        // Right-aligned, in the order they always had (UI audit 2026-09-28, finding 11).
+        var buttons = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty, Anchor = AnchorStyles.Right };
         buttons.Controls.Add(actionButton);
         buttons.Controls.Add(close);
 
+        // The servers you have been on first, then the box to type a new one (Ed, 2026-09-29: "it should be remembered
+        // servers 1st then the name box to enter one"). Moving through the list puts the server in the box, so Connect
+        // (or Enter) goes to the one you are on in the list.
         var layout = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill };
-        foreach (var c in new Control[] { addressLabel, addressBox, rememberedLabel, rememberedList, buttons, statusLabel })
+        foreach (var c in new Control[] { rememberedLabel, rememberedList, addressLabel, addressBox, buttons, statusLabel })
         {
             layout.Controls.Add(c);
         }
         Controls.Add(layout);
+        rememberedList.SelectedIndexChanged += (_, _) =>
+        {
+            if (rememberedList.SelectedItem is string chosen) addressBox.Text = chosen;
+        };
 
-        addressLabel.TabIndex = 0;
-        addressBox.TabIndex = 1;
-        rememberedLabel.TabIndex = 2;
-        rememberedList.TabIndex = 3;
+        rememberedLabel.TabIndex = 0;
+        rememberedList.TabIndex = 1;
+        addressLabel.TabIndex = 2;
+        addressBox.TabIndex = 3;
         buttons.TabIndex = 4;
         actionButton.TabIndex = 0;
         close.TabIndex = 1;
@@ -122,7 +130,12 @@ internal sealed class RelayConnectDialog : Form
         ContextHelp.Mark(close, "dialog.server.close");
 
         FillRemembered();
-        addressBox.Text = connectedTo() ?? loadRemembered().FirstOrDefault() ?? "";
+        var opening = connectedTo() ?? loadRemembered().FirstOrDefault() ?? "";
+        // It opens on the list, on the server you are on or went to last, when there is a list; with none, on the box.
+        var shown = rememberedList.Items.IndexOf(opening);
+        if (rememberedList.Items.Count > 0) rememberedList.SelectedIndex = shown >= 0 ? shown : 0;
+        addressBox.Text = opening;
+        ActiveControl = rememberedList.Items.Count > 0 ? rememberedList : addressBox;
         wasConnected = connectedTo() is not null;
         ApplyState(speak: false);
 
@@ -157,6 +170,8 @@ internal sealed class RelayConnectDialog : Form
     /// <summary>Gate seams: press the button's action, and one tick of the window's watch.</summary>
     internal void ActionForTest() => OnAction();
     internal void TickForTest() => ApplyState(speak: true);
+    internal ListBox RememberedListForTest => rememberedList;
+    internal TextBox AddressBoxForTest => addressBox;
 
     private void FillRemembered()
     {
@@ -187,8 +202,17 @@ internal sealed class RelayConnectDialog : Form
         if (connected != wasConnected)
         {
             wasConnected = connected;
-            FillRemembered();   // a relay we have just gone to is remembered now
-            if (speak) ScreenReader.Speak(connected ? "Connected. The button is now Disconnect." : "Not connected.");
+            // Connected: the window has done its job and closes, without a word (Ed, 2026-09-29: "when you connect to a
+            // server it should close the connect to server window ... that should just be silent when you connect").
+            // The keyboard goes back to the tab's button, which now reads Disconnect from or change server.
+            if (connected)
+            {
+                DialogResult = DialogResult.OK;
+                Close();
+                return;
+            }
+            FillRemembered();
+            if (speak) ScreenReader.Speak("Not connected.");
         }
         // The line under the buttons, spoken when it changes while you are not on a server ("Connecting...", "Couldn't
         // find ..."), or when it says something is wrong. Only written to the label, a person on the button never heard a

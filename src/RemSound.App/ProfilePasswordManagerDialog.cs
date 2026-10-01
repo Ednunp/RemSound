@@ -44,20 +44,25 @@ internal static class ProfilePasswordManagerDialog
             MinimizeBox = false,
             MaximizeBox = true,
             ShowInTaskbar = false,
-            ClientSize = new Size(520, 420),
-            MinimumSize = new Size(420, 240),
+            ClientSize = Dpi.Px(520, 420),
+            MinimumSize = Dpi.Px(420, 240),
             AccessibleName = "Profile passwords",
         };
 
+        // With profiles listed, only what cannot be seen is shown: that both ends need the same password. The rest - one box
+        // per profile, and OK to save - is on screen, so it is kept for the screen reader alone (Ed, 2026-09-28).
         var intro = new Label
         {
             Text = titles.Count == 0
                 ? "You don't have any saved profiles yet. Create one with File → Save as, and it will ask you for a password."
+                : "You and the person you connect to must use the same password.",
+            AccessibleName = titles.Count == 0
+                ? null
                 : "Each profile has its own password. You and the person you connect to must use the same password. Edit any box and press OK to save.",
             Dock = DockStyle.Top,
             AutoSize = false,
-            Height = 48,
-            Padding = new Padding(12, 10, 12, 4),
+            Height = Dpi.Px(48),
+            Padding = Dpi.Pad(12, 10, 12, 4),
         };
 
         var grid = new TableLayoutPanel
@@ -66,7 +71,7 @@ internal static class ProfilePasswordManagerDialog
             AutoScroll = true,
             ColumnCount = 2,
             RowCount = titles.Count,
-            Padding = new Padding(12, 0, 12, 8),
+            Padding = Dpi.Pad(12, 0, 12, 8),
         };
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -78,7 +83,7 @@ internal static class ProfilePasswordManagerDialog
             try { current = RemSoundCrypto.Deobfuscate(store.Load(title)?.Password); }
             catch { current = ""; }
 
-            var label = new Label { Text = title, AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 6, 10, 6) };
+            var label = new Label { Text = title + ":", AutoSize = true, Anchor = AnchorStyles.Left, Padding = Dpi.Pad(0, 6, 10, 6) };
             var box = new TextBox { Text = current, Anchor = AnchorStyles.Left | AnchorStyles.Right, AccessibleName = $"Password for profile {title}", Tag = KeyClickService.PasswordFieldTag };
             grid.Controls.Add(label);
             grid.Controls.Add(box);
@@ -87,9 +92,12 @@ internal static class ProfilePasswordManagerDialog
 
         var okButton = new Button { Text = "&OK", AutoSize = true, DialogResult = DialogResult.OK };
         var cancelButton = new Button { Text = "&Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
-        var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Padding = new Padding(8) };
-        buttons.Controls.Add(okButton);
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Padding = Dpi.Pad(8) };
+        // OK then Cancel, as Windows orders them (Ed, 2026-09-28): right to left, so Cancel goes in first; OK first for Tab too.
         buttons.Controls.Add(cancelButton);
+        buttons.Controls.Add(okButton);
+        okButton.TabIndex = 0;
+        cancelButton.TabIndex = 1;
 
         dialog.Controls.Add(grid);
         dialog.Controls.Add(buttons);
