@@ -728,6 +728,8 @@ public sealed partial class MainForm : Form
     private bool connected;
     private DateTime connectedSinceUtc = DateTime.MinValue;
     private DateTime lastSnapshotUtc = DateTime.MinValue;
+    // The sender and receiver let go: by the close's teardown, or by Dispose for a window that was never closed.
+    private bool audioTornDown;
     private DateTime lastCaptureZeroLogUtc = DateTime.MinValue;
 
     // Full set of selected send endpoints (one per resolved peer address). The heartbeat pings
@@ -1652,6 +1654,20 @@ public sealed partial class MainForm : Form
         // dialog can subscribe to StatusChanged without us juggling instance lifetimes.
         routerPortMapper = new RouterPortMapper(msg => logFile.Event($"upnp: {msg}"));
 
+        // A window disposed without ever being closed - every gate step that builds one - never runs the teardown below, and
+        // left its sender's server-path thread running at real-time priority: one MMCSS registration per window, and at 32
+        // Windows refused the next step's (the full gate, 2026-10-01). So the sound is let go here too, once, bounded as
+        // the close bounds it. A window that was closed has already done it.
+        Disposed += (_, _) =>
+        {
+            if (audioTornDown) return;
+            audioTornDown = true;
+            Task.Run(() =>
+            {
+                try { sender.Dispose(); } catch { /* ignore */ }
+                try { receiver.Dispose(); } catch { /* ignore */ }
+            }).Wait(TimeSpan.FromSeconds(3));
+        };
         FormClosing += (_, _) =>
         {
             // Stop AND dispose each timer. A WinForms Timer is a Component, not a Control, so base
@@ -1697,6 +1713,7 @@ public sealed partial class MainForm : Form
             // The UPnP router teardown (DeletePortMap — a synchronous call to a possibly-unresponsive
             // router) belongs here too: like the ASIO dispose it can block for many seconds, and on the UI
             // thread it froze the close. Run both OFF the UI thread, in parallel, under one hard timeout.
+            audioTornDown = true;
             var slowTeardown = Task.Run(() =>
             {
                 var upnp = Task.Run(() => { try { routerPortMapper?.Dispose(); } catch { /* ignore */ } });

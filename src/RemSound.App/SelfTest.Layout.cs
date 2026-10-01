@@ -805,7 +805,9 @@ internal static partial class SelfTest
         Check(s.Windows.Count >= s.DialogsExpected + 2,
             $"every dialog, the main window and the plugin frame must be surveyed ({s.Windows.Count} of {s.DialogsExpected + 2})");
         Check(s.Views.Count(v => v.StartsWith("Main window /", StringComparison.Ordinal)) >= 3, "every tab of the main window must be surveyed");
-        Check(s.Views.Count(v => v.StartsWith("Preferences /", StringComparison.Ordinal)) >= 8, "every Preferences tab must be surveyed");
+        // Seven: General, Connectivity, Appearance, Audio cues, Startup behaviour, Update settings, Logging (the Latency lab
+        // tab went on 2026-10-01).
+        Check(s.Views.Count(v => v.StartsWith("Preferences /", StringComparison.Ordinal)) >= 7, "every Preferences tab must be surveyed");
         Check(s.Views.Count(v => v.StartsWith("Service profile /", StringComparison.Ordinal)) >= 2, "every Service profile tab must be surveyed");
         Check(s.Controls > 500, $"the walk must see the windows' controls ({s.Controls})");
     }

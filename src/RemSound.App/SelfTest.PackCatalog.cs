@@ -420,6 +420,7 @@ internal static partial class SelfTest
         ["RECORDING DIES: the window stops it, puts Start back and tells the person once, with the reason"] = (StepTier.Area, "recording", "SelfTest.Recording.cs"),
         ["ACCEPT ASK: answered Yes, that person is connected; answered No, left alone and not asked again"] = (StepTier.Area, "peers-heartbeat", "SelfTest.AcceptAsk.cs"),
         ["GATE GUARD: no packet the run sent left this computer"] = (StepTier.Core, "guards", "SelfTest.PluginHostParameters.cs"),
+        ["GATE GUARD: no step leaves threads holding Windows' audio priority"] = (StepTier.Core, "guards", "SelfTest.BoostLeaks.cs"),
         ["GATE GUARD: nothing in the run reached the screen reader - not a word, not an event"] = (StepTier.Core, "guards", "SelfTest.Silence.cs"),
         ["CUES: a profile's own sound wins, then the machine's; a cue switched off plays nothing"] = (StepTier.Area, "cues-sounds", "SelfTest.CueChoices.cs"),
         ["SIMULATOR OUTPUT HICCUP: an output that stops for a moment is not taken for a slow clock - ASIO hiccups of 20 to 450 ms and WASAPI card stalls of 50 to 200 ms, clean at once"] = (StepTier.Area, "receive", "SelfTest.Simulator.cs"),

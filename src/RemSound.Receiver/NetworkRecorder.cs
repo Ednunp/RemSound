@@ -50,7 +50,12 @@ public sealed class NetworkRecorder
             if (lastStream >= 0 && streamId == lastStreamId && from.Equals(lastFrom)) stream = lastStream;
             else
             {
-                stream = streams.FindIndex(s => s.StreamId == streamId && s.From.Equals(from));
+                // A loop, not FindIndex with a lambda: the lambda's captured streamId and from made C# allocate their
+                // closure on entry to this method - before the Enabled check - so every audio packet allocated 32 bytes,
+                // recorder on or off (PERFORMANCE ALLOCATIONS, 2026-10-01).
+                stream = -1;
+                for (var i = 0; i < streams.Count; i++)
+                    if (streams[i].StreamId == streamId && streams[i].From.Equals(from)) { stream = i; break; }
                 if (stream < 0)
                 {
                     if (streams.Count >= ushort.MaxValue) return;

@@ -357,7 +357,8 @@ public sealed class AudioSender : IDisposable
     internal static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> OffMachineTargetsForTest = new();
     private static void NoteOffMachine(IPEndPoint to)
     {
-        if (IPAddress.IsLoopback(to.Address)) return;
+        // 0.0.0.0 goes nowhere: Windows refuses the send (SERVICE BOOT EAR sends there on purpose, to see a refusal counted).
+        if (IPAddress.IsLoopback(to.Address) || to.Address.Equals(IPAddress.Any)) return;
         Interlocked.Increment(ref offMachineSends);
         OffMachineTargetsForTest.AddOrUpdate(to.ToString(), 1, (_, n) => n + 1);
     }

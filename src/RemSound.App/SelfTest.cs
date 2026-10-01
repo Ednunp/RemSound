@@ -707,6 +707,7 @@ internal static partial class SelfTest
         RunStep(results, "GATE GUARD: no plugin in the run talked to the RemSound you have open", NoPluginInTheRunReachedTheRealApp);
         RunStep(results, "GATE GUARD: nothing in the run announced this computer on the network", NothingInTheRunAnnouncedItself);
         RunStep(results, "GATE GUARD: no packet the run sent left this computer", NoPacketLeftThisComputer);
+        RunStep(results, "GATE GUARD: no step leaves threads holding Windows' audio priority", NoStepLeftAudioThreadsBoosted);
         RunStep(results, "GATE GUARD: nothing in the run reached the screen reader - not a word, not an event", NothingInTheRunReachedTheScreenReader);
         RunStep(results, "GATE GUARD: the run never touches the real plugin pointer every DAW reads", TheGateLeavesTheRealPluginPointerAlone);
         RunStep(results, "SCRIPTS: the old scripts folder is tidied away, and nobody else's files go with it", OldScriptsFolderIsTidiedAway);
@@ -795,6 +796,7 @@ internal static partial class SelfTest
         // reporting safety it never established, which is the exact disease this gate exists to
         // cure. A SKIP is exempt — it declares up front that it did not run. 2026-08-24.
         var assertionsBefore = assertionsRun;
+        var boostedBefore = WindowsAudioThreadBoost.LiveRegistrations;
         var stuck = new StuckDialogWatch();
         try
         {
@@ -831,6 +833,7 @@ internal static partial class SelfTest
                       + $"on the hidden desktop it would have hung the run. What the step said after: {r.Message}";
         }
         sw.Stop();
+        NoteBoostsLeftBy(name, boostedBefore);
         r.Ms = sw.ElapsedMilliseconds;
         results.Add(r);
         Console.WriteLine($"  [{r.Status}] {name}  ({r.Ms} ms){(r.Message.Length > 0 ? "  - " + r.Message : "")}");

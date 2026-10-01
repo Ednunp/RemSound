@@ -38,8 +38,9 @@ internal static partial class SelfTest
         // ---- The main window and its controls ----------------------------------------------------
         // Driven for real by the control suite, in all three audio configurations: every control on
         // the window is enumerated from the live form, so a handler on a new control cannot hide.
-        new("RemSound.App/MainForm.cs", "the control suite in all three configurations, with every control specified",
-            "Control suite - ", "Every control is specified"),
+        new("RemSound.App/MainForm.cs", "the control suite in all three configurations, with every control specified; a window "
+            + "disposed without being closed letting its sound go is the audio-priority guard's, over every step that builds one",
+            "Control suite - ", "Every control is specified", "GATE GUARD: no step leaves threads holding Windows' audio priority"),
         new("RemSound.App/MainForm.NetworkRecording.cs",
             "Record > Save the last minute of the network is driven through the control channel, as a user would: the file written "
             + "to the logs folder and said, and with nothing arrived nothing written",

@@ -261,6 +261,7 @@ internal static partial class SelfTest
         var notDialogTypes = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["SplashWindow"] = "the audio-driver splash (AsioLoadingSplash): text only, no controls, and it closes itself",
+            ["NoActivationForm"] = "the self-test's own stand-in window for POP-UPS AND MENUS (SelfTest.PopUpMenus.cs): never shown to anyone",
         };
         var missing = formTypes.Where(t => !covered.Contains(t) && !notDialogTypes.ContainsKey(t)).ToList();
         Check(missing.Count == 0,

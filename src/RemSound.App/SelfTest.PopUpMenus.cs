@@ -12,7 +12,11 @@ internal static partial class SelfTest
     {
         var restoreActive = ForegroundDialog.ActiveFormForTest;
         var restoreActivate = ForegroundDialog.ActivateForTest;
-        using var window = new Form { Text = "pop-up test window", ShowInTaskbar = false, Width = 400, Height = 200 };
+        // Shown without taking activation: an ordinary Show made it the process's active window, and when it closed Windows
+        // handed activation to some other hidden window of the run - after which every menu a later step opened closed
+        // itself at once (the F1 sweep's "File menu ... premise", full gate 2026-10-01). Which window "has the keyboard" is
+        // the ActiveFormForTest seam's to say here, not Windows'.
+        using var window = new NoActivationForm { Text = "pop-up test window", ShowInTaskbar = false, Width = 400, Height = 200 };
         var strip = new MenuStrip();
         var file = new ToolStripMenuItem("&File");
         file.DropDownItems.Add(new ToolStripMenuItem("&Open"));
@@ -60,5 +64,11 @@ internal static partial class SelfTest
             ForegroundDialog.ActivateForTest = restoreActivate;
             try { window.Close(); } catch { /* teardown */ }
         }
+    }
+
+    /// <summary>A window that shows without becoming the active one.</summary>
+    private sealed class NoActivationForm : Form
+    {
+        protected override bool ShowWithoutActivation => true;
     }
 }

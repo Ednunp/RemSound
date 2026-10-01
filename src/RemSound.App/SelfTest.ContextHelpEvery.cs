@@ -375,7 +375,9 @@ internal static partial class SelfTest
                 var mark = HeadlessRecords.Cues.Mark;
                 DriveWhilePumping(main, () =>
                 {
-                    Check(main.Invoke(() => ReferenceEquals(ContextHelp.OpenMenuItem(), item)), $"{what}: premise - the menu must be open on the item");
+                    var onItem = main.Invoke(ContextHelp.OpenMenuItem);
+                    Check(ReferenceEquals(onItem, item), $"{what}: premise - the menu must be open on the item (it is on "
+                        + (onItem is null ? "nothing" : $"\"{onItem.Text}\" of {main.Invoke(() => onItem.Owner?.FindForm()?.Text ?? onItem.Owner?.GetType().Name ?? "no window")}") + ")");
                     Check(PressF1(form) && WaitFor(() => OpenHelp() is not null, TimeSpan.FromSeconds(5)), $"{what}: THE HELP: F1 with the menu open must open the item's help");
                     TheHelpIsRight(what, key!, title);
                     Check(CueSince(mark, "help open"), $"{what}: the help-open sound must play");
