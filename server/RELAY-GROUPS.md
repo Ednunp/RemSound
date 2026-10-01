@@ -129,6 +129,15 @@ So ticking somebody who has not ticked you back gives silence in both
 directions, and unticking stops it in both directions at once. This is exactly
 the rule two people already have on a network, where each has to tick the other.
 
+**Hearing yourself (server-v2.15).** A member whose own tick list names its own
+client id is also sent its own Audio and Format packets back, unchanged, the way
+Jamulus sends you your own channel; nothing else of its own (heartbeats, control,
+metronome) ever comes back. A hello with no tick list never means yourself. The
+Windows app puts its own id first in the list while "Unmute myself to test round
+trip" is on, and takes those packets as from the member address its own id
+hashes to. An older relay ignores the extra id, so nothing comes back. The relay
+logs `event=self_echo state=on|off` when it changes.
+
 ## 6. Sending, once in a group
 
 - Send everything to the relay in group framing, once. The relay copies it to

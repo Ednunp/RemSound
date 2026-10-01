@@ -219,6 +219,26 @@ only releases signed with the RemSound release key.
   somebody else using the member's id, which everybody in the group can see,
   does not. Until then nothing from the new address is acted on: no sound
   forwarded, no hello, no goodbye. A real move takes about 5 to 7 seconds.
+- **The master metronome (since server-v2.14).** Group members pass each
+  other the metronome's messages (packet type 12: asking to lead, answering)
+  as they pass sound: only between two who have both ticked each other. They
+  carry no sound, and are sealed with the group's password like everything
+  else.
+- **The server's metronome (since server-v2.14).** The relay keeps the beat
+  for each group (packet type 13, read by the relay and never passed on). Each
+  RemSound that knows it reports, once a second, when its latest packets were
+  captured; the relay pairs those with when the packets arrived, and so knows
+  how long each member's sound takes to reach it. Each member is sent its own
+  beat, early by exactly that, so everyone's playing reaches the relay on the
+  beat. One member leads it at a time; anyone can ask to take over. Members
+  that never report (phones, older apps) are sent nothing. A relay before
+  server-v2.14 drops both types, and nobody can be the master metronome on it.
+- **Hearing yourself (since server-v2.15).** A member whose tick list names
+  itself is sent its own sound back (Audio and Format packets only, never its
+  heartbeats or anything else), the way Jamulus sends you your own channel, so
+  it can hear its whole round trip. A hello with no tick list never means
+  yourself. Older apps never name themselves, so nothing changes for them; an
+  older relay ignores the extra id and sends nothing back.
 - **The member list is rate-limited (since server-v2.13).** A change (a join,
   a name, a tick) sends the list again at most four times a second; the
   once-a-second list is unchanged. It used to go out on every packet that
@@ -275,6 +295,19 @@ event=withheld_unverified proto=v2 addr=1.2.3.4:5555 (address not proved: no mem
 event=join_rejected reason=ip_cap client_id=<uuid> addr=1.2.3.4:5555
 event=bye_rejected reason=endpoint_mismatch client_id=<uuid> from=5.6.7.8:9999
 
+# the server's metronome (since server-v2.14)
+event=metronome_reporting addr=1.2.3.4:5555 (this member's sound is timed from now on)
+event=metronome_master client_id=<uuid> group=1a2b
+event=metronome_set client_id=<uuid> running=1 bpm=120.000 signature=4/4 version=2
+event=metronome_released client_id=<uuid>          (or reason=master_left)
+# every 30 s while a group's metronome plays, per member timed: how much later than the least a
+# typical and a late packet arrive (the path's jitter), and how far the least moved since the last
+# line (clocks drifting apart, or the path changing)
+event=metronome_timing client_id=<uuid> addr=... readings=N typical_ms=2.10 late_ms=7.95 moved_ms=0.40
+
+# hearing yourself (since server-v2.15): a member started or stopped asking for its own sound back
+event=self_echo client_id=<uuid> state=on
+
 # once a minute: two lines, counting since the previous pair
 event=stats forwarded=N dropped_unpaired=N dropped_lobby_full=N
             rejected_bad_header=N pair_changes=N lobby_changes=N
@@ -282,6 +315,9 @@ event=stats forwarded=N dropped_unpaired=N dropped_lobby_full=N
 event=addr_check_stats addr_check=watch-only addr_checks_verified=N
             blocked_unverified=N would_block_unverified=N rejected_ip_cap=N
             blocked_devices=N would_block_devices=N v2_addr_check=ENFORCED rosters_withheld=N
+# ...and, since server-v2.14, for each client that sent sound that minute: its packets, the longest
+# wait between two, and how many waits were over 20 ms (the relay itself passes each on at once)
+event=audio_timing client_id=<uuid> addr=... packets=N max_gap_ms=12.4 gaps_over_20ms=N
 # ...and, only when the log limits held lines back that minute, one line per kind
 event=log_held_back kind=client_named lines=N (the same kind came too often this minute)
 
