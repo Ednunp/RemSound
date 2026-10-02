@@ -994,6 +994,19 @@ public sealed class AudioReceiver : IDisposable
     /// from a different lane's packets.</summary>
     public bool HasSessionsForRoute(RenderRoute route) => playoutEngine.HasSessionsForRoute(route);
 
+    /// <summary>HEAR MYSELF: each stream arriving as from <paramref name="from"/> - its id, the lane it was sent on, the output
+    /// it plays on here and how many milliseconds of it are waiting to play - for the round-trip line in the log.</summary>
+    public List<(ushort StreamId, RenderRoute Lane, RenderRoute Route, int BufferedMs)> StreamDepthsFrom(IPEndPoint from)
+    {
+        var list = new List<(ushort, RenderRoute, RenderRoute, int)>();
+        lock (sessionsLock)
+        {
+            foreach (var (key, session) in sessions)
+                if (key.Endpoint.Equals(from)) list.Add((key.StreamId, session.Format.Lane, session.Playout.Route, session.Playout.BufferedMs));
+        }
+        return list;
+    }
+
     /// <summary>Test seam: report a faulted output without a real device having to die. An
     /// <c>OutputEntry</c> needs a live MMDevice and WasapiOut, so the fault itself cannot be staged —
     /// but the CHAIN from "an output faulted" to "the app re-applies its devices" can be, and that

@@ -61,7 +61,8 @@ internal sealed class PushToTalkDialog : Form
     private readonly DoubleTapPreview preview = new();
     private static readonly PushToTalkDoubleTapSpeed[] SpeedOrder =
         [PushToTalkDoubleTapSpeed.Slow, PushToTalkDoubleTapSpeed.Medium, PushToTalkDoubleTapSpeed.Fast];
-    private readonly TrackBar levelBar = new()
+    // Up raises the level (Ed, 2026-10-02).
+    private readonly UpMeansMoreTrackBar levelBar = new()
     {
         Minimum = PushToTalkSettings.MinLevelDb,
         Maximum = PushToTalkSettings.MaxLevelDb,

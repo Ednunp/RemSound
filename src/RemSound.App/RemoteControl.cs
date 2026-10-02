@@ -361,7 +361,7 @@ internal sealed class RemoteControlEngine
         "  sounds on|off               let RemSound's sounds play, for testing one (off unless asked)\n" +
         "  talk down|up|tap|state      the push to talk key, as if pressed, released or tapped; or whether you're talking\n" +
         "  metronome start|stop|mute|unmute|state, master on|off, tempo <30-300>|up|down, signature <6/8>, sound <name>,\n" +
-        "            hear remsound|daw   the metronome, as its menu, hotkey and settings window would\n" +
+        "            volume <0-100>|up|down, hear remsound|daw   the metronome, as its menu, hotkeys and settings window would\n" +
         "  wait [gone] <text> [secs]   until a window or question with that text is open (or gone), or a log line has it\n" +
         "  log [n] [words]             the newest log lines (20 unless told), even with the log file off\n" +
         "  cues [n] [words]            the cues RemSound would have played, newest last\n" +
@@ -670,6 +670,13 @@ internal sealed class RemoteControlEngine
                     return $"error: a tempo is {MetronomeTimeline.MinBpm} to {MetronomeTimeline.MaxBpm} beats a minute";
                 main.ChangeMetronomeSettingsForTest(s => s.Bpm = bpm);
                 break;
+            case "volume" when value.Equals("up", StringComparison.OrdinalIgnoreCase) || value.Equals("down", StringComparison.OrdinalIgnoreCase):
+                main.StepMetronomeVolumeForTest(value.Equals("up", StringComparison.OrdinalIgnoreCase) ? +5 : -5, "the control channel");   // as the hotkeys do
+                break;
+            case "volume":
+                if (!int.TryParse(value, out var volume) || volume < 0 || volume > 100) return "error: a volume is 0 to 100";
+                main.ChangeMetronomeSettingsForTest(s => s.Volume = volume);
+                break;
             case "signature":
                 if (!MetronomeSignature.TryParse(value, out var sig) || !MetronomeSignature.Offered.Contains(sig))
                     return "error: a signature is one of " + string.Join(", ", MetronomeSignature.Offered);
@@ -688,7 +695,7 @@ internal sealed class RemoteControlEngine
                 main.ChangeMetronomeSettingsForTest(s => s.HearIn = hear);
                 break;
             case "state" or "": break;
-            default: return "error: metronome start, stop, mute, unmute, state, master on|off, tempo, signature, sound or hear";
+            default: return "error: metronome start, stop, mute, unmute, state, master on|off, tempo, volume, signature, sound or hear";
         }
         return "ok: " + Said();
 

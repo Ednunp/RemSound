@@ -415,6 +415,7 @@ internal static partial class SelfTest
         _ = capture.Handle;
         capture.BoxForTest.Select();
         Check(!capture.KeyDownForTest(Keys.Tab), "THE TRAPPED TAB: Tab in the box must move on to Cancel, not be taken as a shortcut");
+        Check(!capture.KeyDownForTest(Keys.Tab | Keys.Shift), "and Shift+Tab must move back, not be taken as a shortcut");
         Check(capture.KeyDownForTest(Keys.Control | Keys.Shift | Keys.K), "a real combination in the box is still taken");
         capture.CancelForTest.Select();
         Check(!capture.KeyDownForTest(Keys.Space), "THE DEAD BUTTON: on Cancel, Space must press it, not be taken as a shortcut");

@@ -72,6 +72,23 @@ internal sealed class MainFormHotkeyController : IDisposable
     private HotkeyInfo metronomeTempoDownHotkey;
     private GlobalHotkey? metronomeTempoUpGlobalHotkey;
     private GlobalHotkey? metronomeTempoDownGlobalHotkey;
+    /// <summary>The metronome's volume up or down 5 points (Ed, 2026-10-01). Set before <see cref="Initialize"/>.</summary>
+    public Action? MetronomeVolumeUp { get; set; }
+    public Action? MetronomeVolumeDown { get; set; }
+    private HotkeyInfo metronomeVolumeUpHotkey;
+    private HotkeyInfo metronomeVolumeDownHotkey;
+    private GlobalHotkey? metronomeVolumeUpGlobalHotkey;
+    private GlobalHotkey? metronomeVolumeDownGlobalHotkey;
+    /// <summary>Unmute or mute yourself to test the round trip on a server, as its button does (Ed, 2026-10-01: "the unmute
+    /// myself button should have a global hot key"). Set before <see cref="Initialize"/>.</summary>
+    public Action? ToggleHearMyself { get; set; }
+    private HotkeyInfo hearMyselfHotkey;
+    private GlobalHotkey? hearMyselfGlobalHotkey;
+    /// <summary>Mute or unmute received audio, as its box on the Audio inputs and outputs tab does (Ed, 2026-10-02: "might as
+    /// well add the mute and global hotkey for it"). Set before <see cref="Initialize"/>.</summary>
+    public Action? ToggleMuteReceived { get; set; }
+    private HotkeyInfo muteReceivedHotkey;
+    private GlobalHotkey? muteReceivedGlobalHotkey;
     private GlobalHotkey? sendMuteGlobalHotkey;
     private GlobalHotkey? receiveMuteGlobalHotkey;
     private GlobalHotkey? trayGlobalHotkey;
@@ -154,6 +171,10 @@ internal sealed class MainFormHotkeyController : IDisposable
         metronomeHotkey = settingsStore.LoadMetronomeHotkey();
         metronomeTempoUpHotkey = settingsStore.LoadMetronomeTempoUpHotkey();
         metronomeTempoDownHotkey = settingsStore.LoadMetronomeTempoDownHotkey();
+        metronomeVolumeUpHotkey = settingsStore.LoadMetronomeVolumeUpHotkey();
+        metronomeVolumeDownHotkey = settingsStore.LoadMetronomeVolumeDownHotkey();
+        hearMyselfHotkey = settingsStore.LoadHearMyselfHotkey();
+        muteReceivedHotkey = settingsStore.LoadMuteReceivedHotkey();
     }
 
     public void Initialize(Form ownerForm)
@@ -195,6 +216,14 @@ internal sealed class MainFormHotkeyController : IDisposable
         metronomeTempoUpGlobalHotkey.Pressed += () => { if (MetronomeTempoUp is { } up) InvokeOnOwner(up); };
         metronomeTempoDownGlobalHotkey = new GlobalHotkey(ownerForm);
         metronomeTempoDownGlobalHotkey.Pressed += () => { if (MetronomeTempoDown is { } down) InvokeOnOwner(down); };
+        metronomeVolumeUpGlobalHotkey = new GlobalHotkey(ownerForm);
+        metronomeVolumeUpGlobalHotkey.Pressed += () => { if (MetronomeVolumeUp is { } up) InvokeOnOwner(up); };
+        metronomeVolumeDownGlobalHotkey = new GlobalHotkey(ownerForm);
+        metronomeVolumeDownGlobalHotkey.Pressed += () => { if (MetronomeVolumeDown is { } down) InvokeOnOwner(down); };
+        hearMyselfGlobalHotkey = new GlobalHotkey(ownerForm);
+        hearMyselfGlobalHotkey.Pressed += () => { if (ToggleHearMyself is { } toggle) InvokeOnOwner(toggle); };
+        muteReceivedGlobalHotkey = new GlobalHotkey(ownerForm);
+        muteReceivedGlobalHotkey.Pressed += () => { if (ToggleMuteReceived is { } toggle) InvokeOnOwner(toggle); };
         RegisterSendMuteHotkey();
         RegisterReceiveMuteHotkey();
         RegisterTrayHotkey();
@@ -213,6 +242,10 @@ internal sealed class MainFormHotkeyController : IDisposable
         RegisterMetronomeHotkey();
         RegisterMetronomeTempoUpHotkey();
         RegisterMetronomeTempoDownHotkey();
+        RegisterMetronomeVolumeUpHotkey();
+        RegisterMetronomeVolumeDownHotkey();
+        RegisterHearMyselfHotkey();
+        RegisterMuteReceivedHotkey();
     }
 
     /// <summary>Build the keyboard-shortcuts window WITHOUT showing it, so the accessibility, theme
@@ -373,6 +406,10 @@ internal sealed class MainFormHotkeyController : IDisposable
             list.Items.Add($"Start or stop the metronome (mute or unmute while following a master metronome): {metronomeHotkey}");
             list.Items.Add($"Metronome tempo up a beat a minute: {metronomeTempoUpHotkey}");
             list.Items.Add($"Metronome tempo down a beat a minute: {metronomeTempoDownHotkey}");
+            list.Items.Add($"Metronome volume up: {metronomeVolumeUpHotkey}");
+            list.Items.Add($"Metronome volume down: {metronomeVolumeDownHotkey}");
+            list.Items.Add($"Unmute or mute myself to test round trip on server: {hearMyselfHotkey}");
+            list.Items.Add($"Mute received audio: {muteReceivedHotkey}");
             if (prev >= 0 && prev < list.Items.Count)
             {
                 list.SelectedIndex = prev;
@@ -416,6 +453,10 @@ internal sealed class MainFormHotkeyController : IDisposable
                 case 16: ChangeMetronomeHotkey(dialog); break;
                 case 17: ChangeMetronomeTempoUpHotkey(dialog); break;
                 case 18: ChangeMetronomeTempoDownHotkey(dialog); break;
+                case 19: ChangeMetronomeVolumeUpHotkey(dialog); break;
+                case 20: ChangeMetronomeVolumeDownHotkey(dialog); break;
+                case 21: ChangeHearMyselfHotkey(dialog); break;
+                case 22: ChangeMuteReceivedHotkey(dialog); break;
                 default: return;
             }
             RefreshList();
@@ -453,6 +494,10 @@ internal sealed class MainFormHotkeyController : IDisposable
                 case 16: ApplyUnset("metronome", h => metronomeHotkey = h, RegisterMetronomeHotkey, settingsStore.SaveMetronomeHotkey); break;
                 case 17: ApplyUnset("metronome-tempo-up", h => metronomeTempoUpHotkey = h, RegisterMetronomeTempoUpHotkey, settingsStore.SaveMetronomeTempoUpHotkey); break;
                 case 18: ApplyUnset("metronome-tempo-down", h => metronomeTempoDownHotkey = h, RegisterMetronomeTempoDownHotkey, settingsStore.SaveMetronomeTempoDownHotkey); break;
+                case 19: ApplyUnset("metronome-volume-up", h => metronomeVolumeUpHotkey = h, RegisterMetronomeVolumeUpHotkey, settingsStore.SaveMetronomeVolumeUpHotkey); break;
+                case 20: ApplyUnset("metronome-volume-down", h => metronomeVolumeDownHotkey = h, RegisterMetronomeVolumeDownHotkey, settingsStore.SaveMetronomeVolumeDownHotkey); break;
+                case 21: ApplyUnset("hear-myself", h => hearMyselfHotkey = h, RegisterHearMyselfHotkey, settingsStore.SaveHearMyselfHotkey); break;
+                case 22: ApplyUnset("mute-received", h => muteReceivedHotkey = h, RegisterMuteReceivedHotkey, settingsStore.SaveMuteReceivedHotkey); break;
                 default: return;
             }
             RefreshList();
@@ -541,6 +586,10 @@ internal sealed class MainFormHotkeyController : IDisposable
         metronomeGlobalHotkey?.Dispose();
         metronomeTempoUpGlobalHotkey?.Dispose();
         metronomeTempoDownGlobalHotkey?.Dispose();
+        metronomeVolumeUpGlobalHotkey?.Dispose();
+        metronomeVolumeDownGlobalHotkey?.Dispose();
+        hearMyselfGlobalHotkey?.Dispose();
+        muteReceivedGlobalHotkey?.Dispose();
     }
 
     public HotkeyInfo SendMuteHotkey => sendMuteHotkey;
@@ -737,6 +786,63 @@ internal sealed class MainFormHotkeyController : IDisposable
         settingsStore.SaveMetronomeTempoDownHotkey(h);
     });
 
+    public HotkeyInfo MetronomeVolumeUpHotkey => metronomeVolumeUpHotkey;
+    public HotkeyInfo MetronomeVolumeDownHotkey => metronomeVolumeDownHotkey;
+
+    private void ChangeMetronomeVolumeUpHotkey(IWin32Window dialogOwner) => ChangeHotkey(dialogOwner, "metronome-volume-up", h =>
+    {
+        metronomeVolumeUpHotkey = h;
+        RegisterMetronomeVolumeUpHotkey();
+        settingsStore.SaveMetronomeVolumeUpHotkey(h);
+    });
+
+    private void ChangeMetronomeVolumeDownHotkey(IWin32Window dialogOwner) => ChangeHotkey(dialogOwner, "metronome-volume-down", h =>
+    {
+        metronomeVolumeDownHotkey = h;
+        RegisterMetronomeVolumeDownHotkey();
+        settingsStore.SaveMetronomeVolumeDownHotkey(h);
+    });
+
+    public HotkeyInfo HearMyselfHotkey => hearMyselfHotkey;
+
+    private void ChangeHearMyselfHotkey(IWin32Window dialogOwner) => ChangeHotkey(dialogOwner, "hear-myself", h =>
+    {
+        hearMyselfHotkey = h;
+        RegisterHearMyselfHotkey();
+        settingsStore.SaveHearMyselfHotkey(h);
+    });
+
+    public HotkeyInfo MuteReceivedHotkey => muteReceivedHotkey;
+
+    private void ChangeMuteReceivedHotkey(IWin32Window dialogOwner) => ChangeHotkey(dialogOwner, "mute-received", h =>
+    {
+        muteReceivedHotkey = h;
+        RegisterMuteReceivedHotkey();
+        settingsStore.SaveMuteReceivedHotkey(h);
+    });
+
+    /// <summary>The metronome's own keys, in the order its settings window lists them (Ed, 2026-10-01: "a little mini hotkeys
+    /// in the metronome settings for just the metronome hotkeys"): start or stop, tempo up, tempo down, volume up, volume
+    /// down. The same keys as their rows here.</summary>
+    public IReadOnlyList<HotkeyInfo> MetronomeKeys =>
+        [metronomeHotkey, metronomeTempoUpHotkey, metronomeTempoDownHotkey, metronomeVolumeUpHotkey, metronomeVolumeDownHotkey];
+
+    /// <summary>One of <see cref="MetronomeKeys"/>, from the Metronome settings window's OK: kept on this computer and
+    /// registered, as a change here is.</summary>
+    public void SetMetronomeKey(int index, HotkeyInfo key)
+    {
+        switch (index)
+        {
+            case 0: metronomeHotkey = key; RegisterMetronomeHotkey(); settingsStore.SaveMetronomeHotkey(key); break;
+            case 1: metronomeTempoUpHotkey = key; RegisterMetronomeTempoUpHotkey(); settingsStore.SaveMetronomeTempoUpHotkey(key); break;
+            case 2: metronomeTempoDownHotkey = key; RegisterMetronomeTempoDownHotkey(); settingsStore.SaveMetronomeTempoDownHotkey(key); break;
+            case 3: metronomeVolumeUpHotkey = key; RegisterMetronomeVolumeUpHotkey(); settingsStore.SaveMetronomeVolumeUpHotkey(key); break;
+            case 4: metronomeVolumeDownHotkey = key; RegisterMetronomeVolumeDownHotkey(); settingsStore.SaveMetronomeVolumeDownHotkey(key); break;
+            default: throw new ArgumentOutOfRangeException(nameof(index), index, "the metronome has five keys");
+        }
+        OnHotkeyChanged?.Invoke();
+    }
+
     private void ChangeToggleAllPeerShapingHotkey(IWin32Window dialogOwner) => ChangeHotkey(dialogOwner, "toggle-all-peer-shaping", h =>
     {
         toggleAllPeerShapingHotkey = h;
@@ -783,6 +889,13 @@ internal sealed class MainFormHotkeyController : IDisposable
     // The tempo keys repeat while held, as the volume keys do: hold to keep going.
     private void RegisterMetronomeTempoUpHotkey() => RegisterIfSet(metronomeTempoUpGlobalHotkey, metronomeTempoUpHotkey, "metronome tempo up", allowRepeat: true);
     private void RegisterMetronomeTempoDownHotkey() => RegisterIfSet(metronomeTempoDownGlobalHotkey, metronomeTempoDownHotkey, "metronome tempo down", allowRepeat: true);
+    // The volume keys too.
+    private void RegisterMetronomeVolumeUpHotkey() => RegisterIfSet(metronomeVolumeUpGlobalHotkey, metronomeVolumeUpHotkey, "metronome volume up", allowRepeat: true);
+    private void RegisterMetronomeVolumeDownHotkey() => RegisterIfSet(metronomeVolumeDownGlobalHotkey, metronomeVolumeDownHotkey, "metronome volume down", allowRepeat: true);
+    // Unmuting yourself on a server is a one-shot toggle; MOD_NOREPEAT (the default) stops a held key flipping it.
+    private void RegisterHearMyselfHotkey() => RegisterIfSet(hearMyselfGlobalHotkey, hearMyselfHotkey, "unmute or mute myself on the server");
+    // A one-shot toggle too.
+    private void RegisterMuteReceivedHotkey() => RegisterIfSet(muteReceivedGlobalHotkey, muteReceivedHotkey, "mute or unmute received audio");
 
     private void RegisterIfSet(GlobalHotkey? globalHotkey, HotkeyInfo hotkey, string description, bool allowRepeat = false)
     {

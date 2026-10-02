@@ -19,6 +19,24 @@ internal static class HelpLauncher
     /// <summary>Gate seam: where the browser would have gone, instead of opening one.</summary>
     internal static Action<string>? BrowserForTest;
 
+    /// <summary>A web page in the default browser, said in the log first; a headless copy opens none, and says so.</summary>
+    public static void OpenWebPage(string url, string what)
+    {
+        RemSoundLog.Current?.Event($"browser: opening {what} - {url}");
+        if (BrowserForTest is { } seam) { seam(url); return; }
+        if (Windowless.Active)
+        {
+            RemSoundLog.Current?.Event($"browser: a headless copy opens no browser; it would have opened {url}");
+            return;
+        }
+        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
+        catch (Exception ex)
+        {
+            AppMessageBox.Show($"Could not open the browser:\n\n{ex.Message}\n\nThe page is {url}", "Browser open failed",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
     /// <summary>The whole manual, from the top, in the default browser (Shift+F1, and Help, Open user manual).</summary>
     public static void OpenManual() => OpenManualAt(null);
 

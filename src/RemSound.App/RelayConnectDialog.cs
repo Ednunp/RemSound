@@ -17,7 +17,14 @@ internal sealed class RelayConnectDialog : Form
     private readonly TextBox addressBox = new() { Width = Dpi.Px(320), AccessibleName = "Server address" };
     private readonly ListBox rememberedList = new() { Width = Dpi.Px(320), Height = Dpi.Px(110), IntegralHeight = false, AccessibleName = "Remembered servers" };
     private readonly Button actionButton = new() { AutoSize = true };
-    private readonly Label statusLabel = new() { AutoSize = true, AccessibleName = "Server status" };
+    private readonly Label statusLabel = new() { AutoSize = true, AccessibleName = "Server connection" };
+    // The server's status, while you are on one (Ed, 2026-10-01: "put it in the server window"): MainForm.ServerStatus.
+    private readonly TextBox serverStatusBox = new()
+    {
+        ReadOnly = true, Multiline = true, WordWrap = true, ScrollBars = ScrollBars.Vertical,
+        Width = Dpi.Px(420), Height = Dpi.Px(150), AccessibleName = "Server status", Visible = false,
+    };
+    private readonly MnemonicLabel serverStatusLabel = new() { Text = "Server &status (Alt+S):", AutoSize = true, Visible = false };
     private readonly System.Windows.Forms.Timer refresh = new() { Interval = 400 };
 
     private readonly Func<string?> connectedTo;
@@ -26,6 +33,7 @@ internal sealed class RelayConnectDialog : Form
     private readonly Func<IReadOnlyList<string>> loadRemembered;
     private readonly Action<string> forget;
     private readonly Func<string> status;
+    private readonly Func<string?>? serverStatus;
     private bool wasConnected;
     private string? lastLine;
 
@@ -35,9 +43,12 @@ internal sealed class RelayConnectDialog : Form
     /// <param name="loadRemembered">The relays we have been on before, newest first.</param>
     /// <param name="forget">Take one off that list.</param>
     /// <param name="status">One line on what the relay is doing, for the line under the buttons.</param>
+    /// <param name="serverStatus">The server's status while we are on one, a line each, or null.</param>
     internal RelayConnectDialog(Func<string?> connectedTo, Action<string> connect, Action disconnect,
-        Func<IReadOnlyList<string>> loadRemembered, Action<string> forget, Func<string> status)
+        Func<IReadOnlyList<string>> loadRemembered, Action<string> forget, Func<string> status, Func<string?>? serverStatus = null)
     {
+        this.serverStatus = serverStatus;
+        serverStatusLabel.MnemonicTarget = serverStatusBox;
         this.connectedTo = connectedTo;
         this.connect = connect;
         this.disconnect = disconnect;
@@ -69,13 +80,17 @@ internal sealed class RelayConnectDialog : Form
 
         var rememberedLabel = new MnemonicLabel { Text = "Re&membered servers (Alt+M):", MnemonicTarget = rememberedList, AutoSize = true };
         rememberedLabel.Click += (_, _) => rememberedList.Focus();
+        // Enter on a remembered server goes to it (Ed, 2026-10-01: "on the remembered servers list, you should be able to
+        // press enter and it connect to the server. at the moment you have to tab across to the connect button"). The list
+        // asks for Enter itself: left to the window, Enter pressed the action button - which says Disconnect while you are
+        // on a server, as you are whenever your profile reconnects at start - so Enter took you OFF the server.
+        rememberedList.PreviewKeyDown += (_, args) => { if (args.KeyCode == Keys.Enter) args.IsInputKey = true; };
         rememberedList.KeyDown += (_, args) =>
         {
             if (args.KeyCode == Keys.Enter && rememberedList.SelectedItem is string chosen)
             {
                 args.SuppressKeyPress = true;
-                addressBox.Text = chosen;
-                if (connectedTo() is null) connect(chosen);
+                GoTo(chosen);
             }
             else if (args.KeyCode == Keys.Delete && rememberedList.SelectedItem is string doomed)
             {
@@ -87,9 +102,7 @@ internal sealed class RelayConnectDialog : Form
         };
         rememberedList.DoubleClick += (_, _) =>
         {
-            if (rememberedList.SelectedItem is not string chosen) return;
-            addressBox.Text = chosen;
-            if (connectedTo() is null) connect(chosen);
+            if (rememberedList.SelectedItem is string chosen) GoTo(chosen);
         };
 
         actionButton.Click += (_, _) => OnAction();
@@ -104,7 +117,7 @@ internal sealed class RelayConnectDialog : Form
         // servers 1st then the name box to enter one"). Moving through the list puts the server in the box, so Connect
         // (or Enter) goes to the one you are on in the list.
         var layout = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill };
-        foreach (var c in new Control[] { rememberedLabel, rememberedList, addressLabel, addressBox, buttons, statusLabel })
+        foreach (var c in new Control[] { rememberedLabel, rememberedList, addressLabel, addressBox, buttons, serverStatusLabel, serverStatusBox, statusLabel })
         {
             layout.Controls.Add(c);
         }
@@ -121,13 +134,16 @@ internal sealed class RelayConnectDialog : Form
         buttons.TabIndex = 4;
         actionButton.TabIndex = 0;
         close.TabIndex = 1;
-        statusLabel.TabIndex = 5;
+        serverStatusLabel.TabIndex = 5;
+        serverStatusBox.TabIndex = 6;
+        statusLabel.TabIndex = 7;
         AcceptButton = actionButton;
         CancelButton = close;
         ContextHelp.Mark(addressBox, "dialog.server.address");
         ContextHelp.Mark(rememberedList, "dialog.server.remembered");
         ContextHelp.Mark(actionButton, "dialog.server.connect");
         ContextHelp.Mark(close, "dialog.server.close");
+        ContextHelp.Mark(serverStatusBox, "dialog.server.status");
 
         FillRemembered();
         var opening = connectedTo() ?? loadRemembered().FirstOrDefault() ?? "";
@@ -167,10 +183,31 @@ internal sealed class RelayConnectDialog : Form
         ApplyState(speak: true);
     }
 
+    /// <summary>Go to a remembered server: from no server, or from another one (connecting there leaves the one you are on).
+    /// On the one you are on already, you stay, and are told so.</summary>
+    private void GoTo(string chosen)
+    {
+        addressBox.Text = chosen;
+        if (string.Equals(connectedTo(), chosen, StringComparison.OrdinalIgnoreCase))
+        {
+            ScreenReader.Speak($"You're already on {chosen}.");
+            return;
+        }
+        connect(chosen);
+        ApplyState(speak: true);
+    }
+
+    /// <summary>The status with its figures taken out: what stays the same while only the numbers move.</summary>
+    internal static string StatusShape(string text) => System.Text.RegularExpressions.Regex.Replace(text, @"\d+", "#");
+
     /// <summary>Gate seams: press the button's action, and one tick of the window's watch.</summary>
     internal void ActionForTest() => OnAction();
     internal void TickForTest() => ApplyState(speak: true);
     internal ListBox RememberedListForTest => rememberedList;
+    internal TextBox ServerStatusBoxForTest => serverStatusBox;
+    /// <summary>Test seam: whether the status box is being read, when Windows will not give a test the keyboard (null: it has
+    /// the keyboard or not, as it really does).</summary>
+    internal bool? BeingReadForTest;
     internal TextBox AddressBoxForTest => addressBox;
 
     private void FillRemembered()
@@ -199,6 +236,22 @@ internal sealed class RelayConnectDialog : Form
         var lineChanged = line != lastLine;
         lastLine = line;
         if (statusLabel.Text != line) statusLabel.Text = line;
+        // The server's status in place of the one line while you are on a server. Never rewritten while you are reading
+        // it: setting the text puts the screen reader's cursor back at the top.
+        var serverText = connected ? serverStatus?.Invoke() : null;
+        var showBox = serverText is not null;
+        if (serverStatusBox.Visible != showBox)
+        {
+            serverStatusLabel.Visible = showBox;
+            serverStatusBox.Visible = showBox;
+            statusLabel.Visible = !showBox;
+        }
+        // Held still while it is being read - but only against figures moving. A line changing in kind ("measuring" becoming a
+        // figure, a server found to be an older one) is written even then: held whole, "measuring" stood for as long as Ed
+        // read the box (2026-10-02).
+        if (serverText is not null && serverStatusBox.Text != serverText
+            && (!(BeingReadForTest ?? serverStatusBox.ContainsFocus) || StatusShape(serverStatusBox.Text) != StatusShape(serverText)))
+            serverStatusBox.Text = serverText;
         if (connected != wasConnected)
         {
             wasConnected = connected;

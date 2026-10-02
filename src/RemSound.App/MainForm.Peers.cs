@@ -252,6 +252,8 @@ public sealed partial class MainForm
 
     private void SelectPeer(PeerAnnouncement peer, bool fromProfileRestore)
     {
+        // A server is never ticked as a person (MainForm.Servers): whatever asked, it is connected to with Connect to server.
+        if (IsKnownServer(peer.Address)) { SayServerRefused(peer.Address, "not ticked as a peer"); return; }
         // Who ticked them: the profile (and accept connections, which calls NotChosenByYou after) or you. Only a peer you
         // ticked yourself is worth a warning about a different password; the others are held quietly (CheckPeerSecurity).
         if (fromProfileRestore) notChosenByYou.Add(peer.InstanceId);
@@ -343,6 +345,10 @@ public sealed partial class MainForm
         // turned away again, exactly as unticking anybody else is.
         if (relayPairTicked && relayGroup.ConnectedRelay is { } pairRelay && seen.Add(pairRelay.Address))
             allowed.Add(new IPEndPoint(pairRelay.Address, 0));
+        // Our own sound, back from the server while "Unmute myself to test round trip" is on: let in at the address the
+        // relay group credits it to, and only then.
+        if (relayGroup.OwnEchoAddress is { } ownEcho && seen.Add(ownEcho.Address))
+            allowed.Add(new IPEndPoint(ownEcho.Address, 0));
         receiver.SetAllowedSenders(allowed);
 
         // Same walk, kept as GROUPS rather than flattened: which addresses belong to one person. The
@@ -438,6 +444,9 @@ public sealed partial class MainForm
         // send carries both the copy the group reads and the ordinary copy the phone reads. If someone in the group is
         // ticked too, it is the same address, and the dedupe below keeps it to the one send.
         if (relayPairTicked && relayGroup.ConnectedRelay is { } pairRelay) targets = targets.Append(pairRelay);
+        // Hearing ourselves: our sound goes to the server even with nobody else ticked, so it can come back to us. With
+        // somebody there ticked too, it is the same address, and the dedupe below keeps it to the one send.
+        if (relayGroup.HearsItself && relayGroup.ConnectedRelay is { } echoRelay) targets = targets.Append(echoRelay);
         return targets
             .GroupBy(ep => $"{ep.Address}:{ep.Port}")
             .Select(g => g.First())
@@ -513,6 +522,19 @@ public sealed partial class MainForm
             AppMessageBox.Show(this, "Could not resolve that IP address or hostname.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
+        // A server typed as a peer: never added as one. Already known to be a server, the person is asked straight away
+        // whether to connect to it as one; otherwise its address check will tell, and they are asked then.
+        if (IsKnownServer(address))
+        {
+            SayServerRefused(address, $"typed as a peer (\"{text.Trim()}\"), not added");
+            if (NobodyToAnswer) return;
+            var answer = ForegroundDialog.Show(owner => AppMessageBox.Show(owner,
+                "That's the address of a server. Would you like to connect to this server?",
+                AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question));
+            if (answer == DialogResult.Yes) ConnectToRelay(text.Trim(), userAsked: true);
+            return;
+        }
+        typedPeerAddresses.Add(address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address);
 
         var rememberedEntries = settings.LoadRememberedPeers()
             .Select(static value => value.Trim())
@@ -541,6 +563,7 @@ public sealed partial class MainForm
     /// </summary>
     private void EnsurePeerRemembered(PeerAnnouncement peer)
     {
+        if (IsKnownServer(peer.Address)) return;   // never remembered as a person (MainForm.Servers)
         RememberTickedDevice(peer);
         // Remembered by name, a device is found again by name - so a name another device on the network also has ("iPhone",
         // every iPhone's until somebody changes it) is remembered by address instead: by name it would find either phone.

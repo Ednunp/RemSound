@@ -163,7 +163,13 @@ internal static partial class SelfTest
         {
             stopFeeding.Cancel();
             feeder?.Join(2000);
-            foreach (var w in new[] { ed, andre }) try { w?.Dispose(); } catch { /* teardown */ }
+            // Each window leaves the server first, as closing RemSound does: on a real server (REMSOUND_TEST_LIVE_RELAY) a
+            // window only thrown away was listed there for another minute, until it timed out (the live tests, 2026-10-02).
+            foreach (var w in new[] { ed, andre })
+            {
+                try { w?.DisconnectFromRelayForTest(); } catch { /* teardown */ }
+                try { w?.Dispose(); } catch { /* teardown */ }
+            }
             try { relayProcess?.Kill(entireProcessTree: true); } catch { /* already gone */ }
             relayProcess?.Dispose();
             Windowless.SetActiveForTest(false);

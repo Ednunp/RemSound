@@ -465,13 +465,18 @@ internal static partial class SelfTest
                 "a profile's ticks must take effect the moment those people appear on the relay, without the user ticking again");
             form.DisconnectFromRelayForTest();
 
-            // Only a relay sends an address check. One arriving from an address the user typed into the peer list is
-            // how RemSound knows to offer to connect to it as a relay instead.
+            // Only a relay sends an address check. One arriving from an address the user typed into the peer list is how
+            // RemSound knows it is a server: it is taken out of the peers, and the user is asked whether to connect to it as
+            // one (since 2026-10-01 a server is never kept as a peer - SERVERS ARE NEVER PEERS has the rest).
             var typed = new IPEndPoint(IPAddress.Parse("203.0.113.55"), RemPacket.DefaultPort);
-            Check(!form.ShouldOfferRelayForTest(typed), "an address check from somewhere nobody chose must not be asked about");
+            form.ServerAnsweredAtForTest(typed);
+            Check(!form.IsKnownServerForTest(typed.Address), "an address check from somewhere nobody chose must say nothing");
+            form.MarkTypedPeerForTest(typed.Address);
             form.SelectPeerForTest(new PeerAnnouncement(Guid.NewGuid(), "Typed by hand", typed.Port,
                 CanSend: true, CanReceive: true, DateTime.UtcNow, typed.Address));
-            Check(form.ShouldOfferRelayForTest(typed), "an address in the peer list that answers as a relay must be asked about");
+            form.ServerAnsweredAtForTest(typed);
+            Check(form.IsKnownServerForTest(typed.Address) && !form.IsSelectedForTest(typed.Address),
+                "an address typed into the peer list that answers as a relay must be known as a server and taken out of the peers");
             Check(!form.ShouldOfferRelayForTest(typed), "and asked about once only, not on every address check it sends");
             return "the list is hidden until you connect; connecting remembers the relay and lists its people, none ticked; "
                 + "ticking sends to the relay once and lets that person in; somebody who has not ticked you back is named; "
@@ -2099,6 +2104,13 @@ internal static partial class SelfTest
         public HeartbeatService Heartbeat { get; } = new();
         public RelayGroupClient? Group { get; }
         private readonly CancellationTokenSource talking = new();
+        /// <summary>Our own sound back from the server, timed as MainForm times it (HEAR MYSELF).</summary>
+        public HearMyselfMeter Meter { get; } = new();
+        /// <summary>Packets carrying our own id that the server sent back, counted before anything else looks at them: whether
+        /// the SERVER is sending our sound back, whatever the client then does with it.</summary>
+        public long OwnPacketsBack => Interlocked.Read(ref ownPacketsBack);
+        private long ownPacketsBack;
+        private IEnumerable<Guid> lastTicked = [];
 
         /// <summary>Tick people on the relay, exactly as MainForm does it: the relay is told who, our audio goes to the
         /// relay for them, and their audio is let in at the address the relay credits them to. Ticking the phone paired
@@ -2106,13 +2118,25 @@ internal static partial class SelfTest
         public void Tick(IEnumerable<Guid> memberIds, bool pairPartner = false)
         {
             var wanted = memberIds.ToHashSet();
+            lastTicked = wanted;
             var group = Group!;
             group.SetTicked(wanted, pairPartner);
             var members = group.Members.Where(m => wanted.Contains(m.Id)).ToList();
             Sender.SetReceivers(MainForm.SendTargets(members.Select(m => m.Address), group, pairPartner));
             var allowed = members.Select(m => new IPEndPoint(m.Address.Address, 0)).ToList();
             if (pairPartner && group.ConnectedRelay is { } allowRelay) allowed.Add(new IPEndPoint(allowRelay.Address, 0));
+            if (group.OwnEchoAddress is { } ownEcho) allowed.Add(new IPEndPoint(ownEcho.Address, 0));   // as MainForm.PushAllowedReceiveSenders
             Receiver.SetAllowedSenders(allowed);
+        }
+
+        /// <summary>Unmute or mute ourselves (MainForm's button): the server is asked, then our sound's targets and what we let
+        /// in follow, for the people ticked now.</summary>
+        public bool HearMyself(bool on)
+        {
+            var result = Group!.SetHearMyself(on);
+            Meter.Reset();
+            Tick(lastTicked);
+            return result;
         }
 
         public RelayTestApp(string name, string password, IPEndPoint relay, bool groups)
@@ -2148,14 +2172,24 @@ internal static partial class SelfTest
             {
                 Sender.SendVia(packet, length, remote);
             };
+            var ownId = new byte[RelayGroupClient.ClientIdSize];
+            Group?.ClientId.TryWriteBytes(ownId, bigEndian: true, out _);
             Sender.OnInboundPacket = (buffer, length, remote) =>
             {
+                IPEndPoint? fromMember = null;
                 if (Group is not null)
                 {
+                    // Our own SOUND back (audio or format) - not our server pings, which a server-v2.16 always sends back.
+                    if (length >= RelayGroupClient.GroupHeaderSize && buffer[4] == RelayGroupClient.GroupVersion
+                        && buffer[5] is (byte)RemPacketType.Audio or (byte)RemPacketType.Format
+                        && buffer.AsSpan(RemPacket.HeaderSize, RelayGroupClient.ClientIdSize).SequenceEqual(ownId))
+                        Interlocked.Increment(ref ownPacketsBack);
                     if (Group.HandleInbound(buffer, ref length, remote, out var member) == RelayInbound.Consumed) return;
-                    if (member is not null) remote = member;
+                    if (member is not null) remote = fromMember = member;
                 }
-                if (length < RemPacket.HeaderSize || !RemPacket.TryReadHeader(buffer.AsSpan(0, length), out var type, out _, out _)) return;
+                if (length < RemPacket.HeaderSize || !RemPacket.TryReadHeader(buffer.AsSpan(0, length), out var type, out var streamId, out var sequence)) return;
+                if (type == RemPacketType.Audio && fromMember is not null && fromMember.Equals(Group!.OwnEchoAddress))
+                    Meter.NoteArrival(streamId, sequence, MetronomeClock.NowUs());
                 if (type == RemPacketType.Heartbeat) Heartbeat.HandleInjectedPacket(buffer, length, remote);
                 else Receiver.InjectExternalPacket(buffer, length, remote);
             };

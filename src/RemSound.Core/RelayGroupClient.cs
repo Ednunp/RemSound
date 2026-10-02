@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Collections.Frozen;
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 
@@ -64,6 +65,12 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
     public const byte TypeRoster = 7;
     public const byte TypeFull = 8;
     public const byte TypeBye = 9;
+    /// <summary>The server's own status, to each member (server-v2.16): see <see cref="ServerInfo"/>.</summary>
+    public const byte TypeServerInfo = 14;
+    /// <summary>A member's ping, sent straight back by the server (server-v2.16): our round trip to it.</summary>
+    public const byte TypeServerPing = 15;
+    /// <summary>How many recent pings the round trip is the typical of.</summary>
+    public const int RoundTripsKept = 10;
     public const int NameBytes = 32;
     public const int GroupTagBytes = RemPacket.PasswordFingerprintSize;
     /// <summary>The most people one hello can name as ticked, matching the relay's own cap.</summary>
@@ -97,6 +104,78 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
     private System.Threading.Timer? timer;
     private volatile Snapshot snapshot = Snapshot.Empty;
     [ThreadStatic] private static byte[]? wrapBuffer;
+    private volatile bool hearsItself;
+    private volatile IPEndPoint? ownEchoAddress;
+    private volatile ServerInfo? serverInfo;
+    private readonly double[] roundTrips = new double[RoundTripsKept];
+    private int roundTripCount, roundTripNext;
+    private DateTime? inGroupSinceUtc;
+
+    /// <summary>
+    /// What a server says about itself (Ed, 2026-10-01: "a status box about the server"), server-v2.16 on, every 5 s: its
+    /// version, how long it has run, how many people it has and in how many groups, its free places and the phones or older
+    /// apps paired on it - counts only, never a name - and OUR OWN sound over its last minute as it saw it arrive: packets,
+    /// the longest wait between two, and the waits over 20 ms.
+    /// </summary>
+    public sealed record ServerInfo(string Version, TimeSpan Uptime, int People, int Groups, int PlacesFree, int Phones,
+        int YourPackets, double YourLongestGapMs, int YourLongGaps, int YourSeconds, DateTime ReceivedUtc);
+
+    /// <summary>A server status packet's body (after the group header), or null when it is not one this app can read.</summary>
+    public static ServerInfo? ReadServerInfo(ReadOnlySpan<byte> body, DateTime receivedUtc)
+    {
+        if (body.Length < 2 || body[0] != 1) return null;
+        var n = body[1];
+        if (body.Length < 2 + n + 24) return null;
+        var version = Encoding.ASCII.GetString(body.Slice(2, n));
+        var at = body[(2 + n)..];
+        return new ServerInfo(version,
+            TimeSpan.FromSeconds(BinaryPrimitives.ReadUInt32LittleEndian(at)),
+            BinaryPrimitives.ReadUInt16LittleEndian(at[4..]),
+            BinaryPrimitives.ReadUInt16LittleEndian(at[6..]),
+            BinaryPrimitives.ReadUInt16LittleEndian(at[8..]),
+            BinaryPrimitives.ReadUInt16LittleEndian(at[10..]),
+            (int)Math.Min(int.MaxValue, BinaryPrimitives.ReadUInt32LittleEndian(at[12..])),
+            BinaryPrimitives.ReadUInt32LittleEndian(at[16..]) / 1000.0,
+            BinaryPrimitives.ReadUInt16LittleEndian(at[20..]),
+            BinaryPrimitives.ReadUInt16LittleEndian(at[22..]),
+            receivedUtc);
+    }
+
+    /// <summary>The newest status the server we are on has sent, or null (none yet, or an older server that sends none).</summary>
+    public ServerInfo? LatestServerInfo => serverInfo;
+
+    /// <summary>Our round trip to the server: the typical (median) of the last <see cref="RoundTripsKept"/> pings it sent
+    /// back, in ms; null before the first, or on an older server that does not answer them.</summary>
+    public double? ServerRoundTripMs
+    {
+        get
+        {
+            lock (gate)
+            {
+                if (roundTripCount == 0) return null;
+                var sorted = roundTrips.AsSpan(0, roundTripCount).ToArray();
+                Array.Sort(sorted);
+                var mid = sorted.Length / 2;
+                return sorted.Length % 2 == 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+            }
+        }
+    }
+
+    /// <summary>When the server we are on first listed us in its group, or null while not in one.</summary>
+    public DateTime? InGroupSinceUtc { get { lock (gate) return inGroupSinceUtc; } }
+
+    /// <summary>Test seam: the clock pings are timed by, in microseconds - the simulator's virtual time.</summary>
+    internal Func<long>? ClockUsForTest { get; set; }
+
+    private long NowUs() => ClockUsForTest?.Invoke() ?? (long)(Stopwatch.GetTimestamp() * (1_000_000.0 / Stopwatch.Frequency));
+
+    private void ForgetServerStatusLocked()
+    {
+        serverInfo = null;
+        roundTripCount = 0;
+        roundTripNext = 0;
+        inGroupSinceUtc = null;
+    }
 
     public RelayGroupClient(Guid clientId, Action<string>? log = null)
     {
@@ -182,6 +261,7 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         {
             leaving = relays.Keys.Where(r => !r.Equals(relay)).ToList();
             foreach (var r in leaving) ForgetRelayLocked(r);
+            if (leaving.Count > 0) { StopHearingItselfLocked(); ForgetServerStatusLocked(); }   // your own sound, and its status, were the server you left
             targets = [relay];
             if (!relays.ContainsKey(relay))
             {
@@ -206,6 +286,8 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
             ticked.Clear();
             tickedNow = [];
             pairPartnerTicked = false;
+            StopHearingItselfLocked();
+            ForgetServerStatusLocked();
         }
         foreach (var r in leaving) SendBye(r);
         if (leaving.Count > 0) Log?.Invoke("left the relay");
@@ -233,6 +315,46 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
             foreach (var r in relays.Values) r.LastHelloUtc = DateTime.MinValue;   // tell the relay at once
         }
         Tick();
+    }
+
+    /// <summary>HEAR MYSELF (Ed, 2026-10-01: "unmute myself to test round trip"). On: our own id goes first in every hello's
+    /// ticked list, and a server that knows it (server-v2.15 on) sends our own sound back - delivered by
+    /// <see cref="HandleInbound"/> as from <see cref="OwnEchoAddress"/> and played like anyone's, so you hear the whole round
+    /// trip. Off, or once we leave the relay, our own packets are consumed as they always were. Never part of who is ticked:
+    /// <see cref="SetTicked"/> leaves it alone.</summary>
+    public bool HearsItself => hearsItself;
+
+    /// <summary>Where our own sound comes back from while <see cref="HearsItself"/>: the member address our own id hashes to
+    /// on the relay we are on. Null while not hearing ourselves.</summary>
+    public IPEndPoint? OwnEchoAddress => hearsItself ? ownEchoAddress : null;
+
+    /// <summary>Ask the relay we are on to send our own sound back, or stop. Needs a relay; returns whether it is on.</summary>
+    public bool SetHearMyself(bool on)
+    {
+        IPEndPoint? at;
+        lock (gate)
+        {
+            if (on == hearsItself) return hearsItself;
+            if (on)
+            {
+                if (relays.Keys.FirstOrDefault() is not { } relay) return false;
+                ownEchoAddress = AddressForLocked(ClientId, relay);
+                hearsItself = true;
+            }
+            else StopHearingItselfLocked();
+            at = ownEchoAddress;
+            foreach (var r in relays.Values) r.LastHelloUtc = DateTime.MinValue;   // tell the relay at once
+        }
+        Log?.Invoke(on ? $"hear myself: on - the server is asked to send this computer's own sound back (it arrives as {at})"
+                       : "hear myself: off - the server is asked to stop sending this computer's own sound back");
+        Tick();
+        return on;
+    }
+
+    private void StopHearingItselfLocked()
+    {
+        hearsItself = false;
+        ownEchoAddress = null;
     }
 
     /// <summary>Start sending hellos. <paramref name="send"/> must go straight to the socket: our own packets are already
@@ -321,6 +443,9 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
             if (!test(m.Address)) return false;
             any = true;
         }
+        // Hearing ourselves: our own echo never changes what the others are sent - it is one more copy of the same stream.
+        // Alone there, it is the only receiver, and it takes what somebody like us would be sent.
+        if (!any && hearsItself && ownEchoAddress is { } mine && snapshot.GroupRelays.ContainsKey(relay)) return test(mine);
         return any;
     }
 
@@ -373,6 +498,34 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
             return RelayInbound.Consumed;
         }
         if (type is TypeHello or TypeBye) return RelayInbound.Consumed;
+        if (type == TypeServerInfo)
+        {
+            if (ReadServerInfo(buffer.AsSpan(GroupHeaderSize, length - GroupHeaderSize), DateTime.UtcNow) is { } info)
+            {
+                var first = serverInfo is null;
+                serverInfo = info;
+                if (first) Log?.Invoke($"the server at {remote} says: {info.Version}, {info.People} on it in {info.Groups} group(s), {info.PlacesFree} places free");
+            }
+            return RelayInbound.Consumed;
+        }
+        if (type == TypeServerPing)
+        {
+            // Our own ping, back from the server: the round trip, timed by the clock it went out with.
+            if (length >= GroupHeaderSize + 8 && buffer.AsSpan(RemPacket.HeaderSize, ClientIdSize).SequenceEqual(clientId))
+            {
+                var ms = (NowUs() - BinaryPrimitives.ReadInt64LittleEndian(buffer.AsSpan(GroupHeaderSize))) / 1000.0;
+                if (ms is >= 0 and < 10_000)
+                {
+                    lock (gate)
+                    {
+                        roundTrips[roundTripNext] = ms;
+                        roundTripNext = (roundTripNext + 1) % RoundTripsKept;
+                        roundTripCount = Math.Min(roundTripCount + 1, RoundTripsKept);
+                    }
+                }
+            }
+            return RelayInbound.Consumed;
+        }
         if (type == ServerMetronomeWire.TypeTiming)
         {
             // The relay's own message (its beat grid for us): for the metronome, never a member's sound.
@@ -381,7 +534,16 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         }
 
         var idSpan = buffer.AsSpan(RemPacket.HeaderSize, ClientIdSize);
-        if (idSpan.SequenceEqual(clientId)) return RelayInbound.Consumed;   // our own packet: never expected, never played
+        if (idSpan.SequenceEqual(clientId))
+        {
+            // Our own packet. Only our own sound, and only while we asked for it back (HEAR MYSELF); anything else of ours
+            // is never expected and never played.
+            if (!hearsItself || ownEchoAddress is not { } mine
+                || (type != (byte)RemPacketType.Audio && type != (byte)RemPacketType.Format)) return RelayInbound.Consumed;
+            ToOrdinaryForm(buffer, ref length);
+            source = mine;
+            return RelayInbound.Delivered;
+        }
         var id = new Guid(idSpan, bigEndian: true);
         IPEndPoint address;
         bool isNew;
@@ -399,12 +561,17 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         }
         if (isNew) Publish();
 
-        // Ordinary form: version 1, and the payload moved down over the client id.
+        ToOrdinaryForm(buffer, ref length);
+        source = address;
+        return RelayInbound.Delivered;
+    }
+
+    /// <summary>Ordinary form: version 1, and the payload moved down over the client id.</summary>
+    private static void ToOrdinaryForm(byte[] buffer, ref int length)
+    {
         buffer[4] = RemPacket.Version;
         Buffer.BlockCopy(buffer, GroupHeaderSize, buffer, RemPacket.HeaderSize, length - GroupHeaderSize);
         length -= ClientIdSize;
-        source = address;
-        return RelayInbound.Delivered;
     }
 
     private void ReadRoster(IPEndPoint relayEndpoint, ReadOnlySpan<byte> payload)
@@ -436,6 +603,7 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
             var paired = (flags & RosterFlagV1Paired) != 0;
             changed = !relay.InGroup || relay.V1Paired != paired;
             if (!relay.InGroup) events.Add($"in a group on {relayEndpoint} with {listed.Count} other{(listed.Count == 1 ? "" : "s")}");
+            if (!relay.InGroup) inGroupSinceUtc ??= DateTime.UtcNow;
             if (relay.V1Paired != paired) events.Add(paired
                 ? $"a phone or older app on {relayEndpoint} is paired with us: it is in the relay list, and our audio goes to it once it is ticked"
                 : $"no longer paired with a phone or older app on {relayEndpoint}");
@@ -558,6 +726,7 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
                 if (relay.InGroup && now - relay.LastRosterUtc > GroupAliveFor)
                 {
                     relay.InGroup = false;
+                    ForgetServerStatusLocked();
                     relay.V1Paired = false;
                     changed = true;
                     events.Add($"no member list from {relay.Endpoint} for {GroupAliveFor.TotalSeconds:0} s: sending to it as an ordinary pair again");
@@ -580,8 +749,36 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         {
             try { send(packet, packet.Length, relay); } catch { /* UDP; the next hello tries again */ }
         }
+        // Once a second, in a group: a ping, which a server-v2.16 sends straight back, so we know our round trip to it.
+        // An older server drops it.
+        List<IPEndPoint> pinged;
+        lock (gate) pinged = relays.Values.Where(r => r.InGroup).Select(r => r.Endpoint).ToList();
+        foreach (var relay in pinged)
+        {
+            var ping = BuildPing();
+            try { send(ping, ping.Length, relay); } catch { /* UDP; the next one tries again */ }
+        }
         if (changed) Publish();
     }
+
+    /// <summary>A server ping: the group header with our id, then our clock in microseconds, which the server sends back
+    /// untouched.</summary>
+    private byte[] BuildPing()
+    {
+        var packet = new byte[GroupHeaderSize + 8];
+        RemPacket.WriteHeader(packet, (RemPacketType)TypeServerPing, 0, 0);
+        packet[4] = GroupVersion;
+        clientId.CopyTo(packet.AsSpan(RemPacket.HeaderSize));
+        BinaryPrimitives.WriteInt64LittleEndian(packet.AsSpan(GroupHeaderSize), NowUs());
+        return packet;
+    }
+
+    /// <summary>Test seam: a ping as it would go out now.</summary>
+    internal byte[] PingForTest() => BuildPing();
+
+    /// <summary>Test seam: put back when the server first listed us, so a server that never says anything can be met without
+    /// waiting for it.</summary>
+    internal void BackdateInGroupForTest(TimeSpan by) { lock (gate) if (inGroupSinceUtc is { } at) inGroupSinceUtc = at - by; }
 
     /// <summary>Our hello: name, the group tag (our password fingerprint), then the people we have ticked — a count and
     /// that many ids. A hello with no list at all would mean "everyone in my group", which is what an app that knows
@@ -592,7 +789,11 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         // of it in no order could leave out somebody here - the relay then treats them as unticked, and they are silent
         // while their row shows ticked (2026-09-25 sweep).
         var present = snapshot.Members.Select(m => m.Id).ToHashSet();
-        var ids = ticked.OrderByDescending(present.Contains).Take(MaxTickedIds).ToArray();
+        // Hearing ourselves, our own id goes first, so the cap can never leave it out (the relay sends our sound back only
+        // for an id list that names us).
+        var ids = (hearsItself ? new[] { ClientId } : Array.Empty<Guid>())
+            .Concat(ticked.Where(id => id != ClientId).OrderByDescending(present.Contains))
+            .Take(MaxTickedIds).ToArray();
         var packet = new byte[GroupHeaderSize + NameBytes + GroupTagBytes + 1 + ids.Length * ClientIdSize];
         RemPacket.WriteHeader(packet, (RemPacketType)TypeHello, 0, 0);
         packet[4] = GroupVersion;
@@ -641,7 +842,8 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         {
             BinaryPrimitives.WriteUInt32BigEndian(octets, value);
             var candidate = new IPEndPoint(new IPAddress(octets), RemPacket.DefaultPort);
-            if (!memberByAddress.TryGetValue(candidate, out var holder) || (holder.Id == id && holder.Relay.Equals(relay))) return candidate;
+            var oursEcho = id != ClientId && hearsItself && candidate.Equals(ownEchoAddress);   // our own sound's address is taken
+            if (!oursEcho && (!memberByAddress.TryGetValue(candidate, out var holder) || (holder.Id == id && holder.Relay.Equals(relay)))) return candidate;
             value = 0xF0000000u | ((value + 1) & 0x07FFFFFFu);
         }
     }

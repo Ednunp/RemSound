@@ -170,6 +170,24 @@ TIMING_START_LEAD_SECONDS = 0.4      # the first beat, as the app's own metronom
 TIMING_MIN_MILLI_BPM = 30_000
 TIMING_MAX_MILLI_BPM = 300_000
 TIMING_LOG_EVERY_SECONDS = 30.0      # event=metronome_timing, per member, while its group's metronome plays
+# The server's own status (2026-10-01, server-v2.16; Ed: "we need a status box about the server ... how many people
+# connected and in how many groups ... can we show your round trip latency to the server"). Each member in a group is sent,
+# every SERVER_INFO_EVERY_SECONDS, this server's version and size - counts only, never a name and never who is in another
+# group - and that member's OWN sound over the last minute, as this relay saw it arrive. A member's ping comes straight
+# back, so the app can time its round trip to the server. Neither is passed on to anybody; the app alone reads them.
+# The status goes only to a member that has pinged (2026-10-02, before release): RemSound 6.0 knows neither type and reads
+# any group packet it does not know as a member's, so the status - from the all-zero id - put a nameless member in its
+# server list. An app that pings knows both; one that never pings is never sent the status.
+TYPE_SERVER_INFO = 14
+TYPE_SERVER_PING = 15
+SERVER_INFO_LAYOUT = 1
+SERVER_INFO_EVERY_SECONDS = 5.0
+SERVER_INFO_TICK_SECONDS = 0.5       # how often tick() looks for members due their status (it runs after every packet)
+SERVER_PING_MAX_PER_SECOND = 4
+SERVER_PING_MAX_PAYLOAD = 32
+STEADY_WINDOW_SECONDS = 60
+STEADY_RESTART_MS = 2000.0           # a wait longer than this is somebody stopping and starting again, not the network
+SERVER_VERSION = "server-v2.16"      # kept equal to the bundle's VERSION file (a test checks)
 AUDIO_GAP_LONG_MS = 20.0             # event=audio_timing counts waits between one client's packets longer than this
 # Cap on how many lobby/pair entries one source IP may hold at once. A relay is a place people meet now,
 # not a single pair, so one household or one office behind a single address can legitimately show several
@@ -252,6 +270,14 @@ class ClientEntry:
     audio_count: int = 0
     audio_max_gap: float = 0.0
     audio_long_gaps: int = 0
+    # For the server's status (TYPE_SERVER_INFO): this client's sound second by second over the last minute - each
+    # [second, packets, longest wait in ms, waits longer than AUDIO_GAP_LONG_MS] - when it was last sent its status, and
+    # its pings this second (TYPE_SERVER_PING), so a ping can never become a flood.
+    steady: deque = field(default_factory=lambda: deque(maxlen=STEADY_WINDOW_SECONDS + 1))
+    info_sent_at: float = -1e9
+    asked_for_info: bool = False   # set by its first ping: only an app that pings is sent its status (see TYPE_SERVER_INFO)
+    ping_window_start: float = -1e9
+    ping_count: int = 0
 
 
 @dataclass
@@ -408,6 +434,11 @@ def _read_ticked_ids(body: bytes, tag_end: int) -> Optional[set[bytes]]:
     return ids
 
 
+def _hears_itself(ticked: Optional[set[bytes]], client_id: uuid.UUID) -> bool:
+    """True when a member's ticked list names the member itself: it asks to be sent its own sound back (see _handle_v2)."""
+    return ticked is not None and client_id.bytes in ticked
+
+
 def _encode_lobby_name(name: str) -> bytes:
     """Encode a display name into LOBBY_NAME_BYTES, null-padded."""
     encoded = (name or "").encode("utf-8", errors="replace")[:LOBBY_NAME_BYTES]
@@ -461,6 +492,9 @@ class Relay:
         self.beats: dict[bytes, GroupBeat] = {}
         # The relay's clock for the metronome, in seconds (a test may stand another in).
         self.clock = time.monotonic
+        # For the server's status: when this relay started, and when tick() last looked for members due theirs.
+        self.started_at = self.clock()
+        self.last_info_tick = -1e9
 
     def note(self, level: int, kind: str, addr: Optional[tuple[str, int]], fmt: str, *args, exc_info: bool = False) -> None:
         """Write one event line, unless lines of this kind have come too often this minute, from this address or from
@@ -1055,7 +1089,12 @@ class Relay:
                 self.v2_roster_dirty = True
             new_ticked = _read_ticked_ids(body, tag_end)
             if new_ticked != entry.ticked:
+                was_echoed = _hears_itself(entry.ticked, client_id)
                 entry.ticked = new_ticked
+                if _hears_itself(new_ticked, client_id) != was_echoed:
+                    self.note(logging.INFO, "self_echo", addr,
+                        "event=self_echo client_id=%s state=%s", client_id, "off" if was_echoed else "on",
+                    )
                 self.note(logging.INFO, "client_ticks", addr,
                     "event=client_ticks client_id=%s ticked=%s", client_id,
                     "everyone" if new_ticked is None else len(new_ticked),
@@ -1093,6 +1132,22 @@ class Relay:
             if from_registered_endpoint and self._may_forward_to(entry, "v2"):
                 self._timing_message(client_id, entry, data[V2_HEADER_LEN:])
             return
+        if pkt_type == TYPE_SERVER_PING:
+            # Straight back, untouched, so the member can time its round trip - only to a member at the address it is
+            # registered at, small, and a few a second at most, so it can never be turned on anybody as a flood.
+            if from_registered_endpoint and self._may_forward_to(entry, "v2") \
+                    and len(data) <= V2_HEADER_LEN + SERVER_PING_MAX_PAYLOAD:
+                entry.asked_for_info = True   # an app that pings reads the status too
+                if now - entry.ping_window_start >= 1.0:
+                    entry.ping_window_start = now
+                    entry.ping_count = 0
+                if entry.ping_count < SERVER_PING_MAX_PER_SECOND:
+                    entry.ping_count += 1
+                    try:
+                        self.sock.sendto(data, entry.addr)
+                    except OSError:
+                        pass
+            return
         if pkt_type not in V2_FORWARDABLE_TYPES:
             # Unknown / server-originated type from a client. Ignore quietly.
             return
@@ -1100,6 +1155,21 @@ class Relay:
             self._audio_note_arrival(entry)
             if entry.timing_known:
                 self._timing_note_arrival(entry, _stream_id, _sequence)
+
+        # Hearing yourself (Ed, 2026-10-01: "unmute myself to test round trip"): a member whose own hello names itself among
+        # the people it has ticked is sent its own sound back, as Jamulus sends you your own channel - its sound only (Audio
+        # and Format), never its heartbeats or anything else. Only on an explicit self-tick: a hello with no list at all
+        # means "everyone in my group", and that has never meant yourself.
+        if pkt_type in (TYPE_AUDIO, TYPE_FORMAT) and from_registered_endpoint and _hears_itself(entry.ticked, client_id)                 and self._may_forward_to(entry, "v2"):
+            try:
+                self.sock.sendto(data, entry.addr)
+                entry.tx_packets += 1
+                self.stats.forwarded += 1
+            except OSError as e:
+                self.note(logging.WARNING, "send_failed", entry.addr,
+                    "event=send_failed proto=v2 to=%s err=%s",
+                    _fmt_addr(entry.addr), e,
+                )
 
         # Fan-out forwarding to every OTHER client in the same group (verified addresses only, once enforcing).
         for other_id, other in self.v2_clients.items():
@@ -1133,8 +1203,84 @@ class Relay:
                 entry.audio_max_gap = gap_ms
             if gap_ms > AUDIO_GAP_LONG_MS:
                 entry.audio_long_gaps += 1
+        # The member's own last minute, for its status: second by second, so it is always the last sixty seconds. A wait
+        # of more than STEADY_RESTART_MS is somebody stopping and starting, not the network, and is not counted.
+        since = (now - entry.audio_last_arrival) * 1000 if entry.audio_last_arrival else None
+        second = int(now)
+        if not entry.steady or entry.steady[-1][0] != second:
+            entry.steady.append([second, 0, 0.0, 0])
+        bucket = entry.steady[-1]
+        bucket[1] += 1
+        if since is not None and since <= STEADY_RESTART_MS:
+            if since > bucket[2]:
+                bucket[2] = since
+            if since > AUDIO_GAP_LONG_MS:
+                bucket[3] += 1
         entry.audio_last_arrival = now
         entry.audio_count += 1
+
+    # ------- the server's own status (TYPE_SERVER_INFO, TYPE_SERVER_PING) -----
+
+    def _steady_last_minute(self, entry: ClientEntry, now: float) -> tuple[int, float, int, int]:
+        """This member's sound over the last STEADY_WINDOW_SECONDS: packets, the longest wait between two (ms), the waits
+        longer than AUDIO_GAP_LONG_MS, and how many of those seconds had any sound."""
+        cutoff = int(now) - STEADY_WINDOW_SECONDS
+        packets, longest, long_gaps, seconds = 0, 0.0, 0, 0
+        for second, count, gap, longs in entry.steady:
+            if second <= cutoff:
+                continue
+            packets += count
+            longest = max(longest, gap)
+            long_gaps += longs
+            seconds += 1
+        return packets, longest, long_gaps, seconds
+
+    def _server_info_packet(self, entry: ClientEntry, now: float) -> bytes:
+        """The status one member is sent: this server's version, how long it has run, its size in counts only, and that
+        member's own last minute of sound. Little-endian; see TYPE_SERVER_INFO."""
+        header = bytearray(V2_HEADER_LEN)
+        header[0:4] = MAGIC
+        header[4] = V2_VERSION
+        header[5] = TYPE_SERVER_INFO
+        header[V2_CLIENT_ID_OFFSET:V2_CLIENT_ID_OFFSET + V2_CLIENT_ID_LEN] = SERVER_CLIENT_ID_BYTES
+        version = SERVER_VERSION.encode("ascii")[:64]
+        people = len(self.v2_clients)
+        groups = len({e.group for e in self.v2_clients.values()})
+        free = max(0, self.max_clients - people)
+        # A phone or an older app holds an ordinary pair slot; an app's own slot beside one is not another device.
+        phones = sum(1 for p in self.v1_peers if self._v2_entry_at(p.addr) is None)
+        clock_now = self.clock()   # the clock the member's sound was timed by
+        packets, longest_ms, long_gaps, seconds = self._steady_last_minute(entry, clock_now)
+        uptime = max(0, int(clock_now - self.started_at))
+        body = bytes([SERVER_INFO_LAYOUT, len(version)]) + version + struct.pack(
+            "<IHHHHIIHH",
+            min(uptime, 0xFFFFFFFF), min(people, 0xFFFF), min(groups, 0xFFFF), min(free, 0xFFFF), min(phones, 0xFFFF),
+            min(packets, 0xFFFFFFFF), min(int(longest_ms * 1000), 0xFFFFFFFF), min(long_gaps, 0xFFFF), min(seconds, 0xFFFF),
+        )
+        return bytes(header) + body
+
+    def _server_info_tick(self, now: float) -> None:
+        """Every member due its status gets it: every SERVER_INFO_EVERY_SECONDS, and at once once it has proved its
+        address and pinged. Looked for at most every SERVER_INFO_TICK_SECONDS, since tick() runs after every packet."""
+        if now - self.last_info_tick < SERVER_INFO_TICK_SECONDS:
+            return
+        self.last_info_tick = now
+        enforced = self._v2_enforced()
+        for entry in self.v2_clients.values():
+            if enforced and not entry.verified:
+                continue
+            if not entry.asked_for_info:
+                continue   # it has never pinged: an app that cannot read the status (RemSound 6.0) is never sent it
+            if now - entry.info_sent_at < SERVER_INFO_EVERY_SECONDS:
+                continue
+            entry.info_sent_at = now
+            try:
+                self.sock.sendto(self._server_info_packet(entry, now), entry.addr)
+            except OSError as e:
+                self.note(logging.WARNING, "send_failed", entry.addr,
+                    "event=send_failed proto=v2 reason=server_info to=%s err=%s",
+                    _fmt_addr(entry.addr), e,
+                )
 
     def _log_audio_timing(self) -> None:
         """Once a minute, beside event=stats: for each client that sent sound, how many packets, the longest wait between
@@ -1352,6 +1498,7 @@ class Relay:
         # after every packet, and a list honoured on every packet was the relay's biggest amplifier
         # (pre-release sweep 2026-09-25). Nothing is lost: the flag stays set until the list goes out.
         self._timing_tick()
+        self._server_info_tick(now)
         since = now - self.v2_last_roster_broadcast
         if self.v2_clients and (
             since >= ROSTER_HEARTBEAT_SECONDS
@@ -1463,9 +1610,9 @@ def main() -> int:
 
     log = setup_logger(args.log_path)
     log.info(
-        "event=startup version_supported=v1,v2 listen=%s:%d max_clients=%d max_per_ip=%d addr_check=%s "
+        "event=startup version=%s version_supported=v1,v2 listen=%s:%d max_clients=%d max_per_ip=%d addr_check=%s "
         "v2_addr_check=%s",
-        args.host, args.port, args.max_clients, args.max_per_ip,
+        SERVER_VERSION, args.host, args.port, args.max_clients, args.max_per_ip,
         "ENFORCED" if args.require_addr_check else "watch-only",
         "ENFORCED" if args.require_addr_check or not args.v2_watch_only else "watch-only",
     )

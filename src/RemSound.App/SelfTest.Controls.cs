@@ -106,6 +106,10 @@ internal static partial class SelfTest
             (f, c) => ((CheckBox)c).Checked = !((CheckBox)c).Checked,
             f => f.ReceiveEnabledForTest,
             LogContains: "play incoming audio"),
+        new("muteReceivedCheckbox", "whether received audio is silenced on this computer's outputs",
+            (f, c) => ((CheckBox)c).Checked = !((CheckBox)c).Checked,
+            f => f.ReceiveMutedForTest,
+            LogContains: "mute received audio"),
         new("lockPeerAddressesBox", "the allow-list gate that rejects strangers",
             (f, c) => ((CheckBox)c).Checked = !((CheckBox)c).Checked,
             f => f.SettingsForTest.LoadLockPeerAddresses(),
@@ -133,6 +137,7 @@ internal static partial class SelfTest
         new("asioReceiveOutputDevicesList", "which ASIO output pairs play incoming audio", GovernsNothing: true, BothIndependentOnly: true),
         new("uncheckAllDevicesButton", "clears every ticked device at once", GovernsNothing: true),
         new("pushToTalkButton", "opens Push to talk settings, and says whether push to talk is on - PROVEN by 'PUSH TO TALK WINDOW'", GovernsNothing: true),
+        new("hearMyselfButton", "asks the server to send your own sound back, or to stop, and says which pressing it does - PROVEN by 'HEAR MYSELF BUTTON'", GovernsNothing: true),
 
         // ---- Volume, pan and EQ -----------------------------------------------------------------
         new("volumeSlider", "the selected peer's volume - EFFECT PROVEN by 'The pan and EQ tab's real controls reach the live sound', which moves this slider and measures the level", GovernsNothing: true),

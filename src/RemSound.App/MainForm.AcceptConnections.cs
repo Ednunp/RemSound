@@ -214,8 +214,9 @@ public sealed partial class MainForm
                 logFile.Event($"accept connections: {ResolvePeerDisplayName(peer)} at {remote.Address} {how}, but uses a different password — not offered or accepted");
             return;
         }
-        // A relay's own address is not a person: the people behind it arrive in the relay list with names of their own.
-        if (relayGroup.ConnectedRelay is { } relay && relay.Address.Equals(remote.Address)) return;
+        // A server's address is not a person, whether or not we are on it now: the people behind one arrive in its list with
+        // names of their own (Ed, 2026-10-01 - after leaving his server, its own address was accepted as a peer).
+        if (IsKnownServer(remote.Address)) { SayServerRefused(remote.Address, $"{how}, not accepted as a peer"); return; }
         if (!acceptAsked.Add($"peer:{remote.Address}")) return;
 
         var name = ResolvePeerDisplayName(peer);

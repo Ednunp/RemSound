@@ -146,9 +146,13 @@ public sealed partial class MainForm
     private void ReportCaptureTimesToServer()
     {
         var onServer = metronome.OnServer;
-        sender.TimingWanted = onServer;
-        if (!onServer) return;
+        // Hearing ourselves through the server times each packet's echo by the same capture times (HearMyselfMeter).
+        var hearing = relayGroup.HearsItself;
+        sender.TimingWanted = onServer || hearing;
+        if (!onServer && !hearing) return;
         var reports = sender.TakeTimingReports();
+        if (hearing) hearMyselfMeter.NoteSent(reports);
+        if (!onServer) return;
         lastReportPackets = reports.Count;
         if (reports.Count > 0 && relayGroup.SendTiming(ServerMetronomeWire.BuildReport(reports))) reportsSent++;
         // Which capture the server times this machine by, and the delay it takes on trust - said when it changes.
@@ -220,7 +224,13 @@ public sealed partial class MainForm
     private void ApplyMetronomeSettings(MetronomeSettings value, string? logAs)
     {
         metronomeSettings = value.Clone();
-        var sound = MetronomeSoundLibrary.Load(metronomeSettings.Sound) ?? MetronomeSoundLibrary.Load(MetronomeSoundLibrary.DefaultName);
+        // Heard live from the settings window (logAs null), a sound already loaded is used again rather than read from disk
+        // on every move of the volume slider; a profile loading, or OK, reads it afresh, so a sound file changed on disk is
+        // picked up.
+        var sound = logAs is null && metronomeSoundLoaded is { } loaded && loaded.Name.Equals(metronomeSettings.Sound, StringComparison.OrdinalIgnoreCase)
+            ? loaded
+            : MetronomeSoundLibrary.Load(metronomeSettings.Sound) ?? MetronomeSoundLibrary.Load(MetronomeSoundLibrary.DefaultName);
+        metronomeSoundLoaded = sound;
         metronome.Configure(metronomeSettings, sound);
         if (logAs is not null) LogUiChange(logAs, metronomeSettings.Describe());
         UpdateMetronomeMenu();
@@ -245,11 +255,75 @@ public sealed partial class MainForm
         ApplyMetronomeSettings(value, $"metronome tempo ({from})");
     }
 
+    /// <summary>The metronome volume hotkeys (Ed, 2026-10-01): 5 points a press, as the received-sound volume keys move, kept
+    /// in the profile as the window's OK keeps it. Your own clicks' volume, master or following, so it always counts.</summary>
+    private void StepMetronomeVolume(int delta, string from)
+    {
+        var value = settings.LoadMetronomeSettings();
+        var volume = Math.Clamp(value.Volume + delta, 0, 100);
+        if (volume == value.Volume) return;
+        value.Volume = volume;
+        settings.SaveMetronomeSettings(value);
+        MarkProfileDirty();
+        ApplyMetronomeSettings(value, $"metronome volume ({from})");
+    }
+
+    /// <summary>The Metronome settings window as the menu opens it: the profile's settings, the metronome's own Start and Stop
+    /// (Mute and Unmute while following), and every change in it heard at once (Ed, 2026-10-02).</summary>
+    private MetronomeSettingsDialog BuildMetronomeSettingsDialog(out MetronomeSettings saved)
+    {
+        saved = settings.LoadMetronomeSettings();
+        (string, MetronomeTimeline)? master = metronome.Role == MetronomeRole.Follower ? (metronome.MasterName, metronome.Timeline) : null;
+        return new MetronomeSettingsDialog(saved, master, MetronomeLoopbackSentNames(),
+            shortcutKeys: hotkeyController.MetronomeKeys, chooseKey: ChooseMetronomeKey,
+            metronomeState: () => (metronome.Playing, metronome.Role == MetronomeRole.Follower, metronome.Muted),
+            startStop: () => MetronomeStartStop("the metronome settings window"),
+            heardLive: s => ApplyMetronomeSettings(s, null));
+    }
+
+    /// <summary>Cancel (or Escape): the profile's settings back, heard at once, and a metronome the window started stopped
+    /// again - so Cancel still changes nothing.</summary>
+    private void CancelMetronomeSettings(MetronomeSettingsDialog dialog, MetronomeSettings saved)
+    {
+        if (dialog.ChangedLive)
+        {
+            ApplyMetronomeSettings(saved, null);
+            logFile.Event($"metronome: settings window cancelled - the profile's settings heard again ({saved.Describe()}) [{ActiveAudioConfiguration().Describe()}]");
+        }
+        if (dialog.StartedHere && metronome.Playing && metronome.Role != MetronomeRole.Follower)
+            MetronomeStartStop("the metronome settings window's Cancel");
+    }
+
+    /// <summary>The usual window for choosing a key, for the Metronome settings window's shortcut list.</summary>
+    private static HotkeyInfo? ChooseMetronomeKey(IWin32Window owner)
+    {
+        using var capture = MainFormHotkeyController.NewHotkeyCaptureForm();
+        return capture.ShowDialog(owner) == DialogResult.OK ? capture.CapturedHotkey : null;
+    }
+
+    /// <summary>The keys changed in the Metronome settings window: computer-wide, like every shortcut, so kept now and not
+    /// with the profile.</summary>
+    private void KeepMetronomeKeys(MetronomeSettingsDialog dialog)
+    {
+        foreach (var i in dialog.ChangedKeys)
+        {
+            hotkeyController.SetMetronomeKey(i, dialog.ShortcutKeys[i]);
+            LogUiChange($"metronome shortcut: {MetronomeSettingsDialog.KeyNames[i]}", dialog.ShortcutKeys[i].ToString());
+        }
+    }
+
+    private MetronomeSound? metronomeSoundLoaded;
+
     private void OpenMetronomeSettings()
     {
-        (string, MetronomeTimeline)? master = metronome.Role == MetronomeRole.Follower ? (metronome.MasterName, metronome.Timeline) : null;
-        using var dialog = new MetronomeSettingsDialog(settings.LoadMetronomeSettings(), master, MetronomeLoopbackSentNames());
-        if (dialog.ShowDialog(this) != DialogResult.OK || !dialog.ChangedSettings) return;
+        using var dialog = BuildMetronomeSettingsDialog(out var saved);
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            CancelMetronomeSettings(dialog, saved);
+            return;
+        }
+        KeepMetronomeKeys(dialog);
+        if (!dialog.ChangedSettings) return;
         settings.SaveMetronomeSettings(dialog.Result);
         MarkProfileDirty();
         ApplyMetronomeSettings(dialog.Result, "metronome");
@@ -437,6 +511,10 @@ public sealed partial class MainForm
     internal void MetronomeStartStopForTest(string from) => MetronomeStartStop(from);
     internal void SetMetronomeMasterForTest(bool master) => SetMetronomeMaster(master);
     internal void StepMetronomeTempoForTest(int delta, string from) => StepMetronomeTempo(delta, from);
+    internal void StepMetronomeVolumeForTest(int delta, string from) => StepMetronomeVolume(delta, from);
+    internal void KeepMetronomeKeysForTest(MetronomeSettingsDialog dialog) => KeepMetronomeKeys(dialog);
+    internal MetronomeSettingsDialog BuildMetronomeSettingsDialogForTest(out MetronomeSettings saved) => BuildMetronomeSettingsDialog(out saved);
+    internal void CancelMetronomeSettingsForTest(MetronomeSettingsDialog dialog, MetronomeSettings saved) => CancelMetronomeSettings(dialog, saved);
     internal void ApplyMetronomeSettingsForTest(MetronomeSettings value) => ApplyMetronomeSettings(value, "metronome");
 
     /// <summary>A change to the profile's metronome settings made as the window's OK makes it: kept in the profile, marked

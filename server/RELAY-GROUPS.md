@@ -16,7 +16,8 @@ is required. It only lets the app be one of many.
 ## What a relay is now
 
 A relay is a place you go, not a person in your peer list. On Windows the
-Connectivity tab has a relay box: you type the relay's address and press
+Connectivity tab has a Connect to server button (Windows calls relays servers).
+It opens a window with the servers you have been on, an address box and
 Connect. While you are connected, a list appears of the people on that relay who
 share your password, and you tick them exactly as you tick anybody else. Ticking
 means the same as it always did — I send to you and I accept yours — and sound
@@ -39,8 +40,10 @@ header followed by a 16-byte cookie). Echo it back to its source exactly as it
 came, as you should already.
 
 If a user types a relay's address into your add-a-peer box, that echo is how you
-can tell: on Windows the app now offers "you have entered the address of a
-relay, would you like to connect to this relay?" and moves it to the relay box.
+can tell: on Windows the app asks "You have entered the address of a server.
+Would you like to connect to this server?" and connects to it as one. From then
+on Windows remembers that address as a server and never ticks, accepts or
+remembers it as a person.
 
 ## 2. Join the group for your password
 
@@ -80,7 +83,7 @@ your 16-byte client id, then the ordinary payload, untouched:
 | ------ | ----- | ---- |
 | 0 | 4 | magic `RMND` |
 | 4 | 1 | version: **2** |
-| 5 | 1 | type (Format 1, Audio 2, Heartbeat 4, Control 5, Hello 6, Bye 9) |
+| 5 | 1 | type (Format 1, Audio 2, Keepalive 3, Heartbeat 4, Control 5, Hello 6, Bye 9, Metronome 12, Timing 13, Server ping 15) |
 | 6 | 2 | stream id, little-endian |
 | 8 | 4 | sequence, little-endian |
 | 12 | 16 | client id: the sender's; all zeros from the relay itself |
@@ -128,6 +131,15 @@ The relay passes a packet from A to B only when **all** of these hold:
 So ticking somebody who has not ticked you back gives silence in both
 directions, and unticking stops it in both directions at once. This is exactly
 the rule two people already have on a network, where each has to tick the other.
+
+**Hearing yourself (server-v2.15).** A member whose own tick list names its own
+client id is also sent its own Audio and Format packets back, unchanged, the way
+Jamulus sends you your own channel; nothing else of its own (heartbeats, control,
+metronome) ever comes back. A hello with no tick list never means yourself. The
+Windows app puts its own id first in the list while "Unmute myself to test round
+trip" is on, and takes those packets as from the member address its own id
+hashes to. An older relay ignores the extra id, so nothing comes back. The relay
+logs `event=self_echo state=on|off` when it changes.
 
 ## 6. Sending, once in a group
 
@@ -197,6 +209,31 @@ A relay only ever shows you the people on your own password. A new password is a
 new group, so when the user changes it while connected: send the hello again at
 once with the new tag and an empty tick list, drop everybody you had ticked, and
 let the new group's list arrive. Windows says so out loud when it happens.
+
+## 10. The metronome and the server's status
+
+- **Metronome (type 12, server-v2.14).** Sealed with the password, passed
+  between two members only when each has ticked the other, exactly as sound is.
+- **Timing (type 13, server-v2.14).** Read by the relay, never passed on: a
+  member's capture-time reports, and a claim, release or setting of the group's
+  metronome; the relay answers each reporting member with its own beat grid. A
+  member that never reports is sent nothing.
+- **Server ping (type 15, server-v2.16).** Send it in group framing with up to
+  32 bytes of your own; the relay sends it straight back, unchanged, at most four
+  a second, and only to a member at the address it is registered at. Windows
+  puts its clock in it to time its round trip, once a second.
+- **Server status (type 14, server-v2.16).** Sent by the relay every 5 seconds,
+  client id all zeros, to each member that has sent at least one ping - so an
+  app that never pings never sees it (RemSound 6.0 would have shown it as a
+  nameless member). Payload, little-endian: layout byte (1), version length, the
+  version in ASCII ("server-v2.16"), then uptime in seconds (4 bytes), people
+  (2), groups (2), free places (2), phones or older apps paired (2), your packets
+  in the last minute (4), your longest wait between two packets in microseconds
+  (4), your waits over 20 ms (2), seconds with sound (2). An older relay never
+  sends it. Treat the all-zero client id as the server itself, never a member.
+- Windows asks a server what it is before connecting (a hello under a throwaway
+  id named "server check", in a group of its own, pings, then a goodbye), and
+  warns if it says no version or one older than the newest release.
 
 The code: `remsound-relay.py` (the relay), `test_relay.py` (its rules), and on
 Windows `src/RemSound.Core/RelayGroupClient.cs` and

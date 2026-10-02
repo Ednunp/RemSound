@@ -67,6 +67,24 @@ public sealed class RemSoundSettingsStore
         AppConfig.Load().MetronomeTempoDownHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
     public void SaveMetronomeTempoDownHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.MetronomeTempoDownHotkey = HotkeyRecord.From(hotkey));
 
+    /// <summary>The metronome's volume up or down 5 points. Unset unless chosen.</summary>
+    public HotkeyInfo LoadMetronomeVolumeUpHotkey() =>
+        AppConfig.Load().MetronomeVolumeUpHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveMetronomeVolumeUpHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.MetronomeVolumeUpHotkey = HotkeyRecord.From(hotkey));
+    public HotkeyInfo LoadMetronomeVolumeDownHotkey() =>
+        AppConfig.Load().MetronomeVolumeDownHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveMetronomeVolumeDownHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.MetronomeVolumeDownHotkey = HotkeyRecord.From(hotkey));
+
+    /// <summary>Unmute or mute yourself to test the round trip on a server. Unset unless chosen.</summary>
+    public HotkeyInfo LoadHearMyselfHotkey() =>
+        AppConfig.Load().HearMyselfHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveHearMyselfHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.HearMyselfHotkey = HotkeyRecord.From(hotkey));
+
+    /// <summary>Mute or unmute received audio on this computer. Unset unless chosen.</summary>
+    public HotkeyInfo LoadMuteReceivedHotkey() =>
+        AppConfig.Load().MuteReceivedHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
+    public void SaveMuteReceivedHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.MuteReceivedHotkey = HotkeyRecord.From(hotkey));
+
     public HotkeyInfo LoadToggleRecordingHotkey() =>
         AppConfig.Load().ToggleRecordingHotkey?.ToHotkeyInfo() ?? HotkeyInfo.Unset;
     public void SaveToggleRecordingHotkey(HotkeyInfo hotkey) => SaveGlobalHotkey(c => c.ToggleRecordingHotkey = HotkeyRecord.From(hotkey));

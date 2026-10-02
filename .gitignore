@@ -76,3 +76,10 @@ suite-*.txt
 !/simulation-recordings/simulated-*.txt
 # Working notes from live tests, naming testers and their machines.
 LIVE-TEST-*.md
+
+# The live tests' local settings (the test server's address, user and SSH key) and their reports: this machine's alone.
+tools/PiLive/pi-live.local.json
+tools/PiLive/reports/
+
+# Ed's working masters of the cue sounds (with Sound Forge's peak files); the shipped ones are in default sounds.
+default sounds masters/

@@ -39,8 +39,10 @@ internal static partial class SelfTest
         // Driven for real by the control suite, in all three audio configurations: every control on
         // the window is enumerated from the live form, so a handler on a new control cannot hide.
         new("RemSound.App/MainForm.cs", "the control suite in all three configurations, with every control specified; a window "
-            + "disposed without being closed letting its sound go is the audio-priority guard's, over every step that builds one",
-            "Control suite - ", "Every control is specified", "GATE GUARD: no step leaves threads holding Windows' audio priority"),
+            + "disposed without being closed letting its sound go is the audio-priority guard's, over every step that builds one; the number boxes' Enter key, through the box's own key handling; "
+            + "Mute received audio, measured in all three configurations",
+            "Control suite - ", "Every control is specified", "GATE GUARD: no step leaves threads holding Windows' audio priority", "JITTER BUFFER BOX",
+            "MUTE RECEIVED AUDIO"),
         new("RemSound.App/MainForm.NetworkRecording.cs",
             "Record > Save the last minute of the network is driven through the control channel, as a user would: the file written "
             + "to the logs folder and said, and with nothing arrived nothing written",
@@ -55,7 +57,8 @@ internal static partial class SelfTest
             "KEY CLICKS"),
         new("RemSound.App/RelayConnectDialog.cs", "the dialog suite, the relay connect step, and the server window step (moving "
             + "through the remembered servers puts each in the box)",
-            "Dialog control suite", "Connecting to a relay, remembering it and ticking who is on it", "SERVER WINDOW"),
+            "Dialog control suite", "Connecting to a relay, remembering it and ticking who is on it", "SERVER WINDOW",
+            "SERVER WINDOW ENTER"),
         new("RemSound.App/ServiceSendHost.cs",
             "Windows saying the network changed, through the routine its handlers call, with the real service loop running; "
             + "the subscription itself is read from source, because a test cannot make Windows' network change",
@@ -69,8 +72,9 @@ internal static partial class SelfTest
             + "the Connect button's handler finishes in, and drives the remembered list and the tick list through their handlers",
             "Control suite - ", "Connecting to a relay, remembering it and ticking who is on it"),
         new("RemSound.App/MainFormHotkeyController.cs", "every Alt key, a hotkey change, the Keyboard shortcuts window in the dialog suite, "
-            + "and the metronome's keys' actions",
-            "Keyboard: every Alt key goes where it says", "AUDIT: changing a hotkey does not claim", "Dialog control suite", "METRONOME MENU", "METRONOME TEMPO KEYS"),
+            + "the metronome's keys' actions, the unmute-myself key's and the mute-received key's",
+            "Keyboard: every Alt key goes where it says", "AUDIT: changing a hotkey does not claim", "Dialog control suite", "METRONOME MENU", "METRONOME TEMPO KEYS",
+            "METRONOME VOLUME KEYS", "HEAR MYSELF BUTTON", "MUTE RECEIVED AUDIO"),
         new("RemSound.App/MainFormTrayController.cs",
             "the tray icon's right press and the menu closing are driven; the menu items call the same toggles, restore and exit "
             + "the control suite drives",
@@ -92,10 +96,16 @@ internal static partial class SelfTest
             "PUSH TO TALK WINDOW", "PUSH TO TALK DOUBLE TAP PREVIEW", "Dialog control suite"),
         new("RemSound.App/MainForm.PushToTalk.cs", "the button after Send my audio, clicked through the control channel to open the window",
             "PUSH TO TALK WINDOW"),
+        new("RemSound.App/MainForm.HearMyself.cs", "the Audio profile button, clicked through the control channel to unmute and mute",
+            "HEAR MYSELF BUTTON"),
+        new("RemSound.App/MainForm.ServerVersion.cs", "the out-of-date server warning's Visit GitHub button, clicked: the newest release's page and the log",
+            "OUT-OF-DATE SERVERS"),
         new("RemSound.App/MetronomeSettingsDialog.cs",
             "every control of the window driven through the control channel, and OK and Cancel, as a person uses them; the sound "
-            + "list's preview; and the dialog suite",
-            "METRONOME WINDOW", "Dialog control suite"),
+            + "list's preview; the shortcut list's Del through its own key handler, and its Enter and double-click's one routine; "
+            + "the Listen button, pressed through the control channel, and the watch that keeps its words in step (its routine, "
+            + "driven after a start from the menu); and the dialog suite",
+            "METRONOME WINDOW", "Dialog control suite", "METRONOME VOLUME KEYS", "METRONOME LISTEN"),
         new("RemSound.App/MainForm.Metronome.cs",
             "the Metronome menu's three items chosen through the control channel's menu command, and the engine's timer ticking in "
             + "the two-window master test",
@@ -200,12 +210,12 @@ internal static partial class SelfTest
         ["RemSound.App/CommandLineActions.cs"] = 1,
         ["RemSound.App/CuePlayer.cs"] = 1,
         ["RemSound.App/KeyClickService.cs"] = 1,
-        ["RemSound.App/MainForm.cs"] = 124,
+        ["RemSound.App/MainForm.cs"] = 126,
         ["RemSound.App/MainForm.AsioBufferSize.cs"] = 2,
         ["RemSound.App/MainForm.NameLookups.cs"] = 2,
         ["RemSound.App/MainForm.NetworkRecording.cs"] = 1,
         ["RemSound.App/MainForm.Relay.cs"] = 2,
-        ["RemSound.App/MainFormHotkeyController.cs"] = 23,
+        ["RemSound.App/MainFormHotkeyController.cs"] = 27,
         ["RemSound.App/MainFormTrayController.cs"] = 11,
         ["RemSound.App/ManualPeerPrompt.cs"] = 1,
         ["RemSound.App/PluginInstallPlaceDialog.cs"] = 2,
@@ -220,9 +230,11 @@ internal static partial class SelfTest
         ["RemSound.App/RecordingSettingsDialog.cs"] = 8,
         ["RemSound.App/PushToTalkDialog.cs"] = 11,
         ["RemSound.App/MainForm.PushToTalk.cs"] = 1,
-        ["RemSound.App/MetronomeSettingsDialog.cs"] = 8,
+        ["RemSound.App/MainForm.HearMyself.cs"] = 1,
+        ["RemSound.App/MetronomeSettingsDialog.cs"] = 12,
+        ["RemSound.App/MainForm.ServerVersion.cs"] = 1,
         ["RemSound.App/MainForm.Metronome.cs"] = 4,
-        ["RemSound.App/RelayConnectDialog.cs"] = 8,
+        ["RemSound.App/RelayConnectDialog.cs"] = 9,
         ["RemSound.App/RenamePeerDialog.cs"] = 2,
         ["RemSound.App/RouterPortMapper.cs"] = 1,
         ["RemSound.App/ServiceNetworkPresence.cs"] = 1,

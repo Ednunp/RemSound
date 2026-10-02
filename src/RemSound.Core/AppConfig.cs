@@ -221,6 +221,10 @@ public sealed class AppConfig
     /// phrase). Machine-wide like the send on/off cues. Default on; push to talk itself is off until a profile turns it on.</summary>
     public bool EnablePushToTalkOnCue { get; set; } = true;
     public bool EnablePushToTalkOffCue { get; set; } = true;
+    /// <summary>Connecting to a server, and disconnecting from it (Ed's sounds, 2026-10-01). Machine-wide like the send on/off
+    /// cues; default on.</summary>
+    public bool EnableServerConnectCue { get; set; } = true;
+    public bool EnableServerDisconnectCue { get; set; } = true;
     /// <summary>Sound played whenever the user switches between tabs anywhere in the app (the main
     /// window's tab strip and every tabbed dialog). Machine-wide, default on.</summary>
     public bool EnableTabSwitchCue { get; set; } = true;
@@ -297,6 +301,14 @@ public sealed class AppConfig
     /// unless chosen.</summary>
     public HotkeyRecord? MetronomeTempoUpHotkey { get; set; }
     public HotkeyRecord? MetronomeTempoDownHotkey { get; set; }
+    /// <summary>The metronome's volume up or down 5 points, from anywhere; held, it keeps going (Ed, 2026-10-01). Unset
+    /// unless chosen.</summary>
+    public HotkeyRecord? MetronomeVolumeUpHotkey { get; set; }
+    public HotkeyRecord? MetronomeVolumeDownHotkey { get; set; }
+    /// <summary>Unmute or mute yourself to test the round trip on a server, from anywhere (Ed, 2026-10-01). Unset unless
+    /// chosen.</summary>
+    public HotkeyRecord? HearMyselfHotkey { get; set; }
+    public HotkeyRecord? MuteReceivedHotkey { get; set; }
 
     /// <summary>If true, the "Use Windows default output" follower at the top of the received-sound
     /// output list is ticked at startup, so received sound plays to whatever Windows currently calls
@@ -382,6 +394,15 @@ public sealed class AppConfig
     /// <summary>Starting the metronome with no server says that nobody else will hear it (Ed, 2026-09-29), until "Do not show
     /// me this message again" is ticked.</summary>
     public bool ShowMetronomeNoServerMessage { get; set; } = true;
+
+    /// <summary>The first "Unmute myself to test round trip" warns against sending a loopback of what you hear while your own
+    /// sound comes back (Ed, 2026-10-01), until "Do not show me this message again" is ticked.</summary>
+    public bool ShowHearMyselfWarning { get; set; } = true;
+
+    /// <summary>Every address this computer has found to be a server - one connected to as a server, or one that sent the
+    /// address check only a server sends - so it is never ticked, accepted or remembered as a person (Ed, 2026-10-01: "a
+    /// server should never be in a profile peer list"). Newest last, at most 64.</summary>
+    public List<string> KnownServerAddresses { get; set; } = [];
 
     /// <summary>If true, RemSound tries to open the audio port (UDP 47830) on the local router
     /// using UPnP / NAT-PMP / PCP, so peers on the public internet can reach this machine

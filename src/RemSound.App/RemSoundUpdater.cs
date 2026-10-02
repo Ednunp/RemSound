@@ -135,6 +135,35 @@ internal sealed class RemSoundUpdater
         }
     }
 
+    /// <summary>The newest relay server release on GitHub - the highest plain <c>server-vX.Y</c> tag, not a draft, a
+    /// prerelease or a hand-made test tag such as <c>server-v2.13.3-metronome-test</c> - or null when GitHub can't be asked
+    /// or lists none. For the out-of-date server warning (<see cref="ServerVersionCheck"/>). Never throws.</summary>
+    public async Task<string?> LatestServerReleaseAsync(CancellationToken token = default)
+    {
+        try
+        {
+            var url = ReleasesUrlForTest ?? $"https://api.github.com/repos/{RepoOwner}/{RepoName}/releases?per_page=100";
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+            using var resp = await http.SendAsync(req, token).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+            {
+                Log?.Invoke($"server version: HTTP {(int)resp.StatusCode} from GitHub asking for the newest server release");
+                return null;
+            }
+            await using var stream = await resp.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
+            var releases = await JsonSerializer.DeserializeAsync<List<GitHubRelease>>(stream, JsonOpts, token).ConfigureAwait(false);
+            return releases?
+                .Where(r => !r.Draft && !r.Prerelease && ServerVersionCheck.IsPlainReleaseTag(r.TagName))
+                .MaxBy(r => ServerVersionCheck.Parse(r.TagName))?.TagName;
+        }
+        catch (Exception ex)
+        {
+            Log?.Invoke($"server version: could not ask GitHub for the newest server release: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
     /// <summary>Maps a thrown exception from the GitHub HTTP call to a coarse-grained
     /// <see cref="FailureKind"/> the UI can hang an honest plain-English message off without
     /// quoting the underlying .NET exception type. Most "couldn't reach the server" errors

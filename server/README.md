@@ -185,7 +185,9 @@ only releases signed with the RemSound release key.
   Tailscale must NOT carry this traffic — the whole point of the relay is
   to remove Tailscale's hops from the audio path.
 - The relay process itself never decodes audio. It validates the
-  RemSound header (magic `RMND`, version 1 or 2) and forwards or drops.
+  RemSound header (magic `RMND`, version 1 or 2) and forwards or drops. It
+  also answers members' pings and sends each member that pings it the
+  server's status (see below).
 
 ## Address proof and the per-IP cap
 
@@ -233,6 +235,27 @@ only releases signed with the RemSound release key.
   beat. One member leads it at a time; anyone can ask to take over. Members
   that never report (phones, older apps) are sent nothing. A relay before
   server-v2.14 drops both types, and nobody can be the master metronome on it.
+- **Hearing yourself (since server-v2.15).** A member whose tick list names
+  itself is sent its own sound back (Audio and Format packets only, never its
+  heartbeats or anything else), the way Jamulus sends you your own channel, so
+  it can hear its whole round trip. A hello with no tick list never means
+  yourself. Older apps never name themselves, so nothing changes for them; an
+  older relay ignores the extra id and sends nothing back.
+- **The server's status (since server-v2.16).** A member's ping (packet type
+  15) is sent straight back, unchanged, so the app can time its round trip:
+  only to a member at the address it is registered at, at most four a second,
+  and at most 32 bytes. Every 5 seconds the relay sends each member that has
+  pinged it its status (packet type 14, from the all-zero client id): its
+  version, how long it has run, how many people are on it, in how many groups,
+  how many places are free, and how many phones or older apps hold a pair slot.
+  Counts only, never a name, and never who is in another group. It also says
+  how that member's own sound arrived over the last minute: packets, the
+  longest wait between two, and how many waits were over 20 ms. Neither is
+  passed on to anybody, and a member that has not proved its address is sent
+  neither. A member that never pings is never sent the status: RemSound 6.0
+  knows neither type, and would show the status as a nameless member. Windows
+  RemSound 6.1 pings once a second, shows these in its Server window, and warns
+  before connecting to a server older than the newest release.
 - **The member list is rate-limited (since server-v2.13).** A change (a join,
   a name, a tick) sends the list again at most four times a second; the
   once-a-second list is unchanged. It used to go out on every packet that
@@ -257,7 +280,7 @@ only releases signed with the RemSound release key.
 Structured key=value lines. Notable events:
 
 ```
-event=startup version_supported=v1,v2 listen=0.0.0.0:47830 max_clients=64 max_per_ip=8 addr_check=watch-only v2_addr_check=ENFORCED
+event=startup version=server-v2.16 version_supported=v1,v2 listen=0.0.0.0:47830 max_clients=64 max_per_ip=8 addr_check=watch-only v2_addr_check=ENFORCED
 
 # v1 (pairwise)
 event=peer_joined addr=1.2.3.4:5555 slots_filled=1
@@ -274,6 +297,8 @@ event=client_endpoint_move_pending client_id=<uuid> old=... new=...   (echoed: t
 event=client_endpoint_moved client_id=<uuid> old=... new=... old_silent_s=5.2
 event=client_endpoint_move_refused client_id=<uuid> old=... new=... old_heard_s_ago=0.3   (the old address kept talking)
 event=client_named client_id=<uuid> name='Andre'
+# a RemSound 6.1 checking this server's version before it connects: in a group of its own, seen by nobody, gone in a second or two
+event=client_named client_id=<uuid> name='server check'
 event=client_grouped client_id=<uuid> group=1a2b   (the first 2 bytes of the tag only)
 event=client_ticks client_id=<uuid> ticked=3       (or ticked=everyone when the hello carries no list)
 event=client_left client_id=<uuid> addr=... reason=bye
@@ -298,6 +323,9 @@ event=metronome_released client_id=<uuid>          (or reason=master_left)
 # typical and a late packet arrive (the path's jitter), and how far the least moved since the last
 # line (clocks drifting apart, or the path changing)
 event=metronome_timing client_id=<uuid> addr=... readings=N typical_ms=2.10 late_ms=7.95 moved_ms=0.40
+
+# hearing yourself (since server-v2.15): a member started or stopped asking for its own sound back
+event=self_echo client_id=<uuid> state=on
 
 # once a minute: two lines, counting since the previous pair
 event=stats forwarded=N dropped_unpaired=N dropped_lobby_full=N

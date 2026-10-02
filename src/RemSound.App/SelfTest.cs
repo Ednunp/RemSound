@@ -156,6 +156,8 @@ internal static partial class SelfTest
         RemSound.Sender.AudioSender.CountOffMachineForTest = true;
         // Nor does anything in it ask the real router to open a port: a Preferences tick reaching the live mapper would.
         RouterPortMapper.NoNetworkForTest = true;
+        // Nor ask GitHub for the newest server, nor stop on the out-of-date warning, on every step that joins a server.
+        ServerVersionCheck.ForGateRun = true;
         // Nor open a browser: the help window's manual button, pressed by the dialog suite, would (2026-09-25). And the
         // help window gets the app's sounds and log, as it does at startup.
         HelpLauncher.BrowserForTest = RunBrowsed.Enqueue;
@@ -638,15 +640,30 @@ internal static partial class SelfTest
         RunStep(results, "METRONOME OUTPUTS: through the real WASAPI stage and ASIO output, each click on its exact sample by that output's own delay - WASAPI, ASIO and both", MetronomeThroughTheRealOutputs);
         RunStep(results, "METRONOME NEVER SENT: an output this profile sends a loopback of never plays the click, the others do, and the window and the log say so", MetronomeNeverOnALoopbackSentOutput);
         RunStep(results, "METRONOME WINDOW: opened from the menu, changed control by control, OK keeps it in the profile and the log, Cancel changes nothing, the sound list previews", MetronomeWindowSavesToTheProfile);
+        RunStep(results, "METRONOME LISTEN: the settings window's own Listen and Stop, every change heard at once, Cancel puts it all back", MetronomeListenInTheWindow);
         RunStep(results, "METRONOME MENU: Start and Stop from the menu, the hotkey and the control channel, logged with the configuration and in the status", MetronomeMenuHotkeyAndControl);
         RunStep(results, "METRONOME PROFILE: the defaults in a new profile, kept with it, v6.0 profiles load the defaults, the key kept on this computer", MetronomeInTheProfile);
         RunStep(results, "METRONOME TEMPO KEYS: up and down a beat a minute from anywhere, kept in the profile, held at 30 and 300, a follower's left alone", MetronomeTempoKeys);
+        RunStep(results, "METRONOME VOLUME KEYS: 5 points a press from anywhere into the profile, the unmute-myself key, and the settings window's own list of the metronome's keys", MetronomeVolumeKeysAndShortcuts);
         RunStep(results, "METRONOME HANDOVER: leading, told who follows and who said no; asked when another would take over - no is sent, yes hands over", MetronomeHandoverBothWays);
         RunStep(results, "METRONOME THROUGH THE SERVER: the real relay and two windows - followed, the server's metronome claimed and started, each playing its own measured grid, the lead handed over", MetronomeThroughTheServer);
         RunStep(results, "METRONOME SERVER RULES: claim and setting at once and each second, each machine its own grid, silent until timed, the follower's timeout, giving way", MetronomeServerRules);
         RunStep(results, "METRONOME CAPTURE TIMES: each packet's time for the server - its own lane's input delay, its place in the block, its sequence, the instrument's lane first", MetronomeCaptureTimesForTheServer);
         RunStep(results, "METRONOME WITHOUT A SERVER: it clicks for you alone and says so until hidden; being the master needs a server", MetronomeWithoutAServer);
         RunStep(results, "JAMULUS-STYLE THROUGH THE SERVER: the real relay - sent through it while everyone there can decode it, the ordinary stream for all when someone cannot", JamulusStyleThroughTheServer);
+        RunStep(results, "HEAR MYSELF ON THE WIRE: unmuted, the hello names us and our own sound is let back in; leaving the server mutes us", HearMyselfOnTheWire);
+        RunStep(results, "HEAR MYSELF THROUGH THE SERVER: the real relay sends our own sound back while unmuted, each lane on its own, and it is timed", HearMyselfThroughTheServer);
+        RunStep(results, "HEAR MYSELF BUTTON: Unmute myself to test round trip, its loopback warning, and why it stays muted", HearMyselfButton);
+        RunStep(results, "SERVER STATUS SIMULATED: your round trip, the server's size and how steadily your sound reaches it, over networks from the simulator", ServerStatusSimulated);
+        RunStep(results, "SERVER STATUS THROUGH THE SERVER: the real relay sends each member its status and its pings back, its own sound counted", ServerStatusThroughTheServer);
+        RunStep(results, "SERVER STATUS IN THE SERVER WINDOW: the lines in Ed's order, only on a server, held still while read; and the tray", ServerStatusInTheServerWindow);
+        RunStep(results, "SERVER SOUNDS: one as you connect to a server, the other as you disconnect; not for groups; silent when switched off", ServerSoundsPlay);
+        RunStep(results, "SERVER CHECK: before connecting, the real relay says its version within a second under a throwaway name; an older server and nothing there are told apart", ServerCheckBeforeConnecting);
+        RunStep(results, "OUT-OF-DATE SERVERS: no version or an older one than GitHub's newest is warned about in Ed's words, every time, Connect anyway, Visit GitHub or Cancel", OutOfDateServers);
+        RunStep(results, "JITTER BUFFER BOX: after Enter the whole number is selected, so the next one typed replaces it - WASAPI and ASIO boxes", JitterBoxSelectsAfterEnter);
+        RunStep(results, "STREAMS LINE: the underruns this second are never below nought when a stream ends", UnderrunsNeverNegative);
+        RunStep(results, "SAVE AS IN RECENT PROFILES: a profile made with Save as heads Recent profiles, there when RemSound next starts", SaveAsGoesInRecentProfiles);
+        RunStep(results, "SERVERS ARE NEVER PEERS: a server met once is never ticked, accepted, remembered or reconnected as a person", ServersAreNeverPeers);
         RunStep(results, "METRONOME SERVICE: not part of the send-only service", MetronomeIsNotInTheService);
         RunStep(results, "METRONOME IN THE DAW: offered only with In the DAW and last, 0.0.0.1 refused as a peer, a track's clicks within one DAW block of the beat, RemSound's outputs silent of them", MetronomeInTheDaw);
         RunStep(results, "METRONOME RECORDING: ticked, the click on the exact sample it was heard - single file shaped or raw, a track of its own when split; off, none - WASAPI, ASIO and both", MetronomeInTheRecording);
@@ -662,6 +679,7 @@ internal static partial class SelfTest
         RunStep(results, "JAMULUS-STYLE SENDING: PCM as picked is a packet per callback, and the 64-sample stream goes in place of Opus only to whoever plays through ASIO", TheAsioLaneSendsEachStreamToTheRightPeople);
         RunStep(results, "SERVER PATH: audio through a server is received at real-time priority from the first packet, gaps timed", TheServerPathIsAlwaysBoosted);
         RunStep(results, "SERVER WINDOW: remembered servers first, closes without a word on connecting, stays open when a server is not found; the server's list only while on one", ServerWindowAndList);
+        RunStep(results, "SERVER WINDOW ENTER: Enter on a remembered server connects to it, or moves you there from another; on the one you are on it stays", EnterOnARememberedServerConnects);
         RunStep(results, "FAST TIMER: while streaming, a hidden RemSound's 10 ms tick keeps time (measured), and lets go when streaming stops", TheFastTimerHoldsWhileStreaming);
         RunStep(results, "CAPTURE DELAY PER LANE: each lane's format says its own capture, and the far end's readout counts the right one per output", EachLaneAnnouncesItsOwnCaptureDelay);
         RunStep(results, "JAMULUS-STYLE HEARTBEAT: a copy that only listens through ASIO still asks for the frames", TheHeartbeatCarriesTheJamulusFlag);
@@ -674,6 +692,8 @@ internal static partial class SelfTest
         RunStep(results, "PLUGIN RECEIVE: every frame asked for is played, in order, at 44.1 kHz and with the block size changing", ThePluginPlaysEveryFrameItAskedFor);
         RunStep(results, "PEER EQ: a person's streams each have their own, so two streams are not distorted", APeersEqIsNotSharedBetweenTheirStreams);
         RunStep(results, "RECEIVE OFF: the ticked outputs stay closed until receiving is switched on", OutputsStayClosedWithReceiveOff);
+        RunStep(results, "MUTE RECEIVED AUDIO: silence on every output, WASAPI, ASIO and both, the buffers still read and a plugin's peer still served; the box, its hotkey and a peer's remote toggle", MuteReceivedAudio);
+        RunStep(results, "SLIDER KEYS: Up and Page Up mean more on the master volume, a person's volume, the EQ bands and push to talk's level, the master volume heard, kept and logged at once; pan as it was", SlidersUpMeansMore);
         RunStep(results, "RECORDING: every block moves a recording on, silent or not", ARecordingMovesOnWhileNoPeerPlays);
         RunStep(results, "PLUGIN RECEIVE: a DAW track keeps its peer when the WASAPI output stops being read", APluginTrackPlaysWhenTheWasapiOutputStops);
         RunStep(results, "PLUGIN STATUS: says plainly when Receive audio is off in RemSound", APluginSaysWhenReceiveIsOffInRemSound);
@@ -2961,7 +2981,7 @@ internal static partial class SelfTest
         {
             "connect.wav", "disconnect.wav", "start up.wav",
             "send on.wav", "send off.wav", "recieve on.wav", "recieve off.wav", "minimise.wav", "maximise.wav",
-            "check.wav", "uncheck.wav", "push talk on.wav", "push talk off.wav",
+            "check.wav", "uncheck.wav", "push talk on.wav", "push talk off.wav", "server connect.wav", "server disconnect.wav",
         })
         {
             Check(CueSounds.Variants(cue).Count > 0,

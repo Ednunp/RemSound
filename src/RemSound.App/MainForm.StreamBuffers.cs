@@ -142,8 +142,8 @@ public sealed partial class MainForm
         if (reports.Count == 0) return;
         var asioUnderruns = receiver.TuneBlockingUnderrunsFor(RenderRoute.AsioLane);
         var wasapiUnderruns = receiver.TuneBlockingUnderrunsFor(RenderRoute.WasapiLane);
-        var asioNew = streamsLastUnderrunsAsio < 0 ? 0 : asioUnderruns - streamsLastUnderrunsAsio;
-        var wasapiNew = streamsLastUnderrunsWasapi < 0 ? 0 : wasapiUnderruns - streamsLastUnderrunsWasapi;
+        var asioNew = UnderrunsThisSecond(asioUnderruns, streamsLastUnderrunsAsio);
+        var wasapiNew = UnderrunsThisSecond(wasapiUnderruns, streamsLastUnderrunsWasapi);
         streamsLastUnderrunsAsio = asioUnderruns;
         streamsLastUnderrunsWasapi = wasapiUnderruns;
         var streams = string.Join(" | ", reports.Select(r =>
@@ -159,6 +159,11 @@ public sealed partial class MainForm
                     + $"WASAPI={receiver.DropoutGapsFor(RenderRoute.WasapiLane)}; server path gap={serverGap}ms dispatch={serverDispatch}ms; "
                     + $"{sending}; peers asking for Jamulus-style={CustomOpusPeers.Count} | {streams}");
     }
+
+    /// <summary>The underruns since the last second. The total is summed over the streams playing now, so a stream ending
+    /// takes its own away and the total falls: that once logged "underruns this second ASIO=-143" (Ed's ASIO evening,
+    /// 2026-10-01 20:08:03). A fall counts as none; the next second counts from the new total.</summary>
+    internal static long UnderrunsThisSecond(long total, long last) => last < 0 ? 0 : Math.Max(0, total - last);
 
     internal bool LowestDelayTuneForTest => lowestDelayTune;
     internal bool AutoTuneOnForTest(RenderRoute route) => AutoTuneOnFor(route);

@@ -141,8 +141,10 @@ internal static partial class SelfTest
             var targets = form.TickProofTargetsForTest();
             Check(targets.Any(t => t.Address.Equals(ticked.Address)), "a peer we have ticked must be sent a proof");
             // A server somebody put in their peer list (a phone reached through it): ticked, and still never sent a proof.
-            var relay = new IPEndPoint(IPAddress.Parse("203.0.113.77"), RemPacket.DefaultPort);
-            form.SelectPeerForTest(new PeerAnnouncement(Guid.NewGuid(), "203.0.113.77", RemPacket.DefaultPort, true, true, DateTime.UtcNow, relay.Address));
+            // An address no other step connects to as a server: one that has been a server on this computer is never ticked
+            // as a peer at all, and in the full gate's shared settings 203.0.113.77 already had been (2026-10-02).
+            var relay = new IPEndPoint(IPAddress.Parse("203.0.113.177"), RemPacket.DefaultPort);
+            form.SelectPeerForTest(new PeerAnnouncement(Guid.NewGuid(), "203.0.113.177", RemPacket.DefaultPort, true, true, DateTime.UtcNow, relay.Address));
             Check(form.SelectedSendEndpointsForTest().Any(e => e.Address.Equals(relay.Address)), "premise: the server's address is ticked as a peer");
             form.ConnectToRelayForTest("relay.example.test", relay);
             Check(!form.TickProofTargetsForTest().Any(t => t.Address.Equals(relay.Address)), "THE SERVER: a server must never be sent a proof - its member list does that job");

@@ -213,12 +213,21 @@ internal static partial class SelfTest
             + "only and 'both' ask the one driver the same thing at its open, which is what is checked"),
         new("PerStreamBuffersFollowTheirOwnArrivals", "a decode-only receiver with no output device: a stream's own sizing is the same on "
             + "any output, and the test's two streams are one peer's ASIO and WASAPI streams"),
+        // The jitter buffer boxes (2026-10-02).
+        new("JitterBoxSelectsAfterEnter", "the two number boxes themselves, the jitter buffer box and the ASIO one, and what Enter does to "
+            + "their text; both are driven, and no sound runs, so there is no configuration to vary"),
         new("TheAsioLaneSendsEachStreamToTheRightPeople", "the Jamulus-style stream exists only on the ASIO lane, driven here directly; "
             + "PCM's packet per callback is checked on the ASIO lane and the WASAPI lane beside it, the two lanes of 'both'; in "
             + "WASAPI-only there is no ASIO lane to act on"),
         new("MetronomeThroughTheServer", "two windows on one machine, each fed on its WASAPI lane, through the real relay: what is "
             + "checked is the server's timing, the same whichever lane is timed; which lane is timed, and with what input "
             + "delay, is checked in all three configurations by MetronomeCaptureTimesForTheServer"),
+        new("ServerStatusThroughTheServer", "what is checked is what the server says and its ping coming back - counts, a version, "
+            + "a member's own packets - decided by the server, not by any output; the apps only decode, no output configuration "
+            + "is opened"),
+        new("HearMyselfThroughTheServer", "what is checked is the server sending our own streams back, and the relay group letting "
+            + "them in, decided by the server and the ticks, not by the outputs; the receivers only decode - no output configuration "
+            + "is opened - and an echo then plays as any peer's stream does, which the receive suites check in all three"),
         new("JamulusStyleThroughTheServer", "the Jamulus-style stream exists only on the ASIO lane, driven here directly; what is "
             + "checked is who the server may pass it to, a sending rule decided per target, and the receivers only decode - no "
             + "output configuration is opened"),

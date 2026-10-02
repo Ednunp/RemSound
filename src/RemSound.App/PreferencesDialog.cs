@@ -271,6 +271,11 @@ internal sealed class PreferencesDialog : Form
                 c => c.EnableHideCue, (c, v) => c.EnableHideCue = v),
             MachineRow("Restore (show) sound", MainForm.CueId.Show, "maximise.wav",
                 c => c.EnableShowCue, (c, v) => c.EnableShowCue = v),
+            // Connecting to a server and disconnecting from it (Ed's sounds, 2026-10-01).
+            MachineRow("Server connected sound", MainForm.CueId.ServerConnect, "server connect.wav",
+                c => c.EnableServerConnectCue, (c, v) => c.EnableServerConnectCue = v),
+            MachineRow("Server disconnected sound", MainForm.CueId.ServerDisconnect, "server disconnect.wav",
+                c => c.EnableServerDisconnectCue, (c, v) => c.EnableServerDisconnectCue = v),
             // Played on every checkbox tick / untick across the whole app (CheckSoundService).
             MachineRow("Checkbox ticked sound", MainForm.CueId.CheckboxOn, "check.wav",
                 c => c.EnableCheckboxOnCue, (c, v) => c.EnableCheckboxOnCue = v),

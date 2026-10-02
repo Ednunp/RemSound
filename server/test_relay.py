@@ -363,6 +363,281 @@ class Ticks(unittest.TestCase):
                          "c has ticked a, but a has not ticked c: c must not be sent a's audio")
 
 
+class HearMyself(unittest.TestCase):
+    """Ed, 2026-10-01: "unmute myself to test round trip". A member whose own hello names itself among the people it has
+    ticked is sent its own sound back - Audio and Format only - the way Jamulus sends you your own channel. A hello with
+    no list ("everyone") never means yourself, and the mutual-tick rule between members is untouched."""
+
+    def _logged(self, r):
+        log = logging.getLogger(f"remsound-relay-test-echo-{uuid.uuid4()}")
+        log.propagate = False
+        log.setLevel(logging.INFO)
+        captured = _CapturedLog()
+        log.addHandler(captured)
+        r.log = log
+        return captured
+
+    def test_alone_and_self_ticked_you_are_sent_your_own_sound(self):
+        r = make_relay()
+        a = ("10.9.0.1", 9000)
+        join(r, cid(1), "a", G1, a, ticked=[cid(1)])
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"MY-OWN-SOUND"), a)
+        r.handle_packet(v2_packet(relay.TYPE_FORMAT, cid(1), b"MY-OWN-FORMAT"), a)
+        self.assertTrue(forwarded_to(r.sock, a, b"MY-OWN-SOUND"), "a member that ticked itself must be sent its own audio back")
+        self.assertTrue(forwarded_to(r.sock, a, b"MY-OWN-FORMAT"), "and its own format packets, so the stream can be opened")
+
+    def test_only_sound_comes_back(self):
+        r = make_relay()
+        a = ("10.9.1.1", 9100)
+        join(r, cid(1), "a", G1, a, ticked=[cid(1)])
+        r.sock.sent.clear()
+        for kind, payload in ((relay.TYPE_HEARTBEAT, b"MY-HEARTBEAT"), (relay.TYPE_KEEPALIVE, b"MY-KEEPALIVE"),
+                              (relay.TYPE_CONTROL, b"MY-CONTROL"), (relay.TYPE_METRONOME, b"MY-METRONOME")):
+            r.handle_packet(v2_packet(kind, cid(1), payload), a)
+            self.assertFalse(forwarded_to(r.sock, a, payload), f"type {kind} is not sound and must never come back")
+
+    def test_without_the_self_tick_nothing_comes_back(self):
+        r = make_relay()
+        a, b = ("10.9.2.1", 9200), ("10.9.2.2", 9201)
+        join(r, cid(1), "a", G1, a, ticked=[cid(2)])
+        join(r, cid(2), "b", G1, b)   # no list at all: "everyone in my group"
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"A-SOUND"), a)
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(2), b"B-SOUND"), b)
+        self.assertFalse(forwarded_to(r.sock, a, b"A-SOUND"), "ticking somebody else is not ticking yourself")
+        self.assertFalse(forwarded_to(r.sock, b, b"B-SOUND"), "a hello with no list has never meant yourself")
+        self.assertTrue(forwarded_to(r.sock, b, b"A-SOUND"), "premise: the ordinary rule still passes a's sound to b")
+
+    def test_muting_yourself_again_stops_it_and_the_log_says_both(self):
+        r = make_relay()
+        captured = self._logged(r)
+        a = ("10.9.3.1", 9300)
+        join(r, cid(1), "a", G1, a, ticked=[])
+        self.assertFalse(any(m.startswith("event=self_echo") for m in captured.messages), "nothing to say before it is asked for")
+        r.handle_packet(hello(cid(1), "a", G1, ticked=[cid(1)]), a)
+        self.assertTrue(any(m.startswith("event=self_echo") and "state=on" in m for m in captured.messages),
+                        f"turning it on must be logged ({captured.messages})")
+        r.handle_packet(hello(cid(1), "a", G1, ticked=[cid(1)]), a)
+        self.assertEqual(sum(m.startswith("event=self_echo") for m in captured.messages), 1, "the same hello again logs nothing")
+        r.handle_packet(hello(cid(1), "a", G1, ticked=[]), a)
+        self.assertTrue(any(m.startswith("event=self_echo") and "state=off" in m for m in captured.messages),
+                        f"turning it off must be logged ({captured.messages})")
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"AFTER-MUTE"), a)
+        self.assertFalse(forwarded_to(r.sock, a, b"AFTER-MUTE"), "once the self-tick goes, its sound must not come back")
+
+    def test_others_are_unaffected(self):
+        r = make_relay()
+        a, b, c = ("10.9.4.1", 9400), ("10.9.4.2", 9401), ("10.9.4.3", 9402)
+        join(r, cid(1), "a", G1, a, ticked=[cid(1), cid(2)])
+        join(r, cid(2), "b", G1, b, ticked=[cid(1)])
+        join(r, cid(3), "c", G1, c, ticked=[cid(1)])
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"A-PLAYS"), a)
+        self.assertTrue(forwarded_to(r.sock, a, b"A-PLAYS"), "a hears itself")
+        self.assertTrue(forwarded_to(r.sock, b, b"A-PLAYS"), "b, ticked both ways, hears a as ever")
+        self.assertFalse(forwarded_to(r.sock, c, b"A-PLAYS"), "c is still not sent a's sound: a has not ticked c")
+        self.assertEqual(sum(1 for data, to in r.sock.sent if to == a and b"A-PLAYS" in data), 1, "and a gets one copy, not one per member")
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(2), b"B-PLAYS"), b)
+        self.assertFalse(forwarded_to(r.sock, b, b"B-PLAYS"), "b has not ticked itself, so b is not sent its own sound")
+
+    def test_someone_else_cannot_have_your_sound_sent_back_to_you(self):
+        r = make_relay(require_addr_check=True)
+        a, spoof = ("10.9.5.1", 9500), ("10.9.5.66", 9566)
+        join(r, cid(1), "a", G1, a, ticked=[cid(1)])
+        r.sock.sent.clear()
+        r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"FORGED"), spoof)
+        self.assertFalse(forwarded_to(r.sock, a, b"FORGED"),
+                         "a packet with a's id from another address must not be echoed to a")
+
+
+def server_infos_to(sock: FakeSocket, addr) -> list[dict]:
+    """Every TYPE_SERVER_INFO the relay sent to addr, read the way the app reads it."""
+    out = []
+    for data, to in sock.sent:
+        if to != addr or len(data) <= relay.V2_HEADER_LEN or data[4] != relay.V2_VERSION or data[5] != relay.TYPE_SERVER_INFO:
+            continue
+        body = data[relay.V2_HEADER_LEN:]
+        n = body[1]
+        version = body[2:2 + n].decode("ascii")
+        (uptime, people, groups, free, phones, packets, longest_us, long_gaps, seconds) = struct.unpack_from("<IHHHHIIHH", body, 2 + n)
+        out.append(dict(layout=body[0], version=version, uptime=uptime, people=people, groups=groups, free=free, phones=phones,
+                        packets=packets, longest_ms=longest_us / 1000, long_gaps=long_gaps, seconds=seconds,
+                        sender_id=data[relay.V2_CLIENT_ID_OFFSET:relay.V2_CLIENT_ID_OFFSET + 16], raw=data))
+    return out
+
+
+class ServerStatus(unittest.TestCase):
+    """Ed, 2026-10-01: a status box about the server - how many people and groups, your round trip to the server, how
+    steadily your sound reaches it, the server's version (server-v2.16). Counts only: never a name, never who is in
+    another group. A member's own sound figures go to that member alone."""
+
+    def _three_in_two_groups(self, r, ping=True):
+        a, b, c = ("10.12.0.1", 9500), ("10.12.0.2", 9501), ("10.12.0.3", 9502)
+        join(r, cid(1), "alice", G1, a, ticked=[cid(2)])
+        join(r, cid(2), "bob", G1, b, ticked=[cid(1)])
+        join(r, cid(3), "carol", G2, c)
+        if ping:   # an app that reads the status pings the server, once a second
+            for n, addr in ((1, a), (2, b), (3, c)):
+                r.handle_packet(v2_packet(relay.TYPE_SERVER_PING, cid(n), b"\0" * 8), addr)
+        return a, b, c
+
+    def test_a_member_that_never_pings_is_never_sent_the_status(self):
+        # RemSound 6.0 knows neither type, and read the status - a group packet from the all-zero id - as a member's: a
+        # nameless member in its server list every five seconds (2026-10-02, found before server-v2.16 went out).
+        r = make_relay(max_clients=10)
+        a, b, c = self._three_in_two_groups(r, ping=False)
+        r.sock.sent.clear()
+        now = time.monotonic()
+        for later in (0.0, relay.SERVER_INFO_EVERY_SECONDS + 0.1, 2 * relay.SERVER_INFO_EVERY_SECONDS + 0.2):
+            r.tick(now + later)
+        for addr in (a, b, c):
+            self.assertFalse(server_infos_to(r.sock, addr), f"{addr} never pinged, so it must never be sent the status")
+        r.handle_packet(v2_packet(relay.TYPE_SERVER_PING, cid(1), b"\0" * 8), a)
+        r.sock.sent.clear()
+        r.tick(now + 3 * relay.SERVER_INFO_EVERY_SECONDS)
+        self.assertEqual(len(server_infos_to(r.sock, a)), 1, "its first ping asks for it, and it comes at the next look")
+        self.assertFalse(server_infos_to(r.sock, b), "while one that still has not pinged is sent nothing")
+
+    def test_a_ping_that_is_not_answered_does_not_ask_for_the_status(self):
+        r = make_relay(require_addr_check=True, max_clients=10)
+        a, _, _ = self._three_in_two_groups(r, ping=False)
+        r.handle_packet(v2_packet(relay.TYPE_SERVER_PING, cid(1), b"FORGED"), ("10.12.9.9", 9999))
+        r.sock.sent.clear()
+        r.tick(time.monotonic())
+        self.assertFalse(server_infos_to(r.sock, a), "a ping with alice's id from another address must not ask for her status")
+
+    def test_each_member_is_sent_the_servers_status_at_once_and_every_five_seconds(self):
+        r = make_relay(max_clients=10)
+        a, b, c = self._three_in_two_groups(r)
+        r.sock.sent.clear()
+        now = time.monotonic()
+        r.tick(now)
+        for addr in (a, b, c):
+            infos = server_infos_to(r.sock, addr)
+            self.assertEqual(len(infos), 1, f"{addr} must be sent its status once, straight away")
+            info = infos[0]
+            self.assertEqual(info["layout"], relay.SERVER_INFO_LAYOUT)
+            self.assertEqual(info["version"], relay.SERVER_VERSION)
+            self.assertEqual((info["people"], info["groups"], info["free"], info["phones"]), (3, 2, 7, 0),
+                             "three people in two groups, seven places free, no phones")
+            self.assertEqual(info["sender_id"], relay.SERVER_CLIENT_ID_BYTES, "it comes from the relay itself, not a member")
+        r.sock.sent.clear()
+        r.tick(now + 1.0)
+        self.assertFalse(server_infos_to(r.sock, a), "not again a second later")
+        r.tick(now + relay.SERVER_INFO_EVERY_SECONDS + 0.1)
+        self.assertEqual(len(server_infos_to(r.sock, a)), 1, "and again once five seconds have passed")
+
+    def test_counts_only_never_names(self):
+        r = make_relay()
+        a, b, c = self._three_in_two_groups(r)
+        r.sock.sent.clear()
+        r.tick(time.monotonic())
+        for info in server_infos_to(r.sock, a):
+            for name in (b"alice", b"bob", b"carol"):
+                self.assertNotIn(name, info["raw"], "the status must carry counts, never a name")
+            for other in (cid(2), cid(3)):
+                self.assertNotIn(other, info["raw"], "nor anybody's id")
+
+    def test_a_member_is_sent_its_own_sound_figures_and_nobody_elses(self):
+        r = make_relay()
+        a, b, c = self._three_in_two_groups(r)
+        t = [1000.0]
+        r.clock = lambda: t[0]
+        for gap in [0.01] * 50 + [0.045] + [0.01] * 20:
+            t[0] += gap
+            r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"A"), a)
+        r.sock.sent.clear()
+        r.tick(time.monotonic())
+        mine = server_infos_to(r.sock, a)[0]
+        theirs = server_infos_to(r.sock, b)[0]
+        self.assertEqual(mine["packets"], 71, "alice's own packets this last minute")
+        self.assertAlmostEqual(mine["longest_ms"], 45.0, delta=0.5, msg="her longest wait between two")
+        self.assertEqual(mine["long_gaps"], 1, "one wait over 20 ms")
+        self.assertGreaterEqual(mine["seconds"], 1)
+        self.assertEqual((theirs["packets"], theirs["longest_ms"], theirs["long_gaps"]), (0, 0, 0), "bob sent nothing: his figures are his own")
+
+    def test_stopping_and_starting_is_not_a_gap(self):
+        r = make_relay()
+        a, _, _ = self._three_in_two_groups(r)
+        t = [2000.0]
+        r.clock = lambda: t[0]
+        for gap in [0.01] * 10 + [30.0] + [0.01] * 10:
+            t[0] += gap
+            r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"A"), a)
+        r.sock.sent.clear()
+        r.tick(time.monotonic())
+        info = server_infos_to(r.sock, a)[0]
+        self.assertLess(info["longest_ms"], 20, "thirty seconds of nothing is somebody who stopped, not the network")
+        self.assertEqual(info["long_gaps"], 0)
+
+    def test_the_last_minute_only(self):
+        r = make_relay()
+        a, _, _ = self._three_in_two_groups(r)
+        t = [3000.0]
+        r.clock = lambda: t[0]
+        for gap in [0.01] * 5 + [0.5] + [0.01] * 5:
+            t[0] += gap
+            r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"A"), a)
+        t[0] += 90
+        for _ in range(5):
+            t[0] += 0.01
+            r.handle_packet(v2_packet(relay.TYPE_AUDIO, cid(1), b"A"), a)
+        r.sock.sent.clear()
+        r.tick(time.monotonic())
+        info = server_infos_to(r.sock, a)[0]
+        self.assertEqual(info["packets"], 5, "a minute and a half ago is not the last minute")
+        self.assertLess(info["longest_ms"], 20)
+
+    def test_a_phone_counts_but_an_apps_own_pair_slot_does_not(self):
+        r = make_relay()
+        a, _, _ = self._three_in_two_groups(r)
+        phone = ("10.12.0.9", 9509)
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"PHONE"), phone)
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"APP"), a)   # the app's own claim of the slot beside it
+        r.sock.sent.clear()
+        r.tick(time.monotonic())
+        self.assertEqual(server_infos_to(r.sock, a)[0]["phones"], 1, "one phone, and the app's own slot is not another device")
+
+    def test_an_unproved_member_is_sent_nothing(self):
+        r = make_relay()
+        addr = ("10.12.1.1", 9600)
+        r.handle_packet(hello(cid(7), "unproved", G1, ticked=[]), addr)   # never answers its address check
+        r.sock.sent.clear()
+        r.tick(time.monotonic())
+        self.assertFalse(server_infos_to(r.sock, addr), "an address that never proved itself must be sent nothing")
+
+    def test_a_ping_comes_straight_back_untouched_to_the_sender_only(self):
+        r = make_relay()
+        a, b, _ = self._three_in_two_groups(r)
+        ping = v2_packet(relay.TYPE_SERVER_PING, cid(1), b"\x01\x02\x03\x04\x05\x06\x07\x08")
+        r.sock.sent.clear()
+        r.handle_packet(ping, a)
+        self.assertEqual([(d, to) for d, to in r.sock.sent if d[5] == relay.TYPE_SERVER_PING], [(ping, a)],
+                         "the ping must come straight back to its sender, unchanged, and go nowhere else")
+
+    def test_a_ping_from_anywhere_else_or_too_big_or_too_often_is_not_answered(self):
+        r = make_relay(require_addr_check=True)
+        a, _, _ = self._three_in_two_groups(r, ping=False)   # this second's pings all its own
+        r.sock.sent.clear()
+        def pongs():
+            return [(d, to) for d, to in r.sock.sent if len(d) > 5 and d[4] == relay.V2_VERSION and d[5] == relay.TYPE_SERVER_PING]
+        r.handle_packet(v2_packet(relay.TYPE_SERVER_PING, cid(1), b"FORGED"), ("10.12.9.9", 9999))
+        self.assertFalse(pongs(), "a ping with alice's id from another address must not be answered")
+        r.handle_packet(v2_packet(relay.TYPE_SERVER_PING, cid(1), b"X" * (relay.SERVER_PING_MAX_PAYLOAD + 1)), a)
+        self.assertFalse(pongs(), "a ping too big must not be answered")
+        for i in range(10):
+            r.handle_packet(v2_packet(relay.TYPE_SERVER_PING, cid(1), bytes([i])), a)
+        self.assertEqual(len(pongs()), relay.SERVER_PING_MAX_PER_SECOND, "at most a few a second, so it can never be a flood")
+
+    def test_the_version_it_says_is_the_bundles(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, "VERSION"), encoding="utf-8") as f:
+            self.assertEqual(f.read().strip(), relay.SERVER_VERSION, "SERVER_VERSION must match the VERSION file")
+
+
 class Metronome(unittest.TestCase):
     """2026-09-28: the master metronome's messages (type 12) pass between group members exactly as sound does - both
     must have ticked each other - and types the relay does not know are still dropped."""

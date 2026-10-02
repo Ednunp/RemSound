@@ -47,6 +47,90 @@ internal static partial class SelfTest
         return "Save as from a locked profile wrote an editable copy, the window held it as editable, and the original stayed locked";
     }
 
+    /// <summary>SAVE AS IN RECENT PROFILES (Ed, 2026-10-01: "when you open a profile, then change settings, then save as a new
+    /// profile, then open remsound again, i didn't see that newly saved profile in the recents profiles"). Save as's own code,
+    /// after its file picker: the new profile heads the list, the one it was made from next, as the settings the next start
+    /// reads hold them.</summary>
+    private static string? SaveAsGoesInRecentProfiles()
+    {
+        var dir = Path.Combine(AppConfig.UserDataDirectory, "sweep-recent-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        MainForm? form = null;
+        try
+        {
+            var store = new ProfileStore(dir);
+            var first = Profile.NewBlank();
+            first.Title = "Band night";
+            first.Password = RemSoundCrypto.Obfuscate("band-password");   // no password question in the way
+            store.Save(first);
+            try { form = new MainForm(store, first, "Band night", store.PathFor("Band night"), headless: true); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+            var opened = store.PathFor("Band night");
+            Check(AppConfig.Load().RecentProfiles.FirstOrDefault() is { } top && string.Equals(top, opened, StringComparison.OrdinalIgnoreCase),
+                "premise: opening a profile puts it at the top of Recent profiles");
+            var copyPath = store.PathFor("Band night with drums");
+            form.SaveProfileAsToForTest(copyPath);
+            var recent = AppConfig.Load().RecentProfiles;
+            Check(recent.Count >= 2 && string.Equals(recent[0], copyPath, StringComparison.OrdinalIgnoreCase)
+                  && string.Equals(recent[1], opened, StringComparison.OrdinalIgnoreCase),
+                $"SAVE AS: the new profile must head Recent profiles, the one it came from next ({string.Join(" | ", recent.Take(3))})");
+            form.SaveProfileAsToForTest(copyPath);
+            Check(AppConfig.Load().RecentProfiles.Count(p => string.Equals(p, copyPath, StringComparison.OrdinalIgnoreCase)) == 1,
+                "and saved again under the same name, it is there once");
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            try { Directory.Delete(dir, recursive: true); } catch { /* the run's own folder */ }
+        }
+        return "a profile made with Save as headed Recent profiles in the settings the next start reads, the one it came from next, and once only";
+    }
+
+    /// <summary>JITTER BUFFER BOX (Ed, 2026-10-01: he typed 1 and Enter, then 5, and the box said 15). The Enter key itself,
+    /// through the box's own key handling: the number is taken, and then the whole of it selected, in both the WASAPI (or
+    /// only) box and the ASIO one.</summary>
+    private static string? JitterBoxSelectsAfterEnter()
+    {
+        MainForm? form = null;
+        try
+        {
+            try { form = new MainForm(null, Profile.NewBlank(), null, null, headless: true); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+            _ = form.Handle;
+            var onKeyDown = Require(typeof(Control).GetMethod("OnKeyDown", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic),
+                "Control.OnKeyDown not found");
+            foreach (var (box, name) in new[] { (form.JitterBufferBoxForTest, "the jitter buffer box"), (form.AsioJitterBufferBoxForTest, "the ASIO jitter buffer box") })
+            {
+                _ = box.Handle;
+                var inner = Require(box.Controls.OfType<TextBox>().FirstOrDefault(), $"{name}'s text part");
+                _ = inner.Handle;
+                inner.Text = "1";
+                inner.Select(1, 0);   // typed: the caret after the 1
+                onKeyDown.Invoke(inner, [new KeyEventArgs(Keys.Enter)]);
+                for (var i = 0; i < 5; i++) Application.DoEvents();
+                Check(box.Value == 1, $"{name}: Enter must take the number typed ({box.Value})");
+                Check(inner.SelectionStart == 0 && inner.SelectionLength == inner.Text.Length && inner.Text.Length > 0,
+                    $"{name}: AFTER ENTER the whole number must be selected, so typing 5 next gives 5, not 15 (selected {inner.SelectionStart}+{inner.SelectionLength} of \"{inner.Text}\")");
+            }
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+        }
+        return "Enter took the number typed and selected the whole of it, in the jitter buffer box and the ASIO one";
+    }
+
+    /// <summary>STREAMS LINE (Ed's logs, 2026-10-01 20:08:03: "underruns this second ASIO=-143"). The count the line uses: none at
+    /// the first second, the rise since the last, and none - never a negative - when a stream ending takes its own away.</summary>
+    private static string? UnderrunsNeverNegative()
+    {
+        Check(MainForm.UnderrunsThisSecond(500, -1) == 0, "THE FIRST SECOND: nothing to count from, so none");
+        Check(MainForm.UnderrunsThisSecond(507, 500) == 7, "A RISE: the underruns since the last second");
+        Check(MainForm.UnderrunsThisSecond(357, 500) == 0, $"A STREAM ENDED, the total down 143: none, not -143 ({MainForm.UnderrunsThisSecond(357, 500)})");
+        Check(MainForm.UnderrunsThisSecond(360, 357) == 3, "and the next second counts from the new total");
+        return "none at the first second, the rise since the last, none when a stream ending lowers the total, and on from the new total";
+    }
+
     /// <summary>Browse turns a switched-off sound on - Browse's own code, after its file picker.</summary>
     private static string? BrowseSwitchesASoundOn()
     {

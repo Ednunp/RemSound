@@ -108,8 +108,11 @@ public sealed partial class MainForm : Form
     //   * Each box is wrapped in its own FlowLayoutPanel before being placed in the
     //     TableLayoutPanel cell — same as the old code.
     private readonly AccessibleCheckBox receiveAudioCheckbox = new() { Text = "Receive audio", AutoSize = true };
+    // Mute received audio (Ed, 2026-10-02, as the Mac has it): silence on this computer's outputs, nothing stopped.
+    private readonly AccessibleCheckBox muteReceivedCheckbox = new() { Text = "Mute received audio", AutoSize = true };
     private readonly AccessibleCheckBox sendMyAudioCheckbox = new() { Text = "Send my audio", AutoSize = true };
-    private readonly TrackBar volumeBar = new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Value = 100, Width = Dpi.Px(200) };
+    // Up means louder (Ed, 2026-10-02: "the master volume for received audio is also odd in that arrows up make it go down").
+    private readonly UpMeansMoreTrackBar volumeBar = new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Value = 100, Width = Dpi.Px(200) };
     // Receive output devices. Ticks are saved on the profile and put back when it loads
     // (ApplyPendingProfileToControls); the "Use Windows default" row is a machine-wide preference.
     private readonly CheckedListBox receiveOutputDevicesList = new() { CheckOnClick = true, Width = Dpi.Px(430), Height = Dpi.Px(90) };
@@ -235,7 +238,8 @@ public sealed partial class MainForm : Form
     // A checklist: ticking a peer applies your shaping to them (a per-peer bypass), and the peer the
     // cursor is on is the one the controls below edit.
     private readonly CheckedListBox panEqPeerList = new() { Width = Dpi.Px(430), Height = Dpi.Px(90), IntegralHeight = false, AccessibleName = "Peers (Alt+U)" };
-    private readonly TrackBar volumeSlider = new() { Minimum = 0, Maximum = 100, Value = 100, SmallChange = 1, LargeChange = 10, TickFrequency = 25, Width = Dpi.Px(320) };
+    // Up means louder, as on the master volume (Ed, 2026-10-02). Pan keeps Windows' own keys: it has no up.
+    private readonly UpMeansMoreTrackBar volumeSlider = new() { Minimum = 0, Maximum = 100, Value = 100, SmallChange = 1, LargeChange = 10, TickFrequency = 25, Width = Dpi.Px(320) };
     private readonly TrackBar panSlider = new() { Minimum = 0, Maximum = 100, Value = 50, SmallChange = 1, LargeChange = 10, TickFrequency = 25, Width = Dpi.Px(320) };
     private readonly Button resetPeerEqButton = new() { Text = "Set peer E&Q to default (Alt+Q)", AutoSize = true, AccessibleName = "Set peer EQ to default" };
     // Readable while greyed out, with no peer chosen (finding 10): Windows drew its selected row grey on blue.
@@ -623,6 +627,9 @@ public sealed partial class MainForm : Form
     private CuePlayer? receiveOffSound;
     private CuePlayer? hideSound;
     private CuePlayer? showSound;
+    // Connecting to a server and disconnecting from it (Ed's sounds, 2026-10-01): MainForm.Servers.
+    private CuePlayer? serverConnectSound;
+    private CuePlayer? serverDisconnectSound;
     // Labels for the three WASAPI send/receive device lists, captured at layout time so
     // ApplyAsioMode can set their visibility along with the lists. null until BuildLayout has run.
     private MnemonicLabel? sendOutputDevicesLabel;
@@ -758,9 +765,9 @@ public sealed partial class MainForm : Form
         if (!addrCheckGate.ShouldEcho(remote, AddrCheckTalkingTo, Environment.TickCount64)) return;
         try { sender.SendVia(packet, length, remote); }
         catch (Exception ex) { logFile.Event($"addr-check echo to {remote} failed: {ex.GetType().Name}: {ex.Message}"); }
-        // Only a relay sends one of these. If it came from somebody in the peer list, that "peer" is a relay:
-        // offer to connect to it as one (Ed, 2026-09-20).
-        try { BeginInvoke(() => OfferRelayForPeerAddress(remote)); }
+        // Only a relay sends one of these, so that address is a server: never a person (MainForm.Servers). Typed as a peer by
+        // the person, they are asked whether to connect to it as one (Ed, 2026-09-20).
+        try { BeginInvoke(() => ServerAnsweredAt(remote)); }
         catch (InvalidOperationException) { /* window not up yet */ }
     }
     // Cached "ip:port|ip:port" signature of the endpoints currently armed for AUDIO, so the
@@ -1024,6 +1031,8 @@ public sealed partial class MainForm : Form
         // "labels are one phrase used twice" rule.
         receiveAudioCheckbox.Text = "Receive audio (Alt+&R)";
         receiveAudioCheckbox.AccessibleName = "Receive audio";
+        muteReceivedCheckbox.Text = "Mute received audio (Alt+&M)";
+        muteReceivedCheckbox.AccessibleName = "Mute received audio";
         sendMyAudioCheckbox.Text = "Send my audio (Alt+&S)";
         sendMyAudioCheckbox.AccessibleName = "Send my audio";
 
@@ -1078,6 +1087,12 @@ public sealed partial class MainForm : Form
         hotkeyController.ToggleMetronome = () => MetronomeStartStop("the hotkey");
         hotkeyController.MetronomeTempoUp = () => StepMetronomeTempo(+1, "the hotkey");
         hotkeyController.MetronomeTempoDown = () => StepMetronomeTempo(-1, "the hotkey");
+        hotkeyController.MetronomeVolumeUp = () => StepMetronomeVolume(+5, "the hotkey");
+        hotkeyController.MetronomeVolumeDown = () => StepMetronomeVolume(-5, "the hotkey");
+        // Unmute or mute yourself on the server, as the button does (Ed, 2026-10-01).
+        hotkeyController.ToggleHearMyself = () => ToggleHearMyself("the hotkey");
+        // Mute or unmute received audio, as its box does (Ed, 2026-10-02).
+        hotkeyController.ToggleMuteReceived = () => muteReceivedCheckbox.Checked = !muteReceivedCheckbox.Checked;
         trayController = new MainFormTrayController(
             this,
             // getSending / toggleSending — the tray's "Enable sending" checkable item reads
@@ -1324,13 +1339,16 @@ public sealed partial class MainForm : Form
             if (relayGroup.HandleInbound(buffer, ref length, remote, out var member) == RelayInbound.Consumed) return;
             if (member is not null) remote = member;
             if (length < RemPacket.HeaderSize) return;
-            if (!RemPacket.TryReadHeader(buffer.AsSpan(0, length), out var type, out _, out _)) return;
+            if (!RemPacket.TryReadHeader(buffer.AsSpan(0, length), out var type, out var streamId, out var sequence)) return;
             if (type == RemPacketType.Heartbeat)
             {
                 heartbeatService?.HandleInjectedPacket(buffer, length, remote);
             }
             else
             {
+                // Our own sound back from the server (Unmute myself to test round trip): timed as it arrives.
+                if (type == RemPacketType.Audio && member is not null && member.Equals(relayGroup.OwnEchoAddress))
+                    hearMyselfMeter.NoteArrival(streamId, sequence, MetronomeClock.NowUs());
                 // Format / Audio / KeepAlive — feed into the receiver's existing pipeline as if
                 // it had arrived on the well-known port. Allow-list, session creation, decoder,
                 // and playout all work unchanged — they don't know or care which socket the
@@ -1366,7 +1384,7 @@ public sealed partial class MainForm : Form
         // "10". The Enter event fires when the control receives focus (keyboard or click); we
         // post a select-all to it so the cursor lands on a fully-selected value, and any
         // typed digits replace the selection.
-        SelectAllOnFocus(maxLatencyBox);
+        SelectWholeNumber(maxLatencyBox);
         // Push the slider's value to the receiver. With no ASIO driver (WasapiOnly) that's the
         // Mixed route; in BothIndependent the slider drives the WasapiLane route. The
         // ASIO-lane initial push happens later in WireBothIndependentControls once the
@@ -1440,6 +1458,8 @@ public sealed partial class MainForm : Form
         TryLoadCueSound(CueId.ReceiveOff, "recieve off.wav", out receiveOffSound);
         TryLoadCueSound(CueId.Hide, "minimise.wav", out hideSound);
         TryLoadCueSound(CueId.Show, "maximise.wav", out showSound);
+        TryLoadCueSound(CueId.ServerConnect, "server connect.wav", out serverConnectSound);
+        TryLoadCueSound(CueId.ServerDisconnect, "server disconnect.wav", out serverDisconnectSound);
 
         LoadAudioDevices();
         // Apply persisted ASIO mode from settings — switches sender/receiver backends so the
@@ -1462,6 +1482,15 @@ public sealed partial class MainForm : Form
             // "It went quiet" is one of the most common reports, and until 2026-08-24 the one
             // control that makes it go quiet left no trace whatsoever.
             LogUiChange("listening volume", $"{volumeBar.Value}%");
+        };
+        // Mute received audio: the engine's mute, which plays silence on every output, WASAPI and ASIO, while the buffers
+        // keep running - so unmuting is instant, and a DAW plugin's peers carry on. Kept in the profile, as the volume is
+        // and as the Mac keeps it.
+        muteReceivedCheckbox.CheckedChanged += (_, _) =>
+        {
+            receiver.IsMuted = muteReceivedCheckbox.Checked;
+            MarkProfileDirty();
+            LogUiChange("mute received audio", muteReceivedCheckbox.Checked ? "on" : "off");
         };
         WireCheckedListAccessibility(receiveOutputDevicesList, receiveOutputDevicesStatusLabel, "receive output device");
         receiveOutputDevicesList.ItemCheck += (_, e) =>
@@ -4684,6 +4713,7 @@ public sealed partial class MainForm : Form
         // suppresses them; the FlowLayoutPanel wrapper restores the announcement chain).
         var receiveCheckboxPanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         receiveCheckboxPanel.Controls.Add(receiveAudioCheckbox);
+        receiveCheckboxPanel.Controls.Add(muteReceivedCheckbox);
         panel.Controls.Add(receiveCheckboxPanel, 1, 2);
         receiveOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 3, "WASAPI outputs for received audio (Alt+&3):", receiveOutputDevicesList, receiveOutputDevicesStatusLabel, FocusListControl);
         asioReceiveOutputDevicesLabel = FormLayoutRows.AddCheckedListRow(panel, 4, "ASIO outputs for received audio (Alt+&1):", asioReceiveOutputDevicesList, asioReceiveOutputDevicesStatusLabel, FocusListControl);
@@ -4693,6 +4723,7 @@ public sealed partial class MainForm : Form
         // Push to talk's settings, straight after Send my audio (2026-09-28); the button says whether it is on.
         sendCheckboxPanel.Controls.Add(pushToTalkButton);
         WirePushToTalkButton();
+        WireHearMyselfButton();
         panel.Controls.Add(sendCheckboxPanel, 1, 6);
 
         // Row 7: "how to send WASAPI audio" chooser — audio devices (the classic loopback list) or
@@ -5205,6 +5236,7 @@ public sealed partial class MainForm : Form
         ContextHelp.Mark(uncheckAllDevicesButton, "audio-io.uncheck-all");
         ContextHelp.Mark(asioDriverBox, "audio-io.asio-driver");
         ContextHelp.Mark(receiveAudioCheckbox, "audio-io.receive");
+        ContextHelp.Mark(muteReceivedCheckbox, "audio-io.mute-received");
         ContextHelp.Mark(receiveOutputDevicesList, "audio-io.wasapi-outputs");
         ContextHelp.Mark(asioReceiveOutputDevicesList, "audio-io.asio-outputs");
         ContextHelp.Mark(volumeBar, "audio-io.volume");
@@ -5238,6 +5270,7 @@ public sealed partial class MainForm : Form
         ContextHelp.Mark(continuousTuneAsioBox, "audio-profile.asio-auto-tune");
         ContextHelp.Mark(maxLatencyBox, "audio-profile.jitter-buffer");
         ContextHelp.Mark(continuousTuneBox, "audio-profile.auto-tune");
+        ContextHelp.Mark(hearMyselfButton, "audio-profile.hear-myself");
         ContextHelp.Mark(continuousIntervalBox, "audio-profile.auto-tune-interval");
         ContextHelp.Mark(lowestDelayTuneBox, "audio-profile.lowest-delay");
         ContextHelp.Mark(measuredLatencyReadout, "audio-profile.total-latency");
@@ -5622,7 +5655,7 @@ public sealed partial class MainForm : Form
             for (int i = 0; i < bands.Length; i++)
             {
                 float gainDb = gains is not null && i < gains.Length ? gains[i] : 0f;
-                var slider = new TrackBar
+                var slider = new UpMeansMoreTrackBar   // Up raises a band (Ed, 2026-10-02)
                 {
                     Minimum = 0,
                     Maximum = 100,
@@ -5934,7 +5967,7 @@ public sealed partial class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 6,
+            RowCount = 7,
             AutoSize = true,
         };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -5953,7 +5986,7 @@ public sealed partial class MainForm : Form
         asioLatencyLabel = new Label { Text = "AS&IO jitter buffer in milliseconds (Alt+I):", AutoSize = true, Anchor = AnchorStyles.Left };
         FormLayoutRows.LevelWithTop(asioLatencyLabel, 3 + maxLatencyAsioBox.Margin.Top);   // 3: the row panel's own margin
         asioLatencyLabel.Click += (_, _) => FocusControl(maxLatencyAsioBox);
-        SelectAllOnFocus(maxLatencyAsioBox);
+        SelectWholeNumber(maxLatencyAsioBox);
         maxLatencyAsioBox.Value = Math.Clamp(settings.LoadMaxLatencyMsAsio(), (int)maxLatencyAsioBox.Minimum, (int)maxLatencyAsioBox.Maximum);
         continuousTuneAsioBox.Text = "Continuous auto-tune ASIO jitter buffer (Alt+&U)";
         continuousTuneAsioBox.AccessibleName = "Continuous auto-tune ASIO jitter buffer";
@@ -5981,7 +6014,6 @@ public sealed partial class MainForm : Form
         // Level with the number box on the first line of its row, not centred on a row that wraps onto two lines.
         FormLayoutRows.LevelWithTop(wasapiLatencyLabel, 3 + maxLatencyBox.Margin.Top);   // 3: the row panel's own margin
         wasapiLatencyLabel.Click += (_, _) => FocusControl(maxLatencyBox);
-        SelectAllOnFocus(maxLatencyBox);
         continuousTuneBox.Text = "Continuous auto-tune jitter buffer (Alt+&U)";
         continuousTuneBox.AccessibleName = "Continuous auto-tune jitter buffer";
         continuousTuneBox.Checked = continuousTuneEnabled;
@@ -6099,15 +6131,20 @@ public sealed partial class MainForm : Form
         panel.Controls.Add(measuredLatencyLabel, 0, 3);
         panel.Controls.Add(measuredLatencyReadout, 1, 3);
 
-        // === Row 3: Buffer smoothness ===
+        // === Row 4: Unmute myself to test round trip (Ed, 2026-10-01) ===
+        // Straight after the readout of what you hear, and next in Tab order: your own sound back from the server is the
+        // round trip that readout is one end of (MainForm.HearMyself.cs).
+        panel.Controls.Add(hearMyselfButton, 1, 4);
+
+        // === Row 5: Buffer smoothness ===
         var smoothnessLabel = new Label { Text = "Buffer smoothness (Alt+&B):", AutoSize = true, Anchor = AnchorStyles.Left };
         smoothnessLabel.Click += (_, _) => FocusControl(smoothnessBox);
         FormLayoutRows.LevelWithTop(smoothnessLabel, smoothnessBox.Margin.Top);
         FormLayoutRows.StretchInCell(smoothnessBox);
-        panel.Controls.Add(smoothnessLabel, 0, 4);
-        panel.Controls.Add(smoothnessBox, 1, 4);
+        panel.Controls.Add(smoothnessLabel, 0, 5);
+        panel.Controls.Add(smoothnessBox, 1, 5);
 
-        // === Row 4: Artefact ===
+        // === Row 6: Artefact ===
         artefactBox.Items.Clear();
         artefactBox.Items.Add("Noise burst (default) — broadband shhh, blends into music");
         artefactBox.Items.Add("Click — no concealment, raw zero-fill click");
@@ -6138,8 +6175,8 @@ public sealed partial class MainForm : Form
         artefactContainer.Controls.Add(artefactBox);
         FormLayoutRows.LevelWithTop(artefactLabel, artefactContainer.Margin.Top + artefactHint.Margin.Top - Dpi.Px(3));   // beside words, not a box
         FormLayoutRows.FillWidth(artefactContainer, artefactBox, artefactHint);
-        panel.Controls.Add(artefactLabel, 0, 5);
-        panel.Controls.Add(artefactContainer, 1, 5);
+        panel.Controls.Add(artefactLabel, 0, 6);
+        panel.Controls.Add(artefactContainer, 1, 6);
 
         // Wire ASIO companion control event handlers and apply initial visibility now that
         // every element exists. After this method returns the panel is ready to dock into
@@ -6934,6 +6971,7 @@ public sealed partial class MainForm : Form
         // is what enables ASIO). Audio-mode listbox retired 2026-05-11.
         asioDriverBox.TabIndex = 0;
         receiveAudioCheckbox.TabIndex = 1;
+        muteReceivedCheckbox.TabIndex = 2;       // in Receive audio's own wrapper, straight after it
         receiveOutputDevicesList.TabIndex = 2;
         asioReceiveOutputDevicesList.TabIndex = 3;
         volumeBar.TabIndex = 4;
@@ -7270,9 +7308,13 @@ public sealed partial class MainForm : Form
         // round-trip doesn't, so a working stream is never cut.
         // The prune itself is the shared Core rule (PeerArming) — same code the service arms with. The
         // app's receiving-carve-out rides in as the keepAnyway predicate.
-        var armed = all.Length > 0 && heartbeatService is { } hb
-            ? PeerArming.ComputeArmedEndpoints(all, hb.GetAllPeerHealth(), AudioPruneUnreachableAfter,
-                keepAnyway: addr => receiver.IsAudioFlowingFrom(addr, TimeSpan.FromSeconds(3)))
+        // And the server while you hear yourself through it (HearMyselfKeepsArmed): it never answers the heartbeat with nobody
+        // paired there.
+        IReadOnlyList<PeerHealth>? health = PeerHealthForTest is { } fakeHealth ? fakeHealth().ToList() : heartbeatService?.GetAllPeerHealth();
+        var armed = all.Length > 0 && health is not null
+            ? PeerArming.ComputeArmedEndpoints(all, health, AudioPruneUnreachableAfter,
+                keepAnyway: addr => receiver.IsAudioFlowingFrom(addr, TimeSpan.FromSeconds(3))
+                                    || HearMyselfKeepsArmed(addr, relayGroup.HearsItself, relayGroup.ConnectedRelay))
             : all;
         // Nothing to a peer held for its password (CheckPeerSecurity) - the heartbeat still reaches them, so the moment the
         // passwords match they are let go.
@@ -9898,6 +9940,12 @@ public sealed partial class MainForm : Form
         // Whether this computer plays through ASIO, which its heartbeats and Format packets tell the others (Jamulus-style
         // frames are sent only to a copy that does). Logging on or off: it changes what is sent.
         KeepJamulusStyleInStep();
+        // Your own sound back from the server (Unmute myself to test round trip): timed, and given up on if nothing comes.
+        TickHearMyself();
+        // The server's status in the log, once a minute while on one.
+        LogServerStatusIfDue();
+        // Is the server we just joined out of date? Once, as soon as it says its version or doesn't in time.
+        TickServerVersionCheck();
         // Per-stream buffers and the per-second "streams" line: before the diagnostics gate, because the per-stream timing
         // is its own (cheap) and the line is wanted whether or not auto-tune is on.
         TickStreamBuffers();
@@ -10716,6 +10764,7 @@ public sealed partial class MainForm : Form
             // without this a profile saved at e.g. 50% would show 50% but play at full volume until
             // the slider was nudged. Mute is restored from the saved state for the same reason.
             receiver.Volume = volumeBar.Value / 100f;
+            muteReceivedCheckbox.Checked = p.Muted;
             receiver.IsMuted = p.Muted;
 
             // Tick checkboxes. Order matters: setting Checked fires runtime apply paths
@@ -10889,6 +10938,15 @@ public sealed partial class MainForm : Form
             AccessibleName = Text;
             logFile.Event($"profile saved: \"{title}\" → {path}");
             unsavedChanges = false;
+            // The new profile is the one you're in now, so it heads Recent profiles, as opening one puts it there. Only opening
+            // did: a profile made with Save as wasn't in the list when RemSound next started (Ed, 2026-10-01).
+            try
+            {
+                var cfg = AppConfig.Load();
+                cfg.NoteRecentProfile(path);
+                cfg.Save();
+            }
+            catch (Exception ex) { logFile.Event($"profile saved, but not added to Recent profiles: {ex.GetType().Name}: {ex.Message}"); }
             // A freshly created profile has no password yet, and encryption is always on — so
             // ask for one now and write it straight into the file we just saved. OK requires a
             // non-empty password (requireNonEmpty); Cancel still leaves it passwordless and the
@@ -11087,6 +11145,7 @@ public sealed partial class MainForm : Form
     internal void VolumeUpFromHotkey() => NudgeVolume(+5);
     internal void VolumeDownFromHotkey() => NudgeVolume(-5);
     internal int ListeningVolumeForTest => volumeBar.Value;
+    internal float ReceiveVolumeForTest => receiver.Volume;
     internal string TrayTooltipForTest() => BuildTrayTooltip();
     internal string PeerDetailsForTest(PeerListItem item) => BuildPeerDetailsText(item);
     internal void AudioEndpointsChangedForTest() => OnAudioEndpointsChanged();
@@ -11101,6 +11160,8 @@ public sealed partial class MainForm : Form
     internal RemSound.Receiver.AudioReceiver ReceiverForTest => receiver;
     internal RemSound.Sender.AudioSender SenderForTest => sender;
     internal RemSoundSettingsStore SettingsForTest => settings;
+    internal NumericUpDown JitterBufferBoxForTest => maxLatencyBox;
+    internal NumericUpDown AsioJitterBufferBoxForTest => maxLatencyAsioBox;
     /// <summary>The window's own log, so the control suite can prove a control REPORTS what it did
     /// and not merely that it did it. See <see cref="RemSoundLog.EventTapForTest"/>.</summary>
     internal RemSoundLog LogForTest => logFile;
@@ -11150,6 +11211,18 @@ public sealed partial class MainForm : Form
     }
     internal int SendModeIndexForTest => sendModeList.SelectedIndex;
     internal bool ReceiveEnabledForTest => IsReceiveEnabled;
+    internal bool ReceiveMutedForTest => receiver.IsMuted;
+    internal AccessibleCheckBox MuteReceivedBoxForTest => muteReceivedCheckbox;
+    internal void ToggleMuteReceivedFromRemoteForTest(IPEndPoint remote) => ToggleMuteReceivedFromRemote(remote);
+
+    /// <summary>A peer's remote mute toggle, through the Mute received audio box so the box shows what you now hear and the
+    /// profile keeps it (2026-10-02; before the box, it flipped the engine's mute where nothing showed it).</summary>
+    private void ToggleMuteReceivedFromRemote(IPEndPoint remote)
+    {
+        muteReceivedCheckbox.Checked = !muteReceivedCheckbox.Checked;
+        receiver.IsMuted = muteReceivedCheckbox.Checked;
+        logFile.Event($"remote-control APPLIED kind=MuteToggle muted={receiver.IsMuted} from={remote}");
+    }
     internal bool AutoTuneTimerEnabledForTest => continuousTuneTimer.Enabled;
     internal int AutoTuneTimerIntervalForTest => continuousTuneTimer.Interval;
     internal Control? ControlByFieldNameForTest(string fieldName) =>
@@ -11713,6 +11786,16 @@ public sealed partial class MainForm : Form
                 manualPeers[peer.InstanceId] = peer;
             }
             pendingPeerNames.Remove(entry.Trim());
+            // A server saved among the profile's peers (it used to happen): left out, and the profile saved without it. The
+            // profile connects to its server on its own, as its server.
+            if (IsKnownServer(peer.Address))
+            {
+                manualPeers.Remove(peer.InstanceId);
+                logFile.Event($"profile reconnect: \"{entry}\" is the server at {peer.Address}, not a person - left out of the peers");
+                TakeServerOutOfPeers(peer.Address.IsIPv4MappedToIPv6 ? peer.Address.MapToIPv4() : peer.Address);
+                MarkProfileDirty();
+                return;
+            }
             var rememberedEntries = settings.LoadRememberedPeers()
                 .Select(static value => value.Trim())
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -11748,9 +11831,18 @@ public sealed partial class MainForm : Form
     /// Examples:
     ///   * RemSound — not connected
     ///   * RemSound — recording — not connected
-    ///   * RemSound, 2 peers, sending (WASAPI), receiving (WASAPI)
-    ///   * RemSound, recording, 2 peers, sending (WASAPI), receiving (WASAPI)
+    ///   * RemSound, connected to 2 peers, sending (WASAPI), receiving (WASAPI)
+    ///   * RemSound, recording, connected to 1 server, 4 peers, sending (WASAPI), receiving (WASAPI)
     /// </summary>
+    /// <summary>Who you are connected to, for the tray (Ed, 2026-10-01: "the tray icon should mention for example connected to
+    /// 1 server, 4 peers. if no server, then just connected to 4 peers").</summary>
+    internal static string TrayConnectedText(bool onServer, int peers)
+    {
+        var people = peers == 1 ? "1 peer" : $"{peers} peers";
+        if (onServer) return peers == 0 ? "connected to 1 server, no peers" : $"connected to 1 server, {people}";
+        return peers == 0 ? "no peers" : $"connected to {people}";
+    }
+
     private string BuildTrayTooltip()
     {
         // Healthy-peer count: a peer ticked in the list but never reachable doesn't count, because the user cares about
@@ -11771,7 +11863,7 @@ public sealed partial class MainForm : Form
         // after the "RemSound" leader so it reads as a status on the app itself rather than a
         // property of the peer list.
         string? recordingPart = recordingController.IsRecording ? "recording" : null;
-        if (healthyPeers == 0 && !sendMyAudioCheckbox.Checked && !receiveAudioCheckbox.Checked)
+        if (healthyPeers == 0 && relayGroup.ConnectedRelay is null && !sendMyAudioCheckbox.Checked && !receiveAudioCheckbox.Checked)
         {
             return recordingPart is null
                 ? "RemSound — not connected"
@@ -11780,13 +11872,7 @@ public sealed partial class MainForm : Form
 
         var parts = new List<string> { "RemSound" };
         if (recordingPart is not null) parts.Add(recordingPart);
-        var peerText = healthyPeers switch
-        {
-            0 => "no peers",
-            1 => "1 peer",
-            _ => $"{healthyPeers} peers",
-        };
-        parts.Add(peerText);
+        parts.Add(TrayConnectedText(relayGroup.ConnectedRelay is not null, healthyPeers));
 
         // Direction lines — only added when the corresponding direction is actually on. The
         // lane label (WASAPI / ASIO / WASAPI + ASIO) is derived from which device-list ticks
@@ -11859,6 +11945,10 @@ public sealed partial class MainForm : Form
         public const string ReceiveOff = "receive-off";
         public const string Hide = "hide";
         public const string Show = "show";
+        // Connecting to a server and disconnecting from it (Ed's sounds, 2026-10-01). Machine-wide.
+        // The shipped WAVs are "server connect 1.wav" etc.
+        public const string ServerConnect = "server-connect";
+        public const string ServerDisconnect = "server-disconnect";
         // Played on every checkbox tick/untick across the whole app (CheckSoundService).
         public const string CheckboxOn = "checkbox-on";
         public const string CheckboxOff = "checkbox-off";
@@ -11953,6 +12043,8 @@ public sealed partial class MainForm : Form
         TryLoadCueSound(CueId.ReceiveOff, "recieve off.wav", out receiveOffSound, cfg);
         TryLoadCueSound(CueId.Hide, "minimise.wav", out hideSound, cfg);
         TryLoadCueSound(CueId.Show, "maximise.wav", out showSound, cfg);
+        TryLoadCueSound(CueId.ServerConnect, "server connect.wav", out serverConnectSound, cfg);
+        TryLoadCueSound(CueId.ServerDisconnect, "server disconnect.wav", out serverDisconnectSound, cfg);
         // The app-wide checkbox tick/untick and tab-switch sounds live in their own services; keep
         // them in step.
         CheckSoundService.Reload();
@@ -11994,6 +12086,8 @@ public sealed partial class MainForm : Form
             (receiveOffSound, cfg.EnableReceiveOffCue, () => SetMachineCueEnabled(c => c.EnableReceiveOffCue = false), "receive turned off", "you turn receiving off"),
             (hideSound, cfg.EnableHideCue, () => SetMachineCueEnabled(c => c.EnableHideCue = false), "minimise", "RemSound minimises to the tray"),
             (showSound, cfg.EnableShowCue, () => SetMachineCueEnabled(c => c.EnableShowCue = false), "restore", "RemSound is restored from the tray"),
+            (serverConnectSound, cfg.EnableServerConnectCue, () => SetMachineCueEnabled(c => c.EnableServerConnectCue = false), "server connected", "you connect to a server"),
+            (serverDisconnectSound, cfg.EnableServerDisconnectCue, () => SetMachineCueEnabled(c => c.EnableServerDisconnectCue = false), "server disconnected", "you disconnect from a server"),
         };
         foreach (var c in cues)
         {
@@ -12149,12 +12243,14 @@ public sealed partial class MainForm : Form
     {
         sendMyAudioCheckbox.AccessibleDescription = DescribeHotkey(hotkeyController.SendMuteHotkey);
         receiveAudioCheckbox.AccessibleDescription = DescribeHotkey(hotkeyController.ReceiveMuteHotkey);
+        muteReceivedCheckbox.AccessibleDescription = DescribeHotkey(hotkeyController.MuteReceivedHotkey);
         enableAllPeerShapingBox.AccessibleDescription = DescribeHotkey(hotkeyController.ToggleAllPeerShapingHotkey);
         if (startStopRecordingMenuItem is not null)
         {
             startStopRecordingMenuItem.AccessibleDescription = DescribeHotkey(hotkeyController.ToggleRecordingHotkey);
         }
         if (metronomeStartStopItem is not null) metronomeStartStopItem.AccessibleDescription = DescribeHotkey(hotkeyController.MetronomeHotkey);
+        hearMyselfButton.AccessibleDescription = DescribeHotkey(hotkeyController.HearMyselfHotkey);
         // The received-sound volume slider is driven by two hotkeys (up and down).
         var up = hotkeyController.VolumeUpHotkey;
         var down = hotkeyController.VolumeDownHotkey;
@@ -12302,8 +12398,7 @@ public sealed partial class MainForm : Form
                     logFile.Event($"remote-control APPLIED kind={kind} delta={delta} new-volume={volumeBar.Value} from={remote}");
                     break;
                 case RemoteControlKind.MuteToggle:
-                    receiver.IsMuted = !receiver.IsMuted;
-                    logFile.Event($"remote-control APPLIED kind=MuteToggle muted={receiver.IsMuted} from={remote}");
+                    ToggleMuteReceivedFromRemote(remote);
                     break;
                 case RemoteControlKind.SystemVolumeUp:
                     {
@@ -12969,11 +13064,19 @@ public sealed partial class MainForm : Form
     /// "8010" — the WinForms default that nobody wants. Hooks both Enter (keyboard / Tab) and
     /// the underlying TextBox's GotFocus (mouse-click into the field). The Select(0, length)
     /// targets the inner TextBox via NumericUpDown.Select.
+    /// <para>And after the Enter KEY, which takes the number typed but left the caret after it: Ed typed 1, pressed Enter,
+    /// then typed 5 and got 15 (2026-10-01). Selected again once the box has taken the number, so the next one typed
+    /// replaces it.</para>
     /// </summary>
-    private static void SelectAllOnFocus(NumericUpDown box)
+    private static void SelectWholeNumber(NumericUpDown box)
     {
         void SelectAll() => box.Select(0, box.Text.Length);
         box.Enter += (_, _) => SelectAll();
+        // The box takes the typed number on Enter after this handler runs, so the selection is posted to follow it.
+        box.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Enter && box.IsHandleCreated) box.BeginInvoke(SelectAll);
+        };
         // The inner TextBox's own GotFocus also fires when the user clicks directly into the
         // text portion of the spinner. Subscribe defensively to it as well.
         foreach (Control c in box.Controls)

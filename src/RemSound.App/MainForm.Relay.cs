@@ -106,7 +106,8 @@ public sealed partial class MainForm
             disconnect: () => DisconnectFromRelay(userAsked: true),
             loadRemembered: () => settings.LoadRememberedRelays(),
             forget: ForgetRelay,
-            status: () => relayStatusLine?.Text ?? "");
+            status: () => relayStatusLine?.Text ?? "",
+            serverStatus: ServerStatusForWindow);
         ForegroundDialog.Show(owner => dialog.ShowDialog(owner));
         UpdateRelayControls();
     }
@@ -153,8 +154,23 @@ public sealed partial class MainForm
         }, TaskScheduler.Default);
     }
 
-    /// <summary>The part that runs back on the UI thread once the address has resolved (or failed to).</summary>
+    /// <summary>The part that runs back on the UI thread once the address has resolved (or failed to). The server is asked
+    /// what it is first, and connected to only once it is known not to be out of date, or you say connect anyway
+    /// (MainForm.ServerVersion: CheckServerThenConnect). A gate run connects at once, as its steps expect.</summary>
     private void FinishConnectingToRelay(string entry, IPEndPoint? resolved, bool userAsked = true)
+    {
+        if (resolved is not null && (!ServerVersionCheck.ForGateRun || CheckServerFirstForTest))
+        {
+            CheckServerThenConnect(entry, resolved, userAsked);
+            return;
+        }
+        ConnectToRelayNow(entry, resolved, userAsked, checkedFirst: false);
+    }
+
+    /// <summary>Connecting itself: the server joined, its sound played, remembered and noted. <paramref name="checkedFirst"/>:
+    /// its version was judged before connecting; when it was not (a gate run, or it did not answer the check), it is judged
+    /// once it says it, after connecting.</summary>
+    private void ConnectToRelayNow(string entry, IPEndPoint? resolved, bool userAsked, bool checkedFirst)
     {
         relayConnectButton.Enabled = true;
         if (resolved is null)
@@ -178,7 +194,12 @@ public sealed partial class MainForm
         // the key arriving a moment later read as a CHANGE of password, and a profile that connects on start lost every tick
         // it had there and said "Password changed" (found 2026-09-25).
         relayPasswordSignature = currentAudioFingerprint is null ? null : Convert.ToHexString(currentAudioFingerprint);
+        relayEntryText = entry;   // as typed, for the Server window and its status
         relayGroup.Connect(resolved);
+        PlayServerSound(connected: true);
+        if (!checkedFirst) StartServerVersionCheck(resolved);
+        // A server, never a person: remembered as one, and taken out of the peers if it was ever there.
+        NoteServerAddress(resolved.Address, "you connected to it as a server");
         relayConnectedUtc = DateTime.UtcNow;
         ApplyServerPing();
         RememberRelay(entry);
@@ -191,9 +212,12 @@ public sealed partial class MainForm
 
     private void DisconnectFromRelay(bool userAsked)
     {
+        serverCheckRun++;   // a server still being checked is not to be connected to after all
         var was = relayGroup.ConnectedRelay;
         foreach (var id in relayTicked.ToList()) DeselectPeer(id);
         relayGroup.Disconnect();
+        HearMyselfLeftServer();
+        if (was is not null) PlayServerSound(connected: false);
         relayConnectedUtc = null;
         ApplyServerPing();
         relayPairTicked = false;
@@ -332,13 +356,13 @@ public sealed partial class MainForm
     internal static string RelayEntryFor(IPEndPoint remote) =>
         remote.Port == RemPacket.DefaultPort ? remote.Address.ToString() : $"{remote.Address}:{remote.Port}";
 
-    /// <summary>Whether to ask about that address at all: only for somebody actually in the peer list, only while not
-    /// already on a relay, and only once a run for any one address. Asking is a modal question, so the deciding is kept
-    /// separate from the asking.</summary>
+    /// <summary>Whether to ask about that address at all: only while not already on a relay, and only once a run for any one
+    /// address. Asked only about an address the person typed as a peer (ServerAnsweredAt decides that; by then the address
+    /// has already been taken out of the peers). Asking is a modal question, so the deciding is kept separate from the
+    /// asking.</summary>
     private bool ShouldOfferRelay(IPEndPoint remote)
     {
         if (relayGroup.ConnectedRelay is not null) return false;
-        if (!selectedPeerEndpoints.Values.Any(ep => ep.Address.Equals(remote.Address))) return false;
         return relayOfferAsked.Add(remote.Address.ToString());
     }
 
@@ -561,6 +585,7 @@ public sealed partial class MainForm
         relayConnectButton.AccessibleName = connected ? "Disconnect from or change server" : "Connect to server";
         SetConnectivityRowVisible(relayPeersLabel, relayPeersList, connected);
         SyncRelayPeersList();
+        UpdateHearMyselfButton();   // only while on a server
     }
 
     private void RememberRelay(string entry)

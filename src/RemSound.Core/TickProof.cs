@@ -15,8 +15,8 @@ namespace RemSound.Core;
 /// remembers every seal it has accepted (<see cref="TickProofGuard"/>).</para>
 ///
 /// <para><b>Wire layout</b> (for the iPhone and Android ports): the 12-byte RemSound header with type 11, stream id 0xFFFF,
-/// then the sealed payload of <see cref="SealedPayloadBytes"/> = 53 bytes: a 12-byte nonce, the 25-byte ciphertext and
-/// the 16-byte GCM tag, as <see cref="RemSoundCrypto.Encrypt"/> lays them out. The 25 plaintext bytes are: format version
+/// then the sealed payload of <see cref="SealedPayloadBytes"/> = 53 bytes: a 12-byte nonce, the 16-byte GCM tag and
+/// the 25-byte ciphertext, in that order, as <see cref="RemSoundCrypto.Encrypt"/> lays them out. The 25 plaintext bytes are: format version
 /// (1 byte, = 1), the sender's UTC time in Unix seconds (8 bytes, little-endian), and the sender's discovery instance id
 /// (16 bytes, the GUID in RFC 4122 big-endian order - the same bytes its text form reads left to right). Older peers see
 /// an unknown packet type and drop it, as they did Control (5) and AddrCheck (10).</para>
