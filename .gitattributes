@@ -10,6 +10,7 @@ server/*.sh text eol=lf
 server/*.py text eol=lf
 server/*.service text eol=lf
 server/*.timer text eol=lf
+server/Dockerfile text eol=lf
 
 # .ps1 stays as-is — PowerShell handles either, but Windows tooling prefers CRLF.
 *.ps1 text eol=crlf
