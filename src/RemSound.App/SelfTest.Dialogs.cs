@@ -64,6 +64,10 @@ internal static partial class SelfTest
         StartupAutoStart.MemoryValueForTest = null;
 
         var restoreMuted = CuePlayer.GloballyMuted;
+        // Preferences' "Turn all audio cues off" is one of the tick boxes driven below, and it is in force at once for the
+        // whole process (CuePlayer.AllCuesMuted). Left ticked, every step after this one heard no cue at all (the 6.2
+        // release gate, 2026-10-11: ten steps failed).
+        var restoreAllCues = CuePlayer.AllCuesMuted;
         var restoreChecks = CheckSoundService.Suppressed;
         var restoreSink = UiChangeLog.Sink;
         var restoreKeyClicks = KeyClickService.Enabled;
@@ -191,6 +195,7 @@ internal static partial class SelfTest
         finally
         {
             CuePlayer.GloballyMuted = restoreMuted;
+            CuePlayer.AllCuesMuted = restoreAllCues;
             CheckSoundService.Suppressed = restoreChecks;
             UiChangeLog.Sink = restoreSink;
             KeyClickService.Enabled = restoreKeyClicks;

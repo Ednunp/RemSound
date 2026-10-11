@@ -45,6 +45,7 @@ internal static partial class SelfTest
     private static readonly AudioAxisExemption[] AudioAxisExemptions =
     [
         new("EveryDialogIsAudited", "names the ASIO loading splash only as a window that is not a dialog; no audio is involved"),
+        new("WebListenerStep", "the web listener taps what is SENT, before any output: it sends a WASAPI lane and an ASIO (DAW) lane at once and proves each arrives as its own stream, and which outputs are ticked never reaches it"),
         new("AnAsioInterfaceSwitchedOnLateComesBack", "an ASIO driver's probe: only ASIO only and both have a driver, and the probe is the same for both"),
         new("TheAsioSplashNeverSticks", "the ASIO loading splash is a window shown while a driver opens; no audio is involved"),
         new("AnAsioCopyPlayingKeepsItsSessionAlive", "a second copy to play from exists only with both output types; in WASAPI only and ASIO only the one copy is always the one fed"),
