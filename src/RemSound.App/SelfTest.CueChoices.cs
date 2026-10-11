@@ -6,9 +6,10 @@ internal static partial class SelfTest
 {
     /// <summary>CUES, AS THE WINDOW PLAYS THEM (2026-09-28, from the review of every step). The cue registry step pins the
     /// ids, the stores and the global mute; it never asked the window which file a cue plays or whether a cue switched off
-    /// stays quiet. Here: a profile's own sound for a cue wins over the machine's, which wins over the shipped default; and
-    /// the save cue, switched off in the profile, plays nothing on a save where switched on it plays once - counted, with
-    /// the sound kept off every device.</summary>
+    /// stays quiet. Here: a profile's own sound for a cue plays; a profile an older RemSound saved plays what that RemSound
+    /// played - its own sound over the computer's, the computer's over the shipped default (2026-10-08, every cue is the
+    /// profile's now); and the save cue, switched off in the profile, plays nothing on a save where switched on it plays
+    /// once - counted, with the sound kept off every device.</summary>
     private static string? CuesPlayTheChosenSoundOrNothing()
     {
         var scratch = Path.Combine(Path.GetTempPath(), "remsound-cues-" + Guid.NewGuid().ToString("N"));
@@ -21,6 +22,7 @@ internal static partial class SelfTest
         var restoreNoDevice = CuePlayer.NoDeviceForTest;
         var config = AppConfig.Load();
         var restoreMachine = config.MachineCueCustomPaths.TryGetValue(MainForm.CueId.Connect, out var m) ? m : null;
+        var restoreGlobal = config.GlobalCues?.Clone();
         var said = new List<string>();
         try
         {
@@ -32,16 +34,24 @@ internal static partial class SelfTest
                 return FieldOf<CuePlayer>(form, "connectSound")?.FilePathForTest;
             }
 
+            // A profile an older RemSound saved: its own sound in the old field, the computer's in the old computer field.
             var both = Profile.NewBlank();
-            both.CustomCuePaths[MainForm.CueId.Connect] = perProfile;
-            Check(Plays(both) == perProfile, $"with a sound of the profile's own and one for the machine, the profile's must play ({Plays(both)})");
-            Check(Plays(Profile.NewBlank()) == perMachine, $"with only the machine's, the machine's must play ({Plays(Profile.NewBlank())})");
+            both.CustomCuePaths = new() { [MainForm.CueId.Connect] = perProfile };
+            Check(Plays(both) == perProfile, $"an older profile with a sound of its own and one on the computer must play its own ({Plays(both)})");
+            Check(Plays(Profile.NewBlank()) == perMachine, $"an older profile with only the computer's must play the computer's ({Plays(Profile.NewBlank())})");
+            // A profile saved now carries its own, whatever the computer's older settings say.
+            var carried = Profile.NewBlank();
+            carried.Cues = new CueSettings();
+            Check(Plays(carried) is { } own && own != perMachine && File.Exists(own),
+                $"a profile carrying its own cues must not take the computer's older sound ({Plays(carried)})");
+            carried.Cues.CustomPaths[MainForm.CueId.Connect] = perProfile;
+            Check(Plays(carried) == perProfile, $"a profile's own sound must play ({Plays(carried)})");
             config.MachineCueCustomPaths.Remove(MainForm.CueId.Connect);
             config.Save();
             var shipped = Plays(Profile.NewBlank());
             Check(shipped is not null && shipped != perMachine && shipped != perProfile && File.Exists(shipped),
                 $"with neither, the shipped sound must play ({shipped ?? "nothing"})");
-            said.Add("the profile's own sound, then the machine's, then the shipped one");
+            said.Add("the profile's own sound; an older profile's own, then the computer's, then the shipped one");
 
             // The save cue, off and on, through File > Save.
             CuePlayer.NoDeviceForTest = true;
@@ -54,9 +64,11 @@ internal static partial class SelfTest
                 var profile = Profile.NewBlank();
                 profile.Title = "Cue " + (on ? "on" : "off");
                 profile.Password = RemSoundCrypto.Obfuscate("a password for the gate");
-                profile.EnableSaveCue = on;
                 store.Save(profile);
                 using var form = new MainForm(store, profile, profile.Title, null, headless: true);
+                // The save cue is one of the global sounds, kept on the computer (2026-10-08): switched as the Audio cues
+                // tab switches it.
+                form.SettingsForTest.SaveCueEnabled(MainForm.CueId.Save, on);
                 form.RememberSaveConfirmationSuppressedForTest();
                 form.MarkProfileDirtyForTest();
                 var before = CuePlayer.PlaysStartedForTest;
@@ -78,6 +90,7 @@ internal static partial class SelfTest
             var restore = AppConfig.Load();
             if (restoreMachine is null) restore.MachineCueCustomPaths.Remove(MainForm.CueId.Connect);
             else restore.MachineCueCustomPaths[MainForm.CueId.Connect] = restoreMachine;
+            restore.GlobalCues = restoreGlobal;
             try { restore.Save(); } catch { /* the run's own settings folder */ }
             try { Directory.Delete(scratch, recursive: true); } catch { /* temp */ }
         }

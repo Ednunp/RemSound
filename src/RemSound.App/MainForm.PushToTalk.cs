@@ -98,10 +98,9 @@ public sealed partial class MainForm
         var talking = pushToTalkKeys.Talking;
         sender.PushToTalk.SetKeyTalking(talking);
         logFile.Event($"push to talk: {(talking ? "talking" : "stopped talking")} (key, {PushToTalkSettings.KeyBehaviour(pushToTalk.HoldToSpeak, pushToTalk.DoubleTapToHold)})");
-        // The two cues, key mode only: in sound-level mode they would sound with every phrase.
-        var cfg = AppConfig.Load();
-        if (talking) { if (cfg.EnablePushToTalkOnCue) pushToTalkOnSound?.Play(); }
-        else if (cfg.EnablePushToTalkOffCue) pushToTalkOffSound?.Play();
+        // The two cues, key mode only: in sound-level mode they would sound with every phrase. As the profile has them.
+        if (talking) { if (settings.LoadCueEnabled(CueId.PushToTalkOn)) pushToTalkOnSound?.Play(); }
+        else if (settings.LoadCueEnabled(CueId.PushToTalkOff)) pushToTalkOffSound?.Play();
     }
 
     /// <summary>Sound-level mode opens and shuts on the audio threads; the per-second tick writes it down, once a second

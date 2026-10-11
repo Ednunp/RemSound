@@ -333,13 +333,9 @@ internal static class Program
             }
         }
 
-        // We hold the single-instance lock — THIS copy has taken over (any stuck older copy was
-        // force-closed just above). Play the one-shot startup cue here: after the take-over
-        // decision is settled and before the profile picker/load, so if a copy was already
-        // running you only hear it once the NEW process is in charge. The earlier "switch to the
-        // running copy" / "cancel" paths returned before this point, so a copy that bowed out
-        // never plays it. Fire-and-forget WaveOut, so it sounds even when we launch into the tray.
-        PlayStartupCueIfEnabled();
+        // The startup cue is the profile's own since 2026-10-08, so it plays as the first profile opens
+        // (MainForm.PlayStartupCueOnce), not here before one is chosen. Ed: "in reality you pick a profile and it plays
+        // the startup sound."
 
         // We hold the single-instance lock. Listen for a later copy asking us to surface, and
         // route that request to whichever main window is open at the time.
@@ -385,6 +381,8 @@ internal static class Program
         // taken, in which case we simply run without announcing our presence.
         // Not by a copy the gate started: that one leaves the service sending (GateIsolation).
         using var presenceHold = gatePorts is null ? InteractivePresence.AcquireHold() : null;
+        // Said in the first window's log: it used to fail without a word, leaving the service sending (the hand-over review).
+        if (gatePorts is null && presenceHold is null) MainForm.PresenceHoldFailed = true;
 
         // Best-effort: clear leftover update temp stages.
         // We hold the single-instance lock here, so only the live copy does this — no sibling race.
@@ -402,19 +400,22 @@ internal static class Program
         HelpLauncher.WireContextHelp();
         HelpLauncher.Install();
 
-        // Audible typing feedback: a soft click on each keystroke in any edit field, plus a distinct
-        // passkey sound on password fields. Machine-wide toggle (on by default). Installed app-wide
-        // here - after the single-instance guard, before the profile picker - so it works on the
-        // picker and every dialog. Best-effort: inert if the click sounds can't load.
-        KeyClickService.Initialize(!headlessRun && AppConfig.Load().EnableKeyboardClicks);
+        // Audible typing feedback: a soft click on each keystroke in any edit field, plus a distinct passkey sound on
+        // password fields. Installed app-wide here - after the single-instance guard, before the profile picker - so it
+        // works on the picker and every dialog. Best-effort: inert if the click sounds can't load. Whether it clicks is the
+        // profile's setting (2026-10-08), applied by ActiveCues just below.
+        KeyClickService.Initialize(false);
         Application.ApplicationExit += (_, _) => KeyClickService.Shutdown();
 
-        // Tick/untick sounds for checkbox toggles app-wide (CheckSoundService) and the tab-switch
-        // cue (TabSwitchSoundService). Loaded here; reloaded by MainForm.ReloadAllCueSounds whenever
-        // cue settings change in Preferences.
-        CheckSoundService.Reload();
-        TabSwitchSoundService.Reload();
-        HelpSoundService.Reload();
+        // The cues in force before a profile is chosen: the last profile's (the tick box, tab and help sounds and the key
+        // clicks of the profile picker). The first window puts its profile's in force as it opens. "Mute all audio cues"
+        // is this computer's, for every profile.
+        {
+            var cueConfig = AppConfig.Load();
+            CuePlayer.AllCuesMuted = cueConfig.MuteAllCues;
+            ActiveCues.ClicksAllowed = !headlessRun;
+            ActiveCues.Use(cueConfig.CuesBeforeAProfile());
+        }
 
         // Resolve the first profile, then run the window; the loop below re-opens it for a profile switch. An outer loop
         // for changing the profiles folder mid-session wrapped all of this until 2026-09-13 — nothing had set its flag
@@ -459,7 +460,9 @@ internal static class Program
             }
             else if (cli.ForceBlankProfile)
             {
+                // A new profile starts with the cues you have been using (2026-10-08).
                 autoLoaded = Profile.NewBlank();
+                autoLoaded.Cues = appConfig.CuesBeforeAProfile();
                 autoLoadedTitle = null;
             }
 
@@ -568,8 +571,10 @@ internal static class Program
                 var nextTitle = form.NextProfileTitleToLoad;
                 if (form.LoadBlankTemplateNext)
                 {
-                    // File → New profile: rebuild on a fresh blank template, no saved profile - logs off (2026-09-29).
+                    // File → New profile: rebuild on a fresh blank template, no saved profile - logs off (2026-09-29) - and
+                    // the cues of the profile you were in (2026-10-08).
                     profile = Profile.NewForUser();
+                    profile.Cues = form.CuesForANewProfile();
                     title = null;
                     nextPath = null;
                 }
@@ -580,6 +585,8 @@ internal static class Program
                     (profile, title, nextPath) = (read.Profile, read.Title, read.Path);
                     if (read.Error is { } error)
                     {
+                        // The blank profile it opens instead keeps the cues you were using (2026-10-08).
+                        profile.Cues = form.CuesForANewProfile();
                         // Carried into the next window's log (this loop has none of its own), and said to the person - a
                         // switch can start from the tray, so in front of everything.
                         MainForm.LineForNextLog = $"profile switch: could not read \"{wanted}\" ({error}) - opened a new, blank, untitled profile instead, so nothing is saved over that file";
@@ -612,27 +619,5 @@ internal static class Program
             p.WaitForExit(10000);
         }
         catch { /* already gone / invalid pid — nothing to wait for */ }
-    }
-
-    /// <summary>Play the startup cue once if the machine-wide setting is on. Resolves the WAV the
-    /// same way the in-app cues do — a user-set custom path (machine-wide, in <see cref="AppConfig"/>)
-    /// if it exists on disk, otherwise the bundled <c>default sounds\start up.wav</c>. Read straight from
-    /// AppConfig because no profile (and therefore no settings store) is loaded yet at this point
-    /// in startup. Best-effort: a cue must never stop RemSound from starting.</summary>
-    private static void PlayStartupCueIfEnabled()
-    {
-        try
-        {
-            var cfg = AppConfig.Load();
-            if (!cfg.EnableStartupCue) return;
-            var custom = cfg.StartupCueCustomPath;
-            // Custom override wins; otherwise the chosen default variant ("start up 1.wav" etc).
-            var path = !string.IsNullOrWhiteSpace(custom) && File.Exists(custom)
-                ? custom
-                : CueSounds.ResolveDefaultPath(MainForm.CueId.Startup, "start up.wav", cfg);
-            if (path is null || !File.Exists(path)) return;
-            new CuePlayer(path).Play();
-        }
-        catch { /* a startup cue must never disturb startup */ }
     }
 }

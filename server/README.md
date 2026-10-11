@@ -256,6 +256,12 @@ only releases signed with the RemSound release key.
   knows neither type, and would show the status as a nameless member. Windows
   RemSound 6.1 pings once a second, shows these in its Server window, and warns
   before connecting to a server older than the newest release.
+- **Handing over a place (since server-v2.17).** A member's goodbye also frees
+  the ordinary pair slot it held beside a phone or an older app, and a member
+  that moves to a new address takes its pair slot with it. Before, the slot
+  idled out after a minute, so whoever took that computer's place (the
+  Windows app after its send-only service, or the other way round) waited up
+  to a minute to reach the phone. Nothing on the wire changes.
 - **The member list is rate-limited (since server-v2.13).** A change (a join,
   a name, a tick) sends the list again at most four times a second; the
   once-a-second list is unchanged. It used to go out on every packet that
@@ -280,12 +286,14 @@ only releases signed with the RemSound release key.
 Structured key=value lines. Notable events:
 
 ```
-event=startup version=server-v2.16 version_supported=v1,v2 listen=0.0.0.0:47830 max_clients=64 max_per_ip=8 addr_check=watch-only v2_addr_check=ENFORCED
+event=startup version=server-v2.17 version_supported=v1,v2 listen=0.0.0.0:47830 max_clients=64 max_per_ip=8 addr_check=watch-only v2_addr_check=ENFORCED
 
 # v1 (pairwise)
 event=peer_joined addr=1.2.3.4:5555 slots_filled=1
 event=peer_paired a=1.2.3.4:5555 b=5.6.7.8:9999
 event=peer_dropped reason=idle addr=1.2.3.4:5555 remaining=1
+event=peer_dropped reason=bye addr=1.2.3.4:5555 remaining=1   (since server-v2.17: a member's goodbye frees its pair slot)
+event=peer_moved old=1.2.3.4:5555 new=1.2.3.4:6666   (since server-v2.17: the pair slot moved with its member)
 event=peer_replaced old=1.2.3.4:5555 new=9.8.7.6:4444
 event=pair_dissolved reason=both_in_groups a=1.2.3.4:5555 b=5.6.7.8:9999
 event=pair_dissolved reason=different_group member=1.2.3.4:5555

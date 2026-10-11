@@ -221,12 +221,10 @@ internal static class PluginInstaller
         try { return PlaceHelpSounds(target); } catch { return false; }
     }
 
-    /// <summary>The context help sound files chosen in Preferences, or null for one that is switched off.</summary>
-    internal static (string? Open, string? Close) ChosenHelpSounds()
-    {
-        var cfg = AppConfig.Load();
-        return (HelpSoundService.ChosenFile(open: true, cfg), HelpSoundService.ChosenFile(open: false, cfg));
-    }
+    /// <summary>The context help sound files as the open profile has them (or before one is open, the last profile), or null
+    /// for one that is switched off - and both null while "Mute all audio cues" is ticked, so the plugin is quiet too.</summary>
+    internal static (string? Open, string? Close) ChosenHelpSounds() =>
+        (HelpSoundService.ChosenFile(open: true), HelpSoundService.ChosenFile(open: false));
 
     private static bool PlaceHelpSounds(string target, (string? Open, string? Close)? sounds = null)
     {

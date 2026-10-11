@@ -24,14 +24,13 @@ internal static partial class SelfTest
     private static bool SameBytes(string a, string b) =>
         File.Exists(a) && File.Exists(b) && File.ReadAllBytes(a).AsSpan().SequenceEqual(File.ReadAllBytes(b));
 
-    /// <summary>The machine settings this file's steps change, put back afterwards.</summary>
-    private sealed record PluginFolderSettings(string? Folder, bool NoticeSuppressed, string? Declined, bool OpenCue, bool CloseCue, string? CustomOpen)
+    /// <summary>The machine settings, and the cues in force, this file's steps change, put back afterwards.</summary>
+    private sealed record PluginFolderSettings(string? Folder, bool NoticeSuppressed, string? Declined, CueSettings Cues)
     {
         public static PluginFolderSettings Take()
         {
             var c = AppConfig.Load();
-            return new(c.PluginFolder, c.PluginFolderNoticeSuppressed, c.PluginRefreshDeclinedVersion, c.EnableHelpOpenCue, c.EnableHelpCloseCue,
-                c.MachineCueCustomPaths.TryGetValue(MainForm.CueId.HelpOpen, out var p) ? p : null);
+            return new(c.PluginFolder, c.PluginFolderNoticeSuppressed, c.PluginRefreshDeclinedVersion, ActiveCues.Current.Clone());
         }
 
         public void Restore()
@@ -40,11 +39,8 @@ internal static partial class SelfTest
             c.PluginFolder = Folder;
             c.PluginFolderNoticeSuppressed = NoticeSuppressed;
             c.PluginRefreshDeclinedVersion = Declined;
-            c.EnableHelpOpenCue = OpenCue;
-            c.EnableHelpCloseCue = CloseCue;
-            if (CustomOpen is null) c.MachineCueCustomPaths.Remove(MainForm.CueId.HelpOpen);
-            else c.MachineCueCustomPaths[MainForm.CueId.HelpOpen] = CustomOpen;
             c.Save();
+            ActiveCues.Use(Cues);
         }
     }
 
@@ -53,6 +49,14 @@ internal static partial class SelfTest
         var c = AppConfig.Load();
         change(c);
         c.Save();
+    }
+
+    /// <summary>Change the cues in force, as the open profile's change in Preferences (every cue the profile's, 2026-10-08).</summary>
+    private static void EditCues(Action<CueSettings> change)
+    {
+        var cues = ActiveCues.Current.Clone();
+        change(cues);
+        ActiveCues.Use(cues);
     }
 
     /// <summary>
@@ -77,7 +81,8 @@ internal static partial class SelfTest
         try
         {
             if (PluginInstaller.IsInstalledAt(standard)) PluginInstaller.UninstallForTest(standard);
-            EditConfig(c => { c.PluginFolder = null; c.EnableHelpOpenCue = true; c.EnableHelpCloseCue = true; c.MachineCueCustomPaths.Remove(MainForm.CueId.HelpOpen); });
+            EditConfig(c => c.PluginFolder = null);
+            EditCues(q => { q.Enabled[MainForm.CueId.HelpOpen] = true; q.Enabled[MainForm.CueId.HelpClose] = true; q.CustomPaths.Remove(MainForm.CueId.HelpOpen); });
 
             // Its own RemSound folder inside whatever folder is picked - unless the folder picked is already that.
             Check(PluginInstaller.TargetFor(mine) == Path.Combine(mine, "RemSound"), "a chosen folder must get a RemSound folder of its own inside it, so its files never mix with other plugins'");
@@ -113,14 +118,14 @@ internal static partial class SelfTest
             Check(!Directory.Exists(standard), "and not put a copy back in the standard place");
 
             // 4. The help sounds follow Preferences: off takes the copy away, a sound of one's own is copied, no change does nothing.
-            EditConfig(c => c.EnableHelpCloseCue = false);
+            EditCues(q => q.Enabled[MainForm.CueId.HelpClose] = false);
             Check(PluginInstaller.RefreshHelpSounds(), "switching the close sound off must change the plugin's copies");
             Check(!File.Exists(Path.Combine(target, PluginInstaller.HelpCloseSoundName)) && File.Exists(Path.Combine(target, PluginInstaller.HelpOpenSoundName)),
                 "the close sound must be gone from beside the plugin, and the open sound left");
             Check(!PluginInstaller.RefreshHelpSounds(), "with nothing changed, nothing is copied");
             var custom = Path.Combine(root, "my help open.wav");
             File.WriteAllBytes(custom, MinimalWav());
-            EditConfig(c => { c.MachineCueCustomPaths[MainForm.CueId.HelpOpen] = custom; c.EnableHelpCloseCue = true; });
+            EditCues(q => { q.CustomPaths[MainForm.CueId.HelpOpen] = custom; q.Enabled[MainForm.CueId.HelpClose] = true; });
             Check(PluginInstaller.RefreshHelpSounds(), "a sound of the person's own must change the copies");
             Check(SameBytes(Path.Combine(target, PluginInstaller.HelpOpenSoundName), custom) && File.Exists(Path.Combine(target, PluginInstaller.HelpCloseSoundName)),
                 "the plugin must now have the person's own open sound, and the close sound back");
@@ -141,7 +146,7 @@ internal static partial class SelfTest
 
             // A change of sound doesn't ask Windows: left until the next install or update.
             elevated.Clear();
-            EditConfig(c => c.EnableHelpCloseCue = false);
+            EditCues(q => q.Enabled[MainForm.CueId.HelpClose] = false);
             Check(!PluginInstaller.RefreshHelpSounds() && elevated.Count == 0, "a change of sound must not ask Windows for permission");
             Check(PluginInstaller.RefreshNeedsPermission(sharedTarget, "9.9"), "an update of a plugin in a protected folder needs permission, and start-up asks for it");
 

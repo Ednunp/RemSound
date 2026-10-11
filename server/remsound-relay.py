@@ -187,7 +187,7 @@ SERVER_PING_MAX_PER_SECOND = 4
 SERVER_PING_MAX_PAYLOAD = 32
 STEADY_WINDOW_SECONDS = 60
 STEADY_RESTART_MS = 2000.0           # a wait longer than this is somebody stopping and starting again, not the network
-SERVER_VERSION = "server-v2.16"      # kept equal to the bundle's VERSION file (a test checks)
+SERVER_VERSION = "server-v2.17"      # kept equal to the bundle's VERSION file (a test checks)
 AUDIO_GAP_LONG_MS = 20.0             # event=audio_timing counts waits between one client's packets longer than this
 # Cap on how many lobby/pair entries one source IP may hold at once. A relay is a place people meet now,
 # not a single pair, so one household or one office behind a single address can legitimately show several
@@ -985,6 +985,16 @@ class Relay:
             "event=client_endpoint_moved client_id=%s old=%s new=%s old_silent_s=%.1f",
             client_id, _fmt_addr(old), _fmt_addr(entry.addr), quiet,
         )
+        # Its place beside a phone or an older app goes with it (the hand-over review, 2026-10-10): left at the old
+        # address, it held the slot for a minute, and the phone was partnered with nobody.
+        slot = self._v1_find_slot(old)
+        if slot is not None:
+            held = self.v1_peers[slot]
+            self.v1_peers[slot] = PeerSlot(addr=entry.addr, last_seen=now, verified=True, fingerprint=held.fingerprint)
+            self.note(logging.INFO, "peer_moved", entry.addr,
+                "event=peer_moved old=%s new=%s (the member's pair slot moved with it)", _fmt_addr(old), _fmt_addr(entry.addr),
+            )
+            self.stats.pair_changes += 1
         self.v2_roster_dirty = True  # its list, and its v1-paired flag, now go to the new address
         return True
 
@@ -1126,6 +1136,16 @@ class Relay:
             )
             self.stats.lobby_changes += 1
             self.v2_roster_dirty = True
+            # Its place beside a phone or an older app goes too (the hand-over review, 2026-10-10): the goodbye freed the
+            # group but left the pair slot to idle out for a minute, so whoever took this computer's place - the app
+            # after the send-only service, or the service after the app - waited that long to reach the phone.
+            slot = self._v1_find_slot(addr)
+            if slot is not None:
+                self.v1_peers.pop(slot)
+                self.note(logging.INFO, "peer_dropped", addr,
+                    "event=peer_dropped reason=bye addr=%s remaining=%d", _fmt_addr(addr), len(self.v1_peers),
+                )
+                self.stats.pair_changes += 1
             return
         if pkt_type == TYPE_TIMING:
             # Read here, never forwarded - and only from a member at the address it is registered at.

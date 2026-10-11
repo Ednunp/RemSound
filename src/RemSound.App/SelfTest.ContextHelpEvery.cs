@@ -504,14 +504,14 @@ internal static partial class SelfTest
                 }, TimeSpan.FromSeconds(30));
             }
 
-            // ---- The sounds turned off, as Preferences turns them off: help opens and closes in silence.
-            using (AppConfig.UseThrowawayUserDataDirectory(Path.Combine(Path.GetTempPath(), "remsound-helpcues-" + Guid.NewGuid().ToString("N"))))
+            // ---- The sounds turned off, as Preferences turns them off - in the profile, so in the cues in force
+            // (2026-10-08): help opens and closes in silence.
+            var cuesBefore = ActiveCues.Current.Clone();
             {
-                var cfg = AppConfig.Load();
-                cfg.EnableHelpOpenCue = false;
-                cfg.EnableHelpCloseCue = false;
-                cfg.Save();
-                HelpSoundService.Reload();
+                var off = cuesBefore.Clone();
+                off.Enabled[MainForm.CueId.HelpOpen] = false;
+                off.Enabled[MainForm.CueId.HelpClose] = false;
+                ActiveCues.Use(off);
                 var smooth = Require(ContextHelpMarked(form, "audio-profile.smoothness"), "the Buffer smoothness list was not found");
                 var quiet = HeadlessRecords.Cues.Mark;
                 DriveWhilePumping(form, () =>
@@ -522,7 +522,7 @@ internal static partial class SelfTest
                 }, TimeSpan.FromSeconds(30));
                 Check(!CueSince(quiet, "help open") && !CueSince(quiet, "help close"), "TURNED OFF: with the help sounds off in Preferences, neither may play");
             }
-            HelpSoundService.Reload();
+            ActiveCues.Use(cuesBefore);
 
             // ---- A window with no context help anywhere: the whole manual, as F1 always did.
             using (var bare = new Form { Text = "No help here" })

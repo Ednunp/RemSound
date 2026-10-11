@@ -18,13 +18,15 @@
          tag_name on the latest GitHub release; bump it on every public release. The
          AssemblyVersion / FileVersion default to this value, and Assembly.GetName().Version
          is what the About dialog and the updater both read. -->
-    <Version>6.1</Version>
+    <Version>6.2</Version>
   </PropertyGroup>
 
   <ItemGroup>
     <!-- App icon (also set via ApplicationIcon for the exe). Embedded so the forms and the tray icon
          can load the full multi-size icon at runtime for crisp title-bar / taskbar / tray rendering. -->
     <EmbeddedResource Include="remsound.ico" />
+    <!-- The page a web browser listens with (WebListener, 2026-10-10). -->
+    <EmbeddedResource Include="WebListen\index.html" LogicalName="weblisten-index.html" />
     <ProjectReference Include="..\RemSound.Core\RemSound.Core.csproj" />
     <ProjectReference Include="..\RemSound.Ui\RemSound.Ui.csproj" />
     <!-- The gate tests the PLUGIN too: same standard, same suite, one command. -->

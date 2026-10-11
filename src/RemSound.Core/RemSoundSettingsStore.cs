@@ -135,6 +135,20 @@ public sealed class RemSoundSettingsStore
         Save(s);
     }
 
+    /// <summary>The Web listener window's two settings (2026-10-10), the profile's. The password comes back in plain text.</summary>
+    public bool LoadWebListenEnabled() => Try(() => Load()?.WebListenEnabled) ?? false;
+    public string LoadWebListenPassword() => RemSoundCrypto.Deobfuscate(Try(() => Load()?.WebListenPassword));
+    public bool LoadWebListenAutoStart() => Try(() => Load()?.WebListenAutoStart) ?? false;
+
+    public void SaveWebListen(bool enabled, string password, bool autoStart)
+    {
+        var s = Load() ?? new Settings();
+        s.WebListenEnabled = enabled;
+        s.WebListenPassword = string.IsNullOrEmpty(password) ? null : RemSoundCrypto.Obfuscate(password);
+        s.WebListenAutoStart = autoStart;
+        Save(s);
+    }
+
     public int LoadMaxLatencyMs(int defaultValue = 80) =>
         Try(() => Load()?.MaxLatencyMs is int v ? Math.Clamp(v, 5, 500) : (int?)null) ?? defaultValue;
 
@@ -371,140 +385,104 @@ public sealed class RemSoundSettingsStore
         Save(s);
     }
 
-    // === Per-cue enable flags (2026-05-15) ===
-    // Each cue sound has its own enable toggle, on the Preferences dialog's Audio cues tab. The
-    // legacy MuteConnectionCues profile flag (2026-05-06) used to gate both connect AND
-    // disconnect — when the new flags are absent (null cache + null profile), the load
-    // helpers fall back to the legacy value as a migration step. Once the user touches
-    // any per-cue toggle, that flag's load returns the explicit value directly and the
-    // legacy field becomes irrelevant for that cue.
+    // === Audio cues: the profile's own, and the global sounds (2026-10-08) ===
+    // Ed: "one list of profile specific sounds and one of global sounds. global sounds are: profile save, profile switch,
+    // profile menu open, update, context help open and close. the rest are profile specific." The profile's own ride in
+    // this cache's CueSettings, read from the profile on load (or worked out from what an older RemSound used with it) and
+    // written back on save; the global sounds (CueSettings.GlobalCueIds) are this computer's, in AppConfig.GlobalCues,
+    // written at once, like the other machine-wide accessors above. Every per-cue method below routes by the cue id, so its
+    // many callers need not know which kind a cue is.
 
-    public bool LoadEnableConnectCue()
+    private CueSettings Cues() => cache.Cues ??= new CueSettings();
+
+    /// <summary>The global sounds as this computer has them: before any profile has filled them, what its older settings
+    /// gave (every cue on with its first sound when it cannot say).</summary>
+    private static CueSettings GlobalCues()
     {
-        var s = Load();
-        if (s?.EnableConnectCue is bool v) return v;
-        // Legacy fallback: an older profile with MuteConnectionCues=true was muting both
-        // connect AND disconnect at once. Honour that intent on first load.
-        if (s?.MuteConnectionCues == true) return false;
-        return true;
+        try { var cfg = AppConfig.Load(); return cfg.GlobalCues ?? CueSettings.FromBefore(null, cfg).OnlyGlobalCues(); }
+        catch { return new CueSettings(); }
     }
 
-    public void SaveEnableConnectCue(bool value)
+    /// <summary>Change the global sounds, kept on this computer for every profile, at once.</summary>
+    private static void ChangeGlobalCues(Action<CueSettings> change)
     {
-        var s = Load() ?? new Settings();
-        s.EnableConnectCue = value;
-        Save(s);
-    }
-
-    public bool LoadEnableDisconnectCue()
-    {
-        var s = Load();
-        if (s?.EnableDisconnectCue is bool v) return v;
-        if (s?.MuteConnectionCues == true) return false;
-        return true;
-    }
-
-    public void SaveEnableDisconnectCue(bool value)
-    {
-        var s = Load() ?? new Settings();
-        s.EnableDisconnectCue = value;
-        Save(s);
-    }
-
-    public bool LoadEnableRecordStartCue() =>
-        Try(() => Load()?.EnableRecordStartCue) ?? true;
-
-    public void SaveEnableRecordStartCue(bool value)
-    {
-        var s = Load() ?? new Settings();
-        s.EnableRecordStartCue = value;
-        Save(s);
-    }
-
-    public bool LoadEnableRecordStopCue() =>
-        Try(() => Load()?.EnableRecordStopCue) ?? true;
-
-    public void SaveEnableRecordStopCue(bool value)
-    {
-        var s = Load() ?? new Settings();
-        s.EnableRecordStopCue = value;
-        Save(s);
-    }
-
-    public bool LoadEnableSaveCue() =>
-        Try(() => Load()?.EnableSaveCue) ?? true;
-
-    public void SaveEnableSaveCue(bool value)
-    {
-        var s = Load() ?? new Settings();
-        s.EnableSaveCue = value;
-        Save(s);
-    }
-
-    public bool LoadEnableProfileSwitchCue() =>
-        Try(() => Load()?.EnableProfileSwitchCue) ?? true;
-
-    public void SaveEnableProfileSwitchCue(bool value)
-    {
-        var s = Load() ?? new Settings();
-        s.EnableProfileSwitchCue = value;
-        Save(s);
-    }
-
-    public bool LoadEnableProfileMenuOpenCue() =>
-        Try(() => Load()?.EnableProfileMenuOpenCue) ?? true;
-
-    public void SaveEnableProfileMenuOpenCue(bool value)
-    {
-        var s = Load() ?? new Settings();
-        s.EnableProfileMenuOpenCue = value;
-        Save(s);
-    }
-
-    public bool LoadEnableUpdateCue() =>
-        Try(() => Load()?.EnableUpdateCue) ?? true;
-
-    public void SaveEnableUpdateCue(bool value)
-    {
-        var s = Load() ?? new Settings();
-        s.EnableUpdateCue = value;
-        Save(s);
-    }
-
-    /// <summary>The user's custom WAV path for a given cue, or null when they're using the
-    /// default. Per-profile (lives on <see cref="Profile.CustomCuePaths"/>) so different
-    /// profiles can carry different cue palettes.</summary>
-    public string? LoadCustomCuePath(string cueId)
-    {
-        return Try(() =>
+        try
         {
-            var s = Load();
-            if (s?.CustomCuePaths is { } dict && dict.TryGetValue(cueId, out var path)
-                && !string.IsNullOrWhiteSpace(path))
-            {
-                return path;
-            }
-            return (string?)null;
-        });
-    }
-
-    /// <summary>Set a custom WAV path for a given cue. Pass null or empty to clear the
-    /// override (the cue reverts to its shipped default in <c>default sounds\</c>,
-    /// <see cref="AppConfig.SoundsDirectory"/>).</summary>
-    public void SaveCustomCuePath(string cueId, string? path)
-    {
-        var s = Load() ?? new Settings();
-        s.CustomCuePaths ??= new Dictionary<string, string>();
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            s.CustomCuePaths.Remove(cueId);
+            var cfg = AppConfig.Load();
+            var global = cfg.GlobalCues?.Clone() ?? CueSettings.FromBefore(null, cfg).OnlyGlobalCues();
+            change(global);
+            cfg.GlobalCues = global.OnlyGlobalCues();
+            cfg.Save();
         }
-        else
-        {
-            s.CustomCuePaths[cueId] = path;
-        }
-        Save(s);
+        catch { /* harmless - the change just won't survive a restart */ }
     }
+
+    /// <summary>Where a cue's settings live: the global sounds on this computer, every other cue in the profile.</summary>
+    private CueSettings Holding(string cueId) => CueSettings.IsGlobal(cueId) ? GlobalCues() : Cues();
+
+    private void Change(string cueId, Action<CueSettings> change)
+    {
+        if (CueSettings.IsGlobal(cueId)) ChangeGlobalCues(change);
+        else change(Cues());
+    }
+
+    /// <summary>Whether a cue plays: on unless switched off, in the profile or, for a global sound, on this computer.</summary>
+    public bool LoadCueEnabled(string cueId) => Try(() => (bool?)Holding(cueId).IsOn(cueId)) ?? true;
+
+    /// <summary>Switch a cue on or off: in the profile, or for a global sound, on this computer at once.</summary>
+    public void SaveCueEnabled(string cueId, bool on) => Change(cueId, c => c.Enabled[cueId] = on);
+
+    /// <summary>The cue's chosen built-in sound file name, or null for its first one.</summary>
+    public string? LoadCueSound(string cueId) =>
+        Try(() => Holding(cueId).Sounds.TryGetValue(cueId, out var file) && !string.IsNullOrWhiteSpace(file) ? file : null);
+
+    /// <summary>Choose a cue's built-in sound; null goes back to its first one.</summary>
+    public void SaveCueSound(string cueId, string? fileName) => Change(cueId, c =>
+    {
+        if (string.IsNullOrWhiteSpace(fileName)) c.Sounds.Remove(cueId);
+        else c.Sounds[cueId] = fileName;
+    });
+
+    /// <summary>The keyboard clicks while typing, in this profile.</summary>
+    public bool LoadKeyboardClicks() => Try(() => (bool?)Cues().KeyboardClicks) ?? true;
+
+    public void SaveKeyboardClicks(bool on) => Cues().KeyboardClicks = on;
+
+    /// <summary>Every cue as it plays now - this profile's own with this computer's global sounds - for the players and,
+    /// cut back to the profile's own, this computer's copy (<see cref="AppConfig.LastProfileCues"/>).</summary>
+    public CueSettings CueSnapshot() => CueSettings.Combine(Cues(), GlobalCues());
+
+    /// <summary>Put a set of the profile's own cues in place: a new profile's, which start from the last profile's. Any
+    /// global sounds in <paramref name="cues"/> are left to this computer's own.</summary>
+    public void UseCues(CueSettings cues) => cache.Cues = (cues ?? throw new ArgumentNullException(nameof(cues))).OnlyProfileCues();
+
+    public bool LoadEnableConnectCue() => LoadCueEnabled("connect");
+    public void SaveEnableConnectCue(bool value) => SaveCueEnabled("connect", value);
+    public bool LoadEnableDisconnectCue() => LoadCueEnabled("disconnect");
+    public void SaveEnableDisconnectCue(bool value) => SaveCueEnabled("disconnect", value);
+    public bool LoadEnableRecordStartCue() => LoadCueEnabled("record-start");
+    public void SaveEnableRecordStartCue(bool value) => SaveCueEnabled("record-start", value);
+    public bool LoadEnableRecordStopCue() => LoadCueEnabled("record-stop");
+    public void SaveEnableRecordStopCue(bool value) => SaveCueEnabled("record-stop", value);
+    public bool LoadEnableSaveCue() => LoadCueEnabled("save");
+    public void SaveEnableSaveCue(bool value) => SaveCueEnabled("save", value);
+    public bool LoadEnableProfileSwitchCue() => LoadCueEnabled("profile-switch");
+    public void SaveEnableProfileSwitchCue(bool value) => SaveCueEnabled("profile-switch", value);
+    public bool LoadEnableProfileMenuOpenCue() => LoadCueEnabled("profile-menu-open");
+    public void SaveEnableProfileMenuOpenCue(bool value) => SaveCueEnabled("profile-menu-open", value);
+    public bool LoadEnableUpdateCue() => LoadCueEnabled("update");
+    public void SaveEnableUpdateCue(bool value) => SaveCueEnabled("update", value);
+
+    /// <summary>The cue's file of the person's own, or null when it plays a built-in sound.</summary>
+    public string? LoadCustomCuePath(string cueId) => Try(() => Holding(cueId).CustomPathOf(cueId));
+
+    /// <summary>Set a cue's file of the person's own. Null or empty clears it, so the cue plays its chosen built-in sound
+    /// from <c>default sounds\</c> (<see cref="AppConfig.SoundsDirectory"/>).</summary>
+    public void SaveCustomCuePath(string cueId, string? path) => Change(cueId, c =>
+    {
+        if (string.IsNullOrWhiteSpace(path)) c.CustomPaths.Remove(cueId);
+        else c.CustomPaths[cueId] = path;
+    });
 
     /// <summary>The whole recording-settings bag for the current profile. Loaded as a
     /// CLONE so callers can mutate the returned object without inadvertently writing
@@ -641,6 +619,9 @@ public sealed class RemSoundSettingsStore
             // Keyboard shortcuts are not per-profile (since v4.4) — they live in AppConfig and are not
             // carried through the profile cache.
             AcceptRemoteVolumeCommands = profile.AcceptRemoteVolumeCommands,
+            WebListenEnabled = profile.WebListenEnabled,
+            WebListenPassword = profile.WebListenPassword,
+            WebListenAutoStart = profile.WebListenAutoStart,
             MaxLatencyMs = profile.MaxLatencyMs,
             Codec = profile.Codec,
             OpusFrameSamplesPerChannel = profile.OpusFrameSamplesPerChannel,
@@ -659,25 +640,37 @@ public sealed class RemSoundSettingsStore
             LockPeerAddresses = profile.LockPeerAddresses,
             Smoothness = profile.Smoothness,
             ConcealmentArtifact = (ConcealmentArtifact)profile.ConcealmentArtifactRaw,
-            MuteConnectionCues = profile.MuteConnectionCues,
-            EnableConnectCue = profile.EnableConnectCue,
-            EnableDisconnectCue = profile.EnableDisconnectCue,
-            EnableRecordStartCue = profile.EnableRecordStartCue,
-            EnableRecordStopCue = profile.EnableRecordStopCue,
-            EnableSaveCue = profile.EnableSaveCue,
-            EnableProfileSwitchCue = profile.EnableProfileSwitchCue,
-            EnableProfileMenuOpenCue = profile.EnableProfileMenuOpenCue,
-            EnableUpdateCue = profile.EnableUpdateCue,
-            // Defensive copy so cache mutations don't leak into the in-memory Profile graph
-            // (and vice-versa). Profile is loaded once at startup; the cache evolves through
-            // the session and is written back via CopyTo on save.
-            CustomCuePaths = profile.CustomCuePaths is null ? new() : new Dictionary<string, string>(profile.CustomCuePaths),
+            // The profile's own cues, a copy so the cache and the loaded profile never share a dictionary. A profile an
+            // older RemSound saved has none: its cues are what that RemSound used with it - its own eight, everything else
+            // from this computer's older settings, which nothing writes any more (2026-10-08).
+            Cues = CuesOf(profile).OnlyProfileCues(),
             RecordingSettings = profile.RecordingSettings?.Clone() ?? new RecordingSettings(),
             PushToTalk = profile.PushToTalk?.Clone() ?? new PushToTalkSettings(),
             Metronome = profile.Metronome?.Clone() ?? new MetronomeSettings(),
         };
         MigrateRememberedPeersToGlobal(profile);
+        FillGlobalCuesOnce(profile);
     }
+
+    /// <summary>The first profile a RemSound with the two lists of sounds opens on this computer fills its global sounds
+    /// from what that profile played (2026-10-08) - an older profile's own eight, or the cues of one saved with every cue
+    /// in it - so nothing sounds different after the update. Once only: from then on the global sounds are this
+    /// computer's, changed on the Audio cues tab.</summary>
+    private static void FillGlobalCuesOnce(Profile profile)
+    {
+        try
+        {
+            var cfg = AppConfig.Load();
+            if (cfg.GlobalCues is not null) return;
+            cfg.GlobalCues = CuesOf(profile).OnlyGlobalCues();
+            cfg.Save();
+        }
+        catch { /* best-effort, like the app's other AppConfig writes */ }
+    }
+
+    /// <summary>Every cue as <paramref name="profile"/> played it: its own, or for a profile an older RemSound saved,
+    /// what that RemSound used with it.</summary>
+    private static CueSettings CuesOf(Profile profile) => profile.Cues?.Clone() ?? CuesBefore(profile);
 
     /// <summary>ONE-TIME migration for the peers list going machine-wide (2026-07-16): profiles written by
     /// older builds carry their own remembered-peers list, so the first opened profile that has peers has
@@ -704,6 +697,14 @@ public sealed class RemSoundSettingsStore
         catch { /* best-effort, like the app's other AppConfig writes */ }
     }
 
+    /// <summary>The cues an older RemSound used with <paramref name="profile"/> (<see cref="CueSettings.FromBefore"/>), or if
+    /// this computer's settings cannot be read, every cue on with its first sound.</summary>
+    private static CueSettings CuesBefore(Profile profile)
+    {
+        try { return CueSettings.FromBefore(profile, AppConfig.Load()); }
+        catch { return new CueSettings(); }
+    }
+
     /// <summary>Copies the current in-memory settings cache into a Profile. Note: this only
     /// covers the fields the settings store has historically known about — the device-tick
     /// state, send/receive checkbox state, audio port, volume slider, and selected-peer
@@ -714,6 +715,9 @@ public sealed class RemSoundSettingsStore
         var s = cache;
         // Keyboard shortcuts moved to AppConfig (machine-wide) in v4.4 — no longer written to profiles.
         if (s.AcceptRemoteVolumeCommands is bool arvc) profile.AcceptRemoteVolumeCommands = arvc;
+        if (s.WebListenEnabled is bool wle) profile.WebListenEnabled = wle;
+        profile.WebListenPassword = s.WebListenPassword;
+        if (s.WebListenAutoStart is bool wla) profile.WebListenAutoStart = wla;
         if (s.MaxLatencyMs is int ml) profile.MaxLatencyMs = ml;
         if (s.Codec is AudioTransportCodec c) profile.Codec = c;
         if (s.OpusFrameSamplesPerChannel is int op) profile.OpusFrameSamplesPerChannel = op;
@@ -734,21 +738,9 @@ public sealed class RemSoundSettingsStore
         if (s.LockPeerAddresses is bool lpa) profile.LockPeerAddresses = lpa;
         if (s.Smoothness is int sm) profile.Smoothness = sm;
         if (s.ConcealmentArtifact is ConcealmentArtifact ca) profile.ConcealmentArtifactRaw = (int)ca;
-        if (s.MuteConnectionCues is bool mc) profile.MuteConnectionCues = mc;
-        // Per-cue enable flags — copy through verbatim (nullable on both sides, so an
-        // unset flag in the cache stays unset on the profile, letting the legacy
-        // MuteConnectionCues path govern that cue on the next load).
-        profile.EnableConnectCue = s.EnableConnectCue;
-        profile.EnableDisconnectCue = s.EnableDisconnectCue;
-        profile.EnableRecordStartCue = s.EnableRecordStartCue;
-        profile.EnableRecordStopCue = s.EnableRecordStopCue;
-        profile.EnableSaveCue = s.EnableSaveCue;
-        profile.EnableProfileSwitchCue = s.EnableProfileSwitchCue;
-        profile.EnableProfileMenuOpenCue = s.EnableProfileMenuOpenCue;
-        profile.EnableUpdateCue = s.EnableUpdateCue;
-        profile.CustomCuePaths = s.CustomCuePaths is null
-            ? new Dictionary<string, string>()
-            : new Dictionary<string, string>(s.CustomCuePaths);
+        // The profile's own cues; the global sounds are this computer's. The older per-cue fields are left unset, so the
+        // saved file no longer carries them.
+        profile.Cues = (s.Cues ?? new CueSettings()).OnlyProfileCues();
         if (s.RecordingSettings is RecordingSettings rs) profile.RecordingSettings = rs.Clone();
         if (s.PushToTalk is PushToTalkSettings ptt) profile.PushToTalk = ptt.Clone();
         if (s.Metronome is MetronomeSettings metronome) profile.Metronome = metronome.Clone();
@@ -757,6 +749,10 @@ public sealed class RemSoundSettingsStore
     private sealed class Settings
     {
         public bool? AcceptRemoteVolumeCommands { get; set; }
+        public bool? WebListenEnabled { get; set; }
+        /// <summary>Scrambled, as the profile keeps it.</summary>
+        public string? WebListenPassword { get; set; }
+        public bool? WebListenAutoStart { get; set; }
         public int? MaxLatencyMs { get; set; }
         public AudioTransportCodec? Codec { get; set; }
         // Renamed 2026-05-23 (v3.0). Was OpusFrameMilliseconds; the value is samples-per-channel at
@@ -782,18 +778,9 @@ public sealed class RemSoundSettingsStore
         public bool? LockPeerAddresses { get; set; }
         public int? Smoothness { get; set; }
         public ConcealmentArtifact? ConcealmentArtifact { get; set; }
-        public bool? MuteConnectionCues { get; set; }
-        // Per-cue enable flags (2026-05-15). Nullable so an absent value in the loaded
-        // profile falls back to the legacy MuteConnectionCues migration path.
-        public bool? EnableConnectCue { get; set; }
-        public bool? EnableDisconnectCue { get; set; }
-        public bool? EnableRecordStartCue { get; set; }
-        public bool? EnableRecordStopCue { get; set; }
-        public bool? EnableSaveCue { get; set; }
-        public bool? EnableProfileSwitchCue { get; set; }
-        public bool? EnableProfileMenuOpenCue { get; set; }
-        public bool? EnableUpdateCue { get; set; }
-        public Dictionary<string, string>? CustomCuePaths { get; set; }
+        // The profile's own audio cues (2026-10-08). Null only on a cache no profile or new profile has filled yet, which
+        // treats every cue as on with its first sound.
+        public CueSettings? Cues { get; set; }
         public RecordingSettings? RecordingSettings { get; set; }
         public PushToTalkSettings? PushToTalk { get; set; }
         public MetronomeSettings? Metronome { get; set; }

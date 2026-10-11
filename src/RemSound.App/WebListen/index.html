@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RemSound listener</title>
+<style>
+  /* RemSound's colours (Theme.cs): the section-heading blue, and green, amber and red for good, waiting and wrong;
+     light or dark as the device is set. */
+  :root {
+    color-scheme: light dark;
+    --bg: #f3f3f3; --surface: #ffffff; --fg: #1b1b1b; --muted: #5d5d5d; --border: #dcdcdc;
+    --accent: #0063b1; --on-accent: #ffffff; --accent-soft: rgba(0, 99, 177, 0.08);
+    --ok: #188c38; --warn: #b07800; --bad: #be2828;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1c1c; --surface: #2a2a2a; --fg: #f0f0f0; --muted: #b3b3b3; --border: #3e3e3e;
+      --accent: #58a6ff; --on-accent: #0b1b2c; --accent-soft: rgba(88, 166, 255, 0.12);
+      --ok: #46c864; --warn: #e8b840; --bad: #f06464;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); -webkit-text-size-adjust: 100%;
+         font: 16px/1.5 "Segoe UI", system-ui, -apple-system, "Helvetica Neue", sans-serif; }
+  main { max-width: 30rem; margin: 0 auto; padding: 28px 16px 40px; }
+  .top { display: flex; align-items: center; gap: 12px; margin: 0 0 18px; }
+  .mark { width: 34px; height: 34px; flex: none; color: var(--accent); }
+  h1 { font-size: 1.45rem; font-weight: 600; line-height: 1.25; margin: 0; }
+  #source { margin: 2px 0 0; color: var(--muted); }
+  #status { display: flex; align-items: center; gap: 10px; margin: 0 0 16px; padding: 10px 14px;
+            background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+  #status::before { content: ""; width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--muted); }
+  #status.ok::before { background: var(--ok); }
+  #status.warn::before { background: var(--warn); }
+  #status.bad { color: var(--bad); border-color: var(--bad); }
+  #status.bad::before { background: var(--bad); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin: 0 0 16px; }
+  .card > :first-child { margin-top: 0; }
+  h2 { font-size: 1rem; font-weight: 600; color: var(--accent); margin: 0; }
+  label { display: block; font-weight: 600; }
+  .slider { margin-top: 16px; }
+  .slider .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .value { color: var(--muted); font-variant-numeric: tabular-nums; }
+  input[type=range] { display: block; width: 100%; height: 28px; margin: 4px 0 0; accent-color: var(--accent); }
+  input[type=password] { display: block; width: 100%; margin: 6px 0 0; padding: 10px 12px; font: inherit; color: var(--fg);
+                         background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
+  button { display: block; width: 100%; min-height: 44px; margin: 0; padding: 10px 18px; font: inherit; font-weight: 600;
+           border: 1px solid var(--accent); border-radius: 6px; cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--on-accent); margin-top: 16px; }
+  button.secondary { background: transparent; color: var(--accent); }
+  button.secondary:hover { background: var(--accent-soft); }
+  button.primary:hover { filter: brightness(1.08); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  #saved { margin: 8px 0 0; color: var(--muted); }
+  #details { margin: 16px 0 0; color: var(--muted); font-size: 0.85rem; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <svg class="mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="currentColor">
+      <rect x="2" y="9" width="3" height="6" rx="1.5"/><rect x="7" y="5" width="3" height="14" rx="1.5"/>
+      <rect x="12" y="2" width="3" height="20" rx="1.5"/><rect x="17" y="7" width="3" height="10" rx="1.5"/>
+    </svg>
+    <div>
+      <h1>RemSound listener</h1>
+      <p id="source" hidden></p>
+    </div>
+  </header>
+  <p id="status" role="status">Not listening.</p>
+  <!-- Before listening: only the password and Start listening (Ed, 2026-10-10: the password box stayed and looked as if
+       nothing had worked). -->
+  <form id="form" class="card" autocomplete="on">
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <button id="start" class="primary" type="submit">Start listening</button>
+  </form>
+  <!-- While listening: Stop listening, then volume, pan and the three-band EQ, as RemSound shapes a peer. -->
+  <section id="listening" hidden aria-label="Listening">
+    <div class="card">
+      <button id="stop" class="secondary" type="button">Stop listening</button>
+      <div class="slider">
+        <div class="row"><label for="volume">Volume</label><span class="value" id="volume-value" aria-hidden="true"></span></div>
+        <input id="volume" type="range" min="0" max="100" step="1" value="100">
+      </div>
+      <div class="slider">
+        <div class="row"><label for="pan">Pan</label><span class="value" id="pan-value" aria-hidden="true"></span></div>
+        <input id="pan" type="range" min="-100" max="100" step="5" value="0">
+      </div>
+    </div>
+    <div class="card">
+      <h2>EQ</h2>
+      <div class="slider">
+        <div class="row"><label for="bass">Bass</label><span class="value" id="bass-value" aria-hidden="true"></span></div>
+        <input id="bass" type="range" min="-12" max="12" step="1" value="0">
+      </div>
+      <div class="slider">
+        <div class="row"><label for="middle">Middle</label><span class="value" id="middle-value" aria-hidden="true"></span></div>
+        <input id="middle" type="range" min="-12" max="12" step="1" value="0">
+      </div>
+      <div class="slider">
+        <div class="row"><label for="treble">Treble</label><span class="value" id="treble-value" aria-hidden="true"></span></div>
+        <input id="treble" type="range" min="-12" max="12" step="1" value="0">
+      </div>
+    </div>
+    <button id="save" class="secondary" type="button">Save as my defaults</button>
+    <p id="saved" role="status"></p>
+    <p id="details"></p>
+  </section>
+</main>
+<script>
+"use strict";
+// The audio side runs in an AudioWorklet: one small queue per stream (an ASIO lane and a WASAPI lane arrive as separate
+// streams), mixed together. Each queue is held as short as the network allows: it starts by waiting for its target,
+// grows the target after a gap, shrinks it again after quiet time, and jumps back to the live point when a burst leaves
+// it standing deep.
+const workletSource = `
+class RemSoundListener extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.streams = new Map();
+    this.gainL = 1;
+    this.gainR = 1;
+    this.port.onmessage = (e) => this.onMessage(e.data);
+    this.reportAt = 0;
+  }
+  stream(id) {
+    let s = this.streams.get(id);
+    if (!s) {
+      const cap = sampleRate * 2;               // two seconds a channel
+      s = { l: new Float32Array(cap), r: new Float32Array(cap), cap, read: 0, write: 0, depth: 0,
+            primed: false, target: Math.round(sampleRate * 0.03), quietFrames: 0, gaps: 0, skips: 0, fade: 0, lastWrite: currentFrame };
+      this.streams.set(id, s);
+    }
+    return s;
+  }
+  onMessage(m) {
+    if (m.type === 'gain') { this.gainL = m.l; this.gainR = m.r; return; }
+    if (m.type === 'reset') { this.streams.clear(); return; }
+    if (m.type !== 'audio') return;
+    const s = this.stream(m.id);
+    const n = m.l.length;
+    if (s.depth + n > s.cap) { this.skipTo(s, 0); }  // far behind: start again from what arrives
+    for (let i = 0; i < n; i++) {
+      s.l[s.write] = m.l[i];
+      s.r[s.write] = m.r[i];
+      s.write = (s.write + 1) % s.cap;
+    }
+    s.depth += n;
+    s.lastWrite = currentFrame;
+    // Standing too deep after a burst: drop the oldest down to the target, with a short fade in.
+    const maxStand = s.target + Math.round(sampleRate * 0.04);
+    if (s.primed && s.depth > maxStand) { this.skipTo(s, s.target); s.skips++; }
+  }
+  skipTo(s, keep) {
+    const drop = Math.max(0, s.depth - keep);
+    s.read = (s.read + drop) % s.cap;
+    s.depth -= drop;
+    s.fade = Math.round(sampleRate * 0.0025);
+  }
+  process(inputs, outputs) {
+    const out = outputs[0];
+    const L = out[0], R = out[1] || out[0];
+    const frames = L.length;
+    L.fill(0); if (R !== L) R.fill(0);
+    for (const [id, s] of this.streams) {
+      if (!s.primed) {
+        if (s.depth >= s.target) { s.primed = true; s.fade = Math.round(sampleRate * 0.0025); }
+        else continue;
+      }
+      if (s.depth < frames) {
+        // Ran dry: a gap. Raise the target by 10 ms (up to 300 ms) and wait to refill.
+        s.gaps++;
+        s.primed = false;
+        s.target = Math.min(Math.round(sampleRate * 0.3), s.target + Math.round(sampleRate * 0.01));
+        s.quietFrames = 0;
+        continue;
+      }
+      const fadeLen = Math.round(sampleRate * 0.0025);
+      for (let i = 0; i < frames; i++) {
+        let f = 1;
+        if (s.fade > 0) { f = 1 - s.fade / fadeLen; s.fade--; }
+        L[i] += s.l[s.read] * f * this.gainL;
+        if (R !== L) R[i] += s.r[s.read] * f * this.gainR;
+        s.read = (s.read + 1) % s.cap;
+      }
+      s.depth -= frames;
+      // Quiet for 10 s: bring the target down by 2 ms, not below 15 ms.
+      s.quietFrames += frames;
+      if (s.quietFrames >= sampleRate * 10) {
+        s.quietFrames = 0;
+        s.target = Math.max(Math.round(sampleRate * 0.015), s.target - Math.round(sampleRate * 0.002));
+      }
+    }
+    // A stream that has sent nothing for 4 s has stopped: forget it.
+    for (const [id, s] of this.streams) if (currentFrame - s.lastWrite > sampleRate * 4) this.streams.delete(id);
+    if (currentFrame >= this.reportAt) {
+      this.reportAt = currentFrame + sampleRate;
+      const report = [];
+      for (const [id, s] of this.streams) report.push({ id, depthMs: s.depth / sampleRate * 1000, targetMs: s.target / sampleRate * 1000, gaps: s.gaps, skips: s.skips });
+      this.port.postMessage(report);
+    }
+    return true;
+  }
+}
+registerProcessor('remsound-listener', RemSoundListener);
+`;
+
+const $ = (id) => document.getElementById(id);
+const status = $('status'), details = $('details'), startButton = $('start'), stopButton = $('stop'), volume = $('volume');
+const pan = $('pan'), form = $('form'), listening = $('listening');
+// RemSound's simple EQ: bass a low shelf at 100 Hz, middle a peak at 1 kHz, treble a high shelf at 8 kHz, each -12 to +12 dB.
+const bands = [
+  { input: $('bass'), type: 'lowshelf', freq: 100 },
+  { input: $('middle'), type: 'peaking', freq: 1000, q: 0.9 },
+  { input: $('treble'), type: 'highshelf', freq: 8000 },
+];
+let socket = null, context = null, node = null, decoders = new Map(), codec = 'opus', stopping = false, lastSpoken = '';
+let workletReady = false, opusFailed = false, listeningPassword = '';
+// "Start listening when the web page loads" (the Web listener window, Ed 2026-10-11): with it on, this browser keeps the
+// password after the first start and starts by itself next time. It is kept only while RemSound says that box is ticked,
+// and forgotten as soon as it stops working.
+const SAVED = 'remsound-listener-password';
+function savedPassword() { try { return localStorage.getItem(SAVED); } catch { return null; } }
+function keepPassword(p) { try { localStorage.setItem(SAVED, p); } catch {} }
+function forgetPassword() { try { localStorage.removeItem(SAVED); } catch {} }
+
+// tone: true or 'bad' (red), 'ok' (green, listening), 'warn' (amber, waiting for something), or none (grey).
+function say(text, tone) {
+  // The status line is a live region: only changes are written, so a screen reader hears each new state once.
+  if (text === lastSpoken) return;
+  lastSpoken = text;
+  status.textContent = text;
+  status.className = tone === true ? 'bad' : tone || '';
+}
+
+// Pan is a balance, as in RemSound: it never sums to mono. Centre leaves both sides alone; towards one side it turns the
+// OTHER side down, reaching silence at the end. Volume then scales both.
+function sendGain() {
+  const v = volume.value / 100, p = pan.value / 100;
+  const l = (p > 0 ? 1 - p : 1) * v, r = (p < 0 ? 1 + p : 1) * v;
+  if (node) node.port.postMessage({ type: 'gain', l, r });
+}
+function describe() {
+  volume.setAttribute('aria-valuetext', volume.value + ' percent');
+  $('volume-value').textContent = volume.value + '%';
+  const p = Number(pan.value);
+  pan.setAttribute('aria-valuetext', p === 0 ? 'centre' : Math.abs(p) + ' percent ' + (p < 0 ? 'left' : 'right'));
+  $('pan-value').textContent = p === 0 ? 'Centre' : (p < 0 ? 'Left ' : 'Right ') + Math.abs(p) + '%';
+  for (const b of bands) {
+    const g = Number(b.input.value);
+    b.input.setAttribute('aria-valuetext', (g > 0 ? 'plus ' : g < 0 ? 'minus ' : '') + Math.abs(g) + ' decibels');
+    $(b.input.id + '-value').textContent = (g > 0 ? '+' : g < 0 ? '\u2212' : '') + Math.abs(g) + ' dB';
+    if (b.node) b.node.gain.value = g;
+  }
+}
+for (const input of [volume, pan, ...bands.map(b => b.input)]) input.addEventListener('input', () => { describe(); sendGain(); });
+describe();
+
+// Enter puts a slider back where it starts: full volume, centred, flat (Ed, 2026-10-11). A screen reader's own
+// "activate", VoiceOver's double tap or NVDA's Enter in browse mode, arrives as a click with no finger or mouse pressed
+// just before it, so it does the same; a real click or drag on the slider never does.
+let lastPressed = -Infinity;
+for (const type of ['pointerdown', 'pointerup']) window.addEventListener(type, () => { lastPressed = performance.now(); }, true);
+for (const input of [volume, pan, ...bands.map(b => b.input)]) {
+  const reset = () => { input.value = input.defaultValue; input.dispatchEvent(new Event('input')); };
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); reset(); } });
+  input.addEventListener('click', () => { if (performance.now() - lastPressed > 1000) reset(); });
+}
+
+// "Save as my defaults" (Ed, 2026-10-11): this browser keeps where the sliders are, the page starts with them next time,
+// and Enter on a slider comes back to them. Kept in this browser only, never sent anywhere.
+const DEFAULTS = 'remsound-listener-defaults';
+const sliders = { volume, pan, bass: bands[0].input, middle: bands[1].input, treble: bands[2].input };
+try {
+  const saved = JSON.parse(localStorage.getItem(DEFAULTS) || 'null') || {};
+  for (const [name, input] of Object.entries(sliders)) {
+    const v = Number(saved[name]);
+    if (saved[name] === undefined || !Number.isFinite(v) || v < Number(input.min) || v > Number(input.max)) continue;
+    input.defaultValue = String(v);
+    input.value = String(v);
+  }
+  describe();
+} catch {}
+$('save').addEventListener('click', () => {
+  const now = Object.fromEntries(Object.entries(sliders).map(([name, input]) => [name, Number(input.value)]));
+  let text;
+  try {
+    localStorage.setItem(DEFAULTS, JSON.stringify(now));
+    for (const input of Object.values(sliders)) input.defaultValue = input.value;
+    text = 'Saved. The page starts with these next time, and Enter on a slider comes back to them.';
+  } catch {
+    text = 'This browser won\'t let the page keep them.';
+  }
+  // Emptied first, so pressing it again is heard again.
+  $('saved').textContent = '';
+  setTimeout(() => { $('saved').textContent = text; }, 50);
+});
+
+function showListening(on) {
+  form.hidden = on;
+  listening.hidden = !on;
+  if (!on) $('source').hidden = true;
+}
+
+// Browsers play nothing until the page has had a key press or a click. Started by itself, the page connects and decodes,
+// and asks for one key if the browser is holding the sound back.
+function wakeOnFirstKey() {
+  if (!context || context.state === 'running') return;
+  say('Listening. Press any key, or click or tap the page, to hear the sound.', 'warn');
+  const wake = () => {
+    window.removeEventListener('keydown', wake, true);
+    window.removeEventListener('pointerdown', wake, true);
+    if (context) context.resume().then(() => say('Listening.', 'ok'));
+  };
+  window.addEventListener('keydown', wake, true);
+  window.addEventListener('pointerdown', wake, true);
+}
+
+// Locking an iPhone or switching to another app pauses the sound; coming back to the page starts it again, or asks for a
+// key or a tap if the browser wants one first.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !context || !node || stopping || context.state === 'running') return;
+  context.resume().then(() => say('Listening.', 'ok'), () => {});
+  setTimeout(wakeOnFirstKey, 300);
+});
+
+form.addEventListener('submit', (e) => { e.preventDefault(); start(false); });
+stopButton.addEventListener('click', () => stop('Stopped.'));
+
+async function hmacResponse(password, saltB64, iterations, nonceB64) {
+  const enc = new TextEncoder();
+  const salt = Uint8Array.from(atob(saltB64), c => c.charCodeAt(0));
+  const nonce = Uint8Array.from(atob(nonceB64), c => c.charCodeAt(0));
+  const base = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations, hash: 'SHA-256' }, base, 256);
+  const key = await crypto.subtle.importKey('raw', bits, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, nonce));
+  return btoa(String.fromCharCode(...sig));
+}
+
+function decoderFor(id) {
+  let d = decoders.get(id);
+  if (d) return d;
+  d = new AudioDecoder({
+    output: (data) => {
+      const n = data.numberOfFrames;
+      const l = new Float32Array(n), r = new Float32Array(n);
+      data.copyTo(l, { planeIndex: 0, format: 'f32-planar' });
+      if (data.numberOfChannels > 1) data.copyTo(r, { planeIndex: 1, format: 'f32-planar' }); else r.set(l);
+      data.close();
+      node.port.postMessage({ type: 'audio', id, l, r }, [l.buffer, r.buffer]);
+    },
+    error: () => opusGaveUp(),
+  });
+  d.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 });
+  decoders.set(id, d);
+  return d;
+}
+
+function onAudio(buf) {
+  // [1][stream id][sequence u32 LE][payload]
+  const view = new DataView(buf);
+  const id = view.getUint8(1);
+  const seq = view.getUint32(2, true);
+  const payload = new Uint8Array(buf, 6);
+  if (codec === 'opus') {
+    try { decoderFor(id).decode(new EncodedAudioChunk({ type: 'key', timestamp: seq * 5000, data: payload })); }
+    catch { opusGaveUp(); }
+  } else {
+    // 16-bit stereo, interleaved
+    const pcm = new Int16Array(payload.buffer, payload.byteOffset, payload.byteLength >> 1);
+    const n = pcm.length >> 1;
+    const l = new Float32Array(n), r = new Float32Array(n);
+    for (let i = 0; i < n; i++) { l[i] = pcm[2 * i] / 32768; r[i] = pcm[2 * i + 1] / 32768; }
+    node.port.postMessage({ type: 'audio', id, l, r }, [l.buffer, r.buffer]);
+  }
+}
+
+// Opus where this browser says it can decode it; plain 16-bit PCM otherwise, the same sound for more of the computer's
+// upload. A browser with no decoder at all, or one without Opus (an iPhone may be either), gets PCM.
+async function pickCodec() {
+  if (opusFailed || typeof AudioDecoder !== 'function') return 'pcm16';
+  try {
+    const answer = await AudioDecoder.isConfigSupported({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 });
+    return answer.supported ? 'opus' : 'pcm16';
+  } catch { return 'pcm16'; }
+}
+
+// A browser that offered Opus and then failed with it: connect again asking for PCM, keeping the sound side running.
+function opusGaveUp() {
+  if (codec !== 'opus' || !socket || stopping) return;
+  opusFailed = true;
+  const old = socket; socket = null; old.onmessage = old.onclose = old.onerror = null; try { old.close(); } catch {}
+  for (const d of decoders.values()) { try { d.close(); } catch {} }
+  decoders.clear();
+  codec = 'pcm16';
+  connect(listeningPassword, false);
+}
+
+async function start(byItself) {
+  const password = $('password').value;
+  if (!password) { say('Type the password first.', true); $('password').focus(); return; }
+  startButton.disabled = true;
+  stopping = false;
+  try {
+    // On an iPhone, play as music does, so the ring/silent switch doesn't silence it. Other browsers don't have this.
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch {}
+    // A click is what lets the page make sound, so the audio side starts here: built once, and only paused by Stop
+    // listening (building it again on a second start failed to load the worklet). Safari allows it only straight from
+    // the tap, before anything is waited for, so the sound is asked for first.
+    if (!context) context = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
+    const resuming = context.resume();
+    resuming.catch(() => {});
+    if (!workletReady) {
+      const url = URL.createObjectURL(new Blob([workletSource], { type: 'text/javascript' }));
+      await context.audioWorklet.addModule(url);
+      workletReady = true;
+    }
+    node = new AudioWorkletNode(context, 'remsound-listener', { numberOfInputs: 0, outputChannelCount: [2] });
+    // The EQ after the mix: each band its own filter, both channels alike.
+    let last = node;
+    for (const b of bands) {
+      b.node = new BiquadFilterNode(context, { type: b.type, frequency: b.freq, Q: b.q || 0.7071, gain: Number(b.input.value) });
+      last.connect(b.node);
+      last = b.node;
+    }
+    last.connect(context.destination);
+    sendGain();
+    node.port.onmessage = (e) => showDetails(e.data);
+    // A press of Start listening lets the sound start; started by itself, the browser may hold it until a key.
+    if (!byItself) await resuming;
+  } catch (err) {
+    say('This browser cannot play the sound: ' + err.message, true);
+    startButton.disabled = false;
+    return;
+  }
+  codec = await pickCodec();
+  listeningPassword = password;
+  connect(password, byItself);
+}
+
+function connect(password, byItself) {
+  say('Connecting...');
+  const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const mine = new WebSocket(scheme + '//' + location.host + '/listen');
+  socket = mine;
+  mine.binaryType = 'arraybuffer';
+  // Each connection answers only for itself: an old one's late "closed" must never stop a new one (it did, on starting
+  // again after Stop listening).
+  mine.onmessage = async (e) => {
+    if (socket !== mine) return;
+    if (typeof e.data !== 'string') { onAudio(e.data); return; }
+    const m = JSON.parse(e.data);
+    if (m.type === 'challenge') {
+      if (byItself && !m.autoStart) {
+        // Started by itself, but RemSound no longer has the box ticked: forget the password and ask for it.
+        forgetPassword();
+        stop('Type the password and press Start listening.', false);
+        $('password').value = '';
+        $('password').focus();
+        return;
+      }
+      const response = await hmacResponse(password, m.salt, m.iterations, m.nonce);
+      if (socket === mine) mine.send(JSON.stringify({ type: 'auth', response, codec }));
+    } else if (m.type === 'welcome') {
+      // In: the password goes away and the listening controls take its place, with the keyboard on Stop listening.
+      showListening(true);
+      if (m.source) { $('source').textContent = 'Receiving from ' + m.source; $('source').hidden = false; }
+      if (m.autoStart) keepPassword(password); else forgetPassword();
+      say('Listening.', 'ok');
+      stopButton.focus();
+      if (byItself) setTimeout(wakeOnFirstKey, 300);
+    } else if (m.type === 'refused') {
+      forgetPassword();   // a remembered password that no longer works is never tried again
+      stop(m.reason || 'The password was not accepted.', true);
+    } else if (m.type === 'idle') {
+      say('Connected. RemSound on the computer is not sending anything at the moment.', 'warn');
+    } else if (m.type === 'active') {
+      say('Listening.', 'ok');
+    }
+  };
+  mine.onclose = () => { if (socket === mine && !stopping) stop('The connection to RemSound closed.', true); };
+  mine.onerror = () => { if (socket === mine && !stopping) say('Could not reach RemSound.', true); };
+}
+
+function stop(text, bad) {
+  stopping = true;
+  if (socket) { const old = socket; socket = null; old.onmessage = old.onclose = old.onerror = null; try { old.close(); } catch {} }
+  for (const d of decoders.values()) { try { d.close(); } catch {} }
+  decoders.clear();
+  if (node) { node.port.onmessage = null; node.disconnect(); node = null; }
+  for (const b of bands) { if (b.node) b.node.disconnect(); b.node = null; }
+  if (context) context.suspend();
+  const wasListening = !listening.hidden;
+  showListening(false);
+  startButton.disabled = false;
+  details.textContent = '';
+  say(text, bad);
+  // Back to the password, with the keyboard on Start listening, or on the password when it was refused.
+  if (bad && !wasListening) $('password').focus(); else startButton.focus();
+}
+
+{
+  const saved = savedPassword();
+  if (saved) { $('password').value = saved; start(true); }
+}
+
+function showDetails(report) {
+  if (!report.length) { details.textContent = 'Waiting for sound.'; return; }
+  const out = context ? Math.round(((context.baseLatency || 0) + (context.outputLatency || 0)) * 1000) : 0;
+  details.textContent = report.map(s => `Stream ${s.id}: buffer ${Math.round(s.depthMs)} ms (aiming for ${Math.round(s.targetMs)}), gaps ${s.gaps}, catch-ups ${s.skips}`).join('. ')
+    + (out ? `. Your sound card adds about ${out} ms.` : '') + ` Format: ${codec === 'opus' ? 'Opus' : '16-bit PCM'}.`;
+}
+</script>
+</body>
+</html>

@@ -235,6 +235,10 @@ internal sealed class ServiceNetworkPresence : IDisposable
         try { heartbeat?.Stop(); heartbeat?.Dispose(); } catch { }
         heartbeat = null;
         if (relayGroup is not null) relayGroup.Changed -= OnRelayGroupChanged;
+        // Send to nobody before saying goodbye: the sound still flowing in the moment between the goodbye and the audio
+        // stopping went to the server outside the group, once the router below was gone, and took a two-person pair slot
+        // there - a ghost of this computer that the app then paired with (the hand-over review, 2026-10-10).
+        try { sender.SetReceivers([]); } catch { }
         try { relayGroup?.Stop(); } catch { }   // says goodbye, so the group sees us leave at once
         relayGroup = null;
         sender.RelayRouter = null;

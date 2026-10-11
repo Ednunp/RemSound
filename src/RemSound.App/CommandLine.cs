@@ -566,7 +566,8 @@ internal static class CommandLine
         sb.AppendLine($"  Start with profile:     {cfg.StartWithProfileTitle ?? "(picker)"}");
         sb.AppendLine($"  Profiles folder:        {cfg.ProfilesDirectory ?? AppConfig.ProfilesBaseDirectory}");
         sb.AppendLine($"  Update check frequency: {cfg.UpdateCheckFrequency}");
-        sb.AppendLine($"  Startup cue enabled:    {cfg.EnableStartupCue}");
+        sb.AppendLine($"  Startup cue enabled:    {cfg.CuesBeforeAProfile().IsOn(MainForm.CueId.Startup)} (the last profile's)");
+        sb.AppendLine($"  Mute all audio cues:    {cfg.MuteAllCues}");
         sb.AppendLine();
 
         sb.AppendLine("Profiles:");

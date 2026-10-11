@@ -305,6 +305,8 @@ internal sealed class SenderLane
         // ring, and the recorder mixes them rather than appending them sequentially (which
         // would double the file's effective sample rate). 2026-05-15 fix.
         owner.DispatchSentSamples(owner.PushToTalk.RecordsUngated ? ungated : stereoFloats, route);
+        // The web listener hears what peers hear (2026-10-10).
+        owner.DispatchWebSamples(stereoFloats, route);
 
         // Discontinuity probe — what does the audio look like just before we encode it?
         // Compared to the receiver's per-stage probes, this tells us whether artefacts are

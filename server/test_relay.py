@@ -826,6 +826,50 @@ class PhonesStillPair(unittest.TestCase):
         self.assertEqual({p.addr for p in r.v1_peers}, {phone, win2}, "a member on the phone's own password may partner it")
 
 
+class HandOverKeepsThePhone(unittest.TestCase):
+    """The hand-over review, 2026-10-10: the send-only service and the app are one member on a server, and when one takes
+    the other's place a phone partnered with them must not wait a minute for the old pair slot to idle out."""
+
+    def _member_beside_phone(self):
+        r = make_relay()
+        phone, win = ("10.6.0.1", 7800), ("10.6.0.2", 7801)
+        join(r, cid(1), "windows", G1, win)
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), phone)
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), win)
+        self.assertEqual({p.addr for p in r.v1_peers}, {phone, win}, "premise: the member partners the phone")
+        return r, phone, win
+
+    def test_a_goodbye_frees_the_pair_slot_at_once(self):
+        r, phone, win = self._member_beside_phone()
+        r.handle_packet(v2_packet(relay.TYPE_LOBBY_BYE, cid(1)), win)
+        self.assertNotIn(uuid.UUID(bytes=cid(1)), r.v2_clients, "the goodbye removes the member")
+        self.assertEqual([p.addr for p in r.v1_peers], [phone], "and its pair slot, so the phone is free at once")
+        # The other half of this computer arrives from its own port and partners the phone straight away.
+        other = ("10.6.0.2", 7802)
+        join(r, cid(1), "windows", G1, other)
+        r.handle_packet(v1_packet(relay.TYPE_HEARTBEAT, b"hb"), other)
+        self.assertEqual({p.addr for p in r.v1_peers}, {phone, other}, "the newcomer partners the phone without waiting a minute")
+
+    def test_a_forged_goodbye_frees_nothing(self):
+        r, phone, win = self._member_beside_phone()
+        r.handle_packet(v2_packet(relay.TYPE_LOBBY_BYE, cid(1)), ("10.6.9.9", 9999))
+        self.assertEqual({p.addr for p in r.v1_peers}, {phone, win}, "a goodbye from anywhere else must not free the slot")
+
+    def test_a_member_that_moves_takes_its_pair_slot_with_it(self):
+        r, phone, win = self._member_beside_phone()
+        member = r.v2_clients[uuid.UUID(bytes=cid(1))]
+        moved = ("10.6.0.2", 7900)
+        r.handle_packet(hello(cid(1), "windows", G1), moved)
+        prove(r, moved)
+        member.last_seen -= relay.REBIND_SILENCE_SECONDS + 0.1
+        r.handle_packet(hello(cid(1), "windows", G1), moved)
+        self.assertEqual(member.addr, moved, "premise: the member moved")
+        self.assertEqual({p.addr for p in r.v1_peers}, {phone, moved}, "its pair slot must move with it")
+        r.sock.sent.clear()
+        r.handle_packet(v1_packet(relay.TYPE_AUDIO, b"PHONE-TO-WIN"), phone)
+        self.assertTrue(forwarded_to(r.sock, moved, b"PHONE-TO-WIN"), "the phone's audio follows it to the new address")
+
+
 class RelayHint(unittest.TestCase):
     def test_a_device_the_pair_has_no_room_for_learns_it_reached_a_relay(self):
         r = make_relay()

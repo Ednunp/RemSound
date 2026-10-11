@@ -135,32 +135,48 @@ public sealed class AppConfig
     /// none yet. Cleared from Preferences → General.</summary>
     public List<string>? RememberedApplications { get; set; }
 
-    /// <summary>If true (the default), RemSound plays the startup cue once, right after this
-    /// copy wins the single-instance takeover and before the profile loads. Machine-wide (not
-    /// per-<see cref="Profile"/>) because it fires before any profile — and its per-profile
-    /// custom-cue dictionary — has been chosen. Like the connect/disconnect cues it's audible
-    /// feedback, on by default; the user unticks "Startup sound" in Preferences to silence it.
-    /// (The usual "auto-options default off" rule is about data-persistence toggles, not cues.)</summary>
+    /// <summary>Turn every audio cue off, in every profile, on this computer (2026-10-08; Andre asked for it, Ed: "single
+    /// checkbox right before the 2 lists, turn all audio cues off"). The Audio cues tab's "Turn all audio cues off" tick
+    /// box. Every cue, the keyboard clicks and the DAW plugin's help sounds go quiet, whatever each profile and the global
+    /// sounds have them set to; nothing else changes, so unticking it brings every sound back. Only the previews you ask
+    /// for on the Audio cues tab still play. Off by default.</summary>
+    public bool MuteAllCues { get; set; }
+
+    /// <summary>The global sounds - profile saved, profile switched, profile menu open, update, and context help opened and
+    /// closed (<see cref="CueSettings.GlobalCueIds"/>) - kept on this computer for every profile (2026-10-08). Null until a
+    /// RemSound with the two lists of sounds first opens a profile, which fills it from what that profile played
+    /// (<see cref="CueSettings.FromBefore"/>, or the profile's own cues if it has them).</summary>
+    public CueSettings? GlobalCues { get; set; }
+
+    /// <summary>The profile's own cues of the profile last opened on this computer, kept here for what sounds before a
+    /// profile is chosen (the profile picker's tick box and tab sounds, its key clicks) and as the cues a new profile
+    /// starts with. Null until a RemSound with per-profile cues has opened one; until then those come from what an older
+    /// RemSound kept on the computer (<see cref="CueSettings.FromBefore"/>).</summary>
+    public CueSettings? LastProfileCues { get; set; }
+
+    /// <summary>The cues in force before a profile is chosen: the last profile's own and the global sounds, or failing
+    /// those what this computer's older settings gave.</summary>
+    public CueSettings CuesBeforeAProfile()
+    {
+        var older = CueSettings.FromBefore(null, this);
+        return CueSettings.Combine(LastProfileCues ?? older, GlobalCues ?? older);
+    }
+
+    // ---- Cue settings an older RemSound kept on the computer, for every profile ----
+    // Since 2026-10-08 each profile carries all of its cues (Profile.Cues) and nothing writes these any more. They are read
+    // only to carry them into each older profile the first time it is opened, and into LastProfileCues before then
+    // (CueSettings.FromBefore). Never written again, so every older profile gets the same answer from them.
+
+    /// <summary>The startup cue on or off. Before 2026-10-08.</summary>
     public bool EnableStartupCue { get; set; } = true;
 
-    /// <summary>Optional custom WAV path for the startup cue. Null = the default startup sound from
-    /// <see cref="SoundsDirectory"/> (<c>default sounds\</c> next to the exe). Machine-wide for the
-    /// same reason as <see cref="EnableStartupCue"/>: the cue plays before any profile (and the
-    /// per-profile custom-cue paths) is loaded, so it can't live on <see cref="Profile"/>.</summary>
+    /// <summary>The startup cue's file of the person's own. Before 2026-10-08.</summary>
     public string? StartupCueCustomPath { get; set; }
 
-    /// <summary>The chosen default-sound FILENAME for each cue (e.g. "connect 2.wav"), keyed by
-    /// the cue id (<c>MainForm.CueId</c>). The cue WAVs ship as numbered variants ("connect 1.wav",
-    /// "connect 2.wav", ...); this records which one the user picked in Preferences. Machine-wide,
-    /// so a user's preferred sound palette follows them across every profile. A cue absent from the
-    /// dictionary uses the first available variant (the "1"s) by default. A per-profile custom WAV
-    /// (<see cref="Profile.CustomCuePaths"/>) still overrides this choice.</summary>
+    /// <summary>Each cue's chosen built-in sound file name, e.g. "connect 2.wav", by cue id. Before 2026-10-08.</summary>
     public Dictionary<string, string> DefaultCueSounds { get; set; } = new();
 
-    /// <summary>If true (the default), typing into any edit field anywhere in RemSound plays a soft
-    /// keyboard-click sound (one of several, picked at random), so a screen-reader user gets audible
-    /// typing feedback. Password fields additionally play a distinct key sound at the same time.
-    /// Machine-wide; the user unticks "Play keyboard clicks" in Preferences to silence it.</summary>
+    /// <summary>Keyboard clicks while typing on or off. Before 2026-10-08.</summary>
     public bool EnableKeyboardClicks { get; set; } = true;
 
     // The latency lab (2026-09-26 to 2026-10-01) is gone, and its switches left with their fields: an old file that still
@@ -191,6 +207,12 @@ public sealed class AppConfig
     /// it describes this machine, not a profile.</summary>
     public bool EnableDawPluginLink { get; set; } = true;
 
+    /// <summary>The loopback port the web listener's page is served on, for Tailscale Funnel to point at (WebListener,
+    /// 2026-10-10). Whether it is on, and its password, are the profile's (the Web listener window).</summary>
+    public int WebListenPort { get; set; } = 47840;
+
+    public int WebListenIterations { get; set; } = 150_000;
+
     /// <summary>The folder the DAW plugin was installed in when it was put somewhere other than the standard per-user
     /// VST3 folder (Ed, 2026-09-25) - its own RemSound folder, in full. Null for the standard place. Updates refresh the
     /// plugin here, and Remove plugin removes it from here.</summary>
@@ -204,39 +226,28 @@ public sealed class AppConfig
     /// that needs Windows' permission to change: asked once after each update, not at every start.</summary>
     public string? PluginRefreshDeclinedVersion { get; set; }
 
-    /// <summary>Per-cue enable flags for the machine-wide cues added 2026-06-13: the send/receive
-    /// on/off toggle cues and the minimise(hide)/restore(show) cues. Machine-wide (like the startup
-    /// cue) rather than per-profile - they're app-level feedback for an action, not a per-profile
-    /// audio setting. All default on; the user unticks them in Preferences like any other cue.</summary>
+    /// <summary>The cues an older RemSound kept on the computer, each on or off, before 2026-10-08: send and receive
+    /// turned on and off, minimise and restore, tick box on and off, push to talk on and off, server connected and
+    /// disconnected, switching tabs, and context help opened and closed. Read only by <see cref="CueSettings.FromBefore"/>;
+    /// each profile carries its own now.</summary>
     public bool EnableSendOnCue { get; set; } = true;
     public bool EnableSendOffCue { get; set; } = true;
     public bool EnableReceiveOnCue { get; set; } = true;
     public bool EnableReceiveOffCue { get; set; } = true;
     public bool EnableHideCue { get; set; } = true;
     public bool EnableShowCue { get; set; } = true;
-    /// <summary>Tick / untick sounds played on every checkbox toggle anywhere in the app.</summary>
     public bool EnableCheckboxOnCue { get; set; } = true;
     public bool EnableCheckboxOffCue { get; set; } = true;
-    /// <summary>Push to talk opening and closing, in key mode only (in sound-level mode they would sound with every
-    /// phrase). Machine-wide like the send on/off cues. Default on; push to talk itself is off until a profile turns it on.</summary>
     public bool EnablePushToTalkOnCue { get; set; } = true;
     public bool EnablePushToTalkOffCue { get; set; } = true;
-    /// <summary>Connecting to a server, and disconnecting from it (Ed's sounds, 2026-10-01). Machine-wide like the send on/off
-    /// cues; default on.</summary>
     public bool EnableServerConnectCue { get; set; } = true;
     public bool EnableServerDisconnectCue { get; set; } = true;
-    /// <summary>Sound played whenever the user switches between tabs anywhere in the app (the main
-    /// window's tab strip and every tabbed dialog). Machine-wide, default on.</summary>
     public bool EnableTabSwitchCue { get; set; } = true;
-    /// <summary>Sounds played as F1 help opens and as it closes, anywhere in the app (2026-09-25, Ed's sounds).
-    /// Machine-wide, default on.</summary>
     public bool EnableHelpOpenCue { get; set; } = true;
     public bool EnableHelpCloseCue { get; set; } = true;
 
-    /// <summary>Custom WAV overrides for the machine-wide cues above, keyed by cue id. The
-    /// equivalent of <see cref="Profile.CustomCuePaths"/> but machine-wide, since these cues don't
-    /// live on a profile. Empty = use the chosen default variant. The startup cue keeps its own
-    /// <see cref="StartupCueCustomPath"/> field for backward compatibility.</summary>
+    /// <summary>Those cues' files of the person's own, by cue id, before 2026-10-08 (the startup cue's was
+    /// <see cref="StartupCueCustomPath"/>). Read only by <see cref="CueSettings.FromBefore"/>.</summary>
     public Dictionary<string, string> MachineCueCustomPaths { get; set; } = new();
 
     /// <summary>If true, RemSound writes a tab-separated diagnostic log to <see cref="LogsDirectory"/>
@@ -502,6 +513,9 @@ public sealed class AppConfig
         if (owner is null || string.Equals(owner, me, StringComparison.OrdinalIgnoreCase)) return machine;
         return LoadOrCreateAccountRelayClientId(me) ?? machine;
     }
+
+    /// <summary>The computer's own server id, the one the send-only service uses when its profile saved none.</summary>
+    public static Guid MachineRelayClientId() => LoadOrCreateMachineRelayClientId();
 
     /// <summary>The file in <see cref="MachineIdentityDirectory"/> naming the Windows account (its SID) whose id the
     /// computer's is.</summary>

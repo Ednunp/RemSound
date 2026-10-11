@@ -130,45 +130,41 @@ public sealed class Profile
     /// that says true still opens; nothing reads it, and a false is never written.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool PriorityMode { get; set; }
-    /// <summary>Legacy combined "mute connect/disconnect sounds" toggle. True suppresses
-    /// both connect AND disconnect cues. Superseded 2026-05-15 by the four individual
-    /// <c>Enable*Cue</c> flags below — the new flags take precedence when set. This field
-    /// is preserved on the profile for backward compatibility with older builds that don't
-    /// know about the per-cue flags; on first load the per-cue flags inherit from this
-    /// (true → connect+disconnect cues disabled).</summary>
+    /// <summary>Every audio cue setting this profile carries: each cue on or off, its chosen built-in sound or a file of
+    /// the person's own, and the keyboard clicks (2026-10-08, Ed: "all sounds should be switchable for all profiles").
+    /// Null in a profile saved by an older RemSound: the first time it is opened, its cues are worked out from what that
+    /// RemSound used with it (<see cref="CueSettings.FromBefore"/>) and written here on its next save.</summary>
+    public CueSettings? Cues { get; set; }
+
+    // ---- The cue fields an older RemSound saved, read only to carry them into Cues (CueSettings.FromBefore) ----
+    // A profile saved now writes none of them: each is left at its default, which the JSON leaves out.
+
+    /// <summary>Older still: one "mute connect and disconnect sounds" switch (2026-05-06), followed by connect and
+    /// disconnect when their own switches below were unset.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool MuteConnectionCues { get; set; }
 
-    /// <summary>Per-cue enable flags. Nullable so a missing entry in an older profile JSON
-    /// falls back to the legacy <see cref="MuteConnectionCues"/> migration path; once the
-    /// user touches the new UI we write a concrete <c>true</c>/<c>false</c> and the legacy
-    /// field stops mattering. Defaults to "play the sound" (true) for both cases — the
-    /// audio cues are part of the normal user feedback loop, not opt-in. 2026-05-15.
-    ///
-    /// EnableSaveCue / EnableProfileSwitchCue added 2026-05-28 alongside the new
-    /// save.wav / profile.wav defaults. Same nullable + default-true semantics as the rest.</summary>
+    /// <summary>The eight cues a profile carried before 2026-10-08, each on or off; unset meant on.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? EnableConnectCue { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? EnableDisconnectCue { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? EnableRecordStartCue { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? EnableRecordStopCue { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? EnableSaveCue { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? EnableProfileSwitchCue { get; set; }
-    /// <summary>When true (the default), the "profile menu open" cue plays as the Quick profile
-    /// switch popup opens. Per-profile so each setup can mute it independently.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? EnableProfileMenuOpenCue { get; set; }
-    /// <summary>Plays the update cue just before an update starts installing (manual or
-    /// silent). Null = unset → defaults to on, so a silent background update still gives an
-    /// audible heads-up. Added 2026-05-31.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? EnableUpdateCue { get; set; }
 
-    /// <summary>Per-cue custom WAV file overrides, keyed by the well-known cue id (<c>connect</c>,
-    /// <c>disconnect</c>, <c>record-start</c>, <c>record-stop</c>, <c>save</c>,
-    /// <c>profile-switch</c>, <c>update</c>) and valued with the absolute filesystem path to the user's chosen
-    /// WAV. Per-profile (moved here from AppConfig 2026-05-28) so a "live monitoring" profile
-    /// can have one set of custom sounds and a "recording" profile a different set. Missing
-    /// keys mean "use the default sound shipped in the <c>default sounds\</c> folder next to
-    /// RemSound.exe" (<see cref="AppConfig.SoundsDirectory"/>).
-    /// Empty dictionary on a fresh profile.</summary>
-    public Dictionary<string, string> CustomCuePaths { get; set; } = new();
+    /// <summary>Those eight cues' files of the person's own, by cue id, before 2026-10-08.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, string>? CustomCuePaths { get; set; }
     public int MaxLatencyMs { get; set; } = 80;
     public int Smoothness { get; set; } = 3;
     public bool ContinuousAutoTuneEnabled { get; set; }
@@ -277,6 +273,18 @@ public sealed class Profile
     /// connected. Lets a user have one profile that's controllable (home setup, single
     /// trusted peer) and another that's not (one-off jam session, public-ish peer).</summary>
     public bool AcceptRemoteVolumeCommands { get; set; }
+
+    /// <summary>Let a web browser listen to what this profile sends, through Tailscale Funnel (the Web listener window,
+    /// Ed 2026-10-10). Off by default.</summary>
+    public bool WebListenEnabled { get; set; }
+
+    /// <summary>The password a web browser must know, stored LIGHTLY SCRAMBLED like <see cref="Password"/>
+    /// (RemSoundCrypto.Obfuscate). Null/empty = none, so no browser can listen.</summary>
+    public string? WebListenPassword { get; set; }
+
+    /// <summary>The listening page starts by itself when it loads (Ed, 2026-10-11): it remembers the password in that
+    /// browser after the first start, and uses it from then on. Off by default.</summary>
+    public bool WebListenAutoStart { get; set; }
 
     // === JSON-friendly accessors (so callers don't deal with the raw int casts) ===
     // AudioMode accessor + AudioModeRaw backing field retired 2026-05-11. The runtime mode is

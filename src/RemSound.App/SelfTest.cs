@@ -133,6 +133,11 @@ internal static partial class SelfTest
         CuePlayer.GloballyMuted = true;
         CuePlayer.NoDeviceForTest = true;
         RemSound.Plugin.PluginHelpSounds.NoDeviceForTest = true;
+        // A run of the gate is not a start of the app: no step's first window plays the startup cue (the startup step
+        // asks for it), and no window opens a key-click player on a real device as it puts its profile's cues in force
+        // (2026-10-08, every cue the profile's).
+        MainForm.StartupCuePlayedForTest = true;
+        ActiveCues.ClicksAllowed = false;
         // The gate is started --silent, which marks the whole PROCESS a silent launch; the steps are the app's, not a
         // silent launch's, and several check exactly what a silent launch turns off (the update timer). The run's own
         // silence is the cue mute and the speech switch above (2026-09-25).
@@ -215,6 +220,8 @@ internal static partial class SelfTest
         RunStep(results, "The service looks a name up again until it answers", ServiceLooksNamesUpAgainUntilTheyAnswer);
         RunStep(results, "The service follows a server by name that moves to a new address", ServiceFollowsAServerThatMoves);
         RunStep(results, "Service network presence (reachable + shell teardown)", ServiceNetworkPresenceReachable);
+        RunStep(results, "MAIN WINDOW CONNECTIVITY TAB: Add peer by IP straight after Remembered peers, then the lock, Connect to server, Web listener and the status, in the order Tab meets them", ConnectivityTabOrder);
+        RunStep(results, "SERVER HAND-OVER: a goodbye goes three times, even before the list, and stops at a new hello; nothing reaches a server just left outside the group; the service sends to nobody before its goodbye", TheServerHandOver);
         RunStep(results, "Service reachability-gated sending (drop dead peers, re-arm recovered)", ServiceReachabilityGating);
         RunStep(results, "The service stops sending to a peer that stops answering, and starts again when it answers", TheServiceDropsAndRearmsAPeer);
         RunStep(results, "Service silent-capture self-heal (issue #23 boot re-open ladder, driven through the real host)", ServiceSilentCaptureSelfHeal);
@@ -284,7 +291,11 @@ internal static partial class SelfTest
         RunStep(results, "COLONS: a label for a box, list, drop-down, number or slider ends with a colon after its Alt key; tick boxes, buttons, headings and tabs have none", LabelsEndWithAColon);
         RunStep(results, "EQ MODE LIST: greyed out it is drawn readably by RemSound, enabled by Windows, and read the same by a screen reader", EqModeListReadableWhileGreyedOut);
         RunStep(results, "Every sound is pinned (registry, custom paths, muting, checkbox suppression)", CueCoverage);
-        RunStep(results, "CUES: a profile's own sound wins, then the machine's; a cue switched off plays nothing", CuesPlayTheChosenSoundOrNothing);
+        RunStep(results, "CUES: a profile's own sound plays, an older profile's as it did; a cue switched off plays nothing", CuesPlayTheChosenSoundOrNothing);
+        RunStep(results, "CUES UPDATED: an older profile sounds as it did, every cue carried into it, and saved it carries them all", CuesCarryIntoEveryProfileOnUpdate);
+        RunStep(results, "CUES PER PROFILE: two profiles, two sets of sounds, in the window and outside it; a new profile and the startup sound follow the profile", EachProfileHasItsOwnCues);
+        RunStep(results, "WEB LISTENER: a browser with the password hears every sending lane in numbered 5 ms Opus or exact PCM frames, fast; wrong passwords, mute and no password refused or silent; its window saves it in the profile, logged without the password", WebListenerStep);
+        RunStep(results, "MUTE ALL AUDIO CUES: every cue, the key clicks and the plugin's help sounds silent in every profile, through the control channel, saved and logged; the profile untouched", MuteAllCuesSilencesEveryProfile);
         RunStep(results, "SHIPPED SOUNDS: every default sound is 16-bit stereo 44.1 kHz and credits Ed Pourtahmasbi and the RemSound default sound pack, nothing else", ShippedSoundsCreditEd);
         RunStep(results, "Latency estimate counts every stage (no silently-missing term)", LatencyEstimateComplete);
         RunStep(results, "Auto-tune: each lane learns only from itself, and never acts on state from while it was not running", AutoTuneStaleStateGuards);
@@ -1873,14 +1884,14 @@ internal static partial class SelfTest
             Path.GetFileNameWithoutExtension(v).Split(' ').Last(), out var n) ? n : 0).ToList();
         Check(numbers.SequenceEqual(numbers.OrderBy(n => n)), "variants must be ordered by their number");
 
-        var cfg = new AppConfig(); // scratch, never saved
-        Check(CueSounds.ResolveDefaultFileName("connect", "connect.wav", cfg) == variants[0],
-            "with no machine-wide pick, the FIRST variant must resolve");
-        cfg.DefaultCueSounds["connect"] = variants[^1];
-        Check(CueSounds.ResolveDefaultFileName("connect", "connect.wav", cfg) == variants[^1],
-            "a valid machine-wide pick must be honoured");
-        cfg.DefaultCueSounds["connect"] = "connect 999.wav";
-        Check(CueSounds.ResolveDefaultFileName("connect", "connect.wav", cfg) == variants[0],
+        var cues = new CueSettings(); // scratch: a profile's cue settings
+        Check(CueSounds.ResolveDefaultFileName("connect", "connect.wav", cues) == variants[0],
+            "with no pick in the profile, the FIRST variant must resolve");
+        cues.Sounds["connect"] = variants[^1];
+        Check(CueSounds.ResolveDefaultFileName("connect", "connect.wav", cues) == variants[^1],
+            "a valid pick in the profile must be honoured");
+        cues.Sounds["connect"] = "connect 999.wav";
+        Check(CueSounds.ResolveDefaultFileName("connect", "connect.wav", cues) == variants[0],
             "a pick whose file is GONE must fall back to the first variant, not silence");
         return $"labels exact; {variants.Count} variants ordered + deduped; chosen-default honoured with fallback";
     }
@@ -1996,6 +2007,8 @@ internal static partial class SelfTest
                 t == typeof(MetronomeSettings) ? new MetronomeSettings { Bpm = 97, BeatsPerBar = 7, BeatUnit = 8, Sound = "Rim", Volume = 33,
                     HearIn = MetronomeHearIn.Daw, IncludeInRecordings = true, WhenAsked = MetronomeMasterAnswer.AcceptAutomatically } :
                 t == typeof(HotkeyRecord) ? new HotkeyRecord { Key = "F9", Control = true } :
+                t == typeof(CueSettings) ? new CueSettings { KeyboardClicks = false, Enabled = { ["tab-switch"] = false },
+                    CustomPaths = { ["startup"] = @"C:\drift.wav" }, Sounds = { ["connect"] = "connect 2.wav" } } :
                 null;
             if (v is not null) p.SetValue(target, v);
             // A type with no rule here leaves the default in place; the caller then flags the
@@ -5706,6 +5719,7 @@ internal static partial class SelfTest
             ("Manual peer prompt", () => ManualPeerPrompt.Build().Dialog),
             ("Quick profile switch", QuickProfileSwitchDialog.BuildForAudit),
             ("Change profile password", () => ProfilePasswordDialog.Build("Audit", "pw").Dialog),
+            ("Web listener", () => new WebListenerDialog(true, "kettle9tiger42moon", true, () => "On, on this computer's port 47840 for Tailscale Funnel. 1 browser is listening.", (_, _, _) => { })),
             ("Profile passwords manager", () => ProfilePasswordManagerDialog.Build(new ProfileStore(
                 Path.Combine(AppConfig.UserDataDirectory, "selftest-pwmgr-" + Guid.NewGuid().ToString("N")))).Dialog),
             ("Profile name prompt", () => ProfileSaveAsPrompt.Build("Audit").Dialog),

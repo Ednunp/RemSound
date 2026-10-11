@@ -6,13 +6,13 @@ namespace RemSound.App;
 /// Default cue-sound resolution. The cue WAVs ship as numbered variants in <c>default sounds\</c>
 /// (<see cref="AppConfig.SoundsDirectory"/>) -
 /// "connect 1.wav", "connect 2.wav", ... - and the user picks which one is the default for each
-/// cue in Preferences (stored machine-wide in <see cref="AppConfig.DefaultCueSounds"/>). This
+/// cue in Preferences (carried by the profile since 2026-10-08, <see cref="CueSettings.Sounds"/>). This
 /// helper discovers the variants for a cue and resolves which one is the active default.
 ///
 /// The full resolution order used wherever a cue is loaded (MainForm, the startup cue, the
 /// Preferences preview) is:
-///   1. the user's per-profile custom WAV (handled by the caller) - highest priority;
-///   2. the machine-wide chosen default variant, if it still exists on disk;
+///   1. the user's own WAV for the cue (handled by the caller) - highest priority;
+///   2. the built-in sound chosen for the cue, if it still exists on disk;
 ///   3. the first available variant (the lowest-numbered - the "1"s) - the shipped default;
 ///   4. nothing - the cue is silent.
 ///
@@ -90,14 +90,14 @@ internal static class CueSounds
         return "Sound 1";
     }
 
-    /// <summary>The chosen default variant filename for a cue: the machine-wide pick if it still
+    /// <summary>The chosen default variant filename for a cue: the profile's pick if it still
     /// exists among the variants, otherwise the first variant (the "1"). Null when the cue has no
     /// variants on disk at all.</summary>
-    public static string? ResolveDefaultFileName(string cueId, string defaultFileName, AppConfig cfg)
+    public static string? ResolveDefaultFileName(string cueId, string defaultFileName, CueSettings cues)
     {
         var variants = Variants(defaultFileName);
         if (variants.Count == 0) return null;
-        if (cfg.DefaultCueSounds.TryGetValue(cueId, out var chosen))
+        if (cues.Sounds.TryGetValue(cueId, out var chosen))
         {
             var match = variants.FirstOrDefault(v => v.Equals(chosen, StringComparison.OrdinalIgnoreCase));
             if (match is not null) return match;
@@ -106,9 +106,9 @@ internal static class CueSounds
     }
 
     /// <summary>Full path to the chosen default WAV for a cue, or null when none resolves.</summary>
-    public static string? ResolveDefaultPath(string cueId, string defaultFileName, AppConfig cfg)
+    public static string? ResolveDefaultPath(string cueId, string defaultFileName, CueSettings cues)
     {
-        var name = ResolveDefaultFileName(cueId, defaultFileName, cfg);
+        var name = ResolveDefaultFileName(cueId, defaultFileName, cues);
         return name is null ? null : Path.Combine(AppConfig.SoundsDirectory, name);
     }
 }

@@ -344,9 +344,8 @@ internal static partial class SelfTest
             form.DisconnectFromRelayForTest();
             Check(CuePlayer.PlaysStartedForTest == plays + 2, "and not again when there was no server to leave");
 
-            var cfg = AppConfig.Load();
-            cfg.EnableServerConnectCue = false;
-            cfg.Save();
+            // Switched off in the profile, as Preferences switches it off (every cue the profile's, 2026-10-08).
+            form.SettingsForTest.SaveCueEnabled(MainForm.CueId.ServerConnect, false);
             form.ConnectToRelayForTest("server.example.test", at);
             Check(CuePlayer.PlaysStartedForTest == plays + 2 && said.Any(l => l.Contains("server sound: connected to the server (switched off)", StringComparison.Ordinal)),
                 "SWITCHED OFF: no sound, and the log must say it was switched off");

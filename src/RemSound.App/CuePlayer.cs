@@ -29,9 +29,18 @@ internal sealed class CuePlayer : IDisposable
     /// completely quiet: no cue audio, no warning dings, no dialogs. Off in normal use.</summary>
     public static bool GloballyMuted { get; set; }
 
+    /// <summary>The person's "Mute all audio cues" (Preferences, <see cref="RemSound.Core.AppConfig.MuteAllCues"/>,
+    /// 2026-10-08): no cue plays, in any profile, except a <see cref="Preview"/>. Kept apart from <see cref="GloballyMuted"/>,
+    /// which also means "nobody to ask" and skips the start-up update check - a person muting their cues wants neither.</summary>
+    public static bool AllCuesMuted { get; set; }
+
     private readonly string filePath;
 
     public CuePlayer(string filePath) => this.filePath = filePath;
+
+    /// <summary>A sound played because the person asked to hear it - a preview on the Audio cues tab - so
+    /// <see cref="AllCuesMuted"/> lets it through. A silent run still plays nothing.</summary>
+    public bool Preview { get; init; }
 
     /// <summary>Gate seam: the file this cue plays.</summary>
     internal string FilePathForTest => filePath;
@@ -52,8 +61,9 @@ internal sealed class CuePlayer : IDisposable
     public void Play()
     {
         // A headless copy says which cue it would have played, for the control channel's cues command.
-        HeadlessRecords.Note(HeadlessRecords.Cues, $"{Path.GetFileName(filePath)} ({(GloballyMuted ? "silent" : "played")})");
-        if (GloballyMuted) return;
+        var allMuted = AllCuesMuted && !Preview;
+        HeadlessRecords.Note(HeadlessRecords.Cues, $"{Path.GetFileName(filePath)} ({(GloballyMuted ? "silent" : allMuted ? "all cues muted" : "played")})");
+        if (GloballyMuted || allMuted) return;
         System.Threading.Interlocked.Increment(ref PlaysStartedForTest);
         if (NoDeviceForTest) return;
         var path = filePath;

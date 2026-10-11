@@ -21,6 +21,19 @@ internal sealed class AboutDialog : Form
     /// compiled into the exe until 2026-09-13 and never shown.)</summary>
     private const string ReleaseNotes =
         """
+        RemSound v6.2
+
+        Listen in a web browser. Hear what RemSound sends from a web browser on another computer, with nothing to install there: handy where you can't install RemSound, such as at work. It goes through Tailscale Funnel, behind a password of your own. Press Web listener on the Connectivity tab to switch it on, set the password, copy your web address and turn on Funnel. The page says which computer you're hearing, and has Stop listening, Volume, Pan and a three-band EQ. It can start by itself when it loads, each browser can save its own settings, and up to four people can listen at once.
+
+        Audio cues for each profile. Preferences, Audio cues now has two lists. Global sounds are the six that belong to RemSound itself: profile saved, profile switched, the profile menu opening, update, and context help opening and closing. Profile sounds are everything else, kept with each profile, so a jamming profile can stay quiet while another keeps every sound. Keyboard clicks go with the profile too, and Turn all audio cues off silences the lot. The sounds you have now carry over the first time you open each profile.
+
+        Fixes:
+        - Handing over between RemSound and the send-only service on a server is more dependable. The one stepping aside goes quiet before it says goodbye, so it no longer leaves a ghost that keeps a phone out for up to a minute. The goodbye now goes three times, so one lost on the way no longer means 5 to 7 seconds of silence.
+        - A phone, an older app or a profile without a password now takes over a place on a server straight away, instead of waiting up to a minute.
+        - The log says whether RemSound and the service count as the same person on a server, and when the service couldn't be told to step aside.
+
+        The quicker hand-over for phones, older apps and profiles without a password needs server-v2.17.
+
         RemSound v6.1
 
         RemSound now keeps time with you, and tells you more about your server.
@@ -93,22 +106,6 @@ internal sealed class AboutDialog : Form
         The service's log files are also readable again from every account on the machine, so you can always open them in Notepad if you're curious or need to send one in. And if a service action ever fails, the message now says what actually went wrong instead of just showing a bare error code.
 
         This About box also went on a diet: it now shows the newest five releases instead of the whole history, which had grown large enough to upset some screen readers. The full history is on the RemSound releases page on GitHub.
-
-        RemSound v5.7
-
-        Stronger security, and it works with every version again.
-
-        This release puts the password handling back the way it was, so RemSound talks to older versions and the iPhone app again. You still set a password — your audio is always encrypted — we just suggest a strong one now instead of requiring it. Nothing changes for you if you already use a good password.
-
-        Signed updates. Every release is now digitally signed, and the updater refuses anything that isn't genuinely from us — so even if the download page were ever tampered with, a fake update couldn't install itself on your machine.
-
-        Remote volume, now password-protected. The remote volume and mute controls are locked to your password, so only someone who shares it can use them.
-
-        Set the machine's volume when the service starts. In the service's Additional options you can have an unattended machine unmute itself and set its Windows volume to a level you choose — on the first start after each boot, or on every service start.
-
-        Updates on your schedule. In Preferences you can restrict automatic updates to a time range — say 1am to 6am — so an update never closes RemSound and interrupts you. Found outside the range, it quietly waits and installs the moment the range opens.
-
-        Plus: the app releases its high-priority and keep-awake settings when you're not actually streaming (kinder to laptops), diagnostic logs cap their own size on long sessions, and a raft of behind-the-scenes hardening.
 
         Older releases, back to v1.0, are on the RemSound releases page on GitHub.
         """;

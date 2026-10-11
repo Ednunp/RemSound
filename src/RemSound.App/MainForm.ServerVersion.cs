@@ -16,7 +16,7 @@ namespace RemSound.App;
 internal static class ServerVersionCheck
 {
     /// <summary>The server this build was made with (server/VERSION; the self-test holds the two together).</summary>
-    internal const string BuiltWith = "server-v2.16";
+    internal const string BuiltWith = "server-v2.17";
 
     /// <summary>Ed's words.</summary>
     internal const string WarningText = "Warning: you are connecting to a RemSound server that is out of date. Please contact the "

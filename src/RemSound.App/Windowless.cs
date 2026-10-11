@@ -99,7 +99,8 @@ internal static class Windowless
         // deletion was never announced (2026-09-25).
         ScreenReader.Suppressed = false;
         if (!SilentLaunch) CuePlayer.GloballyMuted = false;
-        try { KeyClickService.Enabled = RemSound.Core.AppConfig.Load().EnableKeyboardClicks; } catch { /* clicks stay as they were */ }
+        // The key clicks as the open profile has them (2026-10-08), and "Mute all audio cues".
+        try { ActiveCues.ClicksAllowed = true; ActiveCues.ApplyKeyClicks(); } catch { /* clicks stay as they were */ }
         try
         {
             BringOnScreen(main, appWindow: true);

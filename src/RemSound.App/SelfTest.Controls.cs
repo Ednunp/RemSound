@@ -117,6 +117,7 @@ internal static partial class SelfTest
         new("discoveredPeersList", "which discovered peers are selected to stream with", GovernsNothing: true),
         new("rememberedPeersList", "the remembered-peer list (its own tested surface)", GovernsNothing: true),
         new("manualAddButton", "opens the add-peer-by-address dialog", GovernsNothing: true),
+        new("webListenerButton", "opens the Web listener window, which lets a web browser listen and keeps its tick and password in the profile - PROVEN by 'WEB LISTENER:', which drives the same window the button builds", GovernsNothing: true),
         new("renamePeerButton", "opens the rename dialog for the selected peer", GovernsNothing: true),
         new("peerDetailsBox", "read-only details of the selected peer", GovernsNothing: true),
 

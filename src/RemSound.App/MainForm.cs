@@ -41,6 +41,10 @@ public sealed partial class MainForm : Form
     /// what makes the double-audio problem solve itself, because a claim here is what takes a peer
     /// out of the speakers.</summary>
     private PluginBridgeHost? pluginHost;
+    /// <summary>The web listener (WebListener, 2026-10-10), while the profile has it on (the Web listener window); and the
+    /// port it was opened on, so a change of port reopens it.</summary>
+    private WebListener? webListener;
+    private string? webListenOpenedWith;
 
     /// <summary>Last plugin summary written, so an unchanged one is not repeated every second.</summary>
     private string lastPluginLogLine = "";
@@ -343,6 +347,8 @@ public sealed partial class MainForm : Form
     private readonly CheckedListBox rememberedPeersList = new() { CheckOnClick = true, Width = Dpi.Px(430), Height = Dpi.Px(90), AccessibleName = "Remembered peers (Alt+R)" };
     private readonly Label rememberedPeersStatus = new() { AutoSize = true, Text = "No remembered peer selected." };
     private readonly Button manualAddButton = new() { Text = "Add peer by IP (Alt+&A)", AutoSize = true, AccessibleName = "Add peer by IP" };
+    /// <summary>Opens the Web listener window (Ed, 2026-10-10).</summary>
+    private readonly Button webListenerButton = new() { Text = "&Web listener... (Alt+W)", AutoSize = true, AccessibleName = "Web listener" };
     // Read-only details for the peer highlighted in the connected list, and a button to give it a name.
     private readonly TextBox peerDetailsBox = new() { Multiline = true, ReadOnly = true, Width = Dpi.Px(430), Height = Dpi.Px(132), ScrollBars = ScrollBars.Vertical, AccessibleName = "Peer details (Alt+E)" };
     private readonly Button renamePeerButton = new() { Text = "Rena&me peer (Alt+M)", AutoSize = true, AccessibleName = "Rename peer" };
@@ -955,6 +961,7 @@ public sealed partial class MainForm : Form
         this.headless = headless;
         // Something the switch between windows needs in this window's log (Program's loop has no log of its own).
         if (Interlocked.Exchange(ref LineForNextLog, null) is { } carried) logFile.Event(carried);
+        LogServerIdentityOnce();
         // Before anything that could open the plugin link, so a plugin that says hello during startup
         // never finds a half-built send path.
         pluginTrackSource = new PluginTrackSource(sender, message => logFile.Event($"vst plugin: {message}"));
@@ -995,6 +1002,8 @@ public sealed partial class MainForm : Form
         // the in-memory settings cache BEFORE the rest of the constructor body reads from it.
         // Control states (device ticks, checkboxes, volume) come later in OnShown.
         if (profile is not null) settings.ApplyProfile(profile);
+        // The blank template's cues are the ones you have been using: the last profile's (2026-10-08).
+        else settings.UseCues(AppConfig.Load().CuesBeforeAProfile());
         // Push to talk from the start, so the sender holds from its first block when the profile says so.
         ApplyPushToTalk(settings.LoadPushToTalkSettings(), null);
         // The metronome, before anything can arrive for it (2026-09-28).
@@ -1460,6 +1469,10 @@ public sealed partial class MainForm : Form
         TryLoadCueSound(CueId.Show, "maximise.wav", out showSound);
         TryLoadCueSound(CueId.ServerConnect, "server connect.wav", out serverConnectSound);
         TryLoadCueSound(CueId.ServerDisconnect, "server disconnect.wav", out serverDisconnectSound);
+        // This profile's cues for the sounds outside this window too, and the startup cue as the run's first profile opens
+        // (2026-10-08).
+        ApplyCuesInForce();
+        PlayStartupCueOnce();
 
         LoadAudioDevices();
         // Apply persisted ASIO mode from settings — switches sender/receiver backends so the
@@ -1473,8 +1486,8 @@ public sealed partial class MainForm : Form
         // Send/receive have their own dedicated cue sounds (send/receive turned on/off). When that
         // dedicated cue is on, only it plays - suppress the generic checkbox tick/untick on these two.
         // When the dedicated cue is "(none)", these return false and the checkbox sound plays as normal.
-        sendMyAudioCheckbox.SuppressCheckSound = on => on ? AppConfig.Load().EnableSendOnCue : AppConfig.Load().EnableSendOffCue;
-        receiveAudioCheckbox.SuppressCheckSound = on => on ? AppConfig.Load().EnableReceiveOnCue : AppConfig.Load().EnableReceiveOffCue;
+        sendMyAudioCheckbox.SuppressCheckSound = on => settings.LoadCueEnabled(on ? CueId.SendOn : CueId.SendOff);
+        receiveAudioCheckbox.SuppressCheckSound = on => settings.LoadCueEnabled(on ? CueId.ReceiveOn : CueId.ReceiveOff);
         volumeBar.Scroll += (_, _) =>
         {
             receiver.Volume = volumeBar.Value / 100f;
@@ -1772,6 +1785,8 @@ public sealed partial class MainForm : Form
             // Open (or don't open) the loopback port VST plugin instances talk to. After Connect,
             // so the receiver is already up and a plugin that was waiting gets audio on its first ask.
             ApplyPluginLinkSetting();
+            // The web listener, if the profile has it on.
+            ApplyWebListenSetting();
             // Apply control-state portion of the loaded profile (device ticks, send/receive
             // checkboxes, volume, ticked peers). Done here AFTER device lists are
             // populated by LoadAudioDevices(). Settings-shaped fields (codec, hotkeys, etc.)
@@ -2779,6 +2794,110 @@ public sealed partial class MainForm : Form
             logFile.Event($"vst plugin: link could not open ({ex.GetType().Name}: {ex.Message})");
         }
     }
+
+    /// <summary>Gate seam: the port the web listener opens on, so a test never takes the real one.</summary>
+    internal static int WebListenPortForTest;
+
+    /// <summary>Open, change or close the web listener to match the profile (WebListener and the Web listener window,
+    /// 2026-10-10). Idempotent: nothing happens unless the tick box, port or password changed; a new password takes
+    /// effect in place.</summary>
+    internal void ApplyWebListenSetting()
+    {
+        var cfg = AppConfig.Load();
+        var port = WebListenPortForTest > 0 ? WebListenPortForTest : cfg.WebListenPort;
+        var wanted = settings.LoadWebListenEnabled() ? $"{port}|{cfg.WebListenIterations}" : null;
+        var password = settings.LoadWebListenPassword();
+        if (wanted == webListenOpenedWith && (wanted is null) == (webListener is null))
+        {
+            // Open already, on the same port: a changed password, or the start-by-itself tick, takes effect in place.
+            webListener?.SetPassword(password);
+            if (webListener is not null) webListener.AutoStart = settings.LoadWebListenAutoStart();
+            return;
+        }
+        if (webListener is not null)
+        {
+            sender.OnWebSamples = null;
+            webListener.Dispose();
+            webListener = null;
+        }
+        webListenOpenedWith = wanted;
+        if (wanted is null) return;
+        try
+        {
+            webListener = new WebListener(port, password, cfg.WebListenIterations,
+                () => sender.IsMuted, line => logFile.Event(line)) { AutoStart = settings.LoadWebListenAutoStart() };
+            sender.OnWebSamples = webListener.Feed;
+        }
+        catch (Exception ex)
+        {
+            // Almost always something else holding the port. Logged, and said in the Web listener window's status.
+            webListener = null;
+            webListenOpenedWith = null;
+            logFile.Event($"web listener: could not open 127.0.0.1:{port} ({ex.GetType().Name}: {ex.Message})");
+        }
+    }
+
+    /// <summary>The Web listener window as the button opens it: the profile's tick and password, the running listener's
+    /// status, and every change saved in the profile and put in force at once. One method, so the gate drives the same
+    /// window the button does.</summary>
+    internal WebListenerDialog BuildWebListenerDialog(WebListenerDialog.FunnelHooks? funnel = null) => new(settings.LoadWebListenEnabled(),
+        settings.LoadWebListenPassword(), settings.LoadWebListenAutoStart(), DescribeWebListener, (enabled, password, autoStart) =>
+        {
+            settings.SaveWebListen(enabled, password, autoStart);
+            ApplyWebListenSetting();
+        }, funnel);
+
+    /// <summary>The real Tailscale, for the window the button opens: its command line, and pages opened in the browser.</summary>
+    private WebListenerDialog.FunnelHooks RealFunnel()
+    {
+        var port = WebListenPortForTest > 0 ? WebListenPortForTest : AppConfig.Load().WebListenPort;
+        return new WebListenerDialog.FunnelHooks(
+            ct => TailscaleFunnel.QueryAsync(port, ct),
+            (openPage, ct) => TailscaleFunnel.TurnOnAsync(port, openPage, ct),
+            page =>
+            {
+                logFile.Event($"web listener: opening {page}");
+                try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(page) { UseShellExecute = true }); }
+                catch (Exception ex) { logFile.Event($"web listener: could not open the page ({ex.GetType().Name}: {ex.Message})"); }
+            });
+    }
+
+    /// <summary>The Web listener button: the window, and on OK the profile marked unsaved if anything changed.</summary>
+    private void OnWebListenerButton()
+    {
+        using var dialog = BuildWebListenerDialog(RealFunnel());
+        dialog.ShowDialog(this);
+        AfterWebListenerDialog(dialog);
+    }
+
+    /// <summary>After the window: on OK with something changed, the profile is marked unsaved and the change logged
+    /// (without the password).</summary>
+    internal void AfterWebListenerDialog(WebListenerDialog dialog)
+    {
+        if (!dialog.Changed) return;
+        MarkProfileDirty();
+        UiChangeLog.Record("web listener", (dialog.ListenEnabled ? "on" : "off") + (dialog.Password.Length == 0 ? ", no password" : ", with a password")
+                                           + (dialog.AutoStart ? ", the page starts by itself" : ""));
+    }
+
+    /// <summary>The Web listener window's account of the listener.</summary>
+    private string DescribeWebListener() => webListener is { } w
+        ? $"On, on this computer's port {w.Port} for Tailscale Funnel. {(w.ListenerCount == 1 ? "1 browser is" : $"{w.ListenerCount} browsers are")} listening."
+        : "On, but the port could not be opened - see the log.";
+
+    internal WebListener? WebListenerForTest => webListener;
+
+    /// <summary>Gate seam: the Connectivity tab's lower controls, in the order Tab must meet them (Ed, 2026-10-10: Add peer
+    /// by IP straight after Remembered peers), each list or button row by the wrapper that carries its place.</summary>
+    internal (string Name, Control Control)[] ConnectivityOrderForTest() =>
+    [
+        ("Remembered peers", rememberedPeersList.Parent ?? rememberedPeersList),
+        ("Add peer by IP", manualAddButton),
+        ("Lock to these exact peer addresses", lockPeerAddressesBox),
+        ("Connect to server", relayConnectButton.Parent ?? relayConnectButton),
+        ("Web listener", webListenerButton),
+        ("Connection status", statusReadout),
+    ];
 
     /// <summary>Who a plugin can choose to receive: the peers this profile knows, named where we have
     /// a name for them. Read live rather than pushed, so a plugin opened later sees the current list
@@ -3892,6 +4011,53 @@ public sealed partial class MainForm : Form
     /// <summary>A line for the next window's log, from the profile switch that built it.</summary>
     internal static string? LineForNextLog;
 
+    /// <summary>Set by Program when this copy could not take the hold that makes the send-only service step aside.</summary>
+    internal static bool PresenceHoldFailed;
+    private static bool serverIdentityChecked;
+
+    /// <summary>
+    /// Once a run, with the send-only service installed: whether this app and the service are one person on a server
+    /// (one client id), which is what lets each take the other's place in a group; and whether the service was told to
+    /// step aside at all (the hand-over review, 2026-10-10: a user's server "isn't always allowing RemSound to switch in
+    /// and out to take its place"). The 8 characters match the "connecting to the relay ... as" line in each log.
+    /// </summary>
+    private void LogServerIdentityOnce()
+    {
+        if (serverIdentityChecked || AppConfig.MachineIdentityIsolated) return;
+        serverIdentityChecked = true;
+        try
+        {
+            if (!ServiceControl.IsInstalled()) return;
+            var readable = ServiceStore.TryReadRelayClientId(out var saved);
+            foreach (var line in ServerIdentityLines(PresenceHoldFailed, AppConfig.LoadOrCreateRelayClientId(), readable, saved, AppConfig.MachineRelayClientId()))
+                logFile.Event(line);
+        }
+        catch (Exception ex) { logFile.Event($"server identity: could not be checked ({ex.GetType().Name}: {ex.Message})"); }
+    }
+
+    /// <summary>What <see cref="LogServerIdentityOnce"/> says, with the service installed: apart, so the gate can check
+    /// every case without touching this computer's real ids or service.</summary>
+    internal static List<string> ServerIdentityLines(bool holdFailed, Guid app, bool serviceReadable, Guid? serviceSaved, Guid machine)
+    {
+        static string Short(Guid id) => id.ToString("N")[..8];
+        var lines = new List<string>();
+        if (holdFailed)
+            lines.Add("presence: this copy could not take the hold that makes the send-only service step aside, so the service "
+                      + "may keep sending, and keep its place on a server, while this copy is open");
+        if (!serviceReadable)
+        {
+            lines.Add($"server identity: this account is {Short(app)} on a server; the send-only service's settings can't be "
+                      + "read from this account, so whether the service is the same person is not known");
+            return lines;
+        }
+        var service = serviceSaved ?? machine;
+        lines.Add(service == app
+            ? $"server identity: the app and the send-only service are one person on a server ({Short(app)}), so each takes the other's place"
+            : $"server identity: the app is {Short(app)} on a server but the send-only service is {Short(service)} - two different people, "
+              + "so neither takes the other's place in a group. Configure the service profile again from this account to make them one");
+        return lines;
+    }
+
     private void RenameCurrentProfile()
     {
         if (profileStore is null) return;
@@ -4085,10 +4251,9 @@ public sealed partial class MainForm : Form
         RefreshConnectivityListVisibility();
         var appearanceCfg = AppConfig.Load();
         logFile.Event($"appearance applied: theme={appearanceCfg.ThemeMode}, tabs=[{string.Join(", ", mainTabControl.TabPages.Cast<TabPage>().Select(t => t.Text))}], discovered-list={appearanceCfg.ShowDiscoveredPeers}, remembered-list={appearanceCfg.ShowRememberedPeers}");
-        // The Preferences dialog includes per-cue Browse buttons that can change custom
-        // WAV paths. Reload the cached CuePlayer instances here unconditionally — cheap (fourteen
-        // cues, and CuePlayer reads its file only when it plays), and guarantees the next
-        // play uses whatever the user just picked without waiting for the next launch.
+        // The Preferences dialog can change any cue. Reload the cached CuePlayer instances here unconditionally — cheap
+        // (CuePlayer reads its file only when it plays), and guarantees the next play uses whatever the user just picked
+        // without waiting for the next launch.
         ReloadAllCueSounds();
     }
 
@@ -4294,8 +4459,8 @@ public sealed partial class MainForm : Form
         // starts. Fires for every install path (manual, background-silent, startup-silent), so
         // a silent background update isn't completely silent: the user hears that RemSound is
         // about to close and update. Played before the download so it sounds well before the
-        // app vanishes; the download comfortably outlasts the short cue. Honours the per-profile
-        // EnableUpdateCue flag set in Preferences.
+        // app vanishes; the download comfortably outlasts the short cue. Honours the update cue's switch in
+        // Preferences (one of the global sounds, the same for every profile).
         if (settings.LoadEnableUpdateCue()) updateSound?.Play();
 
         var ok = await updater.DownloadAndStageInstallAsync(info, currentProfileTitle).ConfigureAwait(true);
@@ -4580,12 +4745,15 @@ public sealed partial class MainForm : Form
         discoveredPeersLabel = FormLayoutRows.AddCheckedListRow(panel, 4, "Discovered peers not on a server (Alt+&D):", discoveredPeersList, discoveredPeersStatus, FocusListControl);
         BuildRelayPeersRow(panel, 5);
         rememberedPeersLabel = FormLayoutRows.AddCheckedListRow(panel, 6, "Remembered peers (Alt+&R):", rememberedPeersList, rememberedPeersStatus, FocusListControl);
-        BuildRelayButtonRow(panel, 7);
-        var afterRelay = 8;
-
-        // Add a peer by address, then the lock toggle — the manual / advanced options after the lists.
-        panel.Controls.Add(new Label { Text = "Manual peer", AutoSize = true, Anchor = AnchorStyles.Left }, 0, afterRelay);
-        panel.Controls.Add(manualAddButton, 1, afterRelay);
+        // Add a peer by address straight after the remembered peers, then the lock on those addresses (Ed, 2026-10-10),
+        // then the server and the web listener.
+        panel.Controls.Add(new Label { Text = "Manual peer", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 7);
+        panel.Controls.Add(manualAddButton, 1, 7);
+        BuildRelayButtonRow(panel, 9);
+        // Listening in a web browser (Ed, 2026-10-10): one button, its window holds the rest.
+        panel.Controls.Add(new Label { Text = "Web listener", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 10);
+        panel.Controls.Add(webListenerButton, 1, 10);
+        webListenerButton.Click += (_, _) => OnWebListenerButton();
 
         lockPeerAddressesBox.Checked = settings.LoadLockPeerAddresses();
         lockPeerAddressesBox.CheckedChanged += (_, _) =>
@@ -4594,7 +4762,7 @@ public sealed partial class MainForm : Form
             MarkProfileDirty();
             LogUiChange("lock peer addresses", lockPeerAddressesBox.Checked ? "on" : "off");
         };
-        panel.Controls.Add(lockPeerAddressesBox, 0, afterRelay + 1);
+        panel.Controls.Add(lockPeerAddressesBox, 0, 8);
         panel.SetColumnSpan(lockPeerAddressesBox, 2);
 
         // Connection status readout — last row, tab-into-able.
@@ -4602,8 +4770,8 @@ public sealed partial class MainForm : Form
         statusLabel.Click += (_, _) => statusReadout.Focus();
         FormLayoutRows.LevelWithTop(statusLabel, statusReadout.Margin.Top);
         FormLayoutRows.StretchInCell(statusReadout);
-        panel.Controls.Add(statusLabel, 0, afterRelay + 2);
-        panel.Controls.Add(statusReadout, 1, afterRelay + 2);
+        panel.Controls.Add(statusLabel, 0, 11);
+        panel.Controls.Add(statusReadout, 1, 11);
         UpdatePeerDetails();
 
         // Tab order — the AUTHORITATIVE setting for this tab (SetTabOrder no longer touches it). The
@@ -4611,7 +4779,7 @@ public sealed partial class MainForm : Form
         // list's Parent) is what sorts among the tab's controls; setting the list's own TabIndex only
         // orders it inside its wrapper (where it's alone) and does nothing to the overall order — that
         // was the long-standing bug. Set the wrappers and the directly-added controls in sequence:
-        // connected, details, rename, discovered, remembered, add-by-IP, lock, status.
+        // connected, details, rename, discovered, server people, remembered, add-by-IP, lock, server, web listener, status.
         if (connectedPeersList.Parent is { } connectedWrap) connectedWrap.TabIndex = 0;
         peerDetailsBox.TabIndex = 1;
         renamePeerButton.TabIndex = 2;
@@ -4620,10 +4788,11 @@ public sealed partial class MainForm : Form
         // AddCheckedListRow, so the WRAPPER is what carries the tab order.
         if (relayPeersList.Parent is { } relayPeersWrap) relayPeersWrap.TabIndex = 4;
         if (rememberedPeersList.Parent is { } rememberedWrap) rememberedWrap.TabIndex = 5;
-        if (relayConnectButton.Parent is { } relayButtonWrap) relayButtonWrap.TabIndex = 6;
-        manualAddButton.TabIndex = 7;
-        lockPeerAddressesBox.TabIndex = 8;
-        statusReadout.TabIndex = 9;
+        manualAddButton.TabIndex = 6;   // straight after the remembered peers (Ed, 2026-10-10)
+        lockPeerAddressesBox.TabIndex = 7;   // then the lock on those addresses (Ed, 2026-10-10)
+        if (relayConnectButton.Parent is { } relayButtonWrap) relayButtonWrap.TabIndex = 8;
+        webListenerButton.TabIndex = 9;
+        statusReadout.TabIndex = 10;
 
         // Initial render so the box has content the moment the user tabs into it.
         RefreshStatusReadout();
@@ -5229,6 +5398,7 @@ public sealed partial class MainForm : Form
         ContextHelp.Mark(relayPeersList, "connectivity.server-peers");
         ContextHelp.Mark(rememberedPeersList, "connectivity.remembered-peers");
         ContextHelp.Mark(relayConnectButton, "connectivity.connect-to-server");
+        ContextHelp.Mark(webListenerButton, "connectivity.web-listener");
         ContextHelp.Mark(manualAddButton, "connectivity.add-peer-by-ip");
         ContextHelp.Mark(lockPeerAddressesBox, "connectivity.lock-addresses");
         ContextHelp.Mark(statusReadout, "connectivity.status");
@@ -11480,32 +11650,29 @@ public sealed partial class MainForm : Form
         if (!applyingProfile) PlayStreamToggleCue(box);
     }
 
-    /// <summary>Play the send/receive turned-on / turned-off cue for a streaming checkbox toggle.
-    /// Machine-wide cues (enable flags in AppConfig); silent when the cue is unticked or absent.</summary>
+    /// <summary>Play the send/receive turned-on / turned-off cue for a streaming checkbox toggle, as the profile has it;
+    /// silent when the cue is off or absent.</summary>
     private void PlayStreamToggleCue(AccessibleCheckBox box)
     {
         var on = box.Checked;
-        var cfg = AppConfig.Load();
         if (box == sendMyAudioCheckbox)
         {
-            if (on) { if (cfg.EnableSendOnCue) sendOnSound?.Play(); }
-            else { if (cfg.EnableSendOffCue) sendOffSound?.Play(); }
+            if (on) { if (settings.LoadCueEnabled(CueId.SendOn)) sendOnSound?.Play(); }
+            else { if (settings.LoadCueEnabled(CueId.SendOff)) sendOffSound?.Play(); }
         }
         else if (box == receiveAudioCheckbox)
         {
-            if (on) { if (cfg.EnableReceiveOnCue) receiveOnSound?.Play(); }
-            else { if (cfg.EnableReceiveOffCue) receiveOffSound?.Play(); }
+            if (on) { if (settings.LoadCueEnabled(CueId.ReceiveOn)) receiveOnSound?.Play(); }
+            else { if (settings.LoadCueEnabled(CueId.ReceiveOff)) receiveOffSound?.Play(); }
         }
     }
 
     /// <summary>Play the minimise(hide) or restore(show) cue. Called by the tray controller when the
-    /// window actually transitions to/from hidden. Machine-wide enable flags; silent when unticked
-    /// or the cue WAV is absent.</summary>
+    /// window actually transitions to/from hidden. As the profile has it; silent when off or the cue WAV is absent.</summary>
     public void PlayWindowVisibilityCue(bool show)
     {
-        var cfg = AppConfig.Load();
-        if (show) { if (cfg.EnableShowCue) showSound?.Play(); }
-        else { if (cfg.EnableHideCue) hideSound?.Play(); }
+        if (show) { if (settings.LoadCueEnabled(CueId.Show)) showSound?.Play(); }
+        else { if (settings.LoadCueEnabled(CueId.Hide)) hideSound?.Play(); }
     }
 
     /// <summary>True while a peer-security warning dialog is on screen — set so the 1 Hz status
@@ -11918,11 +12085,9 @@ public sealed partial class MainForm : Form
             _ => "no devices",
         };
 
-    /// <summary>Well-known cue identifiers used as keys into
-    /// <see cref="AppConfig.CustomCuePaths"/>. Stable strings — don't rename without writing
-    /// a migration, because users' Preferences-set custom paths are stored under these keys
-    /// in <c>remsound.config.json</c>. Centralised here so the Preferences dialog and the
-    /// MainForm load path agree on the spellings.</summary>
+    /// <summary>Well-known cue identifiers, the keys of every profile's cue settings (<see cref="CueSettings"/>). Stable
+    /// strings — don't rename without writing a migration, because users' profiles store their cue choices under these
+    /// keys. Centralised here so the Preferences dialog and the MainForm load path agree on the spellings.</summary>
     internal static class CueId
     {
         public const string Connect = "connect";
@@ -11933,19 +12098,16 @@ public sealed partial class MainForm : Form
         public const string ProfileSwitch = "profile-switch";
         public const string ProfileMenuOpen = "profile-menu-open";
         public const string Update = "update";
-        // Startup cue is special: it plays from Program.cs before any profile loads, so its
-        // enable flag and custom-path live machine-wide in AppConfig, not the per-profile
-        // settings store. This id is still used by the Preferences cue list for display/keying.
+        // The startup cue plays as the run's first profile opens (MainForm.PlayStartupCueOnce, 2026-10-08).
         public const string Startup = "startup";
-        // Send/receive toggle + minimise(hide)/restore(show) cues (2026-06-13). Also machine-wide
-        // (enable flags + custom paths in AppConfig) - app-level feedback, not per-profile audio.
+        // Send/receive toggle + minimise(hide)/restore(show) cues (2026-06-13).
         public const string SendOn = "send-on";
         public const string SendOff = "send-off";
         public const string ReceiveOn = "receive-on";
         public const string ReceiveOff = "receive-off";
         public const string Hide = "hide";
         public const string Show = "show";
-        // Connecting to a server and disconnecting from it (Ed's sounds, 2026-10-01). Machine-wide.
+        // Connecting to a server and disconnecting from it (Ed's sounds, 2026-10-01).
         // The shipped WAVs are "server connect 1.wav" etc.
         public const string ServerConnect = "server-connect";
         public const string ServerDisconnect = "server-disconnect";
@@ -11958,46 +12120,34 @@ public sealed partial class MainForm : Form
         // Played as F1 help opens and as it closes (HelpSoundService, 2026-09-25). "help open 1.wav" etc.
         public const string HelpOpen = "help-open";
         public const string HelpClose = "help-close";
-        // Push to talk opening and closing, key mode only (2026-09-28). Machine-wide like send on/off. Ed's own sounds:
+        // Push to talk opening and closing, key mode only (2026-09-28). Ed's own sounds:
         // "push talk on 1.wav" to "3" and "push talk off 1.wav" to "3", the 1s the default.
         public const string PushToTalkOn = "push-to-talk-on";
         public const string PushToTalkOff = "push-to-talk-off";
     }
 
-    /// <summary>Load one cue sound. Resolution order:
-    /// (1) if a custom path is set for <paramref name="cueId"/> AND the referenced file exists,
-    ///     use that — the user-supplied override. The active profile's custom path comes first;
-    ///     the machine-wide cues (send/receive, hide/show) keep theirs in AppConfig.
-    /// (2) otherwise the shipped default in <c>default sounds\</c> next to RemSound.exe: the
-    ///     numbered variant chosen machine-wide, or the first one (CueSounds.ResolveDefaultPath,
-    ///     given <paramref name="defaultFileName"/>).
+    /// <summary>Load one cue sound, as the profile has it (<paramref name="cues"/>, or the window's settings when null):
+    /// (1) the person's own file for the cue, if it is on disk; (2) otherwise the built-in sound chosen for it in
+    /// <c>default sounds\</c> next to RemSound.exe (CueSounds.ResolveDefaultPath, given <paramref name="defaultFileName"/>);
     /// (3) otherwise null — the cue silently doesn't play and the rest of the app keeps working.</summary>
-    private void TryLoadCueSound(string cueId, string defaultFileName, out CuePlayer? player, AppConfig? cfg = null)
+    private void TryLoadCueSound(string cueId, string defaultFileName, out CuePlayer? player, CueSettings? cues = null)
     {
         player = null;
         try
         {
-            // Load the config once per call (or reuse the caller's — ReloadAllCueSounds passes one shared
-            // instance for all 14 cues instead of each cue re-reading + re-parsing the file from disk).
-            cfg ??= AppConfig.Load();
+            cues ??= settings.CueSnapshot();
             string? path = null;
-            var customPath = settings.LoadCustomCuePath(cueId);
-            if (string.IsNullOrWhiteSpace(customPath)
-                && cfg.MachineCueCustomPaths.TryGetValue(cueId, out var machinePath))
-            {
-                // Machine-wide cues (send/receive/hide/show) keep their custom override in AppConfig.
-                customPath = machinePath;
-            }
-            if (!string.IsNullOrWhiteSpace(customPath) && File.Exists(customPath))
+            var customPath = cues.CustomPathOf(cueId);
+            if (customPath is not null && File.Exists(customPath))
             {
                 path = customPath;
                 logFile.Event($"cue sound '{cueId}': using custom path {customPath}");
             }
             else
             {
-                // The cue ships as numbered variants ("connect 1.wav", "connect 2.wav", ...);
-                // resolve the machine-wide chosen default (or the first variant) for this cue.
-                var defaultPath = CueSounds.ResolveDefaultPath(cueId, defaultFileName, cfg);
+                // The cue ships as numbered variants ("connect 1.wav", "connect 2.wav", ...); resolve the one chosen
+                // for this cue (or the first).
+                var defaultPath = CueSounds.ResolveDefaultPath(cueId, defaultFileName, cues);
                 if (defaultPath is not null && File.Exists(defaultPath))
                 {
                     path = defaultPath;
@@ -12024,9 +12174,8 @@ public sealed partial class MainForm : Form
     /// </summary>
     public void ReloadAllCueSounds()
     {
-        // Load the machine config ONCE and pass it to all 14 cues, instead of each cue (twice) re-reading
-        // and re-deserializing the config file — this runs on the UI thread on every Preferences close.
-        var cfg = AppConfig.Load();
+        // One copy of the profile's cue settings for every cue, instead of each taking its own.
+        var cfg = settings.CueSnapshot();
         TryLoadCueSound(CueId.Connect, "connect.wav", out connectSound, cfg);
         TryLoadCueSound(CueId.Disconnect, "disconnect.wav", out disconnectSound, cfg);
         TryLoadCueSound(CueId.RecordStart, "record start.wav", out recordStartSound, cfg);
@@ -12045,11 +12194,9 @@ public sealed partial class MainForm : Form
         TryLoadCueSound(CueId.Show, "maximise.wav", out showSound, cfg);
         TryLoadCueSound(CueId.ServerConnect, "server connect.wav", out serverConnectSound, cfg);
         TryLoadCueSound(CueId.ServerDisconnect, "server disconnect.wav", out serverDisconnectSound, cfg);
-        // The app-wide checkbox tick/untick and tab-switch sounds live in their own services; keep
-        // them in step.
-        CheckSoundService.Reload();
-        TabSwitchSoundService.Reload();
-        HelpSoundService.Reload();
+        // The app-wide tick box, tab-switch and help sounds and the key clicks follow the same settings, and so does this
+        // computer's copy for before a profile opens.
+        ApplyCuesInForce(cfg);
         // The DAW plugin plays the same context help sounds, from copies beside it: keep them in step (a file copy, so off
         // the window's thread; only when a sound actually changed).
         RefreshPluginHelpSounds();
@@ -12067,43 +12214,36 @@ public sealed partial class MainForm : Form
     private void CheckForMissingEnabledCues()
     {
         if (!IsHandleCreated) return; // need a window so the warning can surface
-        var cfg = AppConfig.Load();
-        (CuePlayer? Player, bool Enabled, Action Disable, string Name, string When)[] cues =
+        (CuePlayer? Player, string Id, string Name, string When)[] cues =
         {
-            (connectSound, settings.LoadEnableConnectCue(), () => settings.SaveEnableConnectCue(false), "connect", "a peer connects"),
-            (disconnectSound, settings.LoadEnableDisconnectCue(), () => settings.SaveEnableDisconnectCue(false), "disconnect", "a peer disconnects"),
-            (recordStartSound, settings.LoadEnableRecordStartCue(), () => settings.SaveEnableRecordStartCue(false), "recording start", "you start recording"),
-            (recordStopSound, settings.LoadEnableRecordStopCue(), () => settings.SaveEnableRecordStopCue(false), "recording stop", "you stop recording"),
-            (saveSound, settings.LoadEnableSaveCue(), () => settings.SaveEnableSaveCue(false), "profile saved", "you save a profile"),
-            (profileSwitchSound, settings.LoadEnableProfileSwitchCue(), () => settings.SaveEnableProfileSwitchCue(false), "profile switched", "you switch profile"),
-            (profileMenuOpenSound, settings.LoadEnableProfileMenuOpenCue(), () => settings.SaveEnableProfileMenuOpenCue(false), "profile menu open", "the quick profile menu opens"),
-            (updateSound, settings.LoadEnableUpdateCue(), () => settings.SaveEnableUpdateCue(false), "update", "an update is about to install"),
-            (sendOnSound, cfg.EnableSendOnCue, () => SetMachineCueEnabled(c => c.EnableSendOnCue = false), "send turned on", "you turn sending on"),
-            (sendOffSound, cfg.EnableSendOffCue, () => SetMachineCueEnabled(c => c.EnableSendOffCue = false), "send turned off", "you turn sending off"),
-            (pushToTalkOnSound, cfg.EnablePushToTalkOnCue, () => SetMachineCueEnabled(c => c.EnablePushToTalkOnCue = false), "push to talk on", "you start talking with the push to talk key"),
-            (pushToTalkOffSound, cfg.EnablePushToTalkOffCue, () => SetMachineCueEnabled(c => c.EnablePushToTalkOffCue = false), "push to talk off", "you stop talking with the push to talk key"),
-            (receiveOnSound, cfg.EnableReceiveOnCue, () => SetMachineCueEnabled(c => c.EnableReceiveOnCue = false), "receive turned on", "you turn receiving on"),
-            (receiveOffSound, cfg.EnableReceiveOffCue, () => SetMachineCueEnabled(c => c.EnableReceiveOffCue = false), "receive turned off", "you turn receiving off"),
-            (hideSound, cfg.EnableHideCue, () => SetMachineCueEnabled(c => c.EnableHideCue = false), "minimise", "RemSound minimises to the tray"),
-            (showSound, cfg.EnableShowCue, () => SetMachineCueEnabled(c => c.EnableShowCue = false), "restore", "RemSound is restored from the tray"),
-            (serverConnectSound, cfg.EnableServerConnectCue, () => SetMachineCueEnabled(c => c.EnableServerConnectCue = false), "server connected", "you connect to a server"),
-            (serverDisconnectSound, cfg.EnableServerDisconnectCue, () => SetMachineCueEnabled(c => c.EnableServerDisconnectCue = false), "server disconnected", "you disconnect from a server"),
+            (connectSound, CueId.Connect, "connect", "a peer connects"),
+            (disconnectSound, CueId.Disconnect, "disconnect", "a peer disconnects"),
+            (recordStartSound, CueId.RecordStart, "recording start", "you start recording"),
+            (recordStopSound, CueId.RecordStop, "recording stop", "you stop recording"),
+            (saveSound, CueId.Save, "profile saved", "you save a profile"),
+            (profileSwitchSound, CueId.ProfileSwitch, "profile switched", "you switch profile"),
+            (profileMenuOpenSound, CueId.ProfileMenuOpen, "profile menu open", "the quick profile menu opens"),
+            (updateSound, CueId.Update, "update", "an update is about to install"),
+            (sendOnSound, CueId.SendOn, "send turned on", "you turn sending on"),
+            (sendOffSound, CueId.SendOff, "send turned off", "you turn sending off"),
+            (pushToTalkOnSound, CueId.PushToTalkOn, "push to talk on", "you start talking with the push to talk key"),
+            (pushToTalkOffSound, CueId.PushToTalkOff, "push to talk off", "you stop talking with the push to talk key"),
+            (receiveOnSound, CueId.ReceiveOn, "receive turned on", "you turn receiving on"),
+            (receiveOffSound, CueId.ReceiveOff, "receive turned off", "you turn receiving off"),
+            (hideSound, CueId.Hide, "minimise", "RemSound minimises to the tray"),
+            (showSound, CueId.Show, "restore", "RemSound is restored from the tray"),
+            (serverConnectSound, CueId.ServerConnect, "server connected", "you connect to a server"),
+            (serverDisconnectSound, CueId.ServerDisconnect, "server disconnected", "you disconnect from a server"),
         };
         foreach (var c in cues)
         {
-            if (c.Enabled && c.Player is null)
+            if (settings.LoadCueEnabled(c.Id) && c.Player is null)
             {
-                c.Disable();
+                // Off in this profile, in memory, and saved with the profile like any other cue change.
+                settings.SaveCueEnabled(c.Id, false);
                 ReportMissingCueSound(c.Name, c.When);
             }
         }
-    }
-
-    private static void SetMachineCueEnabled(Action<AppConfig> set)
-    {
-        var c = AppConfig.Load();
-        set(c);
-        try { c.Save(); } catch { /* harmless — the cue is silent regardless this session */ }
     }
 
     /// <summary>Surface the "couldn't find a cue's sound file" message, front-most even when RemSound
@@ -12228,6 +12368,8 @@ public sealed partial class MainForm : Form
     internal static string CueOutcome(bool enabled, CuePlayer? sound) =>
         // A silent run (--silent, --headless) plays nothing at all, and said "played" all the same (2026-09-24).
         CuePlayer.GloballyMuted ? "silenced (a silent or headless run)"
+        // "Mute all audio cues" in Preferences, for every profile (2026-10-08).
+        : CuePlayer.AllCuesMuted ? "silenced (all audio cues muted in Preferences)"
         : !enabled ? "muted in settings" : sound is null ? "enabled but sound not loaded" : "played";
 
     /// <summary>
@@ -13283,6 +13425,7 @@ public sealed partial class MainForm : Form
         // away and say so; leaving the socket open into a half-dismantled app would have them asking
         // for audio from a receiver that no longer exists.
         try { pluginHost?.Dispose(); pluginHost = null; receiver.SetPluginPeerClaims(null); } catch { /* teardown is best-effort */ }
+        try { sender.OnWebSamples = null; webListener?.Dispose(); webListener = null; } catch { /* teardown is best-effort */ }
         try { pluginTrackSource.Dispose(); } catch { /* teardown is best-effort */ }
 
         // Stop any active recording before the engines tear down. The recorder will flush

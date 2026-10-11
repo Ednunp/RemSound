@@ -313,6 +313,23 @@ public static class ServiceStore
     public static Guid? LoadRelayClientId() =>
         Guid.TryParse(LoadSettings().RelayClientId, out var id) && id != Guid.Empty ? id : null;
 
+    /// <summary>For the app's start-up check (the hand-over review, 2026-10-10): false when the service's settings can't be
+    /// read from this account; true with the saved id, or null when none is saved (the service then uses the computer's).
+    /// <see cref="LoadSettings"/> can't tell those apart: it answers "nothing saved" to both.</summary>
+    public static bool TryReadRelayClientId(out Guid? id)
+    {
+        id = null;
+        try
+        {
+            var s = JsonSerializer.Deserialize<ServiceSettings>(File.ReadAllText(SettingsPath)) ?? new ServiceSettings();
+            id = Guid.TryParse(s.RelayClientId, out var g) && g != Guid.Empty ? g : null;
+            return true;
+        }
+        catch (FileNotFoundException) { return true; }
+        catch (DirectoryNotFoundException) { return true; }
+        catch { return false; }
+    }
+
     public static void SaveRelayClientId(Guid id)
     {
         var s = LoadSettings(); // load-modify-save: never clobber the other settings in the file

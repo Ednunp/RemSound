@@ -222,9 +222,12 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
     /// <summary>What the audio path reads on every packet, without a lock: the relays we are in a group on, and the
     /// relay behind each member address.</summary>
     private sealed class Snapshot(FrozenDictionary<IPEndPoint, bool> groupRelays, FrozenDictionary<IPEndPoint, IPEndPoint> memberRelay,
-        IReadOnlyList<Member> members)
+        IReadOnlyList<Member> members, FrozenSet<IPEndPoint> leftRelays)
     {
-        public static readonly Snapshot Empty = new(FrozenDictionary<IPEndPoint, bool>.Empty, FrozenDictionary<IPEndPoint, IPEndPoint>.Empty, []);
+        public static readonly Snapshot Empty = new(FrozenDictionary<IPEndPoint, bool>.Empty, FrozenDictionary<IPEndPoint, IPEndPoint>.Empty, [],
+            FrozenSet<IPEndPoint>.Empty);
+        /// <summary>Servers we said goodbye to and have not connected to again (see <see cref="leftRelays"/>).</summary>
+        public FrozenSet<IPEndPoint> LeftRelays { get; } = leftRelays;
         /// <summary>Relay endpoint → whether we also hold an ordinary pair slot there with a partner.</summary>
         public FrozenDictionary<IPEndPoint, bool> GroupRelays { get; } = groupRelays;
         public FrozenDictionary<IPEndPoint, IPEndPoint> MemberRelay { get; } = memberRelay;
@@ -261,6 +264,9 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         {
             leaving = relays.Keys.Where(r => !r.Equals(relay)).ToList();
             foreach (var r in leaving) ForgetRelayLocked(r);
+            leftRelays.UnionWith(leaving);
+            leftRelays.Remove(relay);
+            byeGeneration++;   // a goodbye still repeating to this server must not land after our hello
             if (leaving.Count > 0) { StopHearingItselfLocked(); ForgetServerStatusLocked(); }   // your own sound, and its status, were the server you left
             targets = [relay];
             if (!relays.ContainsKey(relay))
@@ -280,8 +286,12 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         List<IPEndPoint> leaving;
         lock (gate)
         {
-            leaving = relays.Values.Where(r => r.InGroup).Select(r => r.Endpoint).ToList();
+            // Every server we said hello to, not only those whose list has come back: a hello the relay took before its
+            // list reached us still made us a member, and without a goodbye it holds our place (the hand-over review,
+            // 2026-10-10).
+            leaving = relays.Keys.ToList();
             foreach (var r in relays.Keys.ToList()) ForgetRelayLocked(r);
+            leftRelays.UnionWith(leaving);
             targets = [];
             ticked.Clear();
             tickedNow = [];
@@ -399,8 +409,9 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         List<IPEndPoint> leaving;
         lock (gate)
         {
-            leaving = relays.Values.Where(r => r.InGroup).Select(r => r.Endpoint).ToList();
+            leaving = relays.Keys.ToList();   // every server we said hello to (see Disconnect)
             foreach (var r in relays.Keys.ToList()) ForgetRelayLocked(r);
+            leftRelays.UnionWith(leaving);
         }
         foreach (var r in leaving) SendBye(r);
         Publish();
@@ -666,6 +677,11 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
             return true;
         }
         if (IsMemberAddress(destination.Address)) return true;   // a member we no longer know: never onto the wire
+        // A server we have just said goodbye to: nothing more goes to it until we connect again. The sound still flowing
+        // in the moment after the goodbye used to reach it as ordinary packets from an address that was no longer a member,
+        // and the relay gave that a two-person pair slot - a ghost of us, which the other half of the app/service hand-over
+        // then paired with, and which kept a real phone out for a minute (the hand-over review, 2026-10-10).
+        if (snap.LeftRelays.Contains(destination)) return true;
         if (!snap.GroupRelays.TryGetValue(destination, out var v1Paired)) return false;
         if (packet.Length < RemPacket.HeaderSize) return false;
         var type = (RemPacketType)packet[5];
@@ -806,6 +822,10 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         return packet;
     }
 
+    /// <summary>Goodbye: sent three times, 100 ms apart, since one lost datagram held the next copy of us out for five
+    /// seconds (the relay's REBIND_SILENCE_SECONDS) - the hand-over review, 2026-10-10. A repeat stops if we connect to
+    /// that server again meanwhile, so a late goodbye never undoes our own hello. Copies after the first are ignored by the
+    /// relay: by then we are not a member, and a goodbye counts only from a member's address.</summary>
     private void SendBye(IPEndPoint relay)
     {
         var send = rawSend;
@@ -814,10 +834,31 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
         RemPacket.WriteHeader(packet, (RemPacketType)TypeBye, 0, 0);
         packet[4] = GroupVersion;
         clientId.CopyTo(packet.AsSpan(RemPacket.HeaderSize));
+        int generation;
+        lock (gate) generation = byeGeneration;
         try { send(packet, packet.Length, relay); } catch { /* UDP; the relay forgets us after a minute anyway */ }
+        _ = Task.Run(async () =>
+        {
+            for (var i = 1; i < ByeCopies; i++)
+            {
+                await Task.Delay(ByeRepeatMs).ConfigureAwait(false);
+                lock (gate) if (byeGeneration != generation || relays.ContainsKey(relay)) return;
+                try { send(packet, packet.Length, relay); } catch { return; }
+            }
+        });
     }
 
+    internal const int ByeCopies = 3;
+    internal const int ByeRepeatMs = 100;
+
     // ------- bookkeeping ------------------------------------------------------------------------------------------------
+
+    /// <summary>Servers we said goodbye to and have not connected to since: <see cref="TryRoute"/> sends them nothing.
+    /// Under <see cref="gate"/>; the audio path reads its copy in the snapshot.</summary>
+    private readonly HashSet<IPEndPoint> leftRelays = [];
+    /// <summary>Moves on at every Connect, so a goodbye still repeating stops before it can land after our hello.</summary>
+    private int byeGeneration;
+
 
     private void ForgetRelayLocked(IPEndPoint endpoint)
     {
@@ -858,7 +899,7 @@ public sealed class RelayGroupClient : IRelayRouter, IDisposable
                 .Select(m => new Member(m.Id, m.Address, m.Name, m.Relay, m.TicksUs))
                 .OrderBy(m => m.Name, StringComparer.CurrentCultureIgnoreCase)
                 .ToList();
-            snapshot = new Snapshot(groupRelays, memberRelay, members);
+            snapshot = new Snapshot(groupRelays, memberRelay, members, leftRelays.ToFrozenSet());
         }
         try { Changed?.Invoke(); } catch { /* a listener's failure must not break the network path */ }
     }

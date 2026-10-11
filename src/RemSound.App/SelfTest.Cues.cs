@@ -48,57 +48,59 @@ internal static partial class SelfTest
         var scratch = Path.Combine(Path.GetTempPath(), "remsound-cue-suite-" + Guid.NewGuid().ToString("N"));
         using var scope = AppConfig.UseThrowawayUserDataDirectory(scratch);
 
-        // EVERY cue must round-trip a custom sound path — the user-facing promise of the Preferences
-        // sound list. There are TWO stores and the resolution order is per-profile FIRST, machine-wide
-        // as fallback (MainForm.LoadCueSound), so testing only one of them proves only half the
-        // journey — which is exactly what the first version of this test did.
+        // EVERY cue is the profile's (2026-10-08, Ed: "all sounds should be switchable for all profiles"): its own file, its
+        // chosen built-in sound and its on/off switch must each survive the profile being saved and opened again - through
+        // the settings store, the Profile and its JSON, which is the journey a real save and load takes. Testing the store
+        // alone would prove half of it, which is what the first version of this test did with its two stores.
         var store = new RemSoundSettingsStore("RemSound");
-        foreach (var id in ids)
-        {
-            var machine = $@"C:\sounds\machine-{id}.wav";
-            var cfg = AppConfig.Load();
-            cfg.MachineCueCustomPaths[id] = machine;
-            cfg.Save();
-            Check(AppConfig.Load().MachineCueCustomPaths.TryGetValue(id, out var backMachine) && backMachine == machine,
-                $"cue '{id}': a machine-wide custom sound path must survive a save and reload");
-
-            var perProfile = $@"C:\sounds\profile-{id}.wav";
-            store.SaveCustomCuePath(id, perProfile);
-            Check(store.LoadCustomCuePath(id) == perProfile,
-                $"cue '{id}': a PER-PROFILE custom sound path must round-trip — it is the FIRST thing the resolver looks at");
-            store.SaveCustomCuePath(id, null);
-            Check(string.IsNullOrEmpty(store.LoadCustomCuePath(id)),
-                $"cue '{id}': clearing a per-profile custom path must actually clear it (or the cue is stuck on an old file)");
-        }
-
-        // EVERY cue must have an on/off switch, and it must be findable. The flags live in two places —
-        // machine-wide ones on AppConfig, per-profile ones behind the settings store — so this maps each
-        // cue to its flag by name and FAILS on any cue that has no switch at all. A sound the user
-        // cannot turn off is a bug for someone who listens to this app all day.
+        var backup = new Profile();
+        store.CopyTo(backup);
         var missingSwitch = new List<string>();
-        var machineFlags = 0;
-        var profileFlags = 0;
-        foreach (var id in ids)
+        try
         {
-            var flagName = "Enable" + string.Concat(id.Split('-').Select(part => char.ToUpperInvariant(part[0]) + part[1..])) + "Cue";
-            var appConfigProp = typeof(AppConfig).GetProperty(flagName);
-            var storeMethod = typeof(RemSoundSettingsStore).GetMethod("Load" + flagName);
-            if (appConfigProp is not null)
+            foreach (var id in ids)
             {
-                machineFlags++;
-                // Round-trip it: off must stay off across a save/reload, or "mute this cue" is a lie.
-                var cfg = AppConfig.Load();
-                var original = (bool)appConfigProp.GetValue(cfg)!;
-                appConfigProp.SetValue(cfg, !original);
-                cfg.Save();
-                Check((bool)appConfigProp.GetValue(AppConfig.Load())! == !original,
-                    $"cue '{id}': its enable flag ({flagName}) must survive a save and reload");
+                var own = $@"C:\sounds\profile-{id}.wav";
+                store.SaveCustomCuePath(id, own);
+                store.SaveCueSound(id, $"{id} 2.wav");
+                store.SaveCueEnabled(id, false);
+                var saved = new Profile();
+                store.CopyTo(saved);
+                var reopened = System.Text.Json.JsonSerializer.Deserialize<Profile>(System.Text.Json.JsonSerializer.Serialize(saved))!;
+                var fresh = new RemSoundSettingsStore("RemSound");
+                fresh.ApplyProfile(reopened);
+                // A profile's own cue rides in the profile; a global sound on the computer - either way it must come back.
+                Check(fresh.LoadCustomCuePath(id) == own,
+                    $"cue '{id}': its own sound file must survive the profile being saved and opened ({fresh.LoadCustomCuePath(id) ?? "lost"})");
+                Check(fresh.LoadCueSound(id) == $"{id} 2.wav",
+                    $"cue '{id}': its chosen built-in sound must survive the profile being saved and opened ({fresh.LoadCueSound(id) ?? "lost"})");
+                if (fresh.LoadCueEnabled(id)) missingSwitch.Add(id);
+                store.SaveCustomCuePath(id, null);
+                Check(string.IsNullOrEmpty(store.LoadCustomCuePath(id)),
+                    $"cue '{id}': clearing its own file must actually clear it (or the cue is stuck on an old file)");
+                store.SaveCueEnabled(id, true);
+                Check(store.LoadCueEnabled(id), $"cue '{id}': switching it back on must stick");
             }
-            else if (storeMethod is not null) profileFlags++;
-            else missingSwitch.Add($"{id} (looked for {flagName})");
         }
+        finally { store.ApplyProfile(backup); }
+        // A sound the user cannot turn off is a bug for someone who listens to this app all day.
         Check(missingSwitch.Count == 0,
-            $"these cues have no on/off switch anywhere — the user cannot silence them: {string.Join(", ", missingSwitch)}");
+            $"these cues came back ON after being switched off and the profile saved and opened - the user cannot silence them: {string.Join(", ", missingSwitch)}");
+
+        // And the computer's older settings must not reach a profile that carries its own: with the send-on cue switched
+        // off in this computer's old settings, a profile that has it on must keep it on.
+        {
+            var cfg = AppConfig.Load();
+            cfg.EnableSendOnCue = false;
+            cfg.Save();
+            var carries = new Profile { Cues = new CueSettings() };
+            var applied = new RemSoundSettingsStore("RemSound");
+            applied.ApplyProfile(carries);
+            Check(applied.LoadCueEnabled(MainForm.CueId.SendOn),
+                "a profile that carries its own cues must not take an older computer-wide 'off' - that is the split this change ended");
+            cfg.EnableSendOnCue = true;
+            cfg.Save();
+        }
 
         // MUTING must be absolute. --silent is what makes an unattended run (and the gate itself)
         // quiet; a cue that ignores it plays at whoever is at the screen. Ed heard exactly that from
@@ -133,14 +135,36 @@ internal static partial class SelfTest
         }
         finally { CuePlayer.GloballyMuted = restore; }
 
+        // "Mute all audio cues" (2026-10-08): the person's own switch, separate from the silent run's. Muted, no cue may
+        // reach a device; a preview the person asked for on the Audio cues tab still plays; unmuted, a cue plays again.
+        // Counted both ways, for the reason above.
+        var restoreAll = CuePlayer.AllCuesMuted;
+        var restoreGlobal = CuePlayer.GloballyMuted;
+        try
+        {
+            CuePlayer.GloballyMuted = false;
+            var player = new CuePlayer(wav);
+            CuePlayer.AllCuesMuted = true;
+            var before = CuePlayer.PlaysStartedForTest;
+            player.Play();
+            Check(CuePlayer.PlaysStartedForTest == before, "with every cue muted in Preferences, a cue must not reach a device");
+            new CuePlayer(wav) { Preview = true }.Play();
+            Check(CuePlayer.PlaysStartedForTest == before + 1, "a preview the person asked for must still play with every cue muted");
+            Check(!CuePlayer.GloballyMuted, "muting every cue must not turn on the silent-run flag, which also stops questions and update checks");
+            CuePlayer.AllCuesMuted = false;
+            player.Play();
+            Check(CuePlayer.PlaysStartedForTest == before + 2, "unmuted again, the cue must play");
+        }
+        finally { CuePlayer.AllCuesMuted = restoreAll; CuePlayer.GloballyMuted = restoreGlobal; }
+
         // The checkbox cues are the ones that fire most often — from AccessibleCheckBox, on EVERY
         // checkbox in the app — and CheckSoundService.Suppressed is what stops a programmatic run
         // (profile apply, the control suite) from machine-gunning them.
         Check(ids.Contains("checkbox-on") && ids.Contains("checkbox-off"),
             "the checkbox tick/untick cues must be in the registry — they fire on every checkbox in the app");
 
-        return $"all {ids.Length} cues: ids unique + file-safe; BOTH custom-path stores round-trip (per-profile first, machine-wide fallback); "
-             + $"every cue has a working on/off switch ({machineFlags} machine-wide, {profileFlags} per-profile); muting holds";
+        return $"all {ids.Length} cues: ids unique + file-safe; each cue's own file, chosen sound and on/off switch survive a profile save and "
+             + "open; the computer's older settings don't reach a profile that carries its own; the silent run and 'Mute all audio cues' both hold";
     }
 
     /// <summary>A 44-byte silent WAV header — enough for a player to open without shipping a fixture.</summary>

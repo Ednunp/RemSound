@@ -303,6 +303,22 @@ public sealed class AudioSender : IDisposable
         try { cb(samples, lane); } catch { /* recorder failure isolated from audio path */ }
     }
 
+    /// <summary>
+    /// The web listener's tap (2026-10-10, Ed: listen to this PC from a web browser at work). The same
+    /// 48 kHz interleaved stereo float block as <see cref="OnSentSamples"/>, on the audio thread and reused
+    /// on the next callback, but always what goes out to peers (push to talk applied), never the recorder's
+    /// ungated choice. A slot of its own so the recorder, which sets and clears its tap, never takes it.
+    /// Null = no tap.
+    /// </summary>
+    public Action<ReadOnlyMemory<float>, RenderRoute>? OnWebSamples { get; set; }
+
+    internal void DispatchWebSamples(ReadOnlyMemory<float> samples, RenderRoute lane)
+    {
+        var cb = OnWebSamples;
+        if (cb is null) return;
+        try { cb(samples, lane); } catch { /* a web listener failure must not reach the audio path */ }
+    }
+
     public AudioSender()
     {
         udp = new UdpClient(AddressFamily.InterNetwork);
@@ -742,6 +758,9 @@ public sealed class AudioSender : IDisposable
         var list = endpoints.ToArray();
         Volatile.Write(ref receivers, list);
     }
+
+    /// <summary>Gate seam: how many places the sound goes to now.</summary>
+    internal int ReceiverCountForTest => Volatile.Read(ref receivers).Length;
 
     /// <summary>
     /// Sets the list of capture sources to mix. Each spec identifies a WASAPI device + whether

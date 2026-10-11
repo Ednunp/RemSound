@@ -145,12 +145,13 @@ public sealed partial class MainForm
     /// on it: the peer sounds are for people (Ed: "you hear the peer sounds when you join a group").</summary>
     private void PlayServerSound(bool connected)
     {
-        var cfg = AppConfig.Load();
-        var on = connected ? cfg.EnableServerConnectCue : cfg.EnableServerDisconnectCue;
-        logFile.Event($"server sound: {(connected ? "connected to the server" : "disconnected from the server")} ({(on ? "played" : "switched off")})");
+        // As the profile has them (2026-10-08). The log says what really happened: a silent run or "Mute all audio cues"
+        // plays nothing, and said "played" all the same.
+        var on = settings.LoadCueEnabled(connected ? CueId.ServerConnect : CueId.ServerDisconnect);
+        var sound = connected ? serverConnectSound : serverDisconnectSound;
+        logFile.Event($"server sound: {(connected ? "connected to the server" : "disconnected from the server")} ({(on ? CueOutcome(true, sound) : "switched off")})");
         if (!on) return;
-        if (connected) serverConnectSound?.Play();
-        else serverDisconnectSound?.Play();
+        sound?.Play();
     }
     internal string? ServerConnectSoundFileForTest => serverConnectSound?.FilePathForTest;
     internal string? ServerDisconnectSoundFileForTest => serverDisconnectSound?.FilePathForTest;

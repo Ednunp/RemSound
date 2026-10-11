@@ -1,6 +1,22 @@
-# RemSound release history: v5.5 and earlier
+# RemSound release history: v5.7 and earlier
 
 The notes the About box carried for older releases. The newest few are in the About box (src/RemSound.App/AboutDialog.cs) and RELEASE_NOTES.md; when a release is added there, move the oldest block here.
+
+RemSound v5.7
+
+Stronger security, and it works with every version again.
+
+This release puts the password handling back the way it was, so RemSound talks to older versions and the iPhone app again. You still set a password — your audio is always encrypted — we just suggest a strong one now instead of requiring it. Nothing changes for you if you already use a good password.
+
+Signed updates. Every release is now digitally signed, and the updater refuses anything that isn't genuinely from us — so even if the download page were ever tampered with, a fake update couldn't install itself on your machine.
+
+Remote volume, now password-protected. The remote volume and mute controls are locked to your password, so only someone who shares it can use them.
+
+Set the machine's volume when the service starts. In the service's Additional options you can have an unattended machine unmute itself and set its Windows volume to a level you choose — on the first start after each boot, or on every service start.
+
+Updates on your schedule. In Preferences you can restrict automatic updates to a time range — say 1am to 6am — so an update never closes RemSound and interrupts you. Found outside the range, it quietly waits and installs the moment the range opens.
+
+Plus: the app releases its high-priority and keep-awake settings when you're not actually streaming (kinder to laptops), diagnostic logs cap their own size on long sessions, and a raft of behind-the-scenes hardening.
 
 RemSound v5.5
 
