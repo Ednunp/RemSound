@@ -14,8 +14,8 @@ internal static partial class SelfTest
     /// with that") - never in the gate: its log is on that server, so the checks that read it are left to whoever reads it.</summary>
     private static string? MetronomeThroughTheServer()
     {
-        // Its own questions only: the ASIO warning has its own step (METRONOME ASIO WARNING).
-        using var noAsioWarning = WithoutMetronomeAsioWarning();
+        // Its own questions only: the metronome's accuracy warning has a step of its own.
+        using var noAccuracyWarning = WithoutMetronomeAccuracyWarning();
         var liveText = Environment.GetEnvironmentVariable("REMSOUND_TEST_LIVE_RELAY");
         var live = string.IsNullOrWhiteSpace(liveText) ? null : IPEndPoint.Parse(liveText.Trim());
         var root = FindSourceRoot();

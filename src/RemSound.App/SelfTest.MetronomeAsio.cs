@@ -117,9 +117,9 @@ internal static partial class SelfTest
              + "stopping, handing back and the window's own Listen don't; nobody to answer, never asked; the tick hides it; logged";
     }
 
-    /// <summary>For a step that answers the metronome's other questions: the ASIO warning hidden while it runs, as for someone
+    /// <summary>For a step that answers the metronome's other questions: the accuracy warning hidden while it runs, as for someone
     /// who has ticked it away. Disposing puts it back.</summary>
-    private static IDisposable WithoutMetronomeAsioWarning()
+    private static IDisposable WithoutMetronomeAccuracyWarning()
     {
         var cfg = AppConfig.Load();
         var was = cfg.ShowMetronomeAsioWarning;
