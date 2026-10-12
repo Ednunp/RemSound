@@ -406,6 +406,10 @@ public sealed class AppConfig
     /// me this message again" is ticked.</summary>
     public bool ShowMetronomeNoServerMessage { get; set; } = true;
 
+    /// <summary>Starting the metronome, becoming the master metronome or opening Metronome settings warns that it is only
+    /// accurate with both computers on ASIO (Ed, 2026-10-12), until "Do not show me this message again" is ticked.</summary>
+    public bool ShowMetronomeAsioWarning { get; set; } = true;
+
     /// <summary>The first "Unmute myself to test round trip" warns against sending a loopback of what you hear while your own
     /// sound comes back (Ed, 2026-10-01), until "Do not show me this message again" is ticked.</summary>
     public bool ShowHearMyselfWarning { get; set; } = true;

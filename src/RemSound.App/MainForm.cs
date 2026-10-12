@@ -116,7 +116,7 @@ public sealed partial class MainForm : Form
     private readonly AccessibleCheckBox muteReceivedCheckbox = new() { Text = "Mute received audio", AutoSize = true };
     private readonly AccessibleCheckBox sendMyAudioCheckbox = new() { Text = "Send my audio", AutoSize = true };
     // Up means louder (Ed, 2026-10-02: "the master volume for received audio is also odd in that arrows up make it go down").
-    private readonly UpMeansMoreTrackBar volumeBar = new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Value = 100, Width = Dpi.Px(200) };
+    private readonly UpMeansMoreTrackBar volumeBar = new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Value = 100, Width = Dpi.Px(200), ResetValue = 100 };
     // Receive output devices. Ticks are saved on the profile and put back when it loads
     // (ApplyPendingProfileToControls); the "Use Windows default" row is a machine-wide preference.
     private readonly CheckedListBox receiveOutputDevicesList = new() { CheckOnClick = true, Width = Dpi.Px(430), Height = Dpi.Px(90) };
@@ -243,8 +243,8 @@ public sealed partial class MainForm : Form
     // cursor is on is the one the controls below edit.
     private readonly CheckedListBox panEqPeerList = new() { Width = Dpi.Px(430), Height = Dpi.Px(90), IntegralHeight = false, AccessibleName = "Peers (Alt+U)" };
     // Up means louder, as on the master volume (Ed, 2026-10-02). Pan keeps Windows' own keys: it has no up.
-    private readonly UpMeansMoreTrackBar volumeSlider = new() { Minimum = 0, Maximum = 100, Value = 100, SmallChange = 1, LargeChange = 10, TickFrequency = 25, Width = Dpi.Px(320) };
-    private readonly TrackBar panSlider = new() { Minimum = 0, Maximum = 100, Value = 50, SmallChange = 1, LargeChange = 10, TickFrequency = 25, Width = Dpi.Px(320) };
+    private readonly UpMeansMoreTrackBar volumeSlider = new() { Minimum = 0, Maximum = 100, Value = 100, SmallChange = 1, LargeChange = 10, TickFrequency = 25, Width = Dpi.Px(320), ResetValue = 100 };
+    private readonly ResettableTrackBar panSlider = new() { Minimum = 0, Maximum = 100, Value = 50, SmallChange = 1, LargeChange = 10, TickFrequency = 25, Width = Dpi.Px(320), ResetValue = 50 };
     private readonly Button resetPeerEqButton = new() { Text = "Set peer E&Q to default (Alt+Q)", AutoSize = true, AccessibleName = "Set peer EQ to default" };
     // Readable while greyed out, with no peer chosen (finding 10): Windows drew its selected row grey on blue.
     private readonly ReadableWhenDisabledListBox eqModeList = new() { Width = Dpi.Px(320), Height = Dpi.Px(58), IntegralHeight = false, AccessibleName = "EQ mode" };
@@ -2882,7 +2882,9 @@ public sealed partial class MainForm : Form
 
     /// <summary>The Web listener window's account of the listener.</summary>
     private string DescribeWebListener() => webListener is { } w
-        ? $"On, on this computer's port {w.Port} for Tailscale Funnel. {(w.ListenerCount == 1 ? "1 browser is" : $"{w.ListenerCount} browsers are")} listening."
+        ? string.Join(Environment.NewLine,
+            [$"On, on this computer's port {w.Port} for Tailscale Funnel. {(w.ListenerCount == 1 ? "1 browser is" : $"{w.ListenerCount} browsers are")} listening.",
+             .. w.DescribeBrowsers()])
         : "On, but the port could not be opened - see the log.";
 
     internal WebListener? WebListenerForTest => webListener;
@@ -5836,6 +5838,7 @@ public sealed partial class MainForm : Form
                     Width = Dpi.Px(300),
                     Tag = i,
                     Enabled = selectedShapingKey is not null,
+                    ResetValue = 50,   // flat: Enter puts a band back to 0 dB
                 };
                 UpdateBandAccessibleName(slider, bands[i].Label);
                 ContextHelp.Mark(slider, "pan-eq.eq-band");

@@ -70,6 +70,9 @@ internal sealed class WebListener : IDisposable
     private readonly AutoResetEvent signal = new(false);
     private readonly Dictionary<RenderRoute, Lane> lanes = [];
     private long lastAudioTicks;
+    /// <summary>When sound last reached this listener at all, listeners or not: a browser joining while RemSound sends is
+    /// not greeted with "not sending anything" (Ed, 2026-10-12, at 12:45).</summary>
+    private long lastFedTicks;
     private bool idleSent = true;
 
     /// <summary>What a wrong password costs, in milliseconds. A seam, so the gate can try the lockout quickly.</summary>
@@ -77,6 +80,10 @@ internal sealed class WebListener : IDisposable
 
     /// <summary>How long without sound before a browser is told nothing is being sent. A seam for the gate.</summary>
     internal int IdleAfterMs { get; set; } = 2000;
+    /// <summary>How often every browser is told the connection is alive, sound or not (Ed, 2026-10-12: a page that reconnects
+    /// by itself must tell a quiet RemSound from a connection that died without closing). Seam for the self-test.</summary>
+    internal int AliveEveryMs { get; set; } = 5000;
+    private long lastAliveTicks;
 
     public int Port { get; }
     public int ListenerCount => listening;
@@ -105,13 +112,60 @@ internal sealed class WebListener : IDisposable
         public readonly byte[] OpusScratch = new byte[4000];
     }
 
-    private sealed class Client(WebSocket socket)
+    private sealed class Client
     {
-        public readonly WebSocket Socket = socket;
-        public readonly Channel<(byte[] Data, bool Text)> Outbox = Channel.CreateBounded<(byte[], bool)>(
-            new BoundedChannelOptions(ClientQueueFrames) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true });
+        public Client(WebSocket socket, int number)
+        {
+            Socket = socket;
+            Number = number;
+            Outbox = Channel.CreateBounded<(byte[], bool)>(
+                new BoundedChannelOptions(ClientQueueFrames) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true },
+                _ => Interlocked.Increment(ref Dropped));
+        }
+
+        public readonly WebSocket Socket;
+        /// <summary>Which browser this is since the listener opened: "browser 3" in the status and the log.</summary>
+        public readonly int Number;
+        public readonly Channel<(byte[] Data, bool Text)> Outbox;
         public bool Pcm;
+
+        // What the browser and this end can say about the connection (Ed, 2026-10-12: "you probably want a way of reading
+        // the buffers via remsound without me having to paste it to you").
+        /// <summary>Messages RemSound threw away because this connection could not keep up: a slow upload or a stalled link.</summary>
+        public int Dropped;
+        public readonly object Gate = new();
+        /// <summary>The page's own figures, as it last reported them, already put into words.</summary>
+        public string? Report;
+        public int Reconnects;
+        /// <summary>Round trips of the "alive" message over the last minute: when, and how long.</summary>
+        public readonly List<(long At, int Ms)> RoundTrips = [];
+        public string? LastLogged;
+        public long LastLoggedAt;
+        /// <summary>When the browser last said anything, and whether it ever answers at all (a page from before the reports never
+        /// does, and is never judged by its silence).</summary>
+        public long LastHeardAt = Environment.TickCount64;
+        public bool AnswersBack;
     }
+
+    private int browsersJoined;
+
+    /// <summary>A page that answers every 5 s and has said nothing for this long has gone without closing (Ed, 2026-10-12: after
+    /// he moved, two such connections stayed listed and kept being sent sound, holding places of the four). Seam for the gate.</summary>
+    internal int SilentBrowserMs { get; set; } = 20_000;
+
+    /// <summary>Lets go of every browser that answers back and has gone quiet, freeing its place; logged.</summary>
+    private void DropSilentBrowsers()
+    {
+        Client[] quiet;
+        lock (clientsGate)
+            quiet = [.. clients.Where(c => c.AnswersBack && Environment.TickCount64 - Volatile.Read(ref c.LastHeardAt) > SilentBrowserMs)];
+        foreach (var c in quiet)
+        {
+            log($"web listener: browser {c.Number} has said nothing for {SilentBrowserMs / 1000} s - its connection is taken as gone");
+            try { c.Socket.Abort(); } catch { }
+        }
+    }
+
 
     public WebListener(int port, string? password, int iterations, Func<bool> isMuted, Action<string> log)
     {
@@ -179,7 +233,9 @@ internal sealed class WebListener : IDisposable
     /// volatile read when nobody is listening.</summary>
     public void Feed(ReadOnlyMemory<float> samples, RenderRoute route)
     {
-        if (listening == 0 || samples.IsEmpty) return;
+        if (samples.IsEmpty) return;
+        Volatile.Write(ref lastFedTicks, Environment.TickCount64);
+        if (listening == 0) return;
         if (isMuted()) return;
         if (queue.Count > 2000) return;   // the encoder has stalled: never let the audio thread pile up memory
         var copy = ArrayPool<float>.Shared.Rent(samples.Length);
@@ -202,6 +258,14 @@ internal sealed class WebListener : IDisposable
                 finally { ArrayPool<float>.Shared.Return(block.Data); }
                 lastAudioTicks = Environment.TickCount64;
                 if (idleSent) { idleSent = false; BroadcastText("{\"type\":\"active\"}"); }
+            }
+            DropSilentBrowsers();
+            if (listening > 0 && Environment.TickCount64 - lastAliveTicks > AliveEveryMs)
+            {
+                lastAliveTicks = Environment.TickCount64;
+                // Carries this end's clock: the page sends it straight back, and the difference is the round trip.
+                BroadcastText($"{{\"type\":\"alive\",\"t\":{lastAliveTicks}}}");
+                LogBrowsers();
             }
             if (!idleSent && listening > 0 && Environment.TickCount64 - lastAudioTicks > IdleAfterMs)
             {
@@ -386,8 +450,17 @@ internal sealed class WebListener : IDisposable
             autoStart,
         }));
         using var authTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        var reply = await ReceiveText(socket, authTimeout.Token);
-        if (reply is null) return;
+        // The answer is the message that says it is one ("type":"auth"). A page reconnecting by itself may send its report or
+        // a reply to an alive before its answer is ready (working the answer out takes it a moment, on purpose); those are
+        // passed over, not taken as a wrong password (Ed, 2026-10-12: refused at 12:36 that way, and it then forgot his
+        // saved password). An answer without a type, from an older page, still counts.
+        string? reply;
+        while (true)
+        {
+            reply = await ReceiveText(socket, authTimeout.Token);
+            if (reply is null) return;
+            if (!IsOtherThanAnAnswer(reply)) break;
+        }
         string? response = null, codec = null;
         try
         {
@@ -405,7 +478,7 @@ internal sealed class WebListener : IDisposable
             return;
         }
 
-        var client = new Client(socket) { Pcm = codec == "pcm16" };
+        var client = new Client(socket, Interlocked.Increment(ref browsersJoined)) { Pcm = codec == "pcm16" };
         bool room;
         lock (clientsGate)
         {
@@ -414,14 +487,15 @@ internal sealed class WebListener : IDisposable
         }
         if (!room)
         {
-            await SendText(socket, JsonSerializer.Serialize(new { type = "refused", reason = $"{MaxListeners} browsers are already listening." }));
+            // Full for now, not wrong: retry tells a page that reconnects by itself to keep trying (a place comes free).
+            await SendText(socket, JsonSerializer.Serialize(new { type = "refused", reason = $"{MaxListeners} browsers are already listening.", retry = true }));
             await CloseQuietly(socket);
             return;
         }
         RecountCodecs();
-        log($"web listener: a browser is listening ({ListenerCount} now, {(client.Pcm ? "16-bit PCM" : "Opus")})");
+        log($"web listener: a browser is listening (browser {client.Number}; {ListenerCount} now, {(client.Pcm ? "16-bit PCM" : "Opus")})");
         await SendText(socket, JsonSerializer.Serialize(new { type = "welcome", frameMs = FrameSamples * 1000 / 48000, source = SourceName, autoStart }));
-        if (idleSent) await SendText(socket, "{\"type\":\"idle\"}");
+        if (idleSent && Environment.TickCount64 - Volatile.Read(ref lastFedTicks) > IdleAfterMs) await SendText(socket, "{\"type\":\"idle\"}");
 
         using var gone = new CancellationTokenSource();
         var sending = Task.Run(async () =>
@@ -435,12 +509,23 @@ internal sealed class WebListener : IDisposable
         });
         try
         {
-            // Nothing more is expected from the browser; reading is how its leaving is noticed.
-            var sink = new byte[1024];
+            // The browser says how it's doing (its report, and the alive message sent back); reading is also how its leaving
+            // is noticed. A message too big for this is skipped, not trusted.
+            var buffer = new byte[4096];
             while (socket.State == WebSocketState.Open)
             {
-                var r = await socket.ReceiveAsync(sink, CancellationToken.None);
+                var used = 0;
+                var tooBig = false;
+                WebSocketReceiveResult r;
+                do
+                {
+                    if (used == buffer.Length) { tooBig = true; used = 0; }
+                    r = await socket.ReceiveAsync(new ArraySegment<byte>(buffer, used, buffer.Length - used), CancellationToken.None);
+                    used += r.Count;
+                } while (!r.EndOfMessage && r.MessageType != WebSocketMessageType.Close);
                 if (r.MessageType == WebSocketMessageType.Close) break;
+                Volatile.Write(ref client.LastHeardAt, Environment.TickCount64);
+                if (!tooBig && r.MessageType == WebSocketMessageType.Text) FromBrowser(client, buffer.AsSpan(0, used));
             }
         }
         catch { /* the connection dropped */ }
@@ -451,8 +536,106 @@ internal sealed class WebListener : IDisposable
             client.Outbox.Writer.TryComplete();
             gone.Cancel();
             try { await sending; } catch { }
-            log($"web listener: a browser left ({ListenerCount} now)");
+            log($"web listener: browser {client.Number} left ({ListenerCount} now){(Describe(client) is { } last ? $": {last}" : "")}");
         }
+    }
+
+    /// <summary>What a browser sent: "pong", the alive message's time back, so the round trip is known; "report", the page's
+    /// own figures. Only numbers are taken from it, so nothing a page says reaches the log as it was written.</summary>
+    private void FromBrowser(Client client, ReadOnlySpan<byte> json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json.ToArray());
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return;
+            var type = root.TryGetProperty("type", out var tp) && tp.ValueKind == JsonValueKind.String ? tp.GetString() : null;
+            if (type is "pong" or "report") client.AnswersBack = true;
+            if (type == "pong" && root.TryGetProperty("t", out var sent) && sent.ValueKind == JsonValueKind.Number && sent.TryGetInt64(out var at))
+            {
+                var ms = Environment.TickCount64 - at;
+                if (ms < 0 || ms > 120_000) return;
+                lock (client.Gate)
+                {
+                    client.RoundTrips.Add((Environment.TickCount64, (int)ms));
+                    client.RoundTrips.RemoveAll(x => Environment.TickCount64 - x.At > 60_000);
+                }
+            }
+            else if (type == "report")
+            {
+                static int Num(JsonElement e, string name) =>
+                    e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out var d) && double.IsFinite(d) ? (int)Math.Clamp(Math.Round(d), -1, 1_000_000) : 0;
+                var parts = new List<string>();
+                if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("streams", out var streams) && streams.ValueKind == JsonValueKind.Array)
+                    foreach (var s in streams.EnumerateArray().Take(4))
+                        parts.Add($"stream {Num(s, "id")}: buffer {Num(s, "depthMs")} ms (aiming for {Num(s, "targetMs")}), longest wait {Num(s, "longestWaitMs")} ms, "
+                                  + $"gaps {Num(s, "gaps")}, catch-ups {Num(s, "skips")}");
+                var output = Num(root, "outMs");
+                var rate = Num(root, "rate");
+                lock (client.Gate)
+                {
+                    client.Report = (parts.Count > 0 ? string.Join("; ", parts) : "no sound playing")
+                                    + (output > 0 ? $"; its sound card adds about {output} ms" : "")
+                                    + (rate > 0 ? $" at {rate} Hz" : "");
+                    client.Reconnects = Math.Max(0, Num(root, "reconnects"));
+                }
+            }
+        }
+        catch { /* not a message this end knows: ignored */ }
+    }
+
+    /// <summary>One browser in words: its page's figures, the round trip now and at worst in the last minute, what this end
+    /// dropped, and how often it has had to reconnect. Null before it has said anything.</summary>
+    private string? Describe(Client c)
+    {
+        lock (c.Gate)
+        {
+            if (c.Report is null && c.RoundTrips.Count == 0) return null;
+            var trip = c.RoundTrips.Count > 0
+                ? $"round trip {c.RoundTrips[^1].Ms} ms, worst {c.RoundTrips.Max(x => x.Ms)} ms in the last minute"
+                : "round trip not yet known";
+            return $"{(c.Pcm ? "16-bit PCM" : "Opus")}, {c.Report ?? "no report yet"}; {trip}; dropped here {Volatile.Read(ref c.Dropped)}"
+                   + $"; reconnected {c.Reconnects} {(c.Reconnects == 1 ? "time" : "times")}";
+        }
+    }
+
+    /// <summary>Each browser listening, in words, for the Web listener window's status (Ed, 2026-10-12).</summary>
+    public IReadOnlyList<string> DescribeBrowsers()
+    {
+        Client[] all;
+        lock (clientsGate) all = [.. clients];
+        return [.. all.Select(c => $"Browser {c.Number}: {Describe(c) ?? "just joined"}.")];
+    }
+
+    /// <summary>Into the log when a browser's gaps, catch-ups, drops or reconnects have changed, and once a minute regardless,
+    /// so how a connection held up can be read afterwards without anyone copying the page.</summary>
+    private void LogBrowsers()
+    {
+        Client[] all;
+        lock (clientsGate) all = [.. clients];
+        foreach (var c in all)
+        {
+            var line = Describe(c);
+            if (line is null) continue;
+            var key = System.Text.RegularExpressions.Regex.Replace(line, @"buffer \d+ ms|round trip \d+ ms, worst \d+ ms|sound card adds about \d+ ms|aiming for \d+|longest wait \d+ ms", "");
+            var now = Environment.TickCount64;
+            if (key == c.LastLogged && now - c.LastLoggedAt < 60_000) continue;
+            c.LastLogged = key;
+            c.LastLoggedAt = now;
+            log($"web listener: browser {c.Number}: {line}");
+        }
+    }
+
+    /// <summary>A message with a type other than "auth": a report or a reply to an alive, never an answer to the challenge.</summary>
+    private static bool IsOtherThanAnAnswer(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("type", out var t)
+                   && t.ValueKind == JsonValueKind.String && t.GetString() != "auth";
+        }
+        catch { return false; }
     }
 
     /// <summary>Null if the answer is right; otherwise the reason given to the browser.</summary>

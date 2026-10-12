@@ -12,6 +12,8 @@ internal static partial class SelfTest
     /// and follows the new master.</summary>
     private static string? MetronomeHandoverBothWays()
     {
+        // Its own questions only: the ASIO warning has its own step (METRONOME ASIO WARNING).
+        using var noAsioWarning = WithoutMetronomeAsioWarning();
         var restoreMuted = CuePlayer.GloballyMuted;
         CuePlayer.GloballyMuted = true;
         Windowless.InstallHook();

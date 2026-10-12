@@ -28,6 +28,8 @@ internal static partial class SelfTest
         public readonly ConcurrentQueue<(byte Stream, uint Sequence, byte[] Payload, long At)> Frames = new();
         private readonly CancellationTokenSource stop = new();
         private Task? reading;
+        /// <summary>Held, the browser stops reading without closing: the connection backs up, as a stalled link does.</summary>
+        public volatile bool Held;
 
         public void Connect(int port) => Socket.ConnectAsync(new Uri($"ws://127.0.0.1:{port}/listen"), CancellationToken.None).GetAwaiter().GetResult();
 
@@ -51,6 +53,7 @@ internal static partial class SelfTest
                 {
                     while (!stop.IsCancellationRequested)
                     {
+                        while (Held) await Task.Delay(10, stop.Token);
                         var used = 0;
                         ValueWebSocketReceiveResult r;
                         do
@@ -175,9 +178,30 @@ internal static partial class SelfTest
                 }
                 said.Add("the challenge says whether the page starts by itself");
 
+                // --- A report before the answer (a page reconnecting) is passed over, not a wrong password ------------
+                using (var early = new WebClient())
+                {
+                    early.Connect(port);
+                    early.StartReading();
+                    var earlyChallenge = early.NextText() ?? "";
+                    early.Send("{\"type\":\"report\",\"streams\":[],\"reconnects\":1}");
+                    early.Send("{\"type\":\"pong\",\"t\":1}");
+                    early.Send(JsonSerializer.Serialize(new { type = "auth", response = WebAnswer(earlyChallenge, WebPassword), codec = "opus" }));
+                    var earlyReply = early.NextText() ?? "";
+                    Check(earlyReply.Contains("\"welcome\"", StringComparison.Ordinal),
+                        $"REPORT BEFORE THE ANSWER: a page reconnecting may report first; it must still be let in, not called a wrong password ({earlyReply})");
+                }
+                Check(WaitUntil(() => listener.ListenerCount == 0), $"premise: that page has gone ({listener.ListenerCount})");
+                said.Add("a report sent before the answer is passed over, not taken as a wrong password");
+
                 // --- The right one, and two lanes at once ---------------------------------------------------
+                // Sound already being sent before anyone listens: the browser joining must not be told "not sending" (12:45).
+                listener.Feed(Tone(480, 440, 0), RenderRoute.Mixed);
                 var (browser, welcome) = WebLogin(port, WebPassword);
                 Check(welcome is not null && welcome.Contains("\"welcome\"", StringComparison.Ordinal), $"THE PASSWORD: the right one must be let in ({welcome})");
+                Thread.Sleep(300);
+                Check(!browser.Texts.Any(t => t.Contains("\"idle\"", StringComparison.Ordinal)),
+                    $"JOINING WHILE SENDING: a browser that joins while RemSound is sending must not be told nothing is being sent ({string.Join(" | ", browser.Texts)})");
                 Check(welcome!.Contains($"\"source\":{JsonSerializer.Serialize(listener.SourceName)}", StringComparison.Ordinal) && listener.SourceName.Length > 0,
                     $"RECEIVING FROM: once in, the page must be told this computer's name ({welcome})");
                 Check(WaitUntil(() => listener.ListenerCount == 1), "THE PASSWORD: it must count as one browser listening");
@@ -249,6 +273,59 @@ internal static partial class SelfTest
                     "UNMUTED: the browser must be told sound is back");
                 said.Add("muted, no sound reaches the browser and it is told so; unmuted, it is told sound is back");
 
+                // --- Alive, sound or not: how a page that reconnects by itself tells quiet from dead ----------------
+                listener.AliveEveryMs = 300;
+                muted = true;
+                while (browser.Texts.TryDequeue(out _)) { }
+                Check(WaitUntil(() => browser.Texts.Count(t => t.Contains("\"alive\"", StringComparison.Ordinal)) >= 2, 2000),
+                    "ALIVE: with nothing being sent, the browser must still be told the connection is alive, again and again");
+                muted = false;
+                said.Add("the browser is told the connection is alive every few seconds, sound or not");
+
+                // --- The browser's report, and the round trip: in the window's status and the log ---------------------
+                var alive = browser.Texts.ToArray().Last(t => t.Contains("\"alive\"", StringComparison.Ordinal));
+                using (var aliveDoc = JsonDocument.Parse(alive))
+                    browser.Send(JsonSerializer.Serialize(new { type = "pong", t = aliveDoc.RootElement.GetProperty("t").GetInt64() }));
+                browser.Send("{\"type\":\"report\",\"streams\":[{\"id\":0,\"depthMs\":120,\"targetMs\":140,\"longestWaitMs\":150,\"gaps\":3,\"skips\":1}],\"outMs\":186,\"reconnects\":2}");
+                Check(WaitUntil(() => listener.DescribeBrowsers().Any(l => l.Contains("round trip", StringComparison.Ordinal) && l.Contains("gaps 3", StringComparison.Ordinal)), 3000),
+                    $"REPORT: the window's status must show the browser's figures and the round trip ({string.Join(" | ", listener.DescribeBrowsers())})");
+                var line = listener.DescribeBrowsers().Single();
+                Check(line.Contains("buffer 120 ms (aiming for 140), longest wait 150 ms, gaps 3, catch-ups 1", StringComparison.Ordinal)
+                      && line.Contains("its sound card adds about 186 ms", StringComparison.Ordinal) && line.Contains("reconnected 2 times", StringComparison.Ordinal)
+                      && line.Contains("dropped here 0", StringComparison.Ordinal)
+                      && System.Text.RegularExpressions.Regex.IsMatch(line, @"round trip \d+ ms, worst \d+ ms in the last minute"),
+                    $"REPORT: every figure, the round trip now and at worst, nothing dropped, and the reconnects ({line})");
+                Check(WaitUntil(() => log.Any(l => l.StartsWith("web listener: browser ", StringComparison.Ordinal) && l.Contains("gaps 3", StringComparison.Ordinal)), 3000),
+                    "REPORT: and the log must say how the browser is doing, without anyone copying the page");
+                // Only numbers are taken: a page cannot write into the log, and a message too big is skipped, not trusted.
+                browser.Send("{\"type\":\"report\",\"streams\":[{\"id\":\"<b>ha</b>\",\"depthMs\":\"lots\",\"gaps\":7}],\"reconnects\":\"x\"}");
+                browser.Send("{\"type\":\"report\",\"pad\":\"" + new string('x', 6000) + "\"}");
+                Check(WaitUntil(() => listener.DescribeBrowsers().Single().Contains("gaps 7", StringComparison.Ordinal), 3000)
+                      && !listener.DescribeBrowsers().Single().Contains('<') && !listener.DescribeBrowsers().Single().Contains("lots", StringComparison.Ordinal)
+                      && browser.Socket.State == WebSocketState.Open && listener.ListenerCount == 1,
+                    $"REPORT: words a page sends are never repeated, and a message too big leaves the connection as it was ({listener.DescribeBrowsers().Single()})");
+                said.Add("the browser's own figures and the round trip are in the window's status and the log, numbers only");
+
+
+                // --- A page gone without closing lets go of its place; an older, silent page is left alone ----------------
+                listener.SilentBrowserMs = 600;
+                var (ghost, _) = WebLogin(port, WebPassword);
+                ghost.Send("{\"type\":\"report\",\"streams\":[],\"reconnects\":0}");
+                var (quietOld, _) = WebLogin(port, WebPassword);
+                Check(WaitUntil(() => listener.ListenerCount == 3), $"premise: three browsers listening ({listener.ListenerCount})");
+                Thread.Sleep(300);
+                browser.Send("{\"type\":\"report\",\"streams\":[],\"reconnects\":0}");
+                Check(WaitUntil(() => log.Any(l => l.Contains("has said nothing for", StringComparison.Ordinal)) && listener.ListenerCount == 2, 3000),
+                    $"GONE QUIET: a page that answers back and has gone silent must be let go, logged ({listener.ListenerCount} listening)");
+                Check(quietOld.Socket.State == WebSocketState.Open && browser.Socket.State == WebSocketState.Open,
+                    "GONE QUIET: an older page that never answers, and a page still answering, must be left listening");
+                listener.SilentBrowserMs = 20_000;
+                ghost.Dispose();
+                quietOld.Dispose();
+                Check(WaitUntil(() => listener.ListenerCount == 1), $"premise: back to one browser ({listener.ListenerCount})");
+                said.Add("a page gone silent without closing is let go after a while, an older page never");
+
+
                 // --- 16-bit PCM for a browser without an Opus decoder ----------------------------------------
                 var (pcmBrowser, pcmWelcome) = WebLogin(port, WebPassword, "pcm16");
                 Check(pcmWelcome is not null && pcmWelcome.Contains("\"welcome\"", StringComparison.Ordinal), $"PCM: a browser asking for PCM must be let in ({pcmWelcome})");
@@ -261,10 +338,30 @@ internal static partial class SelfTest
                 var worst = 0.0;
                 for (var i = 0; i < expected.Length; i++) worst = Math.Max(worst, Math.Abs(BitConverter.ToInt16(firstPcm, i * 2) / 32767.0 - expected[i]));
                 Check(worst < 0.0005, $"PCM: the samples must be the ones sent (worst error {worst:0.000000})");
+                // What this end had to drop: a browser that stops reading, as a stalled link does, backs the connection up until
+                // its queue overflows.
+                pcmBrowser.Send("{\"type\":\"report\",\"streams\":[],\"reconnects\":0}");
+                pcmBrowser.Held = true;
+                for (var i = 0; i < 30; i++) listener.Feed(Tone(48000, 440, 0, 0.25f), RenderRoute.Mixed);
+                Check(WaitUntil(() => listener.DescribeBrowsers().Any(l => System.Text.RegularExpressions.Regex.IsMatch(l, @"16-bit PCM.*dropped here [1-9]")), 3000),
+                    $"DROPPED HERE: sound this end could not get through in time must be counted for that browser ({string.Join(" | ", listener.DescribeBrowsers())})");
+                pcmBrowser.Held = false;
                 pcmBrowser.Dispose();
                 browser.Dispose();
                 Check(WaitUntil(() => listener.ListenerCount == 0), $"LEAVING: closed browsers must stop counting ({listener.ListenerCount})");
                 said.Add("a browser asking for 16-bit PCM gets the exact samples; browsers that leave stop counting");
+
+                // --- Full: four browsers, and a fifth told to try again, not that it was wrong -------------------
+                var four = Enumerable.Range(0, 4).Select(_ => WebLogin(port, WebPassword)).ToList();
+                Check(four.All(f => f.Reply is not null && f.Reply.Contains("\"welcome\"", StringComparison.Ordinal)) && WaitUntil(() => listener.ListenerCount == 4),
+                    $"FULL: four browsers must be let in ({listener.ListenerCount})");
+                var (fifth, fifthReply) = WebLogin(port, WebPassword);
+                Check(fifthReply is not null && fifthReply.Contains("already listening", StringComparison.Ordinal) && fifthReply.Contains("\"retry\":true", StringComparison.Ordinal),
+                    $"FULL: a fifth must be refused, and told to try again, so a page reconnecting by itself keeps trying ({fifthReply})");
+                fifth.Dispose();
+                foreach (var f in four) f.Client.Dispose();
+                Check(WaitUntil(() => listener.ListenerCount == 0), $"FULL: and when they leave, they stop counting ({listener.ListenerCount})");
+                said.Add("four browsers at most, a fifth told to try again");
 
                 // --- A new password, in force at once ------------------------------------------------------------
                 var (stays, _) = WebLogin(port, WebPassword);
@@ -274,7 +371,8 @@ internal static partial class SelfTest
                     $"A NEW PASSWORD: the browser listening must be disconnected ({listener.ListenerCount} listening, socket {stays.Socket.State})");
                 stays.Dispose();
                 var (old, oldReply) = WebLogin(port, WebPassword);
-                Check(oldReply is not null && oldReply.Contains("not accepted", StringComparison.Ordinal), $"A NEW PASSWORD: the old one must be refused ({oldReply})");
+                Check(oldReply is not null && oldReply.Contains("not accepted", StringComparison.Ordinal) && !oldReply.Contains("retry", StringComparison.Ordinal),
+                    $"A NEW PASSWORD: the old one must be refused, and not told to try again, so a reconnecting page stops and asks ({oldReply})");
                 old.Dispose();
                 var (fresh, freshReply) = WebLogin(port, "new-" + WebPassword);
                 Check(freshReply is not null && freshReply.Contains("\"welcome\"", StringComparison.Ordinal), $"A NEW PASSWORD: the new one must be let in ({freshReply})");
@@ -306,7 +404,7 @@ internal static partial class SelfTest
             said.Add("with no password set every browser is refused; closed, the port answers nothing");
 
             var lines = log.ToArray();
-            foreach (var expect in new[] { "web listener: open on 127.0.0.1:", "a browser is listening (1 now, Opus)", "refused - wrong password", "refused - too many wrong passwords", "a browser left", "web listener: closed", "no password is set yet", "the password changed - 1 browser(s) disconnected" })
+            foreach (var expect in new[] { "web listener: open on 127.0.0.1:", "a browser is listening (browser 1; 1 now, Opus)", "refused - wrong password", "refused - too many wrong passwords", "browser 1 left", "web listener: closed", "no password is set yet", "the password changed - 1 browser(s) disconnected" })
                 Check(lines.Any(l => l.Contains(expect, StringComparison.Ordinal)), $"THE LOG: it must record \"{expect}\"");
             Check(!lines.Any(l => l.Contains(WebPassword, StringComparison.Ordinal)), "THE LOG: the password may never be written to it");
             said.Add("the log records opening, each browser, each refusal, a password change and closing, and never the password");
@@ -411,6 +509,73 @@ internal static partial class SelfTest
         }
         finally
         {
+            MainForm.WebListenPortForTest = 0;
+        }
+    }
+
+    /// <summary>WEB LISTENER NEEDS A PASSWORD (Ed, 2026-10-12: "is there a check when you put on the web listener that you
+    /// can't put in a blank password? there should be. you should always need a password if you set up web listener"). In
+    /// its window, OK with the tick on and the password box empty says so - answered through the control channel, as the
+    /// keyboard would - and the window stays open at the password box; with a password, OK closes it and keeps both; with
+    /// the tick off, OK needs no password.</summary>
+    private static string? WebListenerNeedsAPassword()
+    {
+        var port = FreeTcpPort();
+        MainForm.WebListenPortForTest = port;
+        var restoreMuted = CuePlayer.GloballyMuted;
+        CuePlayer.GloballyMuted = true;
+        Windowless.InstallHook();
+        Windowless.SetActiveForTest(true);
+        MainForm? form = null;
+        try
+        {
+            try { form = new MainForm(null, new Profile(), null, null, headless: true); }
+            catch (Exception ex) { return MainWindowCouldNotBeBuilt(ex); }
+            _ = form.Handle;
+            var main = form;
+            var answering = new RemoteControlEngine(() => main);
+            bool Asking() => main.Invoke(() => Application.OpenForms.OfType<HeadlessQuestionForm>().Any());
+            string Question() => main.Invoke(() => Application.OpenForms.OfType<HeadlessQuestionForm>().First().Question);
+            DriveWhilePumping(main, () =>
+            {
+                // Ticked, no password: OK refuses.
+                var dialog = main.Invoke(() => { var d = main.BuildWebListenerDialog(); d.Show(main); return d; });
+                var engine = new RemoteControlEngine(() => dialog);
+                main.Invoke(() => engine.Execute("set enableBox on"));
+                main.BeginInvoke(() => engine.Execute("click okButton"));
+                Check(WaitFor(Asking, TimeSpan.FromSeconds(5)), "NO PASSWORD: OK with the tick on and no password must say so");
+                Check(Question() == WebListenerDialog.NeedsPasswordText, $"NO PASSWORD: in those words ({Question()})");
+                var reply = main.Invoke(() => answering.Execute("answer OK"));
+                Check(reply.StartsWith("ok", StringComparison.Ordinal) && WaitFor(() => !Asking(), TimeSpan.FromSeconds(5)), $"NO PASSWORD: the message must take OK ({reply})");
+                Check(main.Invoke(() => !dialog.IsDisposed && dialog.Visible && dialog.DialogResult != DialogResult.OK), "NO PASSWORD: the window must stay open");
+                Check(main.Invoke(() => dialog.ActiveControl == dialog.PasswordBoxForTest), "NO PASSWORD: at the password box");
+
+                // With a password, OK closes it and keeps both.
+                main.Invoke(() => engine.Execute("set passwordBox " + WebPassword));
+                main.Invoke(() => engine.Execute("click okButton"));
+                Check(!Asking() && main.Invoke(() => dialog.DialogResult == DialogResult.OK), "WITH A PASSWORD: OK must close the window without asking");
+                main.Invoke(() => main.AfterWebListenerDialog(dialog));
+                Check(main.Invoke(() => main.SettingsForTest.LoadWebListenEnabled() && main.SettingsForTest.LoadWebListenPassword() == WebPassword),
+                    "WITH A PASSWORD: the tick and the password must be kept");
+                main.Invoke(() => dialog.Dispose());
+
+                // Ticked off with the password emptied: OK needs none.
+                var off = main.Invoke(() => { var d = main.BuildWebListenerDialog(); d.Show(main); return d; });
+                var offEngine = new RemoteControlEngine(() => off);
+                main.Invoke(() => offEngine.Execute("set enableBox off"));
+                main.Invoke(() => off.PasswordBoxForTest.Text = "");
+                main.Invoke(() => offEngine.Execute("click okButton"));
+                Check(!Asking() && main.Invoke(() => off.DialogResult == DialogResult.OK), "TICK OFF: OK must close the window with no password, without asking");
+                main.Invoke(() => off.Dispose());
+            }, TimeSpan.FromSeconds(30));
+            return "OK with the tick on and no password says so, in its own words, and stays open at the password box; with a password OK "
+                 + "closes and keeps both; with the tick off OK needs no password";
+        }
+        finally
+        {
+            try { form?.Dispose(); } catch { /* teardown */ }
+            Windowless.SetActiveForTest(false);
+            CuePlayer.GloballyMuted = restoreMuted;
             MainForm.WebListenPortForTest = 0;
         }
     }

@@ -7,7 +7,7 @@ namespace RemSound.App;
 /// moves the slider itself, and a screen reader hears the change exactly as it does on any slider. Left, Right, Home and End
 /// are left as they are.
 /// </summary>
-internal class UpMeansMoreTrackBar : TrackBar
+internal class UpMeansMoreTrackBar : ResettableTrackBar
 {
     private const int WM_KEYDOWN = 0x0100;
     private const int WM_KEYUP = 0x0101;

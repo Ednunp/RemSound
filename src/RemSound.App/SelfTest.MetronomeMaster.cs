@@ -396,6 +396,8 @@ internal static partial class SelfTest
     /// </summary>
     private static string? MetronomeAskedDeclinedAndOldPeers()
     {
+        // Its own questions only: the ASIO warning has its own step (METRONOME ASIO WARNING).
+        using var noAsioWarning = WithoutMetronomeAsioWarning();
         var restoreMuted = CuePlayer.GloballyMuted;
         CuePlayer.GloballyMuted = true;
         Windowless.InstallHook();

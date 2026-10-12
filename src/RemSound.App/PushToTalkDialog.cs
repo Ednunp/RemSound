@@ -66,6 +66,7 @@ internal sealed class PushToTalkDialog : Form
     {
         Minimum = PushToTalkSettings.MinLevelDb,
         Maximum = PushToTalkSettings.MaxLevelDb,
+        ResetValue = PushToTalkSettings.DefaultLevelDb,
         SmallChange = 1,
         LargeChange = 5,
         TickFrequency = 10,

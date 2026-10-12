@@ -119,6 +119,11 @@
 // it standing deep.
 const workletSource = `
 class RemSoundListener extends AudioWorkletProcessor {
+  // The sound arrives at 48 kHz (Opus and PCM alike); the browser plays at its own rate (sampleRate), which is often
+  // 44.1 kHz on a laptop. The page used to make the browser run at 48 kHz, so the browser converted in the background - and
+  // what the browser said its output added crept up the longer the page played (Ed, 2026-10-12: 50 ms to 186 ms). Now the
+  // browser keeps its own rate and this reads the 48 kHz sound between samples, as it already did for the drain. All the
+  // buffer's own figures are in 48 kHz frames (IN); only time on the clock is in the browser's frames.
   constructor() {
     super();
     this.streams = new Map();
@@ -130,9 +135,12 @@ class RemSoundListener extends AudioWorkletProcessor {
   stream(id) {
     let s = this.streams.get(id);
     if (!s) {
-      const cap = sampleRate * 2;               // two seconds a channel
+      const cap = IN * 2;                       // two seconds a channel
       s = { l: new Float32Array(cap), r: new Float32Array(cap), cap, read: 0, write: 0, depth: 0,
-            primed: false, target: Math.round(sampleRate * 0.03), quietFrames: 0, gaps: 0, skips: 0, fade: 0, lastWrite: currentFrame };
+            primed: false, target: Math.round(IN * 0.04), quietFrames: 0, gaps: 0, skips: 0, fade: 0, lastWrite: currentFrame,
+            waits: [], need: Math.round(IN * 0.04), longest: 0, margin: Math.round(IN * 0.02), lows: [], minFill: Infinity, windowStart: currentFrame, drainLeft: 0,
+            frac: 0, draining: false, xf: 0, xfLen: 0, xfOffset: 0, xfAlike: false, tail: false, tailAge: 0, tailHold: 0, tailFade: 0, tailOut: 0, tailOutLen: 0,
+            cl: null, cr: null, il: null, ir: null, cIntro: false, cPos: 0, resumeAlike: false, fadeWithTail: false };
       this.streams.set(id, s);
     }
     return s;
@@ -143,7 +151,28 @@ class RemSoundListener extends AudioWorkletProcessor {
     if (m.type !== 'audio') return;
     const s = this.stream(m.id);
     const n = m.l.length;
-    if (s.depth + n > s.cap) { this.skipTo(s, 0); }  // far behind: start again from what arrives
+    // Live, the way a call is (Ed, 2026-10-12: "people stream things from the internet all the time and it doesn't get worse
+    // and worse ... the odd dropout for a few ms is fine"). Over TCP, the only kind Funnel carries, a late packet holds up
+    // everything behind it and then it all comes in a rush; a laptop's Wi-Fi does that every 100 ms or so, and worse a few
+    // times a minute. Covering the worst wait of the last minute, as the page did, let every spike raise the delay for a
+    // minute, and the next spike came first: it ratcheted up towards 400 ms. Now the waits only size a small safety margin,
+    // and what is spare is taken back (in process: the lowest the buffer fell in the last 2 s, less that margin).
+    const waited = Math.round((currentFrame - s.lastWrite) * IN / sampleRate);
+    // A wait over 400 ms is an outage (a move, a dropped link): no buffer covers it, so it decides nothing.
+    if (waited >= Math.round(IN * 0.015) && waited <= Math.round(IN * 0.4)) {
+      // The waits of the last 20 s decide only where to start again after a dropout: the longest of them and a little more
+      // (never past 200 ms), so the same kind of wait doesn't drop out again straight away.
+      s.waits.push({ at: currentFrame, w: waited });
+      while (s.waits.length && currentFrame - s.waits[0].at > sampleRate * 20) s.waits.shift();
+      s.longest = Math.max(...s.waits.map(x => x.w));
+      s.target = Math.min(Math.round(IN * 0.2), Math.max(Math.round(IN * 0.04), s.longest + Math.round(IN * 0.02)));
+    }
+    if (s.depth + n > s.cap) {  // far behind: start again from what arrives
+      const playing = s.primed;
+      if (playing) this.startTail(s);
+      this.skipTo(s, 0);
+      if (playing) this.tailHandsOver(s, false);
+    }
     for (let i = 0; i < n; i++) {
       s.l[s.write] = m.l[i];
       s.r[s.write] = m.r[i];
@@ -151,15 +180,136 @@ class RemSoundListener extends AudioWorkletProcessor {
     }
     s.depth += n;
     s.lastWrite = currentFrame;
-    // Standing too deep after a burst: drop the oldest down to the target, with a short fade in.
-    const maxStand = s.target + Math.round(sampleRate * 0.04);
-    if (s.primed && s.depth > maxStand) { this.skipTo(s, s.target); s.skips++; }
   }
   skipTo(s, keep) {
     const drop = Math.max(0, s.depth - keep);
     s.read = (s.read + drop) % s.cap;
     s.depth -= drop;
-    s.fade = Math.round(sampleRate * 0.0025);
+    s.fade = Math.round(sampleRate * FADE);
+    s.fadeWithTail = false;
+    s.xf = 0;
+  }
+  // Filling a dropout (Ed, 2026-10-12). It used to stop dead and come back over 2.5 ms; then it faded out and back in over
+  // 10 ms, and "you still hear the drop". Now, as a phone call does, the sound carries on through the gap: the last stretch
+  // played is looped - a whole number of periods of the note, found by matching the sound against itself, so a held note
+  // simply carries on - at full level for 20 ms, then fading out over 60 ms. When sound comes back it takes over in 10 ms,
+  // lined up with the loop. Only the gap is filled: where the sound starts again, and so the delay, is as it was.
+  startTail(s) {
+    const H = Math.round(IN * 0.04), xl = new Float32Array(H), xr = new Float32Array(H), x = new Float32Array(H);
+    for (let i = 0; i < H; i++) { const k = (s.read - H + i + s.cap) % s.cap; xl[i] = s.l[k]; xr[i] = s.r[k]; x[i] = xl[i] + xr[i]; }
+    // The period: the lag, 2.5 to 15 ms, at which the last 10 ms best matches what came before - first on every other
+    // sample, then exactly around the best.
+    const W = Math.round(IN * 0.01), lo = Math.round(IN * 0.0025), hi = Math.round(IN * 0.015);
+    const match = (T, by) => {
+      let d = 0, a = 0, b = 0;
+      for (let i = H - W; i < H; i += by) { const u = x[i], v = x[i - T]; d += u * v; a += u * u; b += v * v; }
+      return d / Math.sqrt(a * b + 1e-12);
+    };
+    let T = lo, best = -Infinity;
+    for (let t = lo; t <= hi; t += 2) { const c = match(t, 2); if (c > best) { best = c; T = t; } }
+    const near = T;
+    best = -Infinity;
+    for (let t = Math.max(lo, near - 2); t <= Math.min(hi, near + 2); t++) { const c = match(t, 1); if (c > best) { best = c; T = t; } }
+    // About 10 ms of whole periods (one short period loops into a buzz); with no clear period, the last 20 ms.
+    const P = best >= 0.5 ? T * Math.max(1, Math.round(IN * 0.01 / T)) : Math.round(IN * 0.02);
+    // The loop's last 2.5 ms are blended into what came just before its start, so each time round joins without a step.
+    const Q = Math.round(IN * 0.0025);
+    s.cl = xl.slice(H - P);
+    s.cr = xr.slice(H - P);
+    for (let j = 0; j < Q; j++) {
+      const t = (j + 0.5) / Q;
+      s.cl[P - Q + j] = xl[H - Q + j] * (1 - t) + xl[H - P - Q + j] * t;
+      s.cr[P - Q + j] = xr[H - Q + j] * (1 - t) + xr[H - P - Q + j] * t;
+    }
+    // The first time in: unless the sound is clearly periodic and its start follows on from the last sample played, it
+    // turns round there instead - read backwards for 2.5 ms, blending into the loop - so the fill never starts with a step.
+    // (Music with no clear note can still match itself well enough to pass for periodic: 1 dropout in 40 started with a
+    // step in the measurements.)
+    let natural = 0;
+    for (let i = 1; i < H; i++) natural = Math.max(natural, Math.abs(xl[i] - xl[i - 1]), Math.abs(xr[i] - xr[i - 1]));
+    const jump = Math.max(Math.abs(s.cl[0] - xl[H - 1]), Math.abs(s.cr[0] - xr[H - 1]));
+    s.cIntro = best < 0.9 || jump > natural;
+    if (s.cIntro) {
+      s.il = new Float32Array(Q);
+      s.ir = new Float32Array(Q);
+      for (let i = 0; i < Q; i++) {
+        const t = (i + 0.5) / Q;
+        s.il[i] = xl[H - 2 - i] * (1 - t) + s.cl[i] * t;
+        s.ir[i] = xr[H - 2 - i] * (1 - t) + s.cr[i] * t;
+      }
+    }
+    s.cPos = s.frac;
+    s.tail = true;
+    s.tailAge = 0;
+    s.tailOut = 0;
+    s.tailHold = Math.round(sampleRate * HOLD);
+    s.tailFade = Math.round(sampleRate * FADE_OUT);
+  }
+  // Sound back: the loop hands over to it in 10 ms - in straight lines when the two line up, else equal-power.
+  tailHandsOver(s, alike) {
+    s.tailOut = s.tailOutLen = Math.round(sampleRate * FADE);
+    s.resumeAlike = alike;
+    s.fadeWithTail = true;
+  }
+  playTail(s, L, R, frames) {
+    const P = s.cl.length, step = IN / sampleRate;
+    for (let i = 0; i < frames && s.tail; i++) {
+      const age = s.tailAge++;
+      let g = age < s.tailHold ? 1 : 0.5 + 0.5 * Math.cos(Math.PI * Math.min(1, (age - s.tailHold + 0.5) / s.tailFade));
+      if (s.tailOut > 0) {
+        const t = (s.tailOutLen - s.tailOut + 0.5) / s.tailOutLen;
+        g *= s.resumeAlike ? 1 - t : Math.cos(t * Math.PI / 2);
+        if (--s.tailOut === 0) s.tail = false;
+      }
+      if (age + 1 >= s.tailHold + s.tailFade) s.tail = false;
+      const a = Math.floor(s.cPos), fr = s.cPos - a;
+      const la = this.loopAt(s, s.cl, s.il, a), lb = this.loopAt(s, s.cl, s.il, a + 1);
+      const ra = this.loopAt(s, s.cr, s.ir, a), rb = this.loopAt(s, s.cr, s.ir, a + 1);
+      L[i] += (la + (lb - la) * fr) * g * this.gainL;
+      if (R !== L) R[i] += (ra + (rb - ra) * fr) * g * this.gainR;
+      s.cPos += step;
+      if (s.cPos >= P) { s.cPos -= P; s.cIntro = false; }
+    }
+  }
+  loopAt(s, loop, intro, k) {
+    return s.cIntro && k < intro.length ? intro[k] : loop[k % loop.length];
+  }
+  // Where to come back in after a filled gap: keeping the usual amount, as before - or up to 5 ms more, wherever the next
+  // 5 ms line up best with the loop, so a held note carries on through the handover. Any extra goes by the drain.
+  resumeAt(s) {
+    const probe = Math.round(IN * 0.005), room = Math.max(0, Math.min(probe, s.depth - s.target)), P = s.cl.length;
+    const loop = new Float32Array(probe);
+    for (let f = 0; f < probe; f++) { const k = Math.floor(s.cPos) + f; loop[f] = this.loopAt(s, s.cl, s.il, k) + this.loopAt(s, s.cr, s.ir, k); }
+    let keep = s.target, best = -Infinity;
+    for (let k = 0; k <= room; k++) {
+      const start = (s.write - (s.target + k) + s.cap) % s.cap;
+      let d = 0, a = 0, b = 0;
+      for (let f = 0; f < probe; f++) { const j = (start + f) % s.cap, v = s.l[j] + s.r[j], u = loop[f]; d += u * v; a += u * u; b += v * v; }
+      const c = d / Math.sqrt(a * b + 1e-12);
+      if (c > best) { best = c; keep = s.target + k; }
+    }
+    return { keep, alike: best >= 0.5 };
+  }
+  // Where a skip lands, lined up as RemSound's own does (AudioRingBuffer.SkipWithCrossfade): wherever the next 5 ms look
+  // most like the next 5 ms here, so a held note carries on without a dip. RemSound looks 5 ms either side; this looks
+  // only up to 5 ms short of the planned point, so a skip never keeps less in hand than it did (landing later cost a few
+  // more dropouts in the measurements); the few ms extra go by the drain like any other spare.
+  landing(s, spare) {
+    const probe = Math.round(IN * 0.005);
+    const early = Math.min(probe, spare - 1), late = 0;
+    const here = new Float32Array(probe), there = new Float32Array(early + late + probe);
+    for (let f = 0; f < probe; f++) { const i = (s.read + f) % s.cap; here[f] = s.l[i] + s.r[i]; }
+    for (let f = 0; f < there.length; f++) { const i = (s.read + spare - early + f) % s.cap; there[f] = s.l[i] + s.r[i]; }
+    let best = spare, bestScore = -Infinity;
+    for (let k = 0; k <= early + late; k++) {
+      let dot = 0, hh = 0, tt = 0;
+      for (let f = 0; f < probe; f++) { const a = here[f], b = there[k + f]; dot += a * b; hh += a * a; tt += b * b; }
+      const score = dot / Math.sqrt(hh * tt + 1e-12);
+      if (score > bestScore) { bestScore = score; best = spare - early + k; }
+    }
+    // Two stretches that line up (a held note) blend in straight lines, which keeps their level; two that don't (most
+    // skips in music) blend equal-power, which keeps theirs. Either the other way dips or swells 3 dB.
+    return { jump: best, alike: bestScore >= 0.5 };
   }
   process(inputs, outputs) {
     const out = outputs[0];
@@ -168,31 +318,92 @@ class RemSoundListener extends AudioWorkletProcessor {
     L.fill(0); if (R !== L) R.fill(0);
     for (const [id, s] of this.streams) {
       if (!s.primed) {
-        if (s.depth >= s.target) { s.primed = true; s.fade = Math.round(sampleRate * 0.0025); }
-        else continue;
+        if (s.depth < s.target) { if (s.tail) this.playTail(s, L, R, frames); continue; }
+        // Back after a dropout: start from what is live, not from the late sound that has piled up meanwhile.
+        if (s.tail) {
+          const back = this.resumeAt(s);
+          if (s.depth > back.keep) this.skipTo(s, back.keep);
+          this.tailHandsOver(s, back.alike);
+        } else {
+          s.fadeWithTail = false;
+          if (s.depth > s.target) this.skipTo(s, s.target);
+        }
+        s.primed = true;
+        s.fade = Math.round(sampleRate * FADE);
+        s.minFill = Infinity;
+        s.windowStart = currentFrame;
+        s.lows = [];
       }
-      if (s.depth < frames) {
-        // Ran dry: a gap. Raise the target by 10 ms (up to 300 ms) and wait to refill.
+      // Draining spare sound without a cut: played 0.4 % faster (about 7 cents), as RemSound's own receiver drains
+      // (Ed, 2026-09-28), until the spare it was given is gone.
+      s.draining = s.drainLeft > 0;
+      const step = IN / sampleRate * (s.draining ? 1.004 : 1);
+      if (s.depth < frames * step + 2) {
+        // Ran dry: a dropout. Nothing is raised for it; the waits decide the margin.
         s.gaps++;
         s.primed = false;
-        s.target = Math.min(Math.round(sampleRate * 0.3), s.target + Math.round(sampleRate * 0.01));
-        s.quietFrames = 0;
+        this.port.postMessage({ type: 'dropout' });
+        s.drainLeft = 0;
+        s.minFill = Infinity;
+        s.windowStart = currentFrame;
+        s.lows = [];
+        s.xf = 0;
+        this.startTail(s);
+        this.playTail(s, L, R, frames);
         continue;
       }
-      const fadeLen = Math.round(sampleRate * 0.0025);
+      if (s.tail) this.playTail(s, L, R, frames);
+      if (s.draining) s.drainLeft -= frames * IN / sampleRate * 0.004;
+      const fadeLen = Math.round(sampleRate * FADE);
       for (let i = 0; i < frames; i++) {
         let f = 1;
-        if (s.fade > 0) { f = 1 - s.fade / fadeLen; s.fade--; }
-        L[i] += s.l[s.read] * f * this.gainL;
-        if (R !== L) R[i] += s.r[s.read] * f * this.gainR;
-        s.read = (s.read + 1) % s.cap;
+        if (s.fade > 0) {
+          const t = (fadeLen - s.fade + 0.5) / fadeLen;
+          f = s.fadeWithTail ? (s.resumeAlike ? t : Math.sin(t * Math.PI / 2)) : 0.5 - 0.5 * Math.cos(Math.PI * t);
+          s.fade--;
+        }
+        const a = s.read, b = (a + 1) % s.cap;
+        let l = s.l[a] + (s.l[b] - s.l[a]) * s.frac;
+        let r = s.r[a] + (s.r[b] - s.r[a]) * s.frac;
+        if (s.xf > 0) {
+          // The crossfade after a snap: what was playing, still in the buffer behind, fades out as the newer sound fades in.
+          const t = (s.xfLen - s.xf + 0.5) / s.xfLen;
+          const gIn = s.xfAlike ? t : Math.sin(t * Math.PI / 2), gOut = s.xfAlike ? 1 - t : Math.cos(t * Math.PI / 2);
+          const oa = (a - s.xfOffset + s.cap) % s.cap, ob = (oa + 1) % s.cap;
+          l = (s.l[oa] + (s.l[ob] - s.l[oa]) * s.frac) * gOut + l * gIn;
+          r = (s.r[oa] + (s.r[ob] - s.r[oa]) * s.frac) * gOut + r * gIn;
+          s.xf--;
+        }
+        L[i] += l * f * this.gainL;
+        if (R !== L) R[i] += r * f * this.gainR;
+        s.frac += step;
+        while (s.frac >= 1) { s.frac -= 1; s.read = (s.read + 1) % s.cap; s.depth--; }
       }
-      s.depth -= frames;
-      // Quiet for 10 s: bring the target down by 2 ms, not below 15 ms.
-      s.quietFrames += frames;
-      if (s.quietFrames >= sampleRate * 10) {
-        s.quietFrames = 0;
-        s.target = Math.max(Math.round(sampleRate * 0.015), s.target - Math.round(sampleRate * 0.002));
+      // Spare sound is what was never needed: the lowest the buffer fell at any point in the last 20 s, less a 20 ms
+      // cushion. That is delay nobody needs, so it is taken back - a lot at once with a short crossfade, a little by the
+      // drain. Any wait in those 20 s keeps its cushion, so only a wait longer than all of them drops out. (Judged on 2 s,
+      // the page took back cushion a longer wait needed a moment later: 15 dropouts in 3.5 minutes on Ed's Wi-Fi, 14:31.)
+      s.minFill = Math.min(s.minFill, s.depth);
+      if (currentFrame - s.windowStart >= sampleRate * 2) {
+        s.lows.push(s.minFill);
+        if (s.lows.length > 10) s.lows.shift();
+        const spare = Math.min(...s.lows) - s.margin;
+        if (spare > Math.round(IN * 0.06) && s.xf === 0) {
+          const land = this.landing(s, spare);
+          s.read = (s.read + land.jump) % s.cap;
+          s.depth -= land.jump;
+          s.xfOffset = land.jump;
+          s.xfAlike = land.alike;
+          s.xf = s.xfLen = Math.round(sampleRate * 0.015);
+          s.skips++;
+          s.drainLeft = 0;
+          s.lows = s.lows.map(x => x - land.jump);
+        } else if (spare > Math.round(IN * 0.01) && s.drainLeft <= 0) {
+          s.drainLeft = spare;
+          s.lows = s.lows.map(x => x - spare);
+        }
+        s.minFill = Infinity;
+        s.windowStart = currentFrame;
       }
     }
     // A stream that has sent nothing for 4 s has stopped: forget it.
@@ -200,12 +411,17 @@ class RemSoundListener extends AudioWorkletProcessor {
     if (currentFrame >= this.reportAt) {
       this.reportAt = currentFrame + sampleRate;
       const report = [];
-      for (const [id, s] of this.streams) report.push({ id, depthMs: s.depth / sampleRate * 1000, targetMs: s.target / sampleRate * 1000, gaps: s.gaps, skips: s.skips });
+      for (const [id, s] of this.streams) report.push({ id, depthMs: s.depth / IN * 1000, targetMs: s.target / IN * 1000, gaps: s.gaps, skips: s.skips,
+        longestWaitMs: s.longest / IN * 1000 });
       this.port.postMessage(report);
     }
     return true;
   }
 }
+const IN = 48000;
+const FADE = 0.01;      // seconds: sound fades in over this, and takes over from a filled gap over it
+const HOLD = 0.02;      // seconds a filled gap carries on at full level
+const FADE_OUT = 0.06;  // and then fades out over
 registerProcessor('remsound-listener', RemSoundListener);
 `;
 
@@ -220,6 +436,35 @@ const bands = [
 ];
 let socket = null, context = null, node = null, decoders = new Map(), codec = 'opus', stopping = false, lastSpoken = '';
 let workletReady = false, opusFailed = false, listeningPassword = '';
+// Reconnecting by itself (Ed, 2026-10-12: "if you rebuild remsound or if for some reason it disconnects, it reconnects"):
+// while listening is wanted, a lost connection is tried again, 1, 2, 4, then every 5 s, with the sound side left running so
+// no key press is needed. Stop listening, or a password RemSound no longer accepts, ends it.
+let wantListening = false, reconnectTimer = 0, reconnectAttempt = 0, lastHeard = 0;
+// What the page tells RemSound every 5 s (Ed, 2026-10-12: RemSound shows it in the Web listener window and logs it): the
+// buffer figures, how many times it has had to reconnect, and what its sound card adds.
+let lastWorkletReport = [], reconnects = 0, welcomedHere = false;
+// The browser's own output delay creeps up while the page plays - about 8 ms a minute on Ed's work laptop, through his
+// Roger - and only pausing and restarting the sound gives it back (2026-10-12: Stop then Start took it from 90 ms to 50).
+// That pause is never made on its own (Ed: "won't stop starting it cause a jitter?"): only when the sound has already
+// stopped - a dropout, or the connection lost - and only once the delay has crept 20 ms over the lowest it has been.
+let outputNow = 0, outputLowest = 0, outputSettleAt = 0, refreshingOutput = false;
+function noteOutputDelay(ms) {
+  outputNow = ms;
+  if (!ms || refreshingOutput) return;
+  // It settles in the first moments after the sound starts: counted from 5 s on.
+  if (!outputSettleAt) { outputSettleAt = performance.now() + 5000; return; }
+  if (performance.now() < outputSettleAt) return;
+  if (!outputLowest || ms < outputLowest) outputLowest = ms;
+}
+function refreshOutputWhileStopped() {
+  if (!context || context.state !== 'running' || refreshingOutput || !outputLowest || outputNow - outputLowest < 20) return;
+  refreshingOutput = true;
+  context.suspend().then(() => context.resume()).catch(() => {}).finally(() => {
+    refreshingOutput = false;
+    outputLowest = 0;
+    outputSettleAt = 0;
+  });
+}
 // "Start listening when the web page loads" (the Web listener window, Ed 2026-10-11): with it on, this browser keeps the
 // password after the first start and starts by itself next time. It is kept only while RemSound says that box is ticked,
 // and forgotten as soon as it stops working.
@@ -398,8 +643,38 @@ function opusGaveUp() {
   for (const d of decoders.values()) { try { d.close(); } catch {} }
   decoders.clear();
   codec = 'pcm16';
-  connect(listeningPassword, false);
+  connect(listeningPassword, false, true);
 }
+
+// The connection went while listening: drop it, keep the sound side, and try again shortly.
+function connectionLost() {
+  refreshOutputWhileStopped();   // the sound has stopped anyway
+  if (socket) { const old = socket; socket = null; old.onmessage = old.onclose = old.onerror = null; try { old.close(); } catch {} }
+  for (const d of decoders.values()) { try { d.close(); } catch {} }
+  decoders.clear();
+  if (node) node.port.postMessage({ type: 'reset' });
+  say('The connection to RemSound was lost. Reconnecting...', 'warn');
+  // Counted once per connection lost, not once per try while getting back in.
+  if (welcomedHere) reconnects++;
+  welcomedHere = false;
+  clearTimeout(reconnectTimer);
+  // 1 s, then every 2 s: back within about 2 s of RemSound starting again.
+  const wait = Math.min(2000, 1000 * 2 ** reconnectAttempt++);
+  reconnectTimer = setTimeout(() => { if (wantListening && !stopping) connect(listeningPassword, false, true); }, wait);
+}
+
+// RemSound says something at least every 5 s, sound or not; 12 s of nothing is a connection that died without closing
+// (Wi-Fi changing, a laptop waking).
+setInterval(() => {
+  if (wantListening && socket && !stopping && performance.now() - lastHeard > 12000) connectionLost();
+}, 2000);
+
+setInterval(() => {
+  // Only once in: before the welcome, RemSound is waiting for the answer to its challenge (2026-10-12).
+  if (!wantListening || stopping || !welcomedHere || !socket || socket.readyState !== WebSocket.OPEN) return;
+  const out = context ? Math.round(((context.baseLatency || 0) + (context.outputLatency || 0)) * 1000) : 0;
+  socket.send(JSON.stringify({ type: 'report', streams: lastWorkletReport, outMs: out, rate: context ? context.sampleRate : 0, reconnects }));
+}, 5000);
 
 async function start(byItself) {
   const password = $('password').value;
@@ -412,7 +687,10 @@ async function start(byItself) {
     // A click is what lets the page make sound, so the audio side starts here: built once, and only paused by Stop
     // listening (building it again on a second start failed to load the worklet). Safari allows it only straight from
     // the tap, before anything is waited for, so the sound is asked for first.
-    if (!context) context = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
+    // The browser's own rate: the buffer converts from 48 kHz itself (see the worklet). "balanced", not "interactive": with
+    // the smallest output buffer, each moment the laptop is late adds to a buffer inside the browser that it never gives
+    // back - Ed heard the delay grow about 8 ms a minute until he reloaded (2026-10-12). A little more from the start, steady.
+    if (!context) context = new AudioContext({ latencyHint: 'balanced' });
     const resuming = context.resume();
     resuming.catch(() => {});
     if (!workletReady) {
@@ -430,7 +708,7 @@ async function start(byItself) {
     }
     last.connect(context.destination);
     sendGain();
-    node.port.onmessage = (e) => showDetails(e.data);
+    node.port.onmessage = (e) => { if (e.data && e.data.type === 'dropout') refreshOutputWhileStopped(); else showDetails(e.data); };
     // A press of Start listening lets the sound start; started by itself, the browser may hold it until a key.
     if (!byItself) await resuming;
   } catch (err) {
@@ -443,8 +721,10 @@ async function start(byItself) {
   connect(password, byItself);
 }
 
-function connect(password, byItself) {
-  say('Connecting...');
+function connect(password, byItself, again) {
+  if (!again) say('Connecting...');
+  welcomedHere = false;
+  lastHeard = performance.now();
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const mine = new WebSocket(scheme + '//' + location.host + '/listen');
   socket = mine;
@@ -453,6 +733,7 @@ function connect(password, byItself) {
   // again after Stop listening).
   mine.onmessage = async (e) => {
     if (socket !== mine) return;
+    lastHeard = performance.now();
     if (typeof e.data !== 'string') { onAudio(e.data); return; }
     const m = JSON.parse(e.data);
     if (m.type === 'challenge') {
@@ -467,28 +748,45 @@ function connect(password, byItself) {
       const response = await hmacResponse(password, m.salt, m.iterations, m.nonce);
       if (socket === mine) mine.send(JSON.stringify({ type: 'auth', response, codec }));
     } else if (m.type === 'welcome') {
-      // In: the password goes away and the listening controls take its place, with the keyboard on Stop listening.
-      showListening(true);
+      wantListening = true;
+      welcomedHere = true;
+      reconnectAttempt = 0;
       if (m.source) { $('source').textContent = 'Receiving from ' + m.source; $('source').hidden = false; }
       if (m.autoStart) keepPassword(password); else forgetPassword();
       say('Listening.', 'ok');
-      stopButton.focus();
-      if (byItself) setTimeout(wakeOnFirstKey, 300);
+      // In: the password goes away and the listening controls take its place, with the keyboard on Stop listening - but
+      // back in after a lost connection, the keyboard stays wherever it is.
+      if (!again) {
+        showListening(true);
+        stopButton.focus();
+        if (byItself) setTimeout(wakeOnFirstKey, 300);
+      }
     } else if (m.type === 'refused') {
+      if (m.retry && wantListening) { connectionLost(); return; }   // full for now: a place comes free
+      wantListening = false;
       forgetPassword();   // a remembered password that no longer works is never tried again
       stop(m.reason || 'The password was not accepted.', true);
     } else if (m.type === 'idle') {
       say('Connected. RemSound on the computer is not sending anything at the moment.', 'warn');
     } else if (m.type === 'active') {
       say('Listening.', 'ok');
+    } else if (m.type === 'alive') {
+      // Straight back, so RemSound knows the round trip, sound or not.
+      if (typeof m.t === 'number' && socket === mine) mine.send(JSON.stringify({ type: 'pong', t: m.t }));
     }
   };
-  mine.onclose = () => { if (socket === mine && !stopping) stop('The connection to RemSound closed.', true); };
-  mine.onerror = () => { if (socket === mine && !stopping) say('Could not reach RemSound.', true); };
+  mine.onclose = () => {
+    if (socket !== mine || stopping) return;
+    if (wantListening) connectionLost(); else stop('The connection to RemSound closed.', true);
+  };
+  mine.onerror = () => { if (socket === mine && !stopping && !wantListening) say('Could not reach RemSound.', true); };
 }
 
 function stop(text, bad) {
   stopping = true;
+  wantListening = false;
+  clearTimeout(reconnectTimer);
+  reconnectAttempt = 0;
   if (socket) { const old = socket; socket = null; old.onmessage = old.onclose = old.onerror = null; try { old.close(); } catch {} }
   for (const d of decoders.values()) { try { d.close(); } catch {} }
   decoders.clear();
@@ -510,9 +808,12 @@ function stop(text, bad) {
 }
 
 function showDetails(report) {
+  lastWorkletReport = report.map(s => ({ id: s.id, depthMs: Math.round(s.depthMs), targetMs: Math.round(s.targetMs),
+    longestWaitMs: Math.round(s.longestWaitMs), gaps: s.gaps, skips: s.skips }));
   if (!report.length) { details.textContent = 'Waiting for sound.'; return; }
   const out = context ? Math.round(((context.baseLatency || 0) + (context.outputLatency || 0)) * 1000) : 0;
-  details.textContent = report.map(s => `Stream ${s.id}: buffer ${Math.round(s.depthMs)} ms (aiming for ${Math.round(s.targetMs)}), gaps ${s.gaps}, catch-ups ${s.skips}`).join('. ')
+  noteOutputDelay(out);
+  details.textContent = report.map(s => `Stream ${s.id}: buffer ${Math.round(s.depthMs)} ms (aiming for ${Math.round(s.targetMs)}), longest wait ${Math.round(s.longestWaitMs)} ms, gaps ${s.gaps}, catch-ups ${s.skips}`).join('. ')
     + (out ? `. Your sound card adds about ${out} ms.` : '') + ` Format: ${codec === 'opus' ? 'Opus' : '16-bit PCM'}.`;
 }
 </script>

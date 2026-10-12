@@ -50,6 +50,7 @@ internal sealed class MetronomeSettingsDialog : Form
     {
         Minimum = 0,
         Maximum = 100,
+        ResetValue = MetronomeSettings.DefaultVolume,
         SmallChange = 5,
         LargeChange = 10,
         TickFrequency = 10,

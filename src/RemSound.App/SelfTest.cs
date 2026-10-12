@@ -295,6 +295,7 @@ internal static partial class SelfTest
         RunStep(results, "CUES UPDATED: an older profile sounds as it did, every cue carried into it, and saved it carries them all", CuesCarryIntoEveryProfileOnUpdate);
         RunStep(results, "CUES PER PROFILE: two profiles, two sets of sounds, in the window and outside it; a new profile and the startup sound follow the profile", EachProfileHasItsOwnCues);
         RunStep(results, "WEB LISTENER: a browser with the password hears every sending lane in numbered 5 ms Opus or exact PCM frames, fast; wrong passwords, mute and no password refused or silent; its window saves it in the profile, logged without the password", WebListenerStep);
+        RunStep(results, "WEB LISTENER NEEDS A PASSWORD: OK with it on and no password says so and stays at the password box; with one, or with it off, OK closes", WebListenerNeedsAPassword);
         RunStep(results, "MUTE ALL AUDIO CUES: every cue, the key clicks and the plugin's help sounds silent in every profile, through the control channel, saved and logged; the profile untouched", MuteAllCuesSilencesEveryProfile);
         RunStep(results, "SHIPPED SOUNDS: every default sound is 16-bit stereo 44.1 kHz and credits Ed Pourtahmasbi and the RemSound default sound pack, nothing else", ShippedSoundsCreditEd);
         RunStep(results, "Latency estimate counts every stage (no silently-missing term)", LatencyEstimateComplete);
@@ -661,6 +662,7 @@ internal static partial class SelfTest
         RunStep(results, "METRONOME SERVER RULES: claim and setting at once and each second, each machine its own grid, silent until timed, the follower's timeout, giving way", MetronomeServerRules);
         RunStep(results, "METRONOME CAPTURE TIMES: each packet's time for the server - its own lane's input delay, its place in the block, its sequence, the instrument's lane first", MetronomeCaptureTimesForTheServer);
         RunStep(results, "METRONOME WITHOUT A SERVER: it clicks for you alone and says so until hidden; being the master needs a server", MetronomeWithoutAServer);
+        RunStep(results, "METRONOME ASIO WARNING: starting it, becoming the master and opening its settings each warn first until hidden; stopping and handing back never", MetronomeAsioWarning);
         RunStep(results, "JAMULUS-STYLE THROUGH THE SERVER: the real relay - sent through it while everyone there can decode it, the ordinary stream for all when someone cannot", JamulusStyleThroughTheServer);
         RunStep(results, "HEAR MYSELF ON THE WIRE: unmuted, the hello names us and our own sound is let back in; leaving the server mutes us", HearMyselfOnTheWire);
         RunStep(results, "HEAR MYSELF THROUGH THE SERVER: the real relay sends our own sound back while unmuted, each lane on its own, and it is timed", HearMyselfThroughTheServer);
@@ -705,6 +707,7 @@ internal static partial class SelfTest
         RunStep(results, "RECEIVE OFF: the ticked outputs stay closed until receiving is switched on", OutputsStayClosedWithReceiveOff);
         RunStep(results, "MUTE RECEIVED AUDIO: silence on every output, WASAPI, ASIO and both, the buffers still read and a plugin's peer still served; the box, its hotkey and a peer's remote toggle", MuteReceivedAudio);
         RunStep(results, "SLIDER KEYS: Up and Page Up mean more on the master volume, a person's volume, the EQ bands and push to talk's level, the master volume heard, kept and logged at once; pan as it was", SlidersUpMeansMore);
+        RunStep(results, "SLIDER ENTER: Enter puts every slider back where it starts, as a move by hand - the master volume heard, kept and logged, a person's volume heard, pan, every EQ band, the metronome's volume and push to talk's level, their windows staying open while Enter elsewhere is still OK", EnterPutsEverySliderBack);
         RunStep(results, "RECORDING: every block moves a recording on, silent or not", ARecordingMovesOnWhileNoPeerPlays);
         RunStep(results, "PLUGIN RECEIVE: a DAW track keeps its peer when the WASAPI output stops being read", APluginTrackPlaysWhenTheWasapiOutputStops);
         RunStep(results, "PLUGIN STATUS: says plainly when Receive audio is off in RemSound", APluginSaysWhenReceiveIsOffInRemSound);

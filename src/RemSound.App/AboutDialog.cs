@@ -21,6 +21,13 @@ internal sealed class AboutDialog : Form
     /// compiled into the exe until 2026-09-13 and never shown.)</summary>
     private const string ReleaseNotes =
         """
+        RemSound v6.2.1
+
+        - Fixed some bugs in the web listener.
+        - The web listener can't be turned on without a password.
+        - Press Enter on any slider to put it back to its default.
+        - The metronome warns that it's only accurate when both computers use ASIO.
+
         RemSound v6.2
 
         Listen in a web browser. Hear what RemSound sends from a web browser on another computer, with nothing to install there: handy where you can't install RemSound, such as at work. It goes through Tailscale Funnel, behind a password of your own. Press Web listener on the Connectivity tab to switch it on, set the password, copy your web address and turn on Funnel. The page says which computer you're hearing, and has Stop listening, Volume, Pan and a three-band EQ. It can start by itself when it loads, each browser can save its own settings, and up to four people can listen at once.
@@ -96,16 +103,6 @@ internal sealed class AboutDialog : Form
         On most setups, moving the jitter buffer control while sound was playing did nothing at all — neither up nor down. It only took effect if you set it before connecting. Two things were wrong: the control was writing its value where the audio never looked, and even when it landed, a change crept in so slowly that a big move took over two minutes to arrive. Both are fixed. Move it now and the delay follows within a few seconds, with no gap or click — raising it stretches the sound very slightly for a moment while the extra cushion builds up, which is the change happening. Automatic tuning of the jitter buffer was affected by the same fault and now works too.
 
         Setups with separate WASAPI and ASIO controls were the one case that already worked, and they keep their two independent settings exactly as before.
-
-        RemSound v5.8
-
-        A repair for the lock-screen service's settings folder.
-
-        Some machines ended up with the service's settings folder locked so tightly that nothing could use it — saving the service profile failed with "access denied", the service's log files wouldn't open, and on some machines the service itself couldn't start. This release fixes the cause and heals affected machines automatically: the service applies the fix on its own when it updates, RemSound checks the folder every time it starts and offers a one-click repair if anything is wrong, and there's a "Repair service folder access" item in the Service menu you can run any time.
-
-        The service's log files are also readable again from every account on the machine, so you can always open them in Notepad if you're curious or need to send one in. And if a service action ever fails, the message now says what actually went wrong instead of just showing a bare error code.
-
-        This About box also went on a diet: it now shows the newest five releases instead of the whole history, which had grown large enough to upset some screen readers. The full history is on the RemSound releases page on GitHub.
 
         Older releases, back to v1.0, are on the RemSound releases page on GitHub.
         """;

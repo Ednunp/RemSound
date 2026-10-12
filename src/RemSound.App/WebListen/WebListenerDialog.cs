@@ -73,6 +73,8 @@ internal sealed class WebListenerDialog : Form
     private readonly System.Windows.Forms.Timer refresh = new() { Interval = 1000 };
     private readonly CancellationTokenSource closing = new();
 
+    internal const string NeedsPasswordText = "The web listener needs a password. Type one in the Password box, or untick Let a web browser listen.";
+
     private readonly Func<string> status;
     private readonly Action<bool, string, bool> apply;
     private readonly FunnelHooks? funnel;
@@ -178,6 +180,15 @@ internal sealed class WebListenerDialog : Form
         okButton.Click += (_, _) =>
         {
             CommitPassword();   // a password still being typed counts
+            // The web listener always needs a password (Ed, 2026-10-12: "you should always need a password if you set up web
+            // listener"): OK with the tick on and no password says so and goes to the password box.
+            if (enableBox.Checked && committedPassword.Length == 0)
+            {
+                AppMessageBox.Show(this, NeedsPasswordText, "Password needed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                // The window's own focus, so it is the password box the window comes back to, active or not.
+                ActiveControl = passwordBox;
+                return;
+            }
             DialogResult = DialogResult.OK;
             Close();
         };

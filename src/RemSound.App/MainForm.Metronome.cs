@@ -94,9 +94,11 @@ public sealed partial class MainForm
         metronomeTimer.Enabled = metronome.NeedsTicks;
     }
 
-    /// <summary>The menu item, the hotkey and the control channel all come here.</summary>
-    private void MetronomeStartStop(string from)
+    /// <summary>The menu item, the hotkey and the control channel all come here. The settings window's own Start doesn't
+    /// warn about ASIO again: opening the window just did.</summary>
+    private void MetronomeStartStop(string from, bool warnAsio = true)
     {
+        if (warnAsio && metronome.Role != MetronomeRole.Follower && !metronome.Playing) MaybeWarnMetronomeNeedsAsio($"starting it from {from}");
         MaybeSayMetronomeHasNoServer();
         metronome.StartStop();
         logFile.Event($"metronome: {(metronome.Role == MetronomeRole.Follower ? (metronome.Muted ? "muted" : "unmuted") : metronome.Playing ? "started" : "stopped")} from {from} - "
@@ -117,7 +119,11 @@ public sealed partial class MainForm
             UpdateMetronomeMenu();
             return;
         }
-        if (master) metronome.BecomeMaster(Environment.MachineName);
+        if (master)
+        {
+            MaybeWarnMetronomeNeedsAsio("becoming the master metronome");
+            metronome.BecomeMaster(Environment.MachineName);
+        }
         else metronome.ReleaseMaster();
         LogUiChange("be the master metronome", master ? "on" : "off");
         UpdateMetronomeMenu();
@@ -206,6 +212,43 @@ public sealed partial class MainForm
         catch (Exception ex) { logFile.Event($"metronome: could not save hiding the no-server message: {ex.GetType().Name}: {ex.Message}"); }
     }
 
+    /// <summary>Ed's warning (2026-10-12: "warning metronome should only be used with 2 computers running asio devices for
+    /// accuracy ... do not show me this message again checkbox"): on starting the metronome, becoming the master metronome
+    /// or opening Metronome settings, every time until hidden, as the no-server message is.</summary>
+    internal static TaskDialogPage BuildMetronomeAsioWarning(out TaskDialogVerificationCheckBox dontShowAgain)
+    {
+        dontShowAgain = new TaskDialogVerificationCheckBox("Do not show me this message again");
+        return new TaskDialogPage
+        {
+            Caption = AppName,
+            Heading = "Metronome accuracy",
+            Text = "For accuracy, the metronome should only be used with both computers running ASIO devices.",
+            Icon = TaskDialogIcon.Warning,
+            Verification = dontShowAgain,
+            Buttons = { TaskDialogButton.OK },
+            DefaultButton = TaskDialogButton.OK,
+            AllowCancel = true,
+        };
+    }
+
+    private void MaybeWarnMetronomeNeedsAsio(string doing)
+    {
+        if (!AppConfig.Load().ShowMetronomeAsioWarning || NobodyToAnswer) return;
+        logFile.Event($"metronome: the ASIO warning shown - {doing}");
+        var page = BuildMetronomeAsioWarning(out var dontShowAgain);
+        ForegroundDialog.Show(owner => AppTaskDialog.ShowDialog(owner, page));
+        MetronomeAsioWarningAnswered(dontShowAgain.Checked);
+    }
+
+    internal void MetronomeAsioWarningAnswered(bool dontShowAgain)
+    {
+        if (!dontShowAgain) return;
+        var cfg = AppConfig.Load();
+        cfg.ShowMetronomeAsioWarning = false;
+        try { cfg.Save(); logFile.Event("metronome: the ASIO warning is hidden from now on (Do not show me this message again)"); }
+        catch (Exception ex) { logFile.Event($"metronome: could not save hiding the ASIO warning: {ex.GetType().Name}: {ex.Message}"); }
+    }
+
     /// <summary>The recording lane's output delay, so a recorded click lands where it was heard against the peers' audio:
     /// its stage's cushion and its output's own delay (the WASAPI figure the latency readout uses; ASIO's stated one).</summary>
     private void UpdateMetronomeRecordDelay()
@@ -272,12 +315,13 @@ public sealed partial class MainForm
     /// (Mute and Unmute while following), and every change in it heard at once (Ed, 2026-10-02).</summary>
     private MetronomeSettingsDialog BuildMetronomeSettingsDialog(out MetronomeSettings saved)
     {
+        MaybeWarnMetronomeNeedsAsio("opening Metronome settings");
         saved = settings.LoadMetronomeSettings();
         (string, MetronomeTimeline)? master = metronome.Role == MetronomeRole.Follower ? (metronome.MasterName, metronome.Timeline) : null;
         return new MetronomeSettingsDialog(saved, master, MetronomeLoopbackSentNames(),
             shortcutKeys: hotkeyController.MetronomeKeys, chooseKey: ChooseMetronomeKey,
             metronomeState: () => (metronome.Playing, metronome.Role == MetronomeRole.Follower, metronome.Muted),
-            startStop: () => MetronomeStartStop("the metronome settings window"),
+            startStop: () => MetronomeStartStop("the metronome settings window", warnAsio: false),
             heardLive: s => ApplyMetronomeSettings(s, null));
     }
 
