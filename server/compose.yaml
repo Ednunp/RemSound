@@ -1,0 +1,14 @@
+services:
+  relay:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "47830:47830/udp"
+    volumes:
+      - logs:/var/log/remsound-relay
+    logging:
+      options:
+        max-size: 10m
+
+volumes:
+  logs:
