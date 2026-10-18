@@ -58,6 +58,12 @@ After that, RemSound updates itself. Help → Check for updates pulls the next v
 * **Another person running RemSound** on their own Windows machine.
 * **A way for the two machines to reach each other on the network.** Both on the same Wi-Fi works. Both on the same [Tailscale](https://tailscale.com) network works (free and easy to set up). Or both connected through a RemSound relay server you run yourself, which can carry a whole group of people who share a password. There's no public one, but the code to run one on a Linux machine or a Raspberry Pi is in the [server folder](https://github.com/Ednunp/RemSound/tree/main/server) of this repository, with setup instructions.
 
+## RemSound on Mac
+
+There's a full **Mac version** of RemSound, for macOS 14 or later on Apple Silicon or Intel, with AU, VST3 and CLAP plugins for your DAW. It's built and maintained by **[Andre Louis](https://github.com/OnjLouis)** in its own repository, and it speaks the same protocol, so a Mac and a Windows PC play together.
+
+**Get it:** [RemSound for Mac — Releases](https://github.com/OnjLouis/RemSound-Mac/releases/latest) — download the latest `RemSound-Mac` zip and drag RemSound into Applications.
+
 ## RemSound on Android
 
 There's a companion **Android receiver**, so a phone or tablet can pick up RemSound audio — handy for listening on the move while a Windows machine does the sending. It's a separate community project, built and maintained by **[Aryan Choudhary](https://github.com/aryanchoudharypro)**, who is a screen-reader user himself and has tuned the app for TalkBack. It isn't part of RemSound and isn't maintained by us, but it speaks the same protocol and we're glad to point you to it.

@@ -63,6 +63,8 @@ Step| What happens
 
 There is no account and nothing stored online. The sound goes straight from one computer to the other — or, if you run a server of your own, through that.
 
+> **RemSound on Mac:** there is a full Mac version, for macOS 14 or later on Apple Silicon or Intel, with AU, VST3 and CLAP plugins for your DAW. It's built and maintained by Andre Louis in its own repository, and it speaks the same protocol, so a Mac and a Windows PC play together. Get it from its releases page (download the latest **RemSound-Mac** zip): [RemSound for Mac — Releases](https://github.com/OnjLouis/RemSound-Mac/releases/latest).
+
 > **RemSound on Android (receiver):** there is a companion app that lets a phone or tablet _receive_ RemSound audio — handy for listening on the move. It's a separate community project built and maintained by Aryan Choudhary, who is a screen-reader user himself and has tuned the app for TalkBack; it is not part of RemSound and is not maintained by us. Get the signed app from its releases page (download the latest **app-release.apk**): [RemSound Android — Releases](https://github.com/aryanchoudharypro/RemSoundAndroid/releases).
 
 > **RemSound on iOS (beta):** there is also a companion app for iPhone and iPad, currently in beta testing on Apple's TestFlight. Like the Android app it's a separate community project — built and maintained by Jonathan Schuster — and is not part of RemSound and not maintained by us, but it speaks the same protocol. Join the beta here: [RemSound for iOS on TestFlight](https://testflight.apple.com/join/pNCnj3z2).
