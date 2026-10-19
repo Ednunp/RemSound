@@ -256,6 +256,28 @@ function Invoke-RsCli([string[]]$cliArgs, [switch]$Hidden) {
     [pscustomobject]@{ Code = $p.ExitCode; Text = ([string]$text) }
 }
 
+# One --control command sent straight down the headless copy's pipe, as RemSound --control does (RemoteControl.Send:
+# the pipe "RemSound.control.<session>", the command and a newline, then the answer to the end) - without starting a
+# RemSound for it. Ed, 2026-10-19: every start played his "open program" sound, and the restarts-and-dialogs stage sends
+# hundreds, its waits polling every quarter of a second ("i just thought we could do it without the sounds"). The same
+# answer and the same exit code as the program's own client: 0 carried out, 1 refused ("error ..."), 2 nobody listening.
+# The real --control client is still started where it is what is being tested (the headless start below, and the
+# refusal on a normal start).
+function Send-RsControl([string]$command) {
+    $pipeName = "RemSound.control.$((Get-Process -Id $PID).SessionId)"
+    $pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', $pipeName, [System.IO.Pipes.PipeDirection]::InOut)
+    try {
+        try { $pipe.Connect(1000) }
+        catch { return [pscustomobject]@{ Code = 2; Text = "No headless RemSound answered on $pipeName." } }
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes(($command -replace "[`r`n]", ' ') + "`n")
+        $pipe.Write($bytes, 0, $bytes.Length)
+        $pipe.Flush()
+        $text = (New-Object System.IO.StreamReader($pipe, [System.Text.Encoding]::UTF8)).ReadToEnd().TrimEnd()
+        [pscustomobject]@{ Code = $(if ($text -match '^(?i)error') { 1 } else { 0 }); Text = $text }
+    }
+    finally { $pipe.Dispose() }
+}
+
 Stage "CLI surface"
 $v = Invoke-RsCli @('--version')
 if ($v.Code -eq 0 -and $v.Text.Trim() -like 'RemSound *') { Pass "--version: $($v.Text.Trim())" } else { Fail "--version returned '$($v.Text.Trim())' (exit $($v.Code))" }
@@ -492,13 +514,13 @@ else {
         $followed = $false
         for ($i = 0; $i -lt 20 -and -not $followed; $i++) {
             Start-Sleep -Milliseconds 500
-            $g = Invoke-RsCli @('--control', '"get Lock to these exact peer addresses"')
+            $g = Send-RsControl 'get Lock to these exact peer addresses'
             $followed = ($g.Code -eq 0 -and $g.Text -match 'not ticked')
         }
         if ($followed) { Pass "headless: after a profile switch the channel drives the new main window" }
         else { Fail "headless: after File, New profile the channel did not reach the new main window: $($g.Text.Trim())" }
 
-        Invoke-RsCli @('--control', 'quit') | Out-Null
+        Send-RsControl 'quit' | Out-Null
         $gone = $false
         for ($i = 0; $i -lt 40 -and -not $gone; $i++) { Start-Sleep -Milliseconds 250; $gone = -not (Get-Process -Id $hl.Id -ErrorAction SilentlyContinue) }
         if ($gone) { Pass "headless: --control quit closed it (no orphan process)" }
@@ -546,7 +568,7 @@ else {
     $rt = $null; $second = $null
     # One command each. Start-Process passes arguments as they are, so the command goes in quotes and any quotes inside it
     # are escaped the way Windows reads them (\"), or a control name in quotes splits the command in two.
-    function Rc([string]$command) { Invoke-RsCli @('--control', ('"' + ($command -replace '"', '\"') + '"')) }
+    function Rc([string]$command) { Send-RsControl $command }   # no RemSound started per command (Send-RsControl)
     function Start-Headless([string[]]$extra) {
         $p = Start-Process -FilePath $exe -ArgumentList (@('--headless', '--config-dir', $rtCfg) + $extra) -PassThru
         for ($i = 0; $i -lt 60; $i++) { Start-Sleep -Milliseconds 250; if ((Rc 'windows').Code -eq 0) { break } }
