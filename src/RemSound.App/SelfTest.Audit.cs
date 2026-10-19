@@ -1343,6 +1343,9 @@ internal static partial class SelfTest
             log.Event($"{marker} event");
             log.Snapshot(true, true, true, "Opus", 30, 30, 20, 1, 2, $"{marker} sender", 3, 4, 0, 0,
                 $"{marker} receive", "ok", 0, 0, 30, 30);
+            // The lines made every second, and the problem that writes the ones waiting (2026-10-19).
+            log.Detail($"{marker} detail");
+            log.Trouble($"{marker} trouble", evenInsideTheGap: true);
         }
 
         var tapped = new List<string>();
@@ -1391,7 +1394,8 @@ internal static partial class SelfTest
                 "disposing a switched-off log must not write a closing line — 'off' has to mean off all the way to the end");
         }
 
-        return "with logging off nothing reaches disk — not from events, not from state snapshots, not from disposal, "
+        return "with logging off nothing reaches disk — not from events, not from state snapshots, not from the lines made every "
+             + "second or a problem's burst of them, not from disposal, "
              + "and not through the test tap; switching it off mid-session stops the writing on the spot";
     }
 

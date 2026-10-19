@@ -1,6 +1,14 @@
-# RemSound release history: v5.8 and earlier
+# RemSound release history: v5.9 and earlier
 
 The notes the About box carried for older releases. The newest few are in the About box (src/RemSound.App/AboutDialog.cs) and RELEASE_NOTES.md; when a release is added there, move the oldest block here.
+
+RemSound v5.9
+
+The jitter buffer control now works properly while you're listening.
+
+On most setups, moving the jitter buffer control while sound was playing did nothing at all — neither up nor down. It only took effect if you set it before connecting. Two things were wrong: the control was writing its value where the audio never looked, and even when it landed, a change crept in so slowly that a big move took over two minutes to arrive. Both are fixed. Move it now and the delay follows within a few seconds, with no gap or click — raising it stretches the sound very slightly for a moment while the extra cushion builds up, which is the change happening. Automatic tuning of the jitter buffer was affected by the same fault and now works too.
+
+Setups with separate WASAPI and ASIO controls were the one case that already worked, and they keep their two independent settings exactly as before.
 
 RemSound v5.8
 

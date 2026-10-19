@@ -542,7 +542,7 @@ ul, ol { padding-left: 1.4em; }
 <tr><td><strong>Audio cues</strong></td><td>The switch that turns every cue off, the global sounds and the profile sounds and the sound each one plays, and the keyboard clicks (for this profile). See <a href="#audio-cues">Audio cue sounds</a>.</td></tr>
 <tr><td><strong>Startup behaviour</strong></td><td>Start minimised, start with Windows, start with a particular profile, and the context help message.</td></tr>
 <tr><td><strong>Update settings</strong></td><td>How often RemSound checks for a new version, and what it does when it finds one.</td></tr>
-<tr><td><strong>Logging</strong></td><td>Turn logs on, write them now, and tidy the log folder. See <a href="#logs">Logs and diagnostics</a>.</td></tr>
+<tr><td><strong>Logging</strong></td><td>Turn logs on, write them now, open the current log or the logs folder, and tidy the log folder. See <a href="#logs">Logs and diagnostics</a>.</td></tr>
 </table>
 
 <h4>General tab</h4>
@@ -775,7 +775,7 @@ ul, ol { padding-left: 1.4em; }
 
 <p>Most people only need to pick a codec and a smoothness level, and leave everything else at its default.</p>
 
-<p>To compare settings, tick <strong>Enable logs for this profile</strong> on the Logging tab of Preferences. Once a second the log then has a line starting <code>streams</code>: which audio setup is in use, how many dropouts each output had that second, what the ASIO side is sending (Jamulus-style frames, and to how many), and, for every stream you are hearing, how its packets are arriving and how deep a buffer it is playing at. A line starting <code>Jamulus-style Opus:</code> says whenever this computer starts or stops asking for the frames.</p>
+<p>To compare settings, tick <strong>Enable logs for this profile</strong> on the Logging tab of Preferences. The log then has a line starting <code>streams</code> once a minute, and every second around a dropout (see <a href="#logs-detail">how often the log writes</a>): which audio setup is in use, how many dropouts each output had that second, what the ASIO side is sending (Jamulus-style frames, and to how many), and, for every stream you are hearing, how its packets are arriving and how deep a buffer it is playing at. A line starting <code>Jamulus-style Opus:</code> says whenever this computer starts or stops asking for the frames.</p>
 
 <h2 id="pan-eq">9. Volume, pan and EQ for peers tab</h2>
 
@@ -1334,7 +1334,7 @@ Audient USB Audio ASIO Driver &mdash; Pair 3 (channels 5/6): Loop-back 1 (L) / L
 <tr><td>Alt+S</td><td>Go to the Connection status read-out</td></tr>
 </table>
 
-<p>(The logging controls &mdash; Enable logs for this profile, Write logs now and the log-folder housekeeping &mdash; are on the Logging tab of the Preferences dialog; reach it via Options &rarr; Preferences or Ctrl+P, then use Alt+L / Alt+W within the dialog.)</p>
+<p>(The logging controls &mdash; Enable logs for this profile, Write logs now and the log-folder housekeeping &mdash; are on the Logging tab of the Preferences dialog; reach it via Options &rarr; Preferences or Ctrl+P, then use Alt+L / Alt+W within the dialog. Open current log and Open logs folder are there too, on Alt+O / Alt+F.)</p>
 
 <h3>Audio inputs and outputs tab</h3>
 <table>
@@ -1914,15 +1914,23 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <p>Everything to do with logging lives on its own <strong>Logging</strong> tab in the Preferences dialog (Options &rarr; Preferences, or Ctrl+P). If logging is turned on for the profile you are using (the <strong>Enable logs for this profile</strong> checkbox there, off in a new profile), RemSound writes a log file each session into a <code>logs</code> folder inside <strong>user settings and logs</strong> &mdash; the same folder your settings and profiles live in. A new file each time RemSound starts or you switch profile, and a fresh one whenever a file reaches 50 MB.</p>
 
+<p>Each file is named by when it started and then your computer&rsquo;s name &mdash; for example <code>RemSound-2026-10-19-0849-ED_DT.log</code> &mdash; so the folder lists them in the order they started and the newest is last. A later file in the same session ends <code>-part2</code>, <code>-part3</code> and so on. If two copies of RemSound start in the same minute, the second one&rsquo;s name also carries its process number, so they never share a file.</p>
+
 <p>The file contains two kinds of rows:</p>
 
 <table>
 <tr><th>Kind</th><th>Contents</th></tr>
 <tr><td>EVT</td><td>Event lines &mdash; startup, a peer being selected, capture starting, errors, and so on.</td></tr>
-<tr><td>SNAP</td><td>One-second snapshots of running figures: codec, jitter buffer, how much sound is buffered, packets sent, packets received, drop-outs, drops, and peer round-trip times.</td></tr>
+<tr><td>SNAP</td><td>Snapshots of running figures: codec, jitter buffer, how much sound is buffered, packets sent, packets received, drop-outs, drops, and peer round-trip times. Written as the next paragraph says.</td></tr>
 </table>
 
-<p id="help-prefs.logging.write-logs-now">The <strong>Write logs now</strong> button on the Logging tab (Alt+W within the dialog) writes a &ldquo;user requested write logs now&rdquo; marker into the log, so you can find that moment in the file afterwards. It only writes anything while <strong>Enable logs for this profile</strong> is ticked.</p>
+<p id="logs-detail"><strong>How often.</strong> Events are always written as they happen. The lines RemSound makes every second &mdash; the snapshot, a diagnostic line, a line for each stream of sound and the delay estimate &mdash; are written once a minute, which is enough to show anything that changes slowly, such as memory or a buffer drifting. When something goes wrong &mdash; an audible gap, or a peer disconnecting &mdash; RemSound writes every second&rsquo;s lines from the 30 seconds before it, under a line starting <code>detail:</code> that says what happened, then the next 30 seconds as they come. That happens at most once every ten minutes, so a computer that keeps breaking up doesn&rsquo;t fill the file; the next <code>detail:</code> line says how many problems were left out in between. When a peer comes back after disconnecting, its line says how long it was gone. So a session of several hours makes a file you can read, rather than tens of megabytes.</p>
+
+<p id="help-prefs.logging.write-logs-now">The <strong>Write logs now</strong> button on the Logging tab (Alt+W within the dialog) writes a &ldquo;user requested write logs now&rdquo; marker into the log, so you can find that moment in the file afterwards, and with it every second&rsquo;s lines from the 30 seconds before and the 30 after &mdash; even if RemSound has just done that for a problem of its own. Press it straight after you hear something go wrong. It only writes anything while <strong>Enable logs for this profile</strong> is ticked.</p>
+
+<p id="help-prefs.logging.open-current-log">The <strong>Open current log</strong> button on the Logging tab (Alt+O within the dialog) opens the log RemSound is writing right now, in the program Windows uses for .log files (usually Notepad). If logging is off for this profile there is no current log, and it says so.</p>
+
+<p id="help-prefs.logging.open-folder">The <strong>Open logs folder</strong> button on the Logging tab (Alt+F within the dialog) opens the logs folder in File Explorer: the app&rsquo;s logs, the DAW plugin&rsquo;s, and any older ones.</p>
 
 <h3>The Logging tab&rsquo;s settings</h3>
 
@@ -1937,11 +1945,11 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <h3>The DAW plugin writes its own log too</h3>
 
-<p>The <a href="#daw-plugin">plugin</a> runs inside your music software rather than inside RemSound, so it cannot share the app's file. It writes its own, into the same <code>logs</code> folder, named starting <code>RemSoundPlugin-</code> and then your computer's name. The <strong>same</strong> Enable logs checkbox controls it, as set in the profile you used last &mdash; with logging off, no plugin log is written at all.</p>
+<p>The <a href="#daw-plugin">plugin</a> runs inside your music software rather than inside RemSound, so it cannot share the app's file. It writes its own, into the same <code>logs</code> folder, named <code>RemSoundPlugin-</code>, then the date and time it started, your computer&rsquo;s name and a short code for that copy of the plugin. The <strong>same</strong> Enable logs checkbox controls it, as set in the profile you used last &mdash; with logging off, no plugin log is written at all.</p>
 
 <p>You get one file per plugin instance, so two tracks each running RemSound produce two files. Between them the app's log and the plugin's cover both halves of the conversation, which is why sending both is worth doing if something needs looking at.</p>
 
-<p>The plugin's file has the same two kinds of rows. Its snapshot line records what that track was doing, whether RemSound was answering, what your music software was set to, whether RemSound had to convert the sound to match it, whether any sound arrived late, and how much sound was waiting to be played. If a track ever sounds wrong, that line is usually where the reason is.</p>
+<p>The plugin's file has the same two kinds of rows. Its snapshot line is written once a minute, and every second for the 30 seconds either side of sound arriving late or RemSound stopping answering, as the app&rsquo;s lines are. It records what that track was doing, whether RemSound was answering, what your music software was set to, whether RemSound had to convert the sound to match it, whether any sound arrived late, and how much sound was waiting to be played. If a track ever sounds wrong, that line is usually where the reason is.</p>
 
 <p>You can turn logging on while your music software is already open &mdash; the plugin notices within a second and starts a file, so you do not have to reload anything to catch a fault that has already begun.</p>
 

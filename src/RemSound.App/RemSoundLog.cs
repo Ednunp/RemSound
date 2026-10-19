@@ -4,7 +4,7 @@ namespace RemSound.App;
 /// Lightweight tab-separated log file written to <see cref="RemSound.Core.AppConfig.LogsDirectory"/>
 /// (<c>user settings and logs\logs\</c> beside the exe, unless <c>--config-dir</c> moves it).
 /// Two row kinds:
-///   SNAP  — periodic snapshot of runtime counters (one per second)
+///   SNAP  — periodic snapshot of runtime counters (made every second; see <see cref="Detail"/> for when it is written)
 ///   EVT   — one-off events (connect, disconnect, codec change, errors)
 /// Format (the file opens with a header row naming these columns, starting with Kind):
 ///   SNAP\t{Timestamp}\t{Machine}\t{Connected}\t{SendRunning}\t{ReceiveRunning}\t{Codec}\t
@@ -40,6 +40,8 @@ internal sealed class RemSoundLog : IDisposable
     // roll at a tiny size instead of writing 50 MB.
     private long bytesWrittenToCurrentFile;
     private int fileOrdinal;
+    /// <summary>The name this session's first file settled on (LogFileNames): every later part carries it, with "-partN".</summary>
+    private string? sessionStem;
     internal long RollAfterBytes { get; set; } = 50L * 1024 * 1024;
     /// <summary>How many times the log has rolled to a fresh file this session (test seam).</summary>
     internal int RollCount { get; private set; }
@@ -58,11 +60,34 @@ internal sealed class RemSoundLog : IDisposable
     /// or file creation fails).</summary>
     public string? Path { get; private set; }
 
-    /// <summary>Master gate for all writes. When false, both <see cref="Event"/> and
-    /// <see cref="Snapshot"/> short-circuit before touching the file system — no creation,
-    /// no headers, no data. Defaults to false so the App can construct the log object
-    /// before reading the user's preference; the App pushes the real value in after.</summary>
-    public bool Enabled { get; set; }
+    /// <summary>Master gate for all writes. When false, <see cref="Event"/>, <see cref="Snapshot"/>,
+    /// <see cref="Detail"/> and <see cref="Trouble"/> all short-circuit before touching the file system — no
+    /// creation, no headers, no data. Defaults to false so the App can construct the log object
+    /// before reading the user's preference; the App pushes the real value in after. Switching it off also
+    /// forgets the per-second lines waiting in memory, so none of them can reach the file later.</summary>
+    public bool Enabled
+    {
+        get => enabled;
+        set
+        {
+            lock (writeGate)
+            {
+                enabled = value;
+                if (!value) detailRule.Forget();
+            }
+        }
+    }
+    private bool enabled;
+
+    /// <summary>When a line made every second is written: one second's worth a minute, and every second around a
+    /// <see cref="Trouble"/>. See <see cref="RemSound.Core.LogDetailRule"/> for why (2026-10-19, issue 35).</summary>
+    private readonly RemSound.Core.LogDetailRule detailRule = new();
+
+    /// <summary>The clock the per-second rules run on. A test seam: the gate steps through an hour in a moment.</summary>
+    internal Func<DateTime> UtcNowForTest { get; set; } = () => DateTime.UtcNow;
+    /// <summary>Test tap: every <see cref="Trouble"/> call, before the switch, so the gate can prove the app reports a
+    /// problem without a log file existing.</summary>
+    internal Action<string>? TroubleTapForTest;
 
     /// <summary>The log the running window is writing, so the crash handlers can put the failure IN it, at the moment
     /// it happened, rather than only in a separate file beside it. Ed's 2026-09-20 error left no trace at all; a crash
@@ -89,13 +114,11 @@ internal sealed class RemSoundLog : IDisposable
         {
             var dir = RemSound.Core.AppConfig.LogsDirectory;
             Directory.CreateDirectory(dir);
-            // The file ordinal makes a rolled file's name unique even when rolls land within the
-            // same timestamp tick (tiny caps in the self-test roll several times per millisecond);
-            // pid keeps concurrent instances apart as before.
             fileOrdinal++;
-            var name = $"RemSound-{Sanitize(Environment.MachineName)}-{Environment.ProcessId}-{DateTime.Now:yyyyMMdd-HHmmss}-{fileOrdinal}.log";
-            Path = System.IO.Path.Combine(dir, name);
-            writer = new StreamWriter(new FileStream(Path, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite))
+            var (path, stream, stem) = RemSound.Core.LogFileNames.CreateNew(dir, sessionStem ?? RemSound.Core.LogFileNames.AppStem(DateTime.Now), fileOrdinal);
+            sessionStem = stem;
+            Path = path;
+            writer = new StreamWriter(stream)
             {
                 AutoFlush = true,
             };
@@ -141,7 +164,7 @@ internal sealed class RemSoundLog : IDisposable
         if (!Enabled) return;
         lock (writeGate)
         {
-            if (!EnsureFileOpenLocked()) return;
+            if (!enabled) return;
             try
             {
                 var line = string.Join('\t',
@@ -168,11 +191,66 @@ internal sealed class RemSoundLog : IDisposable
                     opusUnrecoveredGaps,
                     maxLatencyMsAsio,
                     targetLatencyMsAsio);
-                writer!.WriteLine(line);
-                AccountAndMaybeRollLocked(line.Length);
+                DetailLocked(line);
             }
             catch { /* swallow — log is best-effort */ }
         }
+    }
+
+    /// <summary>One of the per-second lines (the diagnostic line, the "streams" line, the delay estimate): written as
+    /// <see cref="RemSound.Core.LogDetailRule"/> says - one second's worth a minute, and every second around a
+    /// <see cref="Trouble"/>. The test tap and the headless record see every one, as they see every event.</summary>
+    public void Detail(string message)
+    {
+        EventTapForTest?.Invoke(message);
+        HeadlessRecords.Note(HeadlessRecords.Log, message);
+        if (!Enabled) return;
+        lock (writeGate)
+        {
+            if (!enabled) return;
+            DetailLocked($"EVT\t{DateTime.Now:o}\t{Sanitize(message)}");
+        }
+    }
+
+    /// <summary>Must be called holding <see cref="writeGate"/>. The line keeps the time it was made, so one written
+    /// later from memory still says when it happened.</summary>
+    private void DetailLocked(string line)
+    {
+        if (detailRule.Line(UtcNowForTest(), line)) WriteLineLocked(line);
+    }
+
+    /// <summary>
+    /// Something went wrong that a reader will want every second of: an audible gap, a peer that stopped answering, the
+    /// person pressing Write logs now. Writes the per-second lines from the last 30 seconds, then the next 30 as they
+    /// come. At most once every ten minutes unless <paramref name="evenInsideTheGap"/>; the next one says how many were
+    /// left unwritten in between (<see cref="RemSound.Core.LogDetailRule"/>).
+    /// </summary>
+    public void Trouble(string why, bool evenInsideTheGap = false)
+    {
+        TroubleTapForTest?.Invoke(why);
+        if (!Enabled) return;
+        string? said = null;
+        lock (writeGate)
+        {
+            if (!enabled) return;
+            if (detailRule.Trouble(UtcNowForTest(), why, evenInsideTheGap) is not { } burst) return;
+            said = burst.Heading;
+            WriteLineLocked($"EVT\t{DateTime.Now:o}\t{Sanitize(said)}");
+            foreach (var line in burst.Lines) WriteLineLocked(line);
+        }
+        HeadlessRecords.Note(HeadlessRecords.Log, said);
+    }
+
+    /// <summary>Must be called holding <see cref="writeGate"/>.</summary>
+    private void WriteLineLocked(string line)
+    {
+        if (!EnsureFileOpenLocked()) return;
+        try
+        {
+            writer!.WriteLine(line);
+            AccountAndMaybeRollLocked(line.Length);
+        }
+        catch { /* swallow — log is best-effort */ }
     }
 
     /// <summary>
@@ -199,14 +277,8 @@ internal sealed class RemSoundLog : IDisposable
         if (!Enabled) return;
         lock (writeGate)
         {
-            if (!EnsureFileOpenLocked()) return;
-            try
-            {
-                var line = $"EVT\t{DateTime.Now:o}\t{message.Replace('\t', ' ').Replace('\n', ' ')}";
-                writer!.WriteLine(line);
-                AccountAndMaybeRollLocked(line.Length);
-            }
-            catch { /* swallow */ }
+            if (!enabled) return;
+            WriteLineLocked($"EVT\t{DateTime.Now:o}\t{Sanitize(message)}");
         }
     }
 

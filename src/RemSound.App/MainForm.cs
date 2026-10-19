@@ -609,6 +609,43 @@ public sealed partial class MainForm : Form
     // genuinely stops AND the heartbeat goes unreachable, so a heartbeat blip while audio keeps
     // playing never fires a false disconnect cue. 2026-05-31 rewrite.
     private readonly Dictionary<string, bool> peerConnectedState = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>When each peer that went was last heard, so its coming back can say how long it was gone (2026-10-19).</summary>
+    private readonly Dictionary<string, DateTime> peerLostAtUtc = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The audible gaps counted so far, every output together, as the log last saw them; -1 before the first look.</summary>
+    private long logGapsSeen = -1;
+    /// <summary>Gate seam: every output's audible gaps so far, in place of the receiver's.</summary>
+    internal Func<long>? AudibleGapsForTest;
+
+    /// <summary>How long, in words a log reader takes in at once: "12 seconds", "3 minutes", "2.5 hours".</summary>
+    internal static string HowLongFor(TimeSpan span)
+    {
+        if (span < TimeSpan.Zero) span = TimeSpan.Zero;
+        if (span.TotalSeconds < 90)
+        {
+            var s = (int)Math.Round(span.TotalSeconds);
+            return $"{s} second{(s == 1 ? "" : "s")}";
+        }
+        if (span.TotalMinutes < 90)
+        {
+            var m = (int)Math.Round(span.TotalMinutes);
+            return $"{m} minutes";
+        }
+        return $"{span.TotalHours:0.#} hours";
+    }
+
+    /// <summary>A new audible gap on any output since the last second is a problem the log writes in full: the seconds
+    /// before it and after (RemSoundLog.Trouble, 2026-10-19). All three configurations at once - the total is every
+    /// stream's, whichever output it plays on. A total that falls (a stream ended and took its count with it) counts as
+    /// none, the same rule as the "streams" line's underruns.</summary>
+    private void NoteAudibleGapsForTheLog()
+    {
+        var gaps = AudibleGapsForTest?.Invoke() ?? (receiver.IsRunning ? receiver.DropoutGaps : 0);
+        var fresh = UnderrunsThisSecond(gaps, logGapsSeen);
+        logGapsSeen = gaps;
+        if (fresh > 0) logFile.Trouble($"{fresh} audible gap{(fresh == 1 ? "" : "s")} [{ActiveAudioConfiguration().Describe()}]");
+    }
+    internal void NoteAudibleGapsForTheLogForTest() => NoteAudibleGapsForTheLog();
+
     private CuePlayer? connectSound;
     private CuePlayer? disconnectSound;
     // Recording start/stop cues. Played via CuePlayer to the default Windows output —
@@ -3143,6 +3180,51 @@ public sealed partial class MainForm : Form
         catch (Exception ex) { AppMessageBox.Show(this, $"Could not open the update log ({path}): {ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning); }
     }
 
+    /// <summary>Preferences, Logging tab, Open current log (2026-10-19, Jonathan Schuster's issue 35: "An open current log
+    /// file option in the preferences might help"): the file this session is writing, in the program Windows opens .log
+    /// files with. Returns what to tell the person, or null when it opened.</summary>
+    private string? OpenCurrentLog()
+    {
+        if (!logFile.Enabled)
+            return "Logging is off for this profile, so there is no current log. Tick Enable logs for this profile first.";
+        // The file is made by the first line written, so a session with nothing written yet has none: this line makes it.
+        if (logFile.Path is null) logFile.Event("log opened from Preferences");
+        if (logFile.Path is not { } path)
+            return $"The log file could not be made in {AppConfig.LogsDirectory}. Check that the folder can be written to.";
+        return OpenForThePerson("the current log", path);
+    }
+
+    /// <summary>Preferences, Logging tab, Open logs folder: where every log is, the app's, the plugin's and the old ones.</summary>
+    private string? OpenLogsFolder()
+    {
+        var dir = AppConfig.LogsDirectory;
+        try { Directory.CreateDirectory(dir); }
+        catch (Exception ex) { return $"The logs folder could not be made ({dir}): {ex.Message}"; }
+        return OpenForThePerson("the logs folder", dir);
+    }
+
+    /// <summary>Opens a file or folder the way Windows would on a double-click. A headless copy opens nothing - no window may
+    /// appear - and says in its log what it would have opened, which is how the control channel reads the result.</summary>
+    private string? OpenForThePerson(string what, string path)
+    {
+        if (Windowless.Active)
+        {
+            logFile.Event($"Preferences: {what} is {path} - a headless copy opens nothing");
+            return null;
+        }
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+            logFile.Event($"Preferences: opened {what}, {path}");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            logFile.Event($"Preferences: could not open {what}, {path}: {ex.GetType().Name}: {ex.Message}");
+            return $"Could not open {what} ({path}): {ex.Message}";
+        }
+    }
+
     private static string DescribeAgo(DateTime utc)
     {
         var span = DateTime.UtcNow - utc;
@@ -4187,7 +4269,13 @@ public sealed partial class MainForm : Form
                 // not starve auto-tune.
                 UpdateDiagnosticsGate();
             },
-            writeLogsNow: () => logFile.Event("user requested write logs now"),
+            writeLogsNow: () =>
+            {
+                logFile.Event("user requested write logs now");
+                // And the last 30 seconds of the lines made every second, then the next 30: whatever the person pressed it
+                // for has just happened. Even inside the ten minutes after another time - they asked (2026-10-19).
+                logFile.Trouble("you pressed Write logs now", evenInsideTheGap: true);
+            },
             deleteAllLogs: () =>
             {
                 // Spare the log we're currently writing (it's held open and can't be removed anyway).
@@ -4245,7 +4333,9 @@ public sealed partial class MainForm : Form
             },
             getUpnpSnapshot: () => (routerPortMapper.Status, routerPortMapper.ExternalEndpoint, routerPortMapper.LastError),
             subscribeUpnpStatusChanged: handler => routerPortMapper.StatusChanged += handler,
-            unsubscribeUpnpStatusChanged: handler => routerPortMapper.StatusChanged -= handler);
+            unsubscribeUpnpStatusChanged: handler => routerPortMapper.StatusChanged -= handler,
+            openCurrentLog: OpenCurrentLog,
+            openLogsFolder: OpenLogsFolder);
         dialog.ShowDialog(this);
         if (dialog.ChangedAnyProfileSetting) MarkProfileDirty();
         // Appearance-tab changes (tab order, show pan/EQ tab, show discovered/remembered lists) apply now.
@@ -10072,6 +10162,8 @@ public sealed partial class MainForm : Form
         }
         // Detect peer health transitions and play connect/disconnect cues.
         DetectAndAnnouncePeerHealthTransitions();
+        // A new audible gap: the log writes the seconds around it. Before this second's lines are made, so they go out too.
+        NoteAudibleGapsForTheLog();
 
         // ---- WORK THAT MUST HAPPEN WHATEVER THE LOG SETTING SAYS --------------------------------
         // Both of these used to sit at the BOTTOM of this method, below the DiagnosticsGate early
@@ -10415,7 +10507,12 @@ public sealed partial class MainForm : Form
                 var wireReorderedDelta = wireReorderedNow - prevDiagWireReordered; prevDiagWireReordered = wireReorderedNow;
                 var wireDuplicatedDelta = wireDuplicatedNow - prevDiagWireDuplicated; prevDiagWireDuplicated = wireDuplicatedNow;
 
-                logFile.Event($"diag bufAvg={diag.BufferAvgMs}ms bufMin={diag.BufferMinMs}ms bufMax={diag.BufferMaxMs}ms " +
+                // Made every second, written once a minute and every second around a problem (RemSoundLog.Detail, 2026-10-19).
+                // The boundary/content split of each step probe (the XB and WB pairs) and sampleStepMax (prone to false
+                // alarms on bright music) were taken off the line then: nothing has read them since the click hunt they were
+                // added for, in May 2026, and each stage's combined step stays. The probes are still read here, since reading
+                // is what resets them.
+                logFile.Detail($"diag bufAvg={diag.BufferAvgMs}ms bufMin={diag.BufferMinMs}ms bufMax={diag.BufferMaxMs}ms " +
                     $"maxGapMs={diag.MaxArrivalGapMs} sendCbGapMs={sendCbGapMs} renderCbGapMs={diag.MaxRenderCallbackGapMs} maxReadMs={diag.MaxRenderReadMs} reads={diag.RenderReadCount} " +
                     $"emitMs={emitMs} sndCallMs={sendCallMs} rxDispMs={rxDispatchMs} rxNetGapMs={rxNetGapMs} " +
                     $"gc0Δ={gc0Delta} gc1Δ={gc1Delta} gc2Δ={gc2Delta} " +
@@ -10433,13 +10530,7 @@ public sealed partial class MainForm : Form
                     $"capPeak={capPeak:0.000} capPeakPlg={capPeakPlg:0.000} " +
                     $"emitGapWas={emitGapWas} emitGapAsi={emitGapAsi} emitGapPlg={emitGapPlg} " +
                     $"sndAudFrΔ={sndAudFr} stepRawCap={stepRawCap:0.000} stepPreEnc={stepPreEnc:0.000} stepPreEncWas={stepPreEncWas:0.000} stepPreEncAsi={stepPreEncAsi:0.000} stepPostDec={stepPostDec:0.000} stepPostRing={stepPostRing:0.000} stepPostRsm={stepPostRsm:0.000} " +
-                    $"stepRawCapXB={stepRawCapXB:0.000} stepRawCapWB={stepRawCapWB:0.000} " +
-                    $"stepPreEncWasXB={stepPreEncWasXB:0.000} stepPreEncWasWB={stepPreEncWasWB:0.000} " +
-                    $"stepPreEncAsiXB={stepPreEncAsiXB:0.000} stepPreEncAsiWB={stepPreEncAsiWB:0.000} " +
-                    $"stepPostDecXB={stepPostDecXB:0.000} stepPostDecWB={stepPostDecWB:0.000} " +
-                    $"stepPostRingXB={stepPostRingXB:0.000} stepPostRingWB={stepPostRingWB:0.000} " +
-                    $"stepPostRsmXB={stepPostRsmXB:0.000} stepPostRsmWB={stepPostRsmWB:0.000} " +
-                    $"clipΔ={clippedDelta} sampleStepMax={diag.MaxOutputSampleStep:0.000} spikesN={diag.EnvelopeSpikeCount} " +
+                    $"clipΔ={clippedDelta} spikesN={diag.EnvelopeSpikeCount} " +
                     $"wireOkΔ={wireInOrderDelta} wireMissΔ={wireMissedDelta} wireReordΔ={wireReorderedDelta} wireDupΔ={wireDuplicatedDelta} " +
                     $"pcmRej={receiver.PcmFrameRejections} pcmDiscard={receiver.PcmFrameDiscardedPartials}");
             }
@@ -10502,13 +10593,11 @@ public sealed partial class MainForm : Form
                 // No render figures on a send-only machine, but the long-run report's send frames still count. It read
                 // "send frames=0/s" on every one of them. 2026-09-13 review.
                 NoteLongRunSendFrames(sndAudFr);
-                logFile.Event(
+                // Written as the diag line is, and trimmed the same way (2026-10-19).
+                logFile.Detail(
                     $"sender-diag sendCbGapMs={sendCbGapMs} emitMs={emitMs} sndCallMs={sendCallMs} " +
                     $"capPeak={capPeak:0.000} sndAudFrΔ={sndAudFr} " +
                     $"stepPreEnc={stepPreEnc:0.000} stepPreEncWas={stepPreEncWas:0.000} stepPreEncAsi={stepPreEncAsi:0.000} stepRawCap={stepRawCap:0.000} " +
-                    $"stepRawCapXB={stepRawCapXB:0.000} stepRawCapWB={stepRawCapWB:0.000} " +
-                    $"stepPreEncWasXB={stepPreEncWasXB:0.000} stepPreEncWasWB={stepPreEncWasWB:0.000} " +
-                    $"stepPreEncAsiXB={stepPreEncAsiXB:0.000} stepPreEncAsiWB={stepPreEncAsiWB:0.000} " +
                     $"gc0Δ={gc0Delta} gc1Δ={gc1Delta} gc2Δ={gc2Delta} " +
                     $"cpu={selfMeter.CpuPercentOneCore:0.0}% memMB={selfMeter.ManagedHeapMb:0.0} wsMB={selfMeter.WorkingSetMb:0.0} allocKBps={selfMeter.AllocatedKbPerSecond:0.0} " +
                     $"privMB={selfMeter.PrivateBytesMb:0.0} gcHeapMB={selfMeter.GcHeapMb:0.0} gcFragMB={selfMeter.GcFragmentedMb:0.0} gcCommitMB={selfMeter.GcCommittedMb:0.0} handles={selfMeter.HandleCount} threads={selfMeter.ThreadCount} " +
@@ -10643,7 +10732,7 @@ public sealed partial class MainForm : Form
                 // started on rather than a guess made here about somebody else's hardware.
                 var capSrc = receiver.AnnouncedCaptureLatencyMsFor(listeningRoute) > 0 ? "peer" : sender.CaptureLatencyMsForOutput(listeningRoute) > 0 ? "dev" : "est";
                 var renSrc = reportedRenderMs > 0 ? "dev" : "est";
-                logFile.Event($"latency-probe estimated one-way ≈ {totalMs:0.0}ms " +
+                logFile.Detail($"latency-probe estimated one-way ≈ {totalMs:0.0}ms " +
                     $"(capture={captureBufferMs:0.0}[{capSrc}], send-accum={senderAccumulatorMs:0.0}[est], wire={wireOneWayMs:0.0}[meas], " +
                     $"recv-queue={diag.BufferAvgMs}[meas], out-queue={outputQueueMs:0.0}[meas], render={renderBufferMs:0.0}[{renSrc}])");
             }
@@ -12333,15 +12422,21 @@ public sealed partial class MainForm : Form
             {
                 var enabled = settings.LoadEnableConnectCue();
                 if (enabled) connectSound?.Play();
-                logFile.Event($"peer connected: {DescribeForCue(ph.AudioEndpoint)} (audio={audioFlowing}, heartbeat={ph.State}) — connect cue {CueOutcome(enabled, connectSound)}");
+                // How long it was gone, when it was here before: "kept disconnecting" is answered by these (issue 35).
+                var back = peerLostAtUtc.Remove(key, out var lostAt) ? $", back after {HowLongFor(DateTime.UtcNow - lostAt)}" : "";
+                logFile.Event($"peer connected: {DescribeForCue(ph.AudioEndpoint)}{back} (audio={audioFlowing}, heartbeat={ph.State}) — connect cue {CueOutcome(enabled, connectSound)}");
                 peerConnectedState[key] = true;
             }
             else if (isLost && wasConnected)
             {
                 var enabled = settings.LoadEnableDisconnectCue();
                 if (enabled) disconnectSound?.Play();
-                logFile.Event($"peer disconnected: {DescribeForCue(ph.AudioEndpoint)} (audio stopped, heartbeat={ph.State}) — disconnect cue {CueOutcome(enabled, disconnectSound)}");
+                var name = DescribeForCue(ph.AudioEndpoint);
+                logFile.Event($"peer disconnected: {name} (audio stopped, heartbeat={ph.State}) — disconnect cue {CueOutcome(enabled, disconnectSound)}");
                 peerConnectedState[key] = false;
+                peerLostAtUtc[key] = DateTime.UtcNow;
+                // The seconds before it went are what a reader will want (RemSoundLog.Trouble).
+                logFile.Trouble($"{name} disconnected");
             }
             else if (!peerConnectedState.ContainsKey(key))
             {

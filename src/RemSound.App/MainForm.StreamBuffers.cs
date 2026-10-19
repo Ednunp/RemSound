@@ -154,7 +154,8 @@ public sealed partial class MainForm
         var sending = !sender.IsRunning ? "not sending"
             : asioCustom ? $"ASIO lane sends Jamulus-style to {sender.CustomOpusTargetCount} (frames {customFrames}) and the codec setting to the rest"
             : "ASIO lane sends the codec setting";
-        logFile.Event($"streams [{ActiveAudioConfiguration().Describe()}] [lowest-delay auto-tune {(lowestDelayTune ? "on" : "off")}]: "
+        // Made every second, written once a minute and every second around a problem (RemSoundLog.Detail).
+        logFile.Detail($"streams [{ActiveAudioConfiguration().Describe()}] [lowest-delay auto-tune {(lowestDelayTune ? "on" : "off")}]: "
                     + $"underruns this second ASIO={asioNew} WASAPI={wasapiNew}; audible gaps so far ASIO={receiver.DropoutGapsFor(RenderRoute.AsioLane)} "
                     + $"WASAPI={receiver.DropoutGapsFor(RenderRoute.WasapiLane)}; server path gap={serverGap}ms dispatch={serverDispatch}ms; "
                     + $"{sending}; peers asking for Jamulus-style={CustomOpusPeers.Count} | {streams}");

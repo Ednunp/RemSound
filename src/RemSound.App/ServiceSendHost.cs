@@ -153,7 +153,10 @@ public sealed class ServiceSendHost : IDisposable
     private const int DeafMsToReopen = 450;
     private const int StallMsToReopen = 2_000;     // healthy callbacks tick every few ms
     private const int ReopenSpacingMs = 2_000;     // don't thrash between attempts
-    private const int CapturePulseIntervalMs = 15_000; // diagnostic log cadence (NOT the trigger)
+    // Diagnostic log cadence (NOT the trigger). Once a minute since 2026-10-19, as the app's lines made every second are
+    // written (Jonathan Schuster's issue 35, logs too long to read): the pulse carries the minute's peaks and totals, so a
+    // longer interval loses nothing it measures. It was every 15 s.
+    private const int CapturePulseIntervalMs = 60_000;
 
     // ---- The boot ear (2026-09-28) --------------------------------------------------------------------
     // Ed: "no matter how hard we tried, we were never able to get the service to play the windows startup sound. it always
@@ -409,7 +412,7 @@ public sealed class ServiceSendHost : IDisposable
         if (now - lastCapturePulseTick >= CapturePulseIntervalMs)
         {
             lastCapturePulseTick = now;
-            // maxSendGapMs: the longest wait between two packets leaving in these 15 s - what a listener's buffer has to ride
+            // maxSendGapMs: the longest wait between two packets leaving since the last pulse - what a listener's buffer has to ride
             // out. WASAPI loopback leaves in 10 ms blocks, so about 10 is healthy; much more is the service stalling (2026-09-28,
             // Ed: "the service crackles quite a lot").
             log?.Invoke($"service: capture pulse — callbacks={callbacks} bytes={sender.CaptureBytes} capPeak={pulsePeakMax:F3} meterPeak={pulseMeterMax:F3} framesSent={pulseFramesSent} maxSendGapMs={sender.TakeMaxEmitGapMsWasapiLane()}"

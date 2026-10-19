@@ -87,9 +87,9 @@ internal static partial class SelfTest
                 Check(Logged("first sound heard") && Logged("through the boot ear"), "the first sound must be logged, and through which ear");
                 lock (logged) Check(!logged.Any(l => l.Contains("re-opening capture", StringComparison.Ordinal)), "a boot ear that hears the tune must not be re-opened");
                 meter = heard = 0f;
-                Ticks(32); // past a 15 s pulse
+                Ticks(122); // past the pulse, once a minute since 2026-10-19 (it was every 15 s)
                 Check(host.BootEarForTest, "still nobody signed in: still the boot ear");
-                Check(Logged("maxSendGapMs=") && Logged(" ear=boot"), "the 15 s pulse must carry the longest wait between packets leaving, and say it is the boot ear");
+                Check(Logged("maxSendGapMs=") && Logged(" ear=boot"), "the minute's pulse must carry the longest wait between packets leaving, and say it is the boot ear");
 
                 signedIn = true; // somebody signs in
                 Ticks(1);

@@ -41,14 +41,31 @@ internal static partial class SimRunner
             case "capture-probe-stall": CaptureProbeStall(Say); break;
             case "capture-probe-start": CaptureProbeStart(Say); break;
             case "capture-probe-drift": CaptureProbeDrift(Say); break;
+            case "logs": Logs(seconds, args, Say); break;
             default:
                 // The performance, soak and stress modes (SimRunner.Performance.cs).
                 if (RunPerformanceMode(what, Say, args, outDir)) break;
-                Say($"unknown simulation \"{what}\" - try smoke, lab, probe, replay, calibrate, record, capture, server, wall, music, perf, soak, stress or perf-baseline"); return 2;
+                Say($"unknown simulation \"{what}\" - try smoke, lab, probe, replay, calibrate, record, capture, server, wall, music, logs, perf, soak, stress or perf-baseline"); return 2;
         }
         // "record" writes recordings into its folder, and the report would sit among them looking like one.
         if (what != "record") File.WriteAllText(Path.Combine(outDir, $"simulation-{what}.txt"), report.ToString());
         return 0;
+    }
+
+    /// <summary>The log over every modelled network (SimLogs, 2026-10-19): how big it gets, how many bursts, and whether it
+    /// stays in time order. --seconds is each run's length; "--drops N" drops a peer every N seconds as well.</summary>
+    private static void Logs(double seconds, string[] args, Action<string> say)
+    {
+        var dropEvery = int.TryParse(ValueAfter(args, "--drops"), out var d) ? d : 0;
+        foreach (var net in new[] { SimNetwork.Perfect, SimNetwork.Wired, SimNetwork.Wifi, SimNetwork.Internet, SimNetwork.BurstyInternet,
+                     SimNetwork.Congested, SimNetwork.Rough, SimNetwork.Lumpy, SimNetwork.LaptopLumps })
+            foreach (var config in new[] { SimConfig.WasapiOnly, SimConfig.AsioOnly, SimConfig.Both })
+            {
+                var r = SimLogs.Run(net, config, seconds, dropEvery);
+                say(SimLogs.Describe(r)
+                    + (r.Bursts > SimLogs.MostBurstsIn(r.Hours) ? "; TOO MANY BURSTS" : "")
+                    + (r.SecondsWritten > SimLogs.MostSecondsIn(r.Hours, r.Bursts) ? "; TOO MANY SECONDS" : ""));
+            }
     }
 
     private static void Smoke(double seconds, Action<string> say, string outDir)

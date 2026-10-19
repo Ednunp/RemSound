@@ -16,8 +16,8 @@ namespace RemSound.Core;
 /// reloading the plugin, which matters when the interesting fault has already started.</para>
 ///
 /// <para><b>Nothing here is called from the audio thread.</b> That thread only bumps counters (see
-/// <see cref="Count"/>, which is a lock-free add); the once-a-second snapshot and every event line are
-/// written from a background timer. Writing a line from a DAW's audio callback would be a file system
+/// <see cref="Count"/>, which is a lock-free add); the once-a-second snapshot (written once a minute, and every second
+/// around a problem - <see cref="LogDetailRule"/>) and every event line are written from a background timer. Writing a line from a DAW's audio callback would be a file system
 /// call in the middle of somebody's take.</para>
 /// </summary>
 public sealed class PluginLog : IDisposable
@@ -33,6 +33,17 @@ public sealed class PluginLog : IDisposable
     private bool creationFailed;
     private long bytesWritten;
     private int fileOrdinal;
+    /// <summary>The name this instance's first file settled on (LogFileNames): every later part carries it, with "-partN".</summary>
+    private string? sessionStem;
+    /// <summary>When the once-a-second line is written: one a minute, and every second around a short block or the link
+    /// dropping (LogDetailRule, 2026-10-19).</summary>
+    private readonly LogDetailRule detailRule = new();
+    private long lastShortBlocks = -1;
+    private bool wasConnected;
+    /// <summary>The clock the per-second rule runs on (a test seam).</summary>
+    internal Func<DateTime> UtcNowForTest { get; set; } = () => DateTime.UtcNow;
+    /// <summary>One second's line, on demand: the gate steps the clock and pauses the timer (<see cref="Pause"/>).</summary>
+    internal void WriteSnapshotForTest() => WriteSnapshot();
     // Explicitly System.Threading: Core has WinForms in scope, and a WinForms timer needs a message
     // loop the DAW does not give us.
     private System.Threading.Timer? snapshotTimer;
@@ -109,7 +120,13 @@ public sealed class PluginLog : IDisposable
     private void WriteSnapshot()
     {
         var source = SnapshotSource;
-        if (source is null || !Enabled) return;
+        if (source is null) return;
+        if (!Enabled)
+        {
+            // Off means off: nothing waiting from before may reach the file if logging comes back on.
+            lock (writeGate) detailRule.Forget();
+            return;
+        }
         PluginLogSnapshot snap;
         try { snap = source(); }
         catch { return; }   // a snapshot that throws must never take the timer thread down
@@ -117,14 +134,30 @@ public sealed class PluginLog : IDisposable
         lock (writeGate)
         {
             if (!EnsureOpenLocked()) return;
-            SnapshotsWritten++;
-            WriteLineLocked(string.Join('\t',
+            var line = string.Join('\t',
                 "SNAP", Stamp(), Short(instanceId), snap.Job, snap.Peer ?? "-", snap.Connected ? "yes" : "no",
                 snap.HostSampleRate.ToString("0"), snap.BlockFrames, snap.Resampling ? "yes" : "no",
                 snap.BlocksOut, snap.BlocksIn, snap.ShortBlocks, snap.RingFrames,
                 snap.BytesOut, snap.BytesIn, snap.KnownPeers,
                 snap.HostCalls, snap.LastFrames, snap.Submitted, snap.BusFlushed, snap.BusSenders,
-                snap.InputPeakDb <= -120 ? "silent" : snap.InputPeakDb.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)));
+                snap.InputPeakDb <= -120 ? "silent" : snap.InputPeakDb.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture));
+            var now = UtcNowForTest();
+            // Something went wrong on this track since the last second: sound arrived late, or RemSound stopped answering.
+            // Then the last 30 seconds' lines are written, and the next 30 as they come.
+            var shortNow = lastShortBlocks >= 0 && snap.ShortBlocks > lastShortBlocks ? snap.ShortBlocks - lastShortBlocks : 0;
+            var why = shortNow > 0 ? $"{shortNow} block{(shortNow == 1 ? "" : "s")} of sound arrived late"
+                    : wasConnected && !snap.Connected ? "RemSound stopped answering"
+                    : null;
+            lastShortBlocks = snap.ShortBlocks;
+            wasConnected = snap.Connected;
+            if (why is not null && detailRule.Trouble(now, why) is { } burst)
+            {
+                WriteOpenLocked($"EVT\t{Stamp()}\t{Short(instanceId)}\t{burst.Heading}");
+                foreach (var waiting in burst.Lines) WriteOpenLocked(waiting);
+            }
+            if (!detailRule.Line(now, line)) return;
+            SnapshotsWritten++;
+            WriteOpenLocked(line);
         }
     }
 
@@ -137,16 +170,17 @@ public sealed class PluginLog : IDisposable
             var dir = logsDirectory ?? AppConfig.LogsDirectory;
             Directory.CreateDirectory(dir);
             fileOrdinal++;
-            // Named so it sorts next to the app's logs and is obviously the plugin's.
+            // Named so it sorts next to the app's logs, by when it started, and is obviously the plugin's
+            // (LogFileNames, 2026-10-19).
             //
             // The INSTANCE id is in the name, not just in a column. A DAW loads every plugin instance
             // into ONE process, so two RemSound tracks would otherwise race for the same filename
             // within the same second — the first would win and the second would silently never log,
             // which is precisely the two-track case a tester is most likely to be reporting on.
-            var name = $"RemSoundPlugin-{Sanitize(Environment.MachineName)}-{Environment.ProcessId}-{Short(instanceId)}"
-                     + $"-{DateTime.Now:yyyyMMdd-HHmmss}-{fileOrdinal}.log";
-            Path = System.IO.Path.Combine(dir, name);
-            writer = new StreamWriter(new FileStream(Path, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite), Encoding.UTF8)
+            var (path, stream, stem) = LogFileNames.CreateNew(dir, sessionStem ?? LogFileNames.PluginStem(DateTime.Now, Short(instanceId)), fileOrdinal);
+            sessionStem = stem;
+            Path = path;
+            writer = new StreamWriter(stream, Encoding.UTF8)
             {
                 AutoFlush = true,   // a DAW that hangs must still leave the log that explains why
             };
@@ -167,6 +201,12 @@ public sealed class PluginLog : IDisposable
             Path = null;
             return false;
         }
+    }
+
+    /// <summary>A line that may follow a roll to the next file: opens it first.</summary>
+    private void WriteOpenLocked(string line)
+    {
+        if (EnsureOpenLocked()) WriteLineLocked(line);
     }
 
     private void WriteLineLocked(string line)
@@ -191,7 +231,6 @@ public sealed class PluginLog : IDisposable
 
     private static string Stamp() => DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
     private static string Short(Guid id) => id.ToString("N")[..8];
-    private static string Sanitize(string s) => string.Concat(s.Select(c => char.IsLetterOrDigit(c) ? c : '-'));
 
     public void Dispose()
     {

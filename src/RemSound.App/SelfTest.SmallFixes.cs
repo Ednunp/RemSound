@@ -79,6 +79,8 @@ internal static partial class SelfTest
             var lines = new List<string>();
             form.LogForTest.EventTapForTest = line => { lock (lines) lines.Add(line); };
             bool Logged(string words) { lock (lines) return lines.Any(l => l.Contains(words, StringComparison.Ordinal)); }
+            var troubles = new List<string>();
+            form.LogForTest.TroubleTapForTest = why => { lock (troubles) troubles.Add(why); };
             hb = form.StartHeartbeatForTest((data, length, to) =>
             {
                 if (Volatile.Read(ref answering) == 1 && to.Equals(relay) && PongTo(data, length) is { } pong)
@@ -150,7 +152,16 @@ internal static partial class SelfTest
                 "THE SILENT LEAVING: somebody on the server going must get a disconnect cue of their own");
             Check(!Logged("peer disconnected: ED_DT on the server") && !Logged("peer disconnected: ANDRE_PC on the server"),
                 "and nobody else's");
+            // The log writes the seconds before somebody went in full (RemSoundLog.Trouble, 2026-10-19, issue 35).
+            lock (troubles) Check(troubles.Any(t => t.StartsWith("JONATHAN_LT on the server", StringComparison.Ordinal) && t.EndsWith(" disconnected", StringComparison.Ordinal)),
+                $"THE LOG'S DETAIL: somebody going must have the seconds before it written to the log in full ({string.Join(" | ", troubles)})");
             quiet.Clear();
+            // And coming back says how long they were gone: what "my laptop kept disconnecting" needs from a log.
+            MoveOn(TimeSpan.FromMilliseconds(500), answer: true);
+            bool CameBack() { lock (lines) return lines.Any(l => l.StartsWith("peer connected: JONATHAN_LT on the server", StringComparison.Ordinal) && l.Contains(", back after ", StringComparison.Ordinal)); }
+            Check(WaitFor(() => { Rows(); form.DetectPeerHealthTransitionsForTest(); return CameBack(); },
+                    TimeSpan.FromSeconds(10)),
+                "COMING BACK: somebody who went and returned must be logged as back, with how long they were gone");
 
             // And the tag still works: once the server stops answering, they are gone by every measure.
             Volatile.Write(ref answering, 0);
@@ -163,7 +174,8 @@ internal static partial class SelfTest
 
             return "with everybody on the server answering, each is shown as there, in the list and the details box, each got a "
                  + "connect cue, and the tray counts three people as three; one going quiet went offline alone, with a disconnect "
-                 + "cue of their own; when the server stops answering they are all tagged offline and the tray counts nobody";
+                 + "cue of their own and the seconds before it written to the log in full, and coming back was logged with how long "
+                 + "they were gone; when the server stops answering they are all tagged offline and the tray counts nobody";
         }
         finally
         {

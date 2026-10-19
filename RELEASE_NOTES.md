@@ -1,11 +1,5 @@
-# RemSound v6.2.1
+# RemSound v6.2.2
 
-**Fixed some bugs in the web listener.**
+**Logs are now much smaller and easier to read**: RemSound writes a short summary once a minute, keeps full detail only around a moment when something goes wrong, and names each file by date. The Logging tab in Preferences can open the current log or the logs folder for you, and the manual now links to the Mac version of RemSound.
 
-**The web listener can't be turned on without a password.**
-
-**Press Enter on any slider to put it back to its default.**
-
-**The metronome warns that it's only accurate when both computers use ASIO.**
-
-RemSound updates itself. To install by hand, download **RemSound-v6.2.1.zip** (a zip of the program folder) from the files below, close RemSound, and extract it over your RemSound folder.
+RemSound updates itself. To install by hand, download **RemSound-v6.2.2.zip** (a zip of the program folder) from the files below, close RemSound, and extract it over your RemSound folder.

@@ -19,7 +19,8 @@ namespace RemSound.App;
 ///     (+ the profile list). Moved here from the standalone Options-menu dialog.
 ///   * Update settings — startup-check toggle, frequency, manual check, silent-install, the
 ///     install time range, and show-what's-new.
-///   * Logging — Enable logs (for this profile), Write logs now, the logs-folder size warning, deleting old logs,
+///   * Logging — Enable logs (for this profile), Write logs now, Open current log, Open logs folder, the logs-folder
+///     size warning, deleting old logs,
 ///     and Delete all logs.
 ///
 /// All settings save through <see cref="RemSoundSettingsStore"/> or <see cref="AppConfig"/>
@@ -533,9 +534,24 @@ internal sealed class PreferencesDialog : Form
         AutoSize = true,
     };
 
+    // Open the log this session is writing, or the folder they all live in (2026-10-19, Jonathan Schuster's issue 35: "An
+    // open current log file option in the preferences might help").
+    private readonly Button openCurrentLogButton = new()
+    {
+        Text = "&Open current log",
+        AccessibleName = "Open current log",
+        AutoSize = true,
+    };
+    private readonly Button openLogsFolderButton = new()
+    {
+        Text = "Open logs &folder",
+        AccessibleName = "Open logs folder",
+        AutoSize = true,
+    };
+
     // --- Logging tab: log-folder housekeeping (2026-06-19). All machine-local (AppConfig). The two
     // spinners are greyed out until their enabling checkbox is ticked. Mnemonics on this tab: L, W,
-    // S, M, D, Y, A — all distinct (tab scope is per-page, so reuse elsewhere is fine). ---
+    // S, M, D, Y, A, and O and F for the two Open buttons — all distinct (tab scope is per-page, so reuse elsewhere is fine). ---
     private readonly AccessibleCheckBox warnIfLogsExceedBox = new()
     {
         Text = "Warn at startup if the logs folder is larger than (Alt+&S)",
@@ -668,7 +684,9 @@ internal sealed class PreferencesDialog : Form
         Action<bool> applyUpnpEnabled,
         Func<(RouterMappingStatus Status, IPEndPoint? External, string LastError)> getUpnpSnapshot,
         Action<EventHandler> subscribeUpnpStatusChanged,
-        Action<EventHandler> unsubscribeUpnpStatusChanged)
+        Action<EventHandler> unsubscribeUpnpStatusChanged,
+        Func<string?>? openCurrentLog = null,
+        Func<string?>? openLogsFolder = null)
     {
         this.getUpnpSnapshot = getUpnpSnapshot;
         cueSettings = settings;
@@ -1096,6 +1114,15 @@ internal sealed class PreferencesDialog : Form
         };
 
         writeLogsNowButton.Click += (_, _) => writeLogsNow();
+        // Each returns what to tell the person, or nothing when the file or folder opened.
+        openCurrentLogButton.Click += (_, _) =>
+        {
+            if (openCurrentLog?.Invoke() is { } why) AppMessageBox.Show(this, why, "Open current log", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        };
+        openLogsFolderButton.Click += (_, _) =>
+        {
+            if (openLogsFolder?.Invoke() is { } why) AppMessageBox.Show(this, why, "Open logs folder", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        };
 
         // --- Logging housekeeping (machine-local; each control writes through to AppConfig on
         // change, like the Update-settings controls above). The two spinners follow their
@@ -1335,7 +1362,7 @@ internal sealed class PreferencesDialog : Form
         tabs.TabPages.Add(MakeTab("Update settings",
             checkForUpdatesOnStartupBox, freqRow, checkForUpdatesNowButton, silentlyInstallUpdatesBox, updateWindowBox, updateWindowRangeRow, showWhatsNewAfterUpdateBox));
         tabs.TabPages.Add(MakeTab("Logging",
-            loggingBox, writeLogsNowButton,
+            loggingBox, writeLogsNowButton, openCurrentLogButton, openLogsFolderButton,
             warnIfLogsExceedBox, logsSizeRow,
             pruneOldLogsBox, pruneDaysRow,
             deleteAllLogsButton));
@@ -1412,6 +1439,8 @@ internal sealed class PreferencesDialog : Form
         ContextHelp.Mark(showWhatsNewAfterUpdateBox, "prefs.updates.show-whats-new");
         ContextHelp.Mark(loggingBox, "prefs.logging.enable-logs");
         ContextHelp.Mark(writeLogsNowButton, "prefs.logging.write-logs-now");
+        ContextHelp.Mark(openCurrentLogButton, "prefs.logging.open-current-log");
+        ContextHelp.Mark(openLogsFolderButton, "prefs.logging.open-folder");
         ContextHelp.Mark(warnIfLogsExceedBox, "prefs.logging.warn-size");
         ContextHelp.Mark(logsSizeLimitBox, "prefs.logging.warn-size-megabytes");
         ContextHelp.Mark(pruneOldLogsBox, "prefs.logging.delete-old");
