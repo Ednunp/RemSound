@@ -683,7 +683,8 @@ else {
 
         # --- F. What the log must and must not say. ---
         $rtLog = (Get-ChildItem -LiteralPath (Join-Path $rtCfg 'logs') -Filter '*.log' -ErrorAction SilentlyContinue | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
-        if ($rtLog -match 'updater: background checks are off in a --headless run' -and $rtLog -match 'updater: no startup check in a --headless run') {
+        # Since 6.2.3 the updater's lines are under the "Updates" category ("INFO <time> Updates: ...").
+        if ($rtLog -match 'Updates: background checks are off in a --headless run' -and $rtLog -match 'Updates: no startup check in a --headless run') {
             Pass "log: a headless copy says it made no update checks, at start-up or in the background"
         }
         else { Fail "log: a headless copy did not say it skipped its update checks" }
