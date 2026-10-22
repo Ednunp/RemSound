@@ -10,8 +10,6 @@ namespace RemSound.App;
 /// </summary>
 public sealed partial class MainForm
 {
-    private long streamsLastUnderrunsAsio = -1;
-    private long streamsLastUnderrunsWasapi = -1;
     private readonly DropoutTuner wasapiDropoutTuner = new();
     private readonly DropoutTuner asioDropoutTuner = new();
     private long lastGapsMixed = -1;
@@ -131,8 +129,9 @@ public sealed partial class MainForm
         logFile.Event($"{prefix}: {current} ms -> {next} ms ({tuner.LastReason}) [{ActiveAudioConfiguration().Describe()}]");
     }
 
-    /// <summary>Once a second: the lowest-delay auto-tune, the per-stream buffers, and one "streams" line - every stream's
-    /// arrivals and what it plays at on each output, plus each output's new underruns and audible gaps.</summary>
+    /// <summary>Once a second: the lowest-delay auto-tune, the per-stream buffers, and each stream's readings - its arrivals and
+    /// what it plays at on each output, with each output's dropouts and audible gaps - for the readings file
+    /// (NoteStreamsSecond; until 2026-10-22 one "streams" line in the log).</summary>
     private void TickStreamBuffers()
     {
         NoteNetworkSecond();
@@ -140,25 +139,13 @@ public sealed partial class MainForm
         TickLowestDelayTune();
         var reports = receiver.UpdatePerStreamNeeds(RenderCbMsFor, AutoTuneOnFor);
         if (reports.Count == 0) return;
-        var asioUnderruns = receiver.TuneBlockingUnderrunsFor(RenderRoute.AsioLane);
-        var wasapiUnderruns = receiver.TuneBlockingUnderrunsFor(RenderRoute.WasapiLane);
-        var asioNew = UnderrunsThisSecond(asioUnderruns, streamsLastUnderrunsAsio);
-        var wasapiNew = UnderrunsThisSecond(wasapiUnderruns, streamsLastUnderrunsWasapi);
-        streamsLastUnderrunsAsio = asioUnderruns;
-        streamsLastUnderrunsWasapi = wasapiUnderruns;
-        var streams = string.Join(" | ", reports.Select(r =>
-            $"{r.Stream} pkts={r.Packets} gap={r.GapMs}ms gap-peak={r.GapPeakMs}ms gap-used={r.GapUsedMs}ms {r.Replicas}"));
         var serverGap = sender.TakeInboundMaxGapMs();
         var serverDispatch = sender.TakeInboundMaxDispatchMs();
         var (asioCustom, customFrames) = sender.AsioLaneLabState;
         var sending = !sender.IsRunning ? "not sending"
-            : asioCustom ? $"ASIO lane sends Jamulus-style to {sender.CustomOpusTargetCount} (frames {customFrames}) and the codec setting to the rest"
-            : "ASIO lane sends the codec setting";
-        // Made every second, written once a minute and every second around a problem (RemSoundLog.Detail).
-        logFile.Detail($"streams [{ActiveAudioConfiguration().Describe()}] [lowest-delay auto-tune {(lowestDelayTune ? "on" : "off")}]: "
-                    + $"underruns this second ASIO={asioNew} WASAPI={wasapiNew}; audible gaps so far ASIO={receiver.DropoutGapsFor(RenderRoute.AsioLane)} "
-                    + $"WASAPI={receiver.DropoutGapsFor(RenderRoute.WasapiLane)}; server path gap={serverGap}ms dispatch={serverDispatch}ms; "
-                    + $"{sending}; peers asking for Jamulus-style={CustomOpusPeers.Count} | {streams}");
+            : asioCustom ? $"Jamulus-style to {sender.CustomOpusTargetCount} (frames {customFrames}), the codec setting to the rest"
+            : "the codec setting";
+        NoteStreamsSecond(serverGap, serverDispatch, sending, reports);
     }
 
     /// <summary>The underruns since the last second. The total is summed over the streams playing now, so a stream ending

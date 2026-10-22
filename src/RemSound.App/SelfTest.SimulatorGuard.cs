@@ -12,8 +12,8 @@ internal static partial class SelfTest
     [
         ("left out of the simulator on purpose: idle streams are pruned on the wall clock, and no simulated stream goes idle",
             ["receiver.PruneIdleSessions()"]),
-        ("read for the once-a-second \"streams\" log line only",
-            ["receiver.TuneBlockingUnderrunsFor()", "sender.TakeInboundMaxGapMs()", "sender.TakeInboundMaxDispatchMs()"]),
+        ("read for the readings file only (until 2026-10-22 the once-a-second \"streams\" line)",
+            ["sender.TakeInboundMaxGapMs()", "sender.TakeInboundMaxDispatchMs()"]),
         ("the snapshot log line's own columns: what each lane is set to",
             ["receiver.MaxLatencyMsFor()", "receiver.TargetLatencyMsFor()"]),
         ("the real output says these; the simulator's devices say them themselves (SimMainWindow's reportedOutputMs and outputQueueMs)",

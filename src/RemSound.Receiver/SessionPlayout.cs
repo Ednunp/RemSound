@@ -541,6 +541,13 @@ internal sealed class SessionPlayout : IDisposable
     private long dropoutGapsTotal;
     private bool lastReadWasShort;
     public long DropoutGapsTotal => Interlocked.Read(ref dropoutGapsTotal);
+    // How long each gap lasted (2026-10-22, for the log's run-of-gaps lines, "the longest 40 ms"): the sound missing over a
+    // run of short reads, in input frames, written down as milliseconds when the run ends. Render thread only, but for the
+    // peak the log takes once a second.
+    private long gapRunMissingFrames;
+    private int longestGapMs;
+    /// <summary>The longest audible gap that ended since the last call, in ms. Resets on read.</summary>
+    public int TakeLongestGapMs() => Interlocked.Exchange(ref longestGapMs, 0);
     /// <summary>Inaudible partial short-reads taken while the ring was on target — the device-gulp
     /// case more buffer can't fix. These must NOT block the auto-tune from lowering.</summary>
     public long DeviceGulpUnderrunsTotal => Interlocked.Read(ref deviceGulpUnderrunsTotal);
@@ -1353,6 +1360,7 @@ internal sealed class SessionPlayout : IDisposable
                 Interlocked.Increment(ref tuneBlockingUnderrunsTotal);
                 if (!lastReadWasShort) Interlocked.Increment(ref dropoutGapsTotal);
                 lastReadWasShort = true;
+                gapRunMissingFrames += inputFramesNeeded - framesGot;
             }
             else
             {
@@ -1362,6 +1370,12 @@ internal sealed class SessionPlayout : IDisposable
         else
         {
             lastReadWasShort = false;
+            if (gapRunMissingFrames > 0)
+            {
+                var gapMs = (int)Math.Round(gapRunMissingFrames * 1000.0 / MixSampleRate);
+                if (gapMs > Volatile.Read(ref longestGapMs)) Volatile.Write(ref longestGapMs, gapMs);
+                gapRunMissingFrames = 0;
+            }
         }
         if (framesGot == 0)
         {

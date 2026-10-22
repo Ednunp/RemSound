@@ -611,40 +611,6 @@ public sealed partial class MainForm : Form
     private readonly Dictionary<string, bool> peerConnectedState = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>When each peer that went was last heard, so its coming back can say how long it was gone (2026-10-19).</summary>
     private readonly Dictionary<string, DateTime> peerLostAtUtc = new(StringComparer.OrdinalIgnoreCase);
-    /// <summary>The audible gaps counted so far, every output together, as the log last saw them; -1 before the first look.</summary>
-    private long logGapsSeen = -1;
-    /// <summary>Gate seam: every output's audible gaps so far, in place of the receiver's.</summary>
-    internal Func<long>? AudibleGapsForTest;
-
-    /// <summary>How long, in words a log reader takes in at once: "12 seconds", "3 minutes", "2.5 hours".</summary>
-    internal static string HowLongFor(TimeSpan span)
-    {
-        if (span < TimeSpan.Zero) span = TimeSpan.Zero;
-        if (span.TotalSeconds < 90)
-        {
-            var s = (int)Math.Round(span.TotalSeconds);
-            return $"{s} second{(s == 1 ? "" : "s")}";
-        }
-        if (span.TotalMinutes < 90)
-        {
-            var m = (int)Math.Round(span.TotalMinutes);
-            return $"{m} minutes";
-        }
-        return $"{span.TotalHours:0.#} hours";
-    }
-
-    /// <summary>A new audible gap on any output since the last second is a problem the log writes in full: the seconds
-    /// before it and after (RemSoundLog.Trouble, 2026-10-19). All three configurations at once - the total is every
-    /// stream's, whichever output it plays on. A total that falls (a stream ended and took its count with it) counts as
-    /// none, the same rule as the "streams" line's underruns.</summary>
-    private void NoteAudibleGapsForTheLog()
-    {
-        var gaps = AudibleGapsForTest?.Invoke() ?? (receiver.IsRunning ? receiver.DropoutGaps : 0);
-        var fresh = UnderrunsThisSecond(gaps, logGapsSeen);
-        logGapsSeen = gaps;
-        if (fresh > 0) logFile.Trouble($"{fresh} audible gap{(fresh == 1 ? "" : "s")} [{ActiveAudioConfiguration().Describe()}]");
-    }
-    internal void NoteAudibleGapsForTheLogForTest() => NoteAudibleGapsForTheLog();
 
     private CuePlayer? connectSound;
     private CuePlayer? disconnectSound;
@@ -1812,6 +1778,8 @@ public sealed partial class MainForm : Form
             ScreenReader.Shutdown();
             UnhookNetworkChangeForLookups();
             trayController.Dispose();
+            // Each connection still open ends here: its summary line, then the readings still in memory go to the file.
+            try { EndAllConnections("RemSound closed"); } catch { }
             logFile.Dispose();
         };
 
@@ -4271,10 +4239,11 @@ public sealed partial class MainForm : Form
             },
             writeLogsNow: () =>
             {
-                logFile.Event("user requested write logs now");
-                // And the last 30 seconds of the lines made every second, then the next 30: whatever the person pressed it
-                // for has just happened. Even inside the ten minutes after another time - they asked (2026-10-19).
-                logFile.Trouble("you pressed Write logs now", evenInsideTheGap: true);
+                // The marker, and every second of the last five minutes and the next 30 in the readings file - whatever the
+                // person pressed it for has just happened - written now, not five minutes from now (2026-10-22).
+                var kept = logFile.Capture("you pressed Write logs now", WriteLogsNowLookBack);
+                logFile.Event(LogLevel.Info, "Log", "user requested write logs now" + (kept is null ? "" : $" - {kept}"));
+                logFile.FlushReadings();
             },
             deleteAllLogs: () =>
             {
@@ -9378,6 +9347,8 @@ public sealed partial class MainForm : Form
     /// </summary>
     private void OnSystemResume()
     {
+        // Remembered for the log: a peer lost in the minute after a wake says so (MainForm.Readings.cs, WhyLost).
+        lastResumeUtc = DateTime.UtcNow;
         try
         {
             if (IsDisposed) return;
@@ -10098,6 +10069,8 @@ public sealed partial class MainForm : Form
     {
         if (DateTime.UtcNow - lastSnapshotUtc < TimeSpan.FromMilliseconds(950)) return;
         lastSnapshotUtc = DateTime.UtcNow;
+        // This second's readings, holding only what is in use now (MainForm.Readings.cs); they go out at the end.
+        BeginReadings();
 
         // A WAKE FIRST, before anything in this tick acts on stale evidence. See DetectWakeFromTickGap.
         DetectWakeFromTickGap();
@@ -10162,8 +10135,6 @@ public sealed partial class MainForm : Form
         }
         // Detect peer health transitions and play connect/disconnect cues.
         DetectAndAnnouncePeerHealthTransitions();
-        // A new audible gap: the log writes the seconds around it. Before this second's lines are made, so they go out too.
-        NoteAudibleGapsForTheLog();
 
         // ---- WORK THAT MUST HAPPEN WHATEVER THE LOG SETTING SAYS --------------------------------
         // Both of these used to sit at the BOTTOM of this method, below the DiagnosticsGate early
@@ -10227,6 +10198,7 @@ public sealed partial class MainForm : Form
             // whole session. The measured parts need that instrumentation; the jitter buffer as set does not.
             // 2026-09-13 review.
             UpdateLatencyReadoutWithoutMeasurements();
+            SubmitReadings();
             return;
         }
 
@@ -10241,27 +10213,14 @@ public sealed partial class MainForm : Form
         var primaryTargetMs = inBothIndependent ? receiver.TargetLatencyMsFor(RenderRoute.WasapiLane) : receiver.TargetLatencyMs;
         var asioMaxMs = inBothIndependent ? receiver.MaxLatencyMsFor(RenderRoute.AsioLane) : 0;
         var asioTargetMs = inBothIndependent ? receiver.TargetLatencyMsFor(RenderRoute.AsioLane) : 0;
-        logFile.Snapshot(
-            connected: connected,
-            sendRunning: sender.IsRunning,
-            receiveRunning: receiver.IsRunning,
-            codec: SnapshotCodecLabel(),
-            maxLatencyMs: primaryMaxMs,
-            targetLatencyMs: primaryTargetMs,
-            bufferMs: receiver.CurrentBufferMs,
-            senderPackets: sender.PacketsSent,
-            senderBytes: sender.BytesSent,
-            senderDevice: sender.CaptureDeviceName,
-            receiverPackets: receiver.PacketsReceived,
-            receiverBytes: receiver.BytesReceived,
-            underruns: receiver.Underruns,
-            drops: receiver.Drops,
-            receiveDevice: receiver.OutputDeviceName,
-            heartbeat: heartbeatService?.GetHealthSummary() ?? "no peers",
-            opusFecRecoveries: receiver.OpusFecRecoveries,
-            opusUnrecoveredGaps: receiver.OpusUnrecoveredGaps,
-            maxLatencyMsAsio: asioMaxMs,
-            targetLatencyMsAsio: asioTargetMs);
+        // The status row, now columns of the readings file (2026-10-22): each output's settings only while it is in use.
+        Row.Set("connected", connected).Set("sending", sender.IsRunning).Set("receiving", receiver.IsRunning)
+           .Text("codec", SnapshotCodecLabel()).Text("peers", heartbeatService?.GetHealthSummary() ?? "no peers")
+           .Set("wasapiMaxMs", primaryMaxMs).Set("wasapiTargetMs", primaryTargetMs).Set("asioMaxMs", asioMaxMs).Set("asioTargetMs", asioTargetMs)
+           .Set("bufferMs", receiver.CurrentBufferMs).Set("receivedPackets", receiver.PacketsReceived).Set("receivedKB", receiver.BytesReceived / 1024)
+           .Set("underrunsTotal", receiver.Underruns).Set("dropsTotal", receiver.Drops).Text("receiveDevice", receiver.OutputDeviceName)
+           .Set("opusFecRecoveries", receiver.OpusFecRecoveries).Set("opusUnrecoveredGaps", receiver.OpusUnrecoveredGaps)
+           .Set("sentPackets", sender.PacketsSent).Set("sentKB", sender.BytesSent / 1024).Text("sendDevice", sender.CaptureDeviceName);
 
         // The plugin link's LOG LINE, once a second while a plugin is connected. This one belongs below the
         // diagnostics gate; the sweep it used to sit next to did not, and has moved up.
@@ -10507,32 +10466,35 @@ public sealed partial class MainForm : Form
                 var wireReorderedDelta = wireReorderedNow - prevDiagWireReordered; prevDiagWireReordered = wireReorderedNow;
                 var wireDuplicatedDelta = wireDuplicatedNow - prevDiagWireDuplicated; prevDiagWireDuplicated = wireDuplicatedNow;
 
-                // Made every second, written once a minute and every second around a problem (RemSoundLog.Detail, 2026-10-19).
-                // The boundary/content split of each step probe (the XB and WB pairs) and sampleStepMax (prone to false
-                // alarms on bright music) were taken off the line then: nothing has read them since the click hunt they were
-                // added for, in May 2026, and each stage's combined step stays. The probes are still read here, since reading
-                // is what resets them.
-                logFile.Detail($"diag bufAvg={diag.BufferAvgMs}ms bufMin={diag.BufferMinMs}ms bufMax={diag.BufferMaxMs}ms " +
-                    $"maxGapMs={diag.MaxArrivalGapMs} sendCbGapMs={sendCbGapMs} renderCbGapMs={diag.MaxRenderCallbackGapMs} maxReadMs={diag.MaxRenderReadMs} reads={diag.RenderReadCount} " +
-                    $"emitMs={emitMs} sndCallMs={sendCallMs} rxDispMs={rxDispatchMs} rxNetGapMs={rxNetGapMs} " +
-                    $"gc0Δ={gc0Delta} gc1Δ={gc1Delta} gc2Δ={gc2Delta} " +
-                    $"cpu={selfMeter.CpuPercentOneCore:0.0}% memMB={selfMeter.ManagedHeapMb:0.0} wsMB={selfMeter.WorkingSetMb:0.0} allocKBps={selfMeter.AllocatedKbPerSecond:0.0} " +
-                    $"privMB={selfMeter.PrivateBytesMb:0.0} gcHeapMB={selfMeter.GcHeapMb:0.0} gcFragMB={selfMeter.GcFragmentedMb:0.0} gcCommitMB={selfMeter.GcCommittedMb:0.0} handles={selfMeter.HandleCount} threads={selfMeter.ThreadCount} " +
-                    $"captureMs={captureMs:0.0} sendMs={sendMs:0.0} recvMs={recvMs:0.0} renderMs={renderMs:0.0} " +
-                    $"renderWasapiMs={renderWasapiMs:0.0} renderAsioMs={renderAsioMs:0.0} renderMixedMs={renderMixedMs:0.0} " +
-                    // Per capture source: its ring depth and the rate ratio holding it on the mix
-                    // clock. With two or more WASAPI sources summed into one stream this is the only
-                    // way to SEE them pulling apart — before this the drift was audible and invisible.
-                    $"srcDrift=[{DescribeCaptureSourceDrift()}] " +
-                    $"trimB={trimBytes} trimN={trimFires} trimΔ={trimDelta} drainB={drainBytes} ovfB={ovfBytes} pktRej={pktRej} " +
-                    $"concealΔ={concealDelta} shortReadΔ={shortReadDelta} devGulpΔ={deviceGulpDeltaDiag} " +
-                    $"filtErr={filteredErrorFrames:0.0}f " +
-                    $"capPeak={capPeak:0.000} capPeakPlg={capPeakPlg:0.000} " +
-                    $"emitGapWas={emitGapWas} emitGapAsi={emitGapAsi} emitGapPlg={emitGapPlg} " +
-                    $"sndAudFrΔ={sndAudFr} stepRawCap={stepRawCap:0.000} stepPreEnc={stepPreEnc:0.000} stepPreEncWas={stepPreEncWas:0.000} stepPreEncAsi={stepPreEncAsi:0.000} stepPostDec={stepPostDec:0.000} stepPostRing={stepPostRing:0.000} stepPostRsm={stepPostRsm:0.000} " +
-                    $"clipΔ={clippedDelta} spikesN={diag.EnvelopeSpikeCount} " +
-                    $"wireOkΔ={wireInOrderDelta} wireMissΔ={wireMissedDelta} wireReordΔ={wireReorderedDelta} wireDupΔ={wireDuplicatedDelta} " +
-                    $"pcmRej={receiver.PcmFrameRejections} pcmDiscard={receiver.PcmFrameDiscardedPartials}");
+                // The diagnostic line, now columns of the readings file (2026-10-22, issue 35): written once a minute as the
+                // whole minute summed up, and every second around a problem, each only while what it measures is in use. The
+                // boundary/content split of each step probe (XB and WB) and sampleStepMax left the line on 2026-10-19: nothing
+                // had read them since the click hunt they were added for, in May 2026; each stage's combined step stays. The
+                // probes are still read here, since reading is what resets them.
+                var drift = DescribeCaptureSourceDrift();
+                Row.Set("bufAvgMs", diag.BufferAvgMs).Set("bufMinMs", diag.BufferMinMs).Set("bufMaxMs", diag.BufferMaxMs)
+                   .Set("maxGapMs", diag.MaxArrivalGapMs).Set("renderCbGapMs", diag.MaxRenderCallbackGapMs).Set("maxReadMs", diag.MaxRenderReadMs)
+                   .Set("reads", diag.RenderReadCount).Set("rxDispMs", rxDispatchMs).Set("rxNetGapMs", rxNetGapMs)
+                   .Set("recvMs", recvMs).Set("renderMs", renderMs)
+                   // The WASAPI output renders on its own lane with an ASIO driver chosen, on the shared route without one.
+                   .Set("wasapiRenderMs", renderWasapiMs + renderMixedMs).Set("asioRenderMs", renderAsioMs)
+                   .Set("trimBytes", trimBytes).Set("trimCount", trimFires).Set("trims", trimDelta).Set("drainBytes", drainBytes)
+                   .Set("overflowBytes", ovfBytes).Set("rejectedPackets", pktRej)
+                   .Set("concealments", concealDelta).Set("shortReads", shortReadDelta).Set("deviceGulps", deviceGulpDeltaDiag)
+                   .Set("driftErrorFrames", filteredErrorFrames)
+                   .Set("stepPostDecode", stepPostDec).Set("stepPostRing", stepPostRing).Set("stepPostResampler", stepPostRsm)
+                   .Set("spikes", diag.EnvelopeSpikeCount)
+                   .Set("wireInOrder", wireInOrderDelta).Set("wireMissed", wireMissedDelta).Set("wireReordered", wireReorderedDelta)
+                   .Set("wireDuplicated", wireDuplicatedDelta).Set("pcmRejected", receiver.PcmFrameRejections)
+                   .Set("pcmDiscarded", receiver.PcmFrameDiscardedPartials)
+                   .Set("sendCbGapMs", sendCbGapMs).Set("emitMs", emitMs).Set("sendCallMs", sendCallMs).Set("captureMs", captureMs)
+                   .Set("sendMs", sendMs).Set("capturePeak", capPeak).Set("framesSent", sndAudFr).Set("stepRawCapture", stepRawCap)
+                   .Set("stepPreEncode", stepPreEnc).Set("clipped", clippedDelta)
+                   .Set("stepPreEncodeWasapi", stepPreEncWas).Set("emitGapWasapiMs", emitGapWas)
+                   .Set("stepPreEncodeAsio", stepPreEncAsi).Set("emitGapAsioMs", emitGapAsi)
+                   .Set("capturePeakPlugin", capPeakPlg).Set("emitGapPluginMs", emitGapPlg);
+                if (drift.Length > 0) Row.Text("sourceDrift", drift);
+                SetProcessReadings(selfMeter, gc0Delta, gc1Delta, gc2Delta);
             }
             else if (SenderRunningNow)
             {
@@ -10593,16 +10555,12 @@ public sealed partial class MainForm : Form
                 // No render figures on a send-only machine, but the long-run report's send frames still count. It read
                 // "send frames=0/s" on every one of them. 2026-09-13 review.
                 NoteLongRunSendFrames(sndAudFr);
-                // Written as the diag line is, and trimmed the same way (2026-10-19).
-                logFile.Detail(
-                    $"sender-diag sendCbGapMs={sendCbGapMs} emitMs={emitMs} sndCallMs={sendCallMs} " +
-                    $"capPeak={capPeak:0.000} sndAudFrΔ={sndAudFr} " +
-                    $"stepPreEnc={stepPreEnc:0.000} stepPreEncWas={stepPreEncWas:0.000} stepPreEncAsi={stepPreEncAsi:0.000} stepRawCap={stepRawCap:0.000} " +
-                    $"gc0Δ={gc0Delta} gc1Δ={gc1Delta} gc2Δ={gc2Delta} " +
-                    $"cpu={selfMeter.CpuPercentOneCore:0.0}% memMB={selfMeter.ManagedHeapMb:0.0} wsMB={selfMeter.WorkingSetMb:0.0} allocKBps={selfMeter.AllocatedKbPerSecond:0.0} " +
-                    $"privMB={selfMeter.PrivateBytesMb:0.0} gcHeapMB={selfMeter.GcHeapMb:0.0} gcFragMB={selfMeter.GcFragmentedMb:0.0} gcCommitMB={selfMeter.GcCommittedMb:0.0} handles={selfMeter.HandleCount} threads={selfMeter.ThreadCount} " +
-                    $"captureMs={captureMs:0.0} sendMs={sendMs:0.0} " +
-                    $"clipΔ={clippedDelta} packets={sender.PacketsSent} captureCallbacks={sender.CaptureCallbacks}");
+                // The send-only half of the diagnostic line, as columns of the readings file (2026-10-22).
+                Row.Set("sendCbGapMs", sendCbGapMs).Set("emitMs", emitMs).Set("sendCallMs", sendCallMs).Set("capturePeak", capPeak)
+                   .Set("framesSent", sndAudFr).Set("stepPreEncode", stepPreEnc).Set("stepPreEncodeWasapi", stepPreEncWas)
+                   .Set("stepPreEncodeAsio", stepPreEncAsi).Set("stepRawCapture", stepRawCap).Set("captureMs", captureMs)
+                   .Set("sendMs", sendMs).Set("clipped", clippedDelta).Set("captureCallbacks", sender.CaptureCallbacks);
+                SetProcessReadings(selfMeter, gc0Delta, gc1Delta, gc2Delta);
             }
 
             // Synthesised end-to-end one-way latency estimate. Sums:
@@ -10732,9 +10690,9 @@ public sealed partial class MainForm : Form
                 // started on rather than a guess made here about somebody else's hardware.
                 var capSrc = receiver.AnnouncedCaptureLatencyMsFor(listeningRoute) > 0 ? "peer" : sender.CaptureLatencyMsForOutput(listeningRoute) > 0 ? "dev" : "est";
                 var renSrc = reportedRenderMs > 0 ? "dev" : "est";
-                logFile.Detail($"latency-probe estimated one-way ≈ {totalMs:0.0}ms " +
-                    $"(capture={captureBufferMs:0.0}[{capSrc}], send-accum={senderAccumulatorMs:0.0}[est], wire={wireOneWayMs:0.0}[meas], " +
-                    $"recv-queue={diag.BufferAvgMs}[meas], out-queue={outputQueueMs:0.0}[meas], render={renderBufferMs:0.0}[{renSrc}])");
+                Row.Set("latencyMs", totalMs).Set("latencyMaxMs", totalMs).Set("latencyCaptureMs", captureBufferMs).Text("latencyCaptureFrom", capSrc)
+                   .Set("latencySendMs", senderAccumulatorMs).Set("latencyWireMs", wireOneWayMs).Set("latencyQueueMs", diag.BufferAvgMs)
+                   .Set("latencyOutputQueueMs", outputQueueMs).Set("latencyRenderMs", renderBufferMs).Text("latencyRenderFrom", renSrc);
             }
 
             // If a new stream session opened since the last SNAP tick, flush the gap windows.
@@ -10853,6 +10811,7 @@ public sealed partial class MainForm : Form
         {
             firstReceiverPacketLogged = false;
         }
+        SubmitReadings();
     }
 
     // ===================== Tray =====================
@@ -12423,27 +12382,34 @@ public sealed partial class MainForm : Form
                 var enabled = settings.LoadEnableConnectCue();
                 if (enabled) connectSound?.Play();
                 // How long it was gone, when it was here before: "kept disconnecting" is answered by these (issue 35).
-                var back = peerLostAtUtc.Remove(key, out var lostAt) ? $", back after {HowLongFor(DateTime.UtcNow - lostAt)}" : "";
-                logFile.Event($"peer connected: {DescribeForCue(ph.AudioEndpoint)}{back} (audio={audioFlowing}, heartbeat={ph.State}) — connect cue {CueOutcome(enabled, connectSound)}");
+                var back = peerLostAtUtc.Remove(key, out var lostAt) ? $", back after {GapEpisodes.Duration(DateTime.UtcNow - lostAt)}" : "";
+                logFile.Event(LogLevel.Info, "Peer", $"{DescribeForCue(ph.AudioEndpoint)} connected{back} (audio={audioFlowing}, heartbeat={ph.State}) - connect cue {CueOutcome(enabled, connectSound)}");
                 peerConnectedState[key] = true;
+                StartConnection(key, ph);
             }
             else if (isLost && wasConnected)
             {
                 var enabled = settings.LoadEnableDisconnectCue();
                 if (enabled) disconnectSound?.Play();
                 var name = DescribeForCue(ph.AudioEndpoint);
-                logFile.Event($"peer disconnected: {name} (audio stopped, heartbeat={ph.State}) — disconnect cue {CueOutcome(enabled, disconnectSound)}");
+                // WHO AND WHY, and the five minutes before it in the readings file - a capture of its own, which no run of
+                // gaps can use up (2026-10-22, issue 35: in 6.2.2 gaps and disconnects shared one burst every ten minutes, so
+                // on a machine with steady small gaps a disconnect usually got no detail at all).
+                var kept = logFile.Capture($"{name} disconnected", DisconnectLookBack);
+                logFile.Event(LogLevel.Warn, "Peer", $"{name} disconnected: {WhyLost(ph)}{(kept is null ? "" : $" - {kept}")} - disconnect cue {CueOutcome(enabled, disconnectSound)}");
                 peerConnectedState[key] = false;
                 peerLostAtUtc[key] = DateTime.UtcNow;
-                // The seconds before it went are what a reader will want (RemSoundLog.Trouble).
-                logFile.Trouble($"{name} disconnected");
+                EndConnection(key, name, "disconnected");
             }
             else if (!peerConnectedState.ContainsKey(key))
             {
                 // First sighting and neither clearly connected nor lost (e.g. address typed but
-                // no audio/pong yet) — seed the state without playing a cue.
+                // no audio/pong yet) — seed the state without playing a cue. One already connected (a profile loaded with
+                // its peers there) starts its connection's tally all the same.
                 peerConnectedState[key] = isConnected;
+                if (isConnected) StartConnection(key, ph);
             }
+            if (isConnected) TallyPing(key, ph.RttMs);
         }
 
         // Peers that vanished from tracking entirely (user deselected). Play disconnect only if
@@ -12454,7 +12420,8 @@ public sealed partial class MainForm : Form
             {
                 var enabled = settings.LoadEnableDisconnectCue();
                 if (enabled) disconnectSound?.Play();
-                logFile.Event($"peer disconnected: {key} (deselected while connected) — disconnect cue {CueOutcome(enabled, disconnectSound)}");
+                logFile.Event(LogLevel.Info, "Peer", $"{key} disconnected: you unticked it - disconnect cue {CueOutcome(enabled, disconnectSound)}");
+                EndConnection(key, key, "you unticked it");
             }
             peerConnectedState.Remove(key);
         }

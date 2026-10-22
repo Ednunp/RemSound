@@ -19,7 +19,7 @@ internal static class LogMaintenance
             var dir = AppConfig.LogsDirectory;
             if (!Directory.Exists(dir)) return 0;
             long total = 0;
-            foreach (var file in Directory.EnumerateFiles(dir, "*.log"))
+            foreach (var file in LogFiles(dir))
             {
                 try { total += new FileInfo(file).Length; } catch { /* vanished mid-scan — skip */ }
             }
@@ -40,9 +40,9 @@ internal static class LogMaintenance
             var dir = AppConfig.LogsDirectory;
             if (!Directory.Exists(dir)) return 0;
             var cutoff = DateTime.Now.AddDays(-days);
-            foreach (var file in Directory.EnumerateFiles(dir, "*.log"))
+            foreach (var file in LogFiles(dir))
             {
-                if (IsSamePath(file, activeLogPath)) continue;
+                if (IsActive(file, activeLogPath)) continue;
                 try
                 {
                     if (File.GetLastWriteTime(file) < cutoff)
@@ -68,9 +68,9 @@ internal static class LogMaintenance
         {
             var dir = AppConfig.LogsDirectory;
             if (!Directory.Exists(dir)) return 0;
-            foreach (var file in Directory.EnumerateFiles(dir, "*.log"))
+            foreach (var file in LogFiles(dir))
             {
-                if (IsSamePath(file, activeLogPath)) continue;
+                if (IsActive(file, activeLogPath)) continue;
                 try { File.Delete(file); deleted++; }
                 catch { /* locked / in use — leave it */ }
             }
@@ -102,6 +102,21 @@ internal static class LogMaintenance
         }
         catch { /* give up quietly */ }
         return deleted;
+    }
+
+    /// <summary>Every log in the folder: the app's, the plugin's and the service's, and since 2026-10-22 the readings files
+    /// beside them (".csv").</summary>
+    private static IEnumerable<string> LogFiles(string dir) =>
+        Directory.EnumerateFiles(dir, "*.log").Concat(Directory.EnumerateFiles(dir, "*-readings*.csv"));
+
+    /// <summary>The log being written now, or its readings file (its name, then "-readings"): never deleted under it.</summary>
+    private static bool IsActive(string file, string? activeLogPath)
+    {
+        if (IsSamePath(file, activeLogPath)) return true;
+        if (string.IsNullOrEmpty(activeLogPath)) return false;
+        // A session's later part ("-part2") writes the same readings file as its first.
+        var stem = System.Text.RegularExpressions.Regex.Replace(Path.GetFileNameWithoutExtension(activeLogPath), @"-part\d+$", "");
+        return Path.GetFileName(file).StartsWith(stem + "-readings", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsSamePath(string a, string? b) =>

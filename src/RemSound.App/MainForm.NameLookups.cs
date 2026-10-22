@@ -54,11 +54,26 @@ public sealed partial class MainForm
         NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChangedForLookups;
     }
 
-    private void OnNetworkAvailabilityChangedForLookups(object? sender, NetworkAvailabilityEventArgs e) => OnNetworkChangedForLookups(sender, e);
+    private void OnNetworkAvailabilityChangedForLookups(object? sender, NetworkAvailabilityEventArgs e)
+    {
+        // A line in the log for the network going or coming (MainForm.Readings.cs), as well as the look-ups.
+        try { BeginInvoke(() => NoteNetworkChangedForTheLog(e.IsAvailable)); }
+        catch (ObjectDisposedException) { /* closing */ }
+        catch (InvalidOperationException) { /* no handle yet, or closing */ }
+        OnNetworkChangedForLookups(sender, e);
+    }
 
     private void OnNetworkChangedForLookups(object? sender, EventArgs e)
     {
-        try { BeginInvoke(() => RetryNameLookups(networkChanged: true)); }
+        try
+        {
+            BeginInvoke(() =>
+            {
+                // A change of address is a line in the log too, so a disconnect can be laid beside it (issue 35).
+                if (e is not NetworkAvailabilityEventArgs) NoteNetworkChangedForTheLog(null);
+                RetryNameLookups(networkChanged: true);
+            });
+        }
         catch (ObjectDisposedException) { /* closing */ }
         catch (InvalidOperationException) { /* no handle yet, or closing */ }
     }

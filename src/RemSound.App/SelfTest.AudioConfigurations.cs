@@ -49,6 +49,9 @@ internal static partial class SelfTest
         new("WebListenerStep", "the web listener taps what is SENT, before any output: it sends a WASAPI lane and an ASIO (DAW) lane at once and proves each arrives as its own stream, and which outputs are ticked never reaches it"),
         new("AnAsioInterfaceSwitchedOnLateComesBack", "an ASIO driver's probe: only ASIO only and both have a driver, and the probe is the same for both"),
         new("TheAsioSplashNeverSticks", "the ASIO loading splash is a window shown while a driver opens; no audio is involved"),
+        new("GapRunsAreOneCaptureAndOneLine", "a stream's report names the ASIO and WASAPI outputs it plays on, to prove each gets a readings row of its own; a run of gaps is counted the same whatever is ticked, and which outputs each configuration keeps is ReadingsOnlyWhileInUse's, over all three"),
+        new("LogFilesNamedByWhenTheyStarted", "fills one readings row naming the WASAPI output's group so the diagnostics report has something to read; a file's name does not depend on what is ticked"),
+        new("LogLinesSaySeverityAndCategory", "a sample settings line's words mention WASAPI; how a line is sorted into its severity and category does not depend on what is ticked"),
         new("AnAsioCopyPlayingKeepsItsSessionAlive", "a second copy to play from exists only with both output types; in WASAPI only and ASIO only the one copy is always the one fed"),
         new("HeadlessWindowsStayOutOfSightUntilHandedOver", "names the ASIO loading splash only to prove it never starts while headless; no audio is involved"),
         // ---- Driver and device lifecycle. About opening and closing hardware, not about which

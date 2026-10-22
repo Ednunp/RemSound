@@ -866,6 +866,17 @@ public sealed class AudioSender : IDisposable
     /// running" decision, so a DAW track goes out whether or not "Send my audio" is also ticked.</summary>
     public bool IsPluginSending => pluginSendActive;
 
+    /// <summary>Which of the three lanes sent sound in the last two seconds: the WASAPI (or only) lane, the ASIO input's and
+    /// the plugin's. The log writes a lane's readings only while it is sending (2026-10-22).</summary>
+    public (bool Wasapi, bool Asio, bool Plugin) LanesSending
+    {
+        get
+        {
+            var within = TimeSpan.FromSeconds(2);
+            return (defaultLane.SentWithin(within), asioLane.SentWithin(within), pluginLane.SentWithin(within));
+        }
+    }
+
     /// <summary>This lane's current route and stream id, for the gate. The route is the whole
     /// backward-compatibility argument in one byte, so it is asserted rather than assumed.</summary>
     internal RenderRoute PluginLaneRouteForTest => pluginLane.Route;

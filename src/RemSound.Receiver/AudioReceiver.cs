@@ -729,8 +729,21 @@ public sealed class AudioReceiver : IDisposable
     /// apart (see PlayoutEngine.CurrentBufferMsFor).</summary>
     public int CurrentBufferMsFor(RenderRoute route) => playoutEngine.CurrentBufferMsFor(route);
 
-    /// <summary>One stream's reading for one second, for the log.</summary>
-    public sealed record StreamNeedReport(string Stream, long Packets, int GapMs, int GapPeakMs, int GapUsedMs, string Replicas);
+    /// <summary>One stream's reading for one second, for the log. <see cref="Outputs"/> has the same as <see cref="Replicas"/>
+    /// as numbers, one per output the stream plays on, for the readings file (2026-10-22); the wire counts and the address
+    /// are the stream's own, for its lost packets and its connection's summary line.</summary>
+    public sealed record StreamNeedReport(string Stream, long Packets, int GapMs, int GapPeakMs, int GapUsedMs, string Replicas)
+    {
+        public IPEndPoint? Endpoint { get; init; }
+        public long WireInOrderTotal { get; init; }
+        public long WireMissedTotal { get; init; }
+        public IReadOnlyList<OutputNeed> Outputs { get; init; } = [];
+    }
+
+    /// <summary>One stream on one output, this second: what it needs, what it plays at, how deep its buffer is, its
+    /// dropouts this second, its audible gaps so far, and the longest gap that ended this second.</summary>
+    public sealed record OutputNeed(RenderRoute Route, int NeedMs, int OwnMs, int PlaysAtMs, int OutputMs, int DepthMs,
+        long NewUnderruns, long GapsTotal, int LongestGapMs);
 
     /// <summary>Each stream's buffer sized from its own packet arrivals, instead of one figure shared by every stream on an
     /// output, so a smooth ASIO stream stops paying for a bursty WASAPI one (10 ms lumps) or a phone's. The latency lab's
@@ -771,6 +784,7 @@ public sealed class AudioReceiver : IDisposable
             var (peak, used) = s.Arrivals.Gaps();
             var frameMs = Math.Max(1, (int)Math.Ceiling(s.Format.FrameDurationMs));
             var sb = new System.Text.StringBuilder();
+            var outputs = new List<OutputNeed>();
             var primary = s.Playout;
             var replicas = primary.Mirrors;
             for (var i = -1; i < replicas.Length; i++)
@@ -792,11 +806,19 @@ public sealed class AudioReceiver : IDisposable
                     else own = need >= prev ? need : Math.Max(need, prev - 1);
                 }
                 p.OwnNeedMs = own;
+                outputs.Add(new OutputNeed(p.Route, need, own, p.EffectiveTargetMs(routeTarget), routeTarget, p.BufferedMs,
+                    newUnderruns, p.DropoutGapsTotal, p.TakeLongestGapMs()));
                 if (sb.Length > 0) sb.Append("; ");
                 sb.Append($"{p.Route}: need={need}ms own={(own > 0 ? own + "ms" : "-")} plays-at={p.EffectiveTargetMs(routeTarget)}ms output={routeTarget}ms depth={p.BufferedMs}ms underruns={newUnderruns}");
             }
             reports.Add(new StreamNeedReport($"{s.Endpoint} stream={s.StreamId} {s.Format.Lane} {s.Codec} {s.Format.FrameDurationMs:0.##}ms{s.LabExtra}",
-                packets, gapMs, peak, used, sb.ToString()));
+                packets, gapMs, peak, used, sb.ToString())
+            {
+                Endpoint = s.Endpoint,
+                WireInOrderTotal = s.WireInOrderCount,
+                WireMissedTotal = s.WireMissedCount,
+                Outputs = outputs,
+            });
         }
         return reports;
     }

@@ -64,6 +64,7 @@ internal static class Program
                 (ex?.ToString() ?? "(no exception object)");
             File.WriteAllText(path, report);
             // And a line in the log itself, where whoever reads it is already looking.
+            RemSoundLog.Current?.FlushReadings();
             RemSoundLog.Current?.Event($"CRASH REPORT written to {Path.GetFileName(path)} — {source}: "
                 + $"{ex?.GetType().Name}: {ex?.Message}");
         }

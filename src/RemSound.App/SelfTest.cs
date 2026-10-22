@@ -440,11 +440,14 @@ internal static partial class SelfTest
         RunStep(results, "AUDIT: the sender's capture figure on the wire (both compatibility directions)", AuditCaptureLatencyOnTheWire);
         RunStep(results, "AUDIT: a dialog's change reaches the log, stamped with the configuration", AuditDialogLoggingIsStamped);
         RunStep(results, "AUDIT: logging OFF means nothing is written (including mid-session)", AuditLoggingIsGated);
-        RunStep(results, "Logging: the lines made every second go out once a minute, and in full around a problem", LogLinesMadeEverySecondFollowTheRule);
-        RunStep(results, "Logging: the plugin's line made every second follows the same rule", PluginLogLinesFollowTheRule);
+        RunStep(results, "Logging: the readings file sums up every minute, and keeps every second only around a problem", LogReadingsFileFollowsTheRule);
+        RunStep(results, "Logging: the plugin's log and readings follow the same rules", PluginLogFollowsTheRules);
         RunStep(results, "Logging: log files are named by when they started, and never share a file", LogFilesNamedByWhenTheyStarted);
-        RunStep(results, "Logging: a new audible gap writes the seconds around it, naming the configuration", AudibleGapWritesTheSecondsAroundIt);
+        RunStep(results, "Logging: a run of audible gaps is one capture and one summary line", GapRunsAreOneCaptureAndOneLine);
         RunStep(results, "Logging: Preferences opens the current log and the logs folder (through the control channel)", PreferencesOpensTheCurrentLogAndFolder);
+        RunStep(results, "Logging: every line starts with a severity word, the time and a category", LogLinesSaySeverityAndCategory);
+        RunStep(results, "Logging: each reading is written only while what it measures is in use (all three configurations)", ReadingsOnlyWhileInUse);
+        RunStep(results, "Logging: a disconnect says why, and a change in this computer's network is a line of its own", DisconnectsSayWhy);
         RunStep(results, "SIMULATOR LOGS: on a good or bad connection the log stays in time order and within the rule's bounds", SimulatorLogStaysWithinTheRule);
         RunStep(results, "AUDIT: the render period is read ONCE per tick and shared (auto-tune starvation)", AuditRenderPeriodIsReadOncePerTick);
         RunStep(results, "AUDIT: render time is attributed to the lane that spent it", AuditRenderWorkIsAttributedPerLane);

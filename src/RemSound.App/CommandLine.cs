@@ -628,44 +628,83 @@ internal static class CommandLine
     /// <summary>The last one-second SNAP row from the newest log, as a readable line: the real
     /// running session's codec, send/receive state, buffer, underruns, drops and heartbeat. These
     /// are the live values a static report can't otherwise show. Empty when logging is off.</summary>
-    private static string LastSessionSnapshot()
+    internal static string LastSessionSnapshot()
     {
         try
         {
+            // The readings file since 2026-10-22: the app's newest (not the plugin's), its last row for the whole machine.
             var dir = AppConfig.LogsDirectory;
             if (!Directory.Exists(dir)) return "(no logs - logging may be off)";
-            var newest = new DirectoryInfo(dir).GetFiles("*.log").OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault();
-            if (newest is null) return "(no log files - logging may be off)";
-            var lines = File.ReadAllLines(newest.FullName);
-            var header = lines.FirstOrDefault(l => l.StartsWith("Kind\t") || l.Contains("\tCodec\t"));
-            var lastSnap = lines.LastOrDefault(l => l.StartsWith("SNAP\t"));
-            if (header is null || lastSnap is null) return "(no session snapshots in the newest log yet)";
-            var cols = header.Split('\t');
-            var vals = lastSnap.Split('\t');
-            string Col(string name) { var i = Array.IndexOf(cols, name); return i >= 0 && i < vals.Length ? vals[i] : "?"; }
-            return $"Connected={Col("Connected")}, Send={Col("SendRunning")}, Receive={Col("ReceiveRunning")}, "
-                 + $"Codec={Col("Codec")}, Buffer={Col("BufferMs")}ms, Underruns={Col("Underruns")}, "
-                 + $"Drops={Col("Drops")}, Heartbeat={Col("Heartbeat")}, TargetLatency={Col("TargetLatencyMs")}ms";
+            var newest = new DirectoryInfo(dir).GetFiles("RemSound-*-readings*.csv").OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault();
+            if (newest is null) return "(no readings file yet - logging may be off; RemSound writes it five minutes behind, and in full when it closes)";
+            var lines = ReadShared(newest.FullName);
+            var header = lines.FirstOrDefault(l => l.StartsWith("Time,", StringComparison.Ordinal));
+            var last = lines.LastOrDefault(l => !l.StartsWith("Time,", StringComparison.Ordinal) && CsvFields(l) is { Count: > 3 } f && f[2].Length == 0);
+            if (header is null || last is null) return "(no readings in the newest readings file yet)";
+            var cols = CsvFields(header);
+            var vals = CsvFields(last);
+            string Col(string name) { var i = cols.IndexOf(name); return i >= 0 && i < vals.Count && vals[i].Length > 0 ? vals[i] : "-"; }
+            return $"At {Col("Time")} ({Col("Kind")} row): Connected={Col("connected")}, Sending={Col("sending")}, Receiving={Col("receiving")}, "
+                 + $"Codec={Col("codec")}, Buffer={Col("bufferMs")}ms, Underruns={Col("underrunsTotal")}, Drops={Col("dropsTotal")}, "
+                 + $"Peers={Col("peers")}, WASAPI target={Col("wasapiTargetMs")}ms, ASIO target={Col("asioTargetMs")}ms";
         }
-        catch (Exception ex) { return $"(could not read snapshot: {ex.Message})"; }
+        catch (Exception ex) { return $"(could not read the readings: {ex.Message})"; }
     }
 
-    /// <summary>The recent WARN/ERROR/exception-style lines from the newest log, so a support
-    /// reader sees the problems without scrolling the whole file. Last <paramref name="max"/>.</summary>
+    /// <summary>A file RemSound may still be writing: read beside its writer.</summary>
+    private static List<string> ReadShared(string path)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(fs);
+        var lines = new List<string>();
+        while (reader.ReadLine() is { } line) lines.Add(line);
+        return lines;
+    }
+
+    /// <summary>One row of a readings file, its quoted fields unquoted.</summary>
+    internal static List<string> CsvFields(string line)
+    {
+        var fields = new List<string>();
+        var field = new System.Text.StringBuilder();
+        var quoted = false;
+        for (var i = 0; i < line.Length; i++)
+        {
+            var c = line[i];
+            if (quoted)
+            {
+                if (c == '"' && i + 1 < line.Length && line[i + 1] == '"') { field.Append('"'); i++; }
+                else if (c == '"') quoted = false;
+                else field.Append(c);
+            }
+            else if (c == '"') quoted = true;
+            else if (c == ',') { fields.Add(field.ToString()); field.Clear(); }
+            else field.Append(c);
+        }
+        fields.Add(field.ToString());
+        return fields;
+    }
+
+    /// <summary>The app's newest log - not the plugin's, which shares the folder.</summary>
+    private static FileInfo? NewestAppLog(string dir) =>
+        new DirectoryInfo(dir).GetFiles("RemSound-*.log").OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault();
+
     private static string RecentLogProblems(int max)
     {
         try
         {
             var dir = AppConfig.LogsDirectory;
             if (!Directory.Exists(dir)) return "  (no logs - logging may be off)";
-            var newest = new DirectoryInfo(dir).GetFiles("*.log").OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault();
+            var newest = NewestAppLog(dir);
             if (newest is null) return "  (no log files - logging may be off)";
-            var problems = File.ReadLines(newest.FullName)
-                .Where(l => l.Contains("error", StringComparison.OrdinalIgnoreCase)
-                         || l.Contains("warn", StringComparison.OrdinalIgnoreCase)
-                         || l.Contains("exception", StringComparison.OrdinalIgnoreCase)
-                         || l.Contains("unreachable", StringComparison.OrdinalIgnoreCase)
-                         || l.Contains("failed", StringComparison.OrdinalIgnoreCase))
+            // Since 2026-10-22 every line starts with its severity word; a log from before is searched for the old words.
+            var problems = ReadShared(newest.FullName)
+                .Where(l => l.StartsWith("WARN	", StringComparison.Ordinal) || l.StartsWith("ERROR	", StringComparison.Ordinal)
+                         || (l.StartsWith("EVT	", StringComparison.Ordinal)
+                             && (l.Contains("error", StringComparison.OrdinalIgnoreCase)
+                              || l.Contains("warn", StringComparison.OrdinalIgnoreCase)
+                              || l.Contains("exception", StringComparison.OrdinalIgnoreCase)
+                              || l.Contains("unreachable", StringComparison.OrdinalIgnoreCase)
+                              || l.Contains("failed", StringComparison.OrdinalIgnoreCase))))
                 .ToList();
             if (problems.Count == 0) return "  (none in the newest log)";
             var tail = problems.Count <= max ? problems : problems.GetRange(problems.Count - max, max);
@@ -674,8 +713,6 @@ internal static class CommandLine
         catch (Exception ex) { return $"  (could not scan log: {ex.Message})"; }
     }
 
-    /// <summary>Write a support-friendly diagnostics report and exit. Always writes a file so it
-    /// works even when launched without a terminal; prints the path if a console is attached.</summary>
     private static int RunDiagnostics(string? pathArg)
     {
         AppConfig cfg;
@@ -723,10 +760,9 @@ internal static class CommandLine
         {
             var dir = AppConfig.LogsDirectory;
             if (!Directory.Exists(dir)) return "  (no logs folder - logging may be off)";
-            var newest = new DirectoryInfo(dir).GetFiles("*.log")
-                .OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault();
+            var newest = NewestAppLog(dir);
             if (newest is null) return "  (no log files - logging may be off)";
-            var all = File.ReadAllLines(newest.FullName);
+            var all = ReadShared(newest.FullName).ToArray();
             var tail = all.Length <= lines ? all : all[^lines..];
             return $"  file: {newest.Name}" + Environment.NewLine
                  + string.Join(Environment.NewLine, tail.Select(l => "  " + l));

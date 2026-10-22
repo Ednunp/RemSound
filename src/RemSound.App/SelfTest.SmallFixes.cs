@@ -78,9 +78,10 @@ internal static partial class SelfTest
             var quiet = new System.Collections.Concurrent.ConcurrentDictionary<IPAddress, bool>();
             var lines = new List<string>();
             form.LogForTest.EventTapForTest = line => { lock (lines) lines.Add(line); };
-            bool Logged(string words) { lock (lines) return lines.Any(l => l.Contains(words, StringComparison.Ordinal)); }
+            // A peer's lines say who first, then what (2026-10-22): "Peer: JONATHAN_LT on the server at ... disconnected: ...".
+            bool PeerLine(string who, string what) { lock (lines) return lines.Any(l => l.StartsWith($"Peer: {who} on the server", StringComparison.Ordinal) && l.Contains(what, StringComparison.Ordinal)); }
             var troubles = new List<string>();
-            form.LogForTest.TroubleTapForTest = why => { lock (troubles) troubles.Add(why); };
+            form.LogForTest.CaptureTapForTest = why => { lock (troubles) troubles.Add(why); };
             hb = form.StartHeartbeatForTest((data, length, to) =>
             {
                 if (Volatile.Read(ref answering) == 1 && to.Equals(relay) && PongTo(data, length) is { } pong)
@@ -130,7 +131,7 @@ internal static partial class SelfTest
             Check(tip.Contains("3 peers", StringComparison.Ordinal),
                 $"THE WRONG COUNT: the tray must count three people on a server as three, not as the server's one heartbeat (it says: {tip})");
             form.DetectPeerHealthTransitionsForTest();
-            Check(people.All(p => Logged($"peer connected: {p.Name} on the server")),
+            Check(people.All(p => PeerLine(p.Name, " connected")),
                 "THE SILENT TICK: each person on the server must get a connect cue of their own as they answer");
 
             // One of them goes quiet - leaves, or unticks us. Only they go, with a cue of their own; the others stay.
@@ -148,9 +149,9 @@ internal static partial class SelfTest
                 $"THE SERVER'S WORD: one person going quiet must show as offline on their own, while the others stay connected ({Names(Rows())})");
             // The cue waits for five seconds of silence, as it does for anybody, where the tag goes at two.
             MoveOn(HeartbeatService.UnreachableWindow - HeartbeatService.HealthyWindow, answer: true);
-            Check(WaitFor(() => { form.DetectPeerHealthTransitionsForTest(); return Logged("peer disconnected: JONATHAN_LT on the server"); }, TimeSpan.FromSeconds(10)),
+            Check(WaitFor(() => { form.DetectPeerHealthTransitionsForTest(); return PeerLine("JONATHAN_LT", " disconnected: "); }, TimeSpan.FromSeconds(10)),
                 "THE SILENT LEAVING: somebody on the server going must get a disconnect cue of their own");
-            Check(!Logged("peer disconnected: ED_DT on the server") && !Logged("peer disconnected: ANDRE_PC on the server"),
+            Check(!PeerLine("ED_DT", " disconnected: ") && !PeerLine("ANDRE_PC", " disconnected: "),
                 "and nobody else's");
             // The log writes the seconds before somebody went in full (RemSoundLog.Trouble, 2026-10-19, issue 35).
             lock (troubles) Check(troubles.Any(t => t.StartsWith("JONATHAN_LT on the server", StringComparison.Ordinal) && t.EndsWith(" disconnected", StringComparison.Ordinal)),
@@ -158,7 +159,12 @@ internal static partial class SelfTest
             quiet.Clear();
             // And coming back says how long they were gone: what "my laptop kept disconnecting" needs from a log.
             MoveOn(TimeSpan.FromMilliseconds(500), answer: true);
-            bool CameBack() { lock (lines) return lines.Any(l => l.StartsWith("peer connected: JONATHAN_LT on the server", StringComparison.Ordinal) && l.Contains(", back after ", StringComparison.Ordinal)); }
+            // WHY, in words (2026-10-22): he stopped answering his pings - and his connection's summary when it ended.
+            Check(PeerLine("JONATHAN_LT", " disconnected: it stopped answering - no reply to its pings for "),
+                "WHY: the disconnect line must say in words why he was lost");
+            Check(PeerLine("JONATHAN_LT", ": connection ended (disconnected) after ") && PeerLine("JONATHAN_LT", "ping "),
+                "THE SUMMARY: his connection's end must be summed up in one line, with its pings");
+            bool CameBack() => PeerLine("JONATHAN_LT", " connected, back after ");
             Check(WaitFor(() => { Rows(); form.DetectPeerHealthTransitionsForTest(); return CameBack(); },
                     TimeSpan.FromSeconds(10)),
                 "COMING BACK: somebody who went and returned must be logged as back, with how long they were gone");

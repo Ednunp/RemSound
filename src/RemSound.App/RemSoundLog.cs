@@ -1,47 +1,37 @@
+using RemSound.Core;
+
 namespace RemSound.App;
 
 /// <summary>
-/// Lightweight tab-separated log file written to <see cref="RemSound.Core.AppConfig.LogsDirectory"/>
-/// (<c>user settings and logs\logs\</c> beside the exe, unless <c>--config-dir</c> moves it).
-/// Two row kinds:
-///   SNAP  — periodic snapshot of runtime counters (made every second; see <see cref="Detail"/> for when it is written)
-///   EVT   — one-off events (connect, disconnect, codec change, errors)
-/// Format (the file opens with a header row naming these columns, starting with Kind):
-///   SNAP\t{Timestamp}\t{Machine}\t{Connected}\t{SendRunning}\t{ReceiveRunning}\t{Codec}\t
-///         {MaxLatencyMs}\t{TargetLatencyMs}\t{BufferMs}\t{SenderPackets}\t{SenderKB}\t
-///         {SenderDevice}\t{ReceiverPackets}\t{ReceiverKB}\t{Underruns}\t{Drops}\t{ReceiveDevice}\t
-///         {Heartbeat}\t{OpusFecRecoveries}\t{OpusUnrecoveredGaps}\t{MaxLatencyMsAsio}\t{TargetLatencyMsAsio}
-///   EVT\t{Timestamp}\t{Message}
+/// The log: what happened, one line each, in a text file written to <see cref="AppConfig.LogsDirectory"/>
+/// (<c>user settings and logs\logs\</c> beside the exe, unless <c>--config-dir</c> moves it) - and, beside it, the readings
+/// RemSound measures every second, in a CSV file of their own (2026-10-22, issue 35).
 ///
-/// The log file is created lazily on the first write that arrives while <see cref="Enabled"/>
-/// is true. When the user has logs turned off in Preferences (the default), no file is created
-/// at all — the App can construct the log object freely without spawning empty files in
-/// <c>logs\</c>. Flipping <see cref="Enabled"/> back on mid-session is also safe: the next
-/// write creates the file with its header and the session continues normally.
+/// <para>Every line of the log starts with a severity word, the time and a category, tab-separated:
+/// <c>WARN 14:02:31.250 Peer: LAPTOP disconnected - ...</c> (<see cref="LogLines"/>). The date is said when the log starts
+/// and whenever it changes. The readings go through <see cref="ReadingsRecorder"/>: a minute row summing up every minute,
+/// and every second only around a problem (<see cref="Capture"/>).</para>
+///
+/// <para>The files are made lazily, on the first line written while <see cref="Enabled"/> is true. With logs turned off
+/// in Preferences (the default) nothing is made at all, so the App can construct this freely. Flipping
+/// <see cref="Enabled"/> on mid-session is safe: the next line makes the file.</para>
 /// </summary>
 internal sealed class RemSoundLog : IDisposable
 {
-    // MaxLatencyMsAsio / TargetLatencyMsAsio columns hold the per-lane numbers in
-    // BothIndependent mode. In WasapiOnly they are 0 and the legacy MaxLatencyMs /
-    // TargetLatencyMs columns continue to mean "the receiver's only latency".
-    private const string SnapHeader =
-        "Kind\tTimestamp\tMachine\tConnected\tSendRunning\tReceiveRunning\tCodec\t" +
-        "MaxLatencyMs\tTargetLatencyMs\tBufferMs\tSenderPackets\tSenderKB\t" +
-        "SenderDevice\tReceiverPackets\tReceiverKB\tUnderruns\tDrops\tReceiveDevice\tHeartbeat\t" +
-        "OpusFecRecoveries\tOpusUnrecoveredGaps\tMaxLatencyMsAsio\tTargetLatencyMsAsio";
-
     private StreamWriter? writer;
     private bool fileCreationFailed;
     // Bytes written to the CURRENT file, tracked so a multi-day session with logging on can't
     // grow one file without bound (2026-07-26 resource audit: ~25-60 MB/day while streaming,
     // startup-only pruning never touches the live file). At the cap the file is closed with a
-    // "continued in next file" line and a fresh timestamped file starts — the startup pruning
+    // "continued in next file" line and a fresh file starts — the startup pruning
     // then ages out the closed ones like any other log. Internal seam so the self-test can
     // roll at a tiny size instead of writing 50 MB.
     private long bytesWrittenToCurrentFile;
     private int fileOrdinal;
-    /// <summary>The name this session's first file settled on (LogFileNames): every later part carries it, with "-partN".</summary>
+    /// <summary>The name this session's first file settled on (LogFileNames): every later part carries it, with "-partN",
+    /// and so does the readings file.</summary>
     private string? sessionStem;
+    private DateTime? dateSaid;
     internal long RollAfterBytes { get; set; } = 50L * 1024 * 1024;
     /// <summary>How many times the log has rolled to a fresh file this session (test seam).</summary>
     internal int RollCount { get; private set; }
@@ -60,11 +50,14 @@ internal sealed class RemSoundLog : IDisposable
     /// or file creation fails).</summary>
     public string? Path { get; private set; }
 
-    /// <summary>Master gate for all writes. When false, <see cref="Event"/>, <see cref="Snapshot"/>,
-    /// <see cref="Detail"/> and <see cref="Trouble"/> all short-circuit before touching the file system — no
-    /// creation, no headers, no data. Defaults to false so the App can construct the log object
-    /// before reading the user's preference; the App pushes the real value in after. Switching it off also
-    /// forgets the per-second lines waiting in memory, so none of them can reach the file later.</summary>
+    /// <summary>The readings file, once the first row has gone into it.</summary>
+    public string? ReadingsPath { get; private set; }
+
+    /// <summary>Master gate for all writes. When false, <see cref="Event"/>, <see cref="Readings"/> and
+    /// <see cref="Capture"/> all short-circuit before touching the file system — no creation, no headers, no data.
+    /// Defaults to false so the App can construct the log object before reading the user's preference; the App pushes the
+    /// real value in after. Switching it off also forgets the readings waiting in memory, so none can reach the file
+    /// later.</summary>
     public bool Enabled
     {
         get => enabled;
@@ -73,21 +66,18 @@ internal sealed class RemSoundLog : IDisposable
             lock (writeGate)
             {
                 enabled = value;
-                if (!value) detailRule.Forget();
+                if (!value) readings?.Forget();
             }
         }
     }
     private bool enabled;
 
-    /// <summary>When a line made every second is written: one second's worth a minute, and every second around a
-    /// <see cref="Trouble"/>. See <see cref="RemSound.Core.LogDetailRule"/> for why (2026-10-19, issue 35).</summary>
-    private readonly RemSound.Core.LogDetailRule detailRule = new();
+    /// <summary>The clock the log runs on - this computer's time. A test seam: the gate steps through an hour in a moment.</summary>
+    internal Func<DateTime> NowForTest { get; set; } = () => DateTime.Now;
 
-    /// <summary>The clock the per-second rules run on. A test seam: the gate steps through an hour in a moment.</summary>
-    internal Func<DateTime> UtcNowForTest { get; set; } = () => DateTime.UtcNow;
-    /// <summary>Test tap: every <see cref="Trouble"/> call, before the switch, so the gate can prove the app reports a
-    /// problem without a log file existing.</summary>
-    internal Action<string>? TroubleTapForTest;
+    /// <summary>Test tap: every <see cref="Capture"/>, before the switch, so the gate can prove the app keeps the seconds
+    /// around a problem without a log file existing.</summary>
+    internal Action<string>? CaptureTapForTest;
 
     /// <summary>The log the running window is writing, so the crash handlers can put the failure IN it, at the moment
     /// it happened, rather than only in a separate file beside it. Ed's 2026-09-20 error left no trace at all; a crash
@@ -101,21 +91,18 @@ internal sealed class RemSoundLog : IDisposable
         Current = this;
     }
 
-    /// <summary>Open the underlying file if it hasn't been opened yet and write the schema
-    /// header + a "log started" event line. Must be called while holding
-    /// <see cref="writeGate"/>. Returns true on success or if the file is already open;
-    /// false if creation has failed (either now or earlier) — caller should give up on the
-    /// current write.</summary>
+    /// <summary>Open the log if it isn't open yet, starting it with a line saying what it is. Must be called holding
+    /// <see cref="writeGate"/>. False if creation has failed (now or earlier): the caller gives up on its line.</summary>
     private bool EnsureFileOpenLocked()
     {
         if (writer is not null) return true;
-        if (fileCreationFailed) return false;
+        if (fileCreationFailed || disposed) return false;
         try
         {
-            var dir = RemSound.Core.AppConfig.LogsDirectory;
+            var dir = AppConfig.LogsDirectory;
             Directory.CreateDirectory(dir);
             fileOrdinal++;
-            var (path, stream, stem) = RemSound.Core.LogFileNames.CreateNew(dir, sessionStem ?? RemSound.Core.LogFileNames.AppStem(DateTime.Now), fileOrdinal);
+            var (path, stream, stem) = LogFileNames.CreateNew(dir, sessionStem ?? LogFileNames.AppStem(DateTime.Now), fileOrdinal);
             sessionStem = stem;
             Path = path;
             writer = new StreamWriter(stream)
@@ -123,8 +110,14 @@ internal sealed class RemSoundLog : IDisposable
                 AutoFlush = true,
             };
             bytesWrittenToCurrentFile = 0;
-            writer.WriteLine(SnapHeader);
-            writer.WriteLine($"EVT\t{DateTime.Now:o}\tlog started");
+            var now = NowForTest();
+            var offset = TimeZoneInfo.Local.GetUtcOffset(now);
+            dateSaid = now.Date;
+            writer.WriteLine(LogLines.Format(LogLevel.Info, now, "Log",
+                $"RemSound {typeof(RemSoundLog).Assembly.GetName().Version?.ToString(3)} log for {Environment.MachineName}, "
+                + $"{(fileOrdinal == 1 ? "started" : "continued")} {now:dddd d MMMM yyyy}. Times are this computer's "
+                + $"(UTC{(offset < TimeSpan.Zero ? "-" : "+")}{offset:hh\\:mm}). What it measures every second is in "
+                + $"{stem}-readings.csv beside this file: a row for every minute, and every second around a problem."));
             return true;
         }
         catch
@@ -137,120 +130,6 @@ internal sealed class RemSoundLog : IDisposable
             fileCreationFailed = true;
             return false;
         }
-    }
-
-    public void Snapshot(
-        bool connected,
-        bool sendRunning,
-        bool receiveRunning,
-        string codec,
-        int maxLatencyMs,
-        int targetLatencyMs,
-        int bufferMs,
-        long senderPackets,
-        long senderBytes,
-        string senderDevice,
-        long receiverPackets,
-        long receiverBytes,
-        long underruns,
-        long drops,
-        string receiveDevice,
-        string heartbeat,
-        long opusFecRecoveries,
-        long opusUnrecoveredGaps,
-        int maxLatencyMsAsio = 0,
-        int targetLatencyMsAsio = 0)
-    {
-        if (!Enabled) return;
-        lock (writeGate)
-        {
-            if (!enabled) return;
-            try
-            {
-                var line = string.Join('\t',
-                    "SNAP",
-                    DateTime.Now.ToString("o"),
-                    Environment.MachineName,
-                    connected,
-                    sendRunning,
-                    receiveRunning,
-                    codec,
-                    maxLatencyMs,
-                    targetLatencyMs,
-                    bufferMs,
-                    senderPackets,
-                    senderBytes / 1024,
-                    Sanitize(senderDevice),
-                    receiverPackets,
-                    receiverBytes / 1024,
-                    underruns,
-                    drops,
-                    Sanitize(receiveDevice),
-                    Sanitize(heartbeat),
-                    opusFecRecoveries,
-                    opusUnrecoveredGaps,
-                    maxLatencyMsAsio,
-                    targetLatencyMsAsio);
-                DetailLocked(line);
-            }
-            catch { /* swallow — log is best-effort */ }
-        }
-    }
-
-    /// <summary>One of the per-second lines (the diagnostic line, the "streams" line, the delay estimate): written as
-    /// <see cref="RemSound.Core.LogDetailRule"/> says - one second's worth a minute, and every second around a
-    /// <see cref="Trouble"/>. The test tap and the headless record see every one, as they see every event.</summary>
-    public void Detail(string message)
-    {
-        EventTapForTest?.Invoke(message);
-        HeadlessRecords.Note(HeadlessRecords.Log, message);
-        if (!Enabled) return;
-        lock (writeGate)
-        {
-            if (!enabled) return;
-            DetailLocked($"EVT\t{DateTime.Now:o}\t{Sanitize(message)}");
-        }
-    }
-
-    /// <summary>Must be called holding <see cref="writeGate"/>. The line keeps the time it was made, so one written
-    /// later from memory still says when it happened.</summary>
-    private void DetailLocked(string line)
-    {
-        if (detailRule.Line(UtcNowForTest(), line)) WriteLineLocked(line);
-    }
-
-    /// <summary>
-    /// Something went wrong that a reader will want every second of: an audible gap, a peer that stopped answering, the
-    /// person pressing Write logs now. Writes the per-second lines from the last 30 seconds, then the next 30 as they
-    /// come. At most once every ten minutes unless <paramref name="evenInsideTheGap"/>; the next one says how many were
-    /// left unwritten in between (<see cref="RemSound.Core.LogDetailRule"/>).
-    /// </summary>
-    public void Trouble(string why, bool evenInsideTheGap = false)
-    {
-        TroubleTapForTest?.Invoke(why);
-        if (!Enabled) return;
-        string? said = null;
-        lock (writeGate)
-        {
-            if (!enabled) return;
-            if (detailRule.Trouble(UtcNowForTest(), why, evenInsideTheGap) is not { } burst) return;
-            said = burst.Heading;
-            WriteLineLocked($"EVT\t{DateTime.Now:o}\t{Sanitize(said)}");
-            foreach (var line in burst.Lines) WriteLineLocked(line);
-        }
-        HeadlessRecords.Note(HeadlessRecords.Log, said);
-    }
-
-    /// <summary>Must be called holding <see cref="writeGate"/>.</summary>
-    private void WriteLineLocked(string line)
-    {
-        if (!EnsureFileOpenLocked()) return;
-        try
-        {
-            writer!.WriteLine(line);
-            AccountAndMaybeRollLocked(line.Length);
-        }
-        catch { /* swallow — log is best-effort */ }
     }
 
     /// <summary>
@@ -267,19 +146,133 @@ internal sealed class RemSoundLog : IDisposable
     /// it did, which is a property of the call site, not of whether the user happens to have the log
     /// file switched on. Tapping here also means the gate never writes a real log file in order to
     /// test logging. Same lesson as TICK1: behaviour must not sit behind the log switch.</para>
+    ///
+    /// <para>It sees a line as it was asked for: a line that says its own level and category as "Category: text", every
+    /// other one in its own words, as the suites have always matched them.</para>
     /// </summary>
     internal Action<string>? EventTapForTest;
 
+    /// <summary>A line in its own words. Its level and category come from them (<see cref="LogLines.Classify"/>).</summary>
     public void Event(string message)
     {
         EventTapForTest?.Invoke(message);
         HeadlessRecords.Note(HeadlessRecords.Log, message);
         if (!Enabled) return;
+        var (level, category, text) = LogLines.Classify(message);
+        Write(level, category, text);
+    }
+
+    /// <summary>A line that says its own level and category: "WARN Peer: LAPTOP disconnected - ...".</summary>
+    public void Event(LogLevel level, string category, string text)
+    {
+        var said = $"{category}: {text}";
+        EventTapForTest?.Invoke(said);
+        HeadlessRecords.Note(HeadlessRecords.Log, said);
+        if (!Enabled) return;
+        Write(level, category, text);
+    }
+
+    private void Write(LogLevel level, string category, string text)
+    {
+        lock (writeGate)
+        {
+            if (!enabled || !EnsureFileOpenLocked()) return;
+            var now = NowForTest();
+            if (dateSaid != now.Date)
+            {
+                dateSaid = now.Date;
+                WriteLineLocked(LogLines.Format(LogLevel.Info, now, "Log", $"the date is now {now:dddd d MMMM yyyy}"));
+            }
+            WriteLineLocked(LogLines.Format(level, now, category, text));
+        }
+    }
+
+    /// <summary>Must be called holding <see cref="writeGate"/>.</summary>
+    private void WriteLineLocked(string line)
+    {
+        if (!EnsureFileOpenLocked()) return;
+        try
+        {
+            writer!.WriteLine(line);
+            AccountAndMaybeRollLocked(line.Length);
+        }
+        catch { /* swallow — log is best-effort */ }
+    }
+
+    // ---- THE READINGS FILE ------------------------------------------------------------------------------------------
+
+    private ReadingsRecorder? readings;
+    private StreamWriter? readingsWriter;
+    private long readingsBytes;
+    private int readingsPart;
+    private bool readingsFailed;
+
+    /// <summary>One second's readings: the machine-wide row and one for each stream on each output. They go to the
+    /// readings file as <see cref="ReadingsRecorder"/> says.</summary>
+    public void Readings(ReadingsRow machine, IReadOnlyList<ReadingsRow>? streams = null)
+    {
+        if (!Enabled) return;
         lock (writeGate)
         {
             if (!enabled) return;
-            WriteLineLocked($"EVT\t{DateTime.Now:o}\t{Sanitize(message)}");
+            readings ??= new ReadingsRecorder(machine.Schema, WriteReadingLineLocked);
+            try { readings.Second(NowForTest(), machine, streams); }
+            catch { /* best-effort */ }
         }
+    }
+
+    /// <summary>Keep the seconds from <paramref name="lookBack"/> ago and the next 30: a problem a reader will want every
+    /// second of. Returns words for the log line that reports it ("every second from 14:01:31 to 14:02:31 is in the
+    /// readings file"), or null when nothing is being kept (logging off, or no readings yet).</summary>
+    public string? Capture(string why, TimeSpan lookBack)
+    {
+        CaptureTapForTest?.Invoke(why);
+        if (!Enabled) return null;
+        lock (writeGate)
+        {
+            if (!enabled || readings is null) return null;
+            var (from, to) = readings.Capture(NowForTest(), lookBack);
+            return $"every second from {from:HH:mm:ss} to {to:HH:mm:ss} goes in the readings file";
+        }
+    }
+
+    /// <summary>Write now what the readings file will hold, rather than five minutes from now: Write logs now, a crash,
+    /// and RemSound closing (<paramref name="closing"/> also sums up the minute still open).</summary>
+    public void FlushReadings(bool closing = false)
+    {
+        lock (writeGate)
+        {
+            if (!enabled) return;
+            try { readings?.Flush(NowForTest(), closing); }
+            catch { /* best-effort */ }
+        }
+    }
+
+    private void WriteReadingLineLocked(string line)
+    {
+        if (readingsFailed) return;
+        try
+        {
+            if (readingsWriter is null)
+            {
+                if (!EnsureFileOpenLocked()) { readingsFailed = true; return; }
+                readingsPart++;
+                var dir = System.IO.Path.GetDirectoryName(Path!)!;
+                var name = $"{sessionStem}-readings{(readingsPart > 1 ? $"-part{readingsPart}" : "")}.csv";
+                ReadingsPath = System.IO.Path.Combine(dir, name);
+                readingsWriter = new StreamWriter(new FileStream(ReadingsPath, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite)) { AutoFlush = true };
+                readingsBytes = 0;
+                if (readingsPart > 1 && !line.StartsWith("Time,", StringComparison.Ordinal)) readingsWriter.WriteLine(readings!.HeaderLine);
+            }
+            readingsWriter.WriteLine(line);
+            readingsBytes += line.Length + 2;
+            if (readingsBytes >= RollAfterBytes)
+            {
+                readingsWriter.Dispose();
+                readingsWriter = null;
+            }
+        }
+        catch { readingsFailed = true; }
     }
 
     /// <summary>Account a just-written line and roll to a fresh file at the size cap. Must be
@@ -294,7 +287,7 @@ internal sealed class RemSoundLog : IDisposable
         if (bytesWrittenToCurrentFile < RollAfterBytes) return;
         try
         {
-            writer?.WriteLine($"EVT\t{DateTime.Now:o}\tlog reached its size cap — continuing in a fresh file");
+            writer?.WriteLine(LogLines.Format(LogLevel.Info, NowForTest(), "Log", "this file has reached its size limit - the log goes on in a fresh file"));
             writer?.Dispose();
         }
         catch { /* swallow */ }
@@ -308,16 +301,20 @@ internal sealed class RemSoundLog : IDisposable
         {
             try
             {
-                if (writer is not null && Enabled)
+                if (enabled)
                 {
-                    // Inline the "log stopped" write so we don't re-acquire the gate.
-                    writer.WriteLine($"EVT\t{DateTime.Now:o}\tlog stopped");
+                    readings?.Flush(NowForTest(), closeMinute: true);
+                    if (writer is not null) writer.WriteLine(LogLines.Format(LogLevel.Info, NowForTest(), "Log", "log stopped"));
                 }
                 writer?.Dispose();
+                readingsWriter?.Dispose();
             }
             catch { /* swallow */ }
+            writer = null;
+            readingsWriter = null;
+            // Nothing written after this may start a fresh file.
+            disposed = true;
         }
     }
-
-    private static string Sanitize(string value) => value.Replace('\t', ' ').Replace('\n', ' ');
+    private bool disposed;
 }

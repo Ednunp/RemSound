@@ -88,7 +88,8 @@ internal static partial class SelfTest
             // Said in the plugin's log.
             var logs = Directory.Exists(AppConfig.LogsDirectory) ? Directory.GetFiles(AppConfig.LogsDirectory, "RemSoundPlugin-*.log") : [];
             var text = string.Join("\n", logs.Select(f => { try { using var s = new FileStream(f, FileMode.Open, FileAccess.Read, FileShare.ReadWrite); return new StreamReader(s).ReadToEnd(); } catch { return ""; } }));
-            Check(text.Contains("parameters: changed by the host, not the window - applying them", StringComparison.Ordinal),
+            // Under its category, which starts with a capital since 2026-10-22: the words matched as words.
+            Check(text.Contains("parameters: changed by the host, not the window - applying them", StringComparison.OrdinalIgnoreCase),
                 "the plugin's log must say when it applied a change the host made");
         }
         finally

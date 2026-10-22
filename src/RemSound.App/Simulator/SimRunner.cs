@@ -62,9 +62,7 @@ internal static partial class SimRunner
             foreach (var config in new[] { SimConfig.WasapiOnly, SimConfig.AsioOnly, SimConfig.Both })
             {
                 var r = SimLogs.Run(net, config, seconds, dropEvery);
-                say(SimLogs.Describe(r)
-                    + (r.Bursts > SimLogs.MostBurstsIn(r.Hours) ? "; TOO MANY BURSTS" : "")
-                    + (r.SecondsWritten > SimLogs.MostSecondsIn(r.Hours, r.Bursts) ? "; TOO MANY SECONDS" : ""));
+                say(SimLogs.Describe(r) + (r.SecondRows > SimLogs.MostSecondRows(r) ? "; TOO MANY SECOND ROWS" : ""));
             }
     }
 

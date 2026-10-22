@@ -97,8 +97,9 @@ internal sealed record SimNetwork(string Name, double BaseMs, double JitterMs = 
 /// <param name="Music">The left channel carries the music-like signal (<see cref="SimMusic"/>) in place of the steady tone,
 /// and the result's <see cref="SimResult.Music"/> says what was heard in it: each fault, where in the music it fell and
 /// how audible it is. The tone's own findings (glitches, pitch, noise) mean nothing in such a run; its delay figures do.</param>
-/// <param name="EverySecondDo">Called once a simulated second with the simulated time and the receiver, after the main
-/// window's work - for a run that watches the receiver as some other part of the app does (the log, SimLogs).</param>
+/// <param name="EverySecondDo">Called once a simulated second with the simulated time, the receiver and that second's
+/// per-stream reports (the ones the per-stream buffers were sized from - asked once, as the app asks), after the main
+/// window's work: for a run that watches the receiver as some other part of the app does (the log, SimLogs).</param>
 internal sealed record SimScenario(
     string Name,
     SimConfig Config,
@@ -138,7 +139,7 @@ internal sealed record SimScenario(
     IReadOnlyList<SimCaptureDevice>? CaptureDevices = null,
     double MixTickJitterMs = 1.5,
     bool Music = false,
-    Action<double, AudioReceiver>? EverySecondDo = null);
+    Action<double, AudioReceiver, IReadOnlyList<AudioReceiver.StreamNeedReport>>? EverySecondDo = null);
 
 /// <summary>
 /// Push to talk in a run (2026-09-28): the profile's settings at the sender, and the key pressed and released at simulated
@@ -808,12 +809,14 @@ internal static class Simulation
             // formula makes of the stream under test's own arrivals.
             var gapUsed = 0;
             var streamNames = new SortedSet<string>(StringComparer.Ordinal);
+            IReadOnlyList<AudioReceiver.StreamNeedReport> lastReports = [];
             var laneTag = sendAsio ? "AsioLane" : "Mixed";
             for (var sec = 1; sec <= (int)s.Seconds; sec++)
                 At(sec, () =>
                 {
                     var reports = receiver.UpdatePerStreamNeeds(r => r == RenderRoute.AsioLane ? (int)Math.Ceiling(receivePeriod * 1000) : 10,
                         _ => s.ContinuousAutoTune || s.LowestDelayTune);   // as the app: only on an output whose auto-tune is on
+                    lastReports = reports;
                     foreach (var rep in reports) if (rep.Packets > 0) streamNames.Add(rep.Stream);
                     var mine = reports.FirstOrDefault(r => r.Stream.Contains(laneTag, StringComparison.Ordinal) && r.Packets > 0);
                     if (mine is not null) gapUsed = mine.GapUsedMs;
@@ -850,7 +853,7 @@ internal static class Simulation
 
             // Anything else the run watches each second (SimLogs: the log's rule fed the receiver's real gaps). It draws no dice.
             if (s.EverySecondDo is { } everySecond)
-                for (var sec = 1; sec <= (int)s.Seconds; sec++) At(sec + 0.26, () => everySecond(now, receiver));
+                for (var sec = 1; sec <= (int)s.Seconds; sec++) At(sec + 0.26, () => everySecond(now, receiver, lastReports));
 
             // Each second: the listened output's underruns, the post-decode probe, the WASAPI stage's reading.
             var underrunsBySecond = new List<long>();

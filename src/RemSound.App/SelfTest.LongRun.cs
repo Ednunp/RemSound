@@ -138,7 +138,7 @@ internal static partial class SelfTest
                     "the very first tick must write a long-run line even with nothing running — this is the exact state "
                     + "in which the per-second diagnostic line goes silent, and the whole reason this report exists");
                 var logPath = form.LogForTest.Path;
-                Check(logPath is not null && ReadSharedText(logPath).Contains("\tlongrun ", StringComparison.Ordinal),
+                Check(logPath is not null && ReadSharedText(logPath).Contains("\tLong run: longrun ", StringComparison.Ordinal),
                     $"and the long-run line must be IN the log file, not only handed to the logger (file: {logPath ?? "none"})");
 
                 Check(first.Contains("stage=", StringComparison.Ordinal),

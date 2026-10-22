@@ -145,8 +145,9 @@ internal static partial class SelfTest
             // second, and scattered the rest over a file each (found 2026-09-25).
             var cliLog = CommandLineLog.PathForTest;
             var cliText = cliLog is null ? "" : ReadSharedText(cliLog);
-            Check(cliText.Contains("vst plugin install: ok", StringComparison.Ordinal) && cliText.Contains("service: install requested (elevated)", StringComparison.Ordinal)
-                  && cliText.Contains("service: install finished", StringComparison.Ordinal),
+            // Each under its category, which starts with a capital since 2026-10-22: the words matched as words.
+            Check(cliText.Contains("vst plugin install: ok", StringComparison.OrdinalIgnoreCase) && cliText.Contains("service: install requested (elevated)", StringComparison.OrdinalIgnoreCase)
+                  && cliText.Contains("service: install finished", StringComparison.OrdinalIgnoreCase),
                 $"a command's lines must all reach one log file, the later ones included (file: {cliLog ?? "none"})");
 
             // What the menu greys out is said instead, and nothing is asked of Windows.

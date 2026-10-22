@@ -629,7 +629,7 @@ internal static partial class SelfTest
                 Check(Directory.Exists(pointer!.Value.UserDataDirectory), "...and it must point at a folder that is really there");
 
 
-                string? path;
+                string? path, readingsPath;
                 using (var live = new PluginLog(Guid.NewGuid()))
                 {
                     live.SnapshotSource = () => SampleSnapshot();
@@ -641,39 +641,40 @@ internal static partial class SelfTest
                     // timer, and reading a log while its own writer still holds it open is a
                     // file-sharing argument that proves nothing about whether the logging works.
                     Check(WaitUntil(() => live.SnapshotsWritten > 0, timeoutMs: 4000),
-                        "the per-second snapshot line must actually be written");
+                        "the per-second readings must actually be taken");
                 }
+                // Closing the log wrote out its readings: the minute so far, summed up (2026-10-22, their own file).
+                readingsPath = Directory.GetFiles(Path.GetDirectoryName(path!)!, Path.GetFileNameWithoutExtension(path!) + "-readings.csv").FirstOrDefault();
 
                 var text = ReadSharedText(path!);
-                Check(text.StartsWith("Kind\tTimestamp"), "the file must start with its column header, or nobody can read it");
+                Check(text.StartsWith("INFO\t", StringComparison.Ordinal), "every line starts with its severity word, the first included");
                 Check(text.Contains("plugin log started"), "it must say when it started, and in which host process");
-                Check(text.Contains("job: receiving 192.168.1.50"), "events must be written verbatim");
+                Check(text.Contains("Job: receiving 192.168.1.50"), "events must be written in their own words, under their category");
+                var readings = ReadSharedText(Require(readingsPath, "the plugin's readings must be in their own file beside its log"));
                 // The numbers a tester's report hinges on. If these are absent the log looks fine and
                 // answers nothing.
-                foreach (var column in new[] { "HostRate", "BlockFrames", "Resampling", "ShortBlocks", "RingFrames" })
-                    Check(text.Contains(column), $"the snapshot must carry '{column}' - it is one of the numbers that explains a fault");
-
-                var snap = text.Split('\n').First(l => l.StartsWith("SNAP"));
-                Check(snap.Contains("\t44100\t") && snap.Contains("\tyes\t"),
-                    $"the snapshot must report the host's real rate and whether we are resampling (got: {snap.Trim()})");
-
+                var rows = readings.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToList();
+                var header = CommandLine.CsvFields(rows[0]);
+                foreach (var column in new[] { "hostRate", "blockFrames", "resampling", "shortBlocksTotal", "ringFrames" })
+                    Check(header.Contains(column), $"the readings must carry '{column}' - it is one of the numbers that explains a fault");
+                var values = CommandLine.CsvFields(Require(rows.Skip(1).LastOrDefault(), "the readings file must hold the minute so far"));
                 // The columns added 2026-09-24 to find where a send stops. Read by NAME through the header, so a
                 // value that lands under the wrong heading fails - a shifted column reads as a plausible wrong number.
-                var header = text.Split('\n')[0].TrimEnd('\r').Split('\t');
-                var values = snap.TrimEnd('\r').Split('\t');
-                Check(values.Length == header.Length, $"every snapshot line must have one value per heading ({values.Length} values, {header.Length} headings)");
+                Check(values.Count == header.Count, $"every row must have one value per heading ({values.Count} values, {header.Count} headings)");
                 string Column(string name)
                 {
-                    var at = Array.IndexOf(header, name);
+                    var at = header.IndexOf(name);
                     Check(at >= 0, $"the header must carry '{name}'");
-                    return values[at];
+                    return at >= 0 ? values[at] : "";
                 }
-                Check(Column("HostCalls") == "98765", $"HostCalls must sit under its own heading (got '{Column("HostCalls")}')");
-                Check(Column("LastFrames") == "256", $"LastFrames likewise (got '{Column("LastFrames")}')");
-                Check(Column("Submitted") == "4321", $"Submitted likewise (got '{Column("Submitted")}')");
-                Check(Column("BusFlushed") == "4300", $"BusFlushed likewise (got '{Column("BusFlushed")}')");
-                Check(Column("BusSenders") == "2", $"BusSenders likewise (got '{Column("BusSenders")}')");
-                Check(Column("InputPeakDb") == "-6.0", $"InputPeakDb must be written in dBFS to one place (got '{Column("InputPeakDb")}')");
+                Check(Column("hostRate") == "44100" && Column("resampling") == "1",
+                    $"the readings must report the host's real rate and whether we are resampling (got {Column("hostRate")}, {Column("resampling")})");
+                Check(Column("hostCalls") == "98765", $"hostCalls must sit under its own heading (got '{Column("hostCalls")}')");
+                Check(Column("lastFrames") == "256", $"lastFrames likewise (got '{Column("lastFrames")}')");
+                Check(Column("submitted") == "4321", $"submitted likewise (got '{Column("submitted")}')");
+                Check(Column("busFlushed") == "4300", $"busFlushed likewise (got '{Column("busFlushed")}')");
+                Check(Column("busSenders") == "2", $"busSenders likewise (got '{Column("busSenders")}')");
+                Check(Column("inputPeakDb") == "-6", $"inputPeakDb must be written in dBFS to one place (got '{Column("inputPeakDb")}')");
             }
 
             // --- The APP's half: every claim and release must reach the log ---------------------
@@ -753,7 +754,7 @@ internal static partial class SelfTest
                 var path = form.LogPathForTest;
                 Check(path is not null, "with logging on, the app must have a log file");
                 var text = ReadSharedText(path!);
-                Check(text.Contains("vst plugin: link open"), "the app's log must record the link opening, with its port");
+                Check(text.Contains("Plugin: link open"), "the app's log must record the link opening, with its port");
                 Check(text.Contains("said hello"),
                     "the app's log must record a plugin connecting - this is the wiring the bridge's own test cannot prove");
                 Check(text.Contains("took 192.168.1.50"),

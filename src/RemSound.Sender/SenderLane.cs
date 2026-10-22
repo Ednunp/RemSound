@@ -129,6 +129,14 @@ internal sealed class SenderLane
     private long lastEmitTicks;
     private long maxEmitGapTicks;
 
+    /// <summary>Has this lane sent a frame in the last <paramref name="within"/>? What "in use" means for its readings in
+    /// the log (2026-10-22, Ed: readings "only get logged when they get turned on").</summary>
+    internal bool SentWithin(TimeSpan within)
+    {
+        var last = Interlocked.Read(ref lastEmitTicks);
+        return last != 0 && System.Diagnostics.Stopwatch.GetTimestamp() - last <= within.TotalSeconds * System.Diagnostics.Stopwatch.Frequency;
+    }
+
     private void NoteEmitted()
     {
         var now = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -138,7 +146,7 @@ internal sealed class SenderLane
             var gap = now - lastEmitTicks;
             if (gap > maxEmitGapTicks) maxEmitGapTicks = gap;
         }
-        lastEmitTicks = now;
+        Interlocked.Exchange(ref lastEmitTicks, now);
     }
 
     /// <summary>Largest gap between two audio frames leaving this lane since the last call, in

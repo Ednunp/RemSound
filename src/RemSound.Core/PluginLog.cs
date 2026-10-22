@@ -16,16 +16,25 @@ namespace RemSound.Core;
 /// reloading the plugin, which matters when the interesting fault has already started.</para>
 ///
 /// <para><b>Nothing here is called from the audio thread.</b> That thread only bumps counters (see
-/// <see cref="Count"/>, which is a lock-free add); the once-a-second snapshot (written once a minute, and every second
-/// around a problem - <see cref="LogDetailRule"/>) and every event line are written from a background timer. Writing a line from a DAW's audio callback would be a file system
-/// call in the middle of somebody's take.</para>
+/// <see cref="Count"/>, which is a lock-free add); the once-a-second readings (to the readings file, a row a minute and
+/// every second around a problem - <see cref="ReadingsRecorder"/>) and every event line are written from a background
+/// timer. Writing a line from a DAW's audio callback would be a file system call in the middle of somebody's take.</para>
 /// </summary>
 public sealed class PluginLog : IDisposable
 {
-    private const string SnapHeader =
-        "Kind\tTimestamp\tInstance\tJob\tPeer\tConnected\tHostRate\tBlockFrames\tResampling\t" +
-        "BlocksOut\tBlocksIn\tShortBlocks\tRingFrames\tBytesOut\tBytesIn\tKnownPeers\t" +
-        "HostCalls\tLastFrames\tSubmitted\tBusFlushed\tBusSenders\tInputPeakDb";
+    /// <summary>The plugin's readings file (2026-10-22, issue 35): what it said every second as named columns, beside its log,
+    /// as the app's are (<see cref="ReadingsRecorder"/>) - a row for every minute, and every second around late sound or
+    /// RemSound not answering.</summary>
+    public static readonly ReadingsSchema Schema = new(
+    [
+        new("job", ReadingAgg.Last, Text: true), new("peer", ReadingAgg.Last, Text: true), new("connected", ReadingAgg.Last),
+        new("hostRate", ReadingAgg.Last), new("blockFrames", ReadingAgg.Last), new("resampling", ReadingAgg.Last),
+        new("blocksOut", ReadingAgg.Last), new("blocksIn", ReadingAgg.Last), new("shortBlocksTotal", ReadingAgg.Last),
+        new("lateBlocks", ReadingAgg.Sum), new("ringFrames", ReadingAgg.Mean), new("ringFramesMin", ReadingAgg.Min),
+        new("bytesOut", ReadingAgg.Last), new("bytesIn", ReadingAgg.Last), new("knownPeers", ReadingAgg.Last),
+        new("hostCalls", ReadingAgg.Last), new("lastFrames", ReadingAgg.Last), new("submitted", ReadingAgg.Last),
+        new("busFlushed", ReadingAgg.Last), new("busSenders", ReadingAgg.Last), new("inputPeakDb", ReadingAgg.Max),
+    ]);
 
     private readonly object writeGate = new();
     private readonly Guid instanceId;
@@ -33,16 +42,19 @@ public sealed class PluginLog : IDisposable
     private bool creationFailed;
     private long bytesWritten;
     private int fileOrdinal;
-    /// <summary>The name this instance's first file settled on (LogFileNames): every later part carries it, with "-partN".</summary>
+    /// <summary>The name this instance's first file settled on (LogFileNames): every later part carries it, with "-partN",
+    /// and so does its readings file.</summary>
     private string? sessionStem;
-    /// <summary>When the once-a-second line is written: one a minute, and every second around a short block or the link
-    /// dropping (LogDetailRule, 2026-10-19).</summary>
-    private readonly LogDetailRule detailRule = new();
+    private ReadingsRecorder? readings;
+    private StreamWriter? readingsWriter;
+    /// <summary>Runs of late sound, as the app's runs of gaps (GapEpisodes): a capture when one starts or gets clearly
+    /// worse, a line when it ends.</summary>
+    private readonly GapEpisodes lateSound = new();
     private long lastShortBlocks = -1;
     private bool wasConnected;
-    /// <summary>The clock the per-second rule runs on (a test seam).</summary>
-    internal Func<DateTime> UtcNowForTest { get; set; } = () => DateTime.UtcNow;
-    /// <summary>One second's line, on demand: the gate steps the clock and pauses the timer (<see cref="Pause"/>).</summary>
+    /// <summary>The clock the log runs on (a test seam): this computer's time.</summary>
+    internal Func<DateTime> NowForTest { get; set; } = () => DateTime.Now;
+    /// <summary>One second's readings, on demand: the gate steps the clock and pauses the timer (<see cref="Pause"/>).</summary>
     internal void WriteSnapshotForTest() => WriteSnapshot();
     // Explicitly System.Threading: Core has WinForms in scope, and a WinForms timer needs a message
     // loop the DAW does not give us.
@@ -61,12 +73,14 @@ public sealed class PluginLog : IDisposable
     /// and null again if creation failed — never a path to a file this log does not own.</summary>
     public string? Path { get; private set; }
 
-    /// <summary>How many per-second lines have been written. The gate waits on this rather than
-    /// polling the file: reading a log its own writer still holds open is a sharing fight that proves
-    /// nothing about the logging.</summary>
+    /// <summary>The readings file, once its first row is written.</summary>
+    public string? ReadingsPath { get; private set; }
+
+    /// <summary>How many seconds' readings have been taken. The gate waits on this rather than polling the files: reading
+    /// a file its own writer still holds open is a sharing fight that proves nothing about the logging.</summary>
     internal long SnapshotsWritten { get; private set; }
 
-    /// <summary>What the once-a-second line reports. Set from the plugin's own state; read on the
+    /// <summary>What the once-a-second readings report. Set from the plugin's own state; read on the
     /// timer thread, so every field is written as a whole value rather than built up in pieces.</summary>
     public Func<PluginLogSnapshot>? SnapshotSource { get; set; }
 
@@ -99,20 +113,26 @@ public sealed class PluginLog : IDisposable
         }
     }
 
-    /// <summary>One thing that happened. Free-text, plain English, so the file is readable by whoever
-    /// is sent it rather than only by whoever wrote the code.</summary>
+    /// <summary>One thing that happened, in plain English, so the file is readable by whoever is sent it. Its severity
+    /// and category come from its words (LogLines); anything not otherwise sorted is the plugin's.</summary>
     public void Event(string message)
+    {
+        var (level, category, text) = LogLines.Classify(message);
+        Event(level, category == "App" ? "Plugin" : category, text);
+    }
+
+    public void Event(LogLevel level, string category, string text)
     {
         if (!Enabled) return;
         lock (writeGate)
         {
             if (!EnsureOpenLocked()) return;
-            WriteLineLocked($"EVT\t{Stamp()}\t{Short(instanceId)}\t{message}");
+            WriteLineLocked(LogLines.Format(level, NowForTest(), category, text));
         }
     }
 
-    /// <summary>Stop the once-a-second line while the instance is deactivated - a plugin removed from its track would
-    /// otherwise write one a second until the DAW closed - and start it again.</summary>
+    /// <summary>Stop the once-a-second readings while the instance is deactivated - a plugin removed from its track would
+    /// otherwise take one a second until the DAW closed - and start them again.</summary>
     public void Pause() { try { snapshotTimer?.Change(Timeout.Infinite, Timeout.Infinite); } catch (ObjectDisposedException) { } }
 
     public void Resume() { try { snapshotTimer?.Change(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1)); } catch (ObjectDisposedException) { } }
@@ -124,7 +144,7 @@ public sealed class PluginLog : IDisposable
         if (!Enabled)
         {
             // Off means off: nothing waiting from before may reach the file if logging comes back on.
-            lock (writeGate) detailRule.Forget();
+            lock (writeGate) readings?.Forget();
             return;
         }
         PluginLogSnapshot snap;
@@ -134,30 +154,40 @@ public sealed class PluginLog : IDisposable
         lock (writeGate)
         {
             if (!EnsureOpenLocked()) return;
-            var line = string.Join('\t',
-                "SNAP", Stamp(), Short(instanceId), snap.Job, snap.Peer ?? "-", snap.Connected ? "yes" : "no",
-                snap.HostSampleRate.ToString("0"), snap.BlockFrames, snap.Resampling ? "yes" : "no",
-                snap.BlocksOut, snap.BlocksIn, snap.ShortBlocks, snap.RingFrames,
-                snap.BytesOut, snap.BytesIn, snap.KnownPeers,
-                snap.HostCalls, snap.LastFrames, snap.Submitted, snap.BusFlushed, snap.BusSenders,
-                snap.InputPeakDb <= -120 ? "silent" : snap.InputPeakDb.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture));
-            var now = UtcNowForTest();
-            // Something went wrong on this track since the last second: sound arrived late, or RemSound stopped answering.
-            // Then the last 30 seconds' lines are written, and the next 30 as they come.
-            var shortNow = lastShortBlocks >= 0 && snap.ShortBlocks > lastShortBlocks ? snap.ShortBlocks - lastShortBlocks : 0;
-            var why = shortNow > 0 ? $"{shortNow} block{(shortNow == 1 ? "" : "s")} of sound arrived late"
-                    : wasConnected && !snap.Connected ? "RemSound stopped answering"
-                    : null;
+            var now = NowForTest();
+            var late = lastShortBlocks >= 0 && snap.ShortBlocks > lastShortBlocks ? snap.ShortBlocks - lastShortBlocks : 0;
+            var row = new ReadingsRow(Schema, [])
+                .Text("job", snap.Job).Text("peer", snap.Peer ?? "-").Set("connected", snap.Connected)
+                .Set("hostRate", snap.HostSampleRate).Set("blockFrames", snap.BlockFrames).Set("resampling", snap.Resampling)
+                .Set("blocksOut", snap.BlocksOut).Set("blocksIn", snap.BlocksIn).Set("shortBlocksTotal", snap.ShortBlocks)
+                .Set("lateBlocks", late).Set("ringFrames", snap.RingFrames).Set("ringFramesMin", snap.RingFrames)
+                .Set("bytesOut", snap.BytesOut).Set("bytesIn", snap.BytesIn).Set("knownPeers", snap.KnownPeers)
+                .Set("hostCalls", snap.HostCalls).Set("lastFrames", snap.LastFrames).Set("submitted", snap.Submitted)
+                .Set("busFlushed", snap.BusFlushed).Set("busSenders", snap.BusSenders);
+            if (snap.InputPeakDb > -120) row.Set("inputPeakDb", Math.Round(snap.InputPeakDb, 1));
+            readings ??= new ReadingsRecorder(Schema, WriteReadingLineLocked);
+            // The rows first, so this second is among the ones a capture keeps. Then: sound arriving late on this track (a
+            // run of it, as the app's runs of gaps), or RemSound no longer answering (the five minutes before it kept).
+            readings.Second(now, row);
+            SnapshotsWritten++;
+            foreach (var change in lateSound.Second(now, late, 0))
+            {
+                var words = change.Words.Replace("gaps", "late blocks").Replace("gap", "late block");
+                if (change.Kind is GapEpisodes.Kind.Started or GapEpisodes.Kind.Worse)
+                {
+                    var (from, to) = readings.Capture(now, TimeSpan.FromSeconds(30));
+                    words += $" - every second from {from:HH:mm:ss} to {to:HH:mm:ss} goes in the readings file";
+                }
+                WriteLineLocked(LogLines.Format(change.Kind == GapEpisodes.Kind.StillGoing ? LogLevel.Info : LogLevel.Warn, now, "Plugin", words));
+            }
+            if (wasConnected && !snap.Connected)
+            {
+                var (from, to) = readings.Capture(now, TimeSpan.FromMinutes(5));
+                WriteLineLocked(LogLines.Format(LogLevel.Warn, now, "Plugin",
+                    $"RemSound stopped answering - every second from {from:HH:mm:ss} to {to:HH:mm:ss} goes in the readings file"));
+            }
             lastShortBlocks = snap.ShortBlocks;
             wasConnected = snap.Connected;
-            if (why is not null && detailRule.Trouble(now, why) is { } burst)
-            {
-                WriteOpenLocked($"EVT\t{Stamp()}\t{Short(instanceId)}\t{burst.Heading}");
-                foreach (var waiting in burst.Lines) WriteOpenLocked(waiting);
-            }
-            if (!detailRule.Line(now, line)) return;
-            SnapshotsWritten++;
-            WriteOpenLocked(line);
         }
     }
 
@@ -185,8 +215,10 @@ public sealed class PluginLog : IDisposable
                 AutoFlush = true,   // a DAW that hangs must still leave the log that explains why
             };
             bytesWritten = 0;
-            writer.WriteLine(SnapHeader);
-            writer.WriteLine($"EVT\t{Stamp()}\t{Short(instanceId)}\tplugin log started (host process {Environment.ProcessId})");
+            var now = NowForTest();
+            writer.WriteLine(LogLines.Format(LogLevel.Info, now, "Plugin",
+                $"plugin log {(fileOrdinal == 1 ? "started" : "continued")} {now:dddd d MMMM yyyy}, instance {Short(instanceId)}, host process "
+                + $"{Environment.ProcessId}. What it measures every second is in {stem}-readings.csv beside this file."));
             return true;
         }
         catch
@@ -203,10 +235,23 @@ public sealed class PluginLog : IDisposable
         }
     }
 
-    /// <summary>A line that may follow a roll to the next file: opens it first.</summary>
-    private void WriteOpenLocked(string line)
+    private void WriteReadingLineLocked(string line)
     {
-        if (EnsureOpenLocked()) WriteLineLocked(line);
+        try
+        {
+            if (readingsWriter is null)
+            {
+                if (sessionStem is null || Path is null) return;
+                ReadingsPath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(Path)!, $"{sessionStem}-readings.csv");
+                readingsWriter = new StreamWriter(new FileStream(ReadingsPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite), Encoding.UTF8) { AutoFlush = true };
+            }
+            readingsWriter.WriteLine(line);
+        }
+        catch
+        {
+            try { readingsWriter?.Dispose(); } catch { }
+            readingsWriter = null;
+        }
     }
 
     private void WriteLineLocked(string line)
@@ -216,7 +261,7 @@ public sealed class PluginLog : IDisposable
             writer!.WriteLine(line);
             bytesWritten += line.Length + 2;
             if (bytesWritten < RollAfterBytes) return;
-            writer.WriteLine($"EVT\t{Stamp()}\t{Short(instanceId)}\tfile full, continued in the next one");
+            writer.WriteLine(LogLines.Format(LogLevel.Info, NowForTest(), "Plugin", "this file has reached its size limit - the log goes on in a fresh file"));
             writer.Dispose();
             writer = null;
         }
@@ -229,7 +274,6 @@ public sealed class PluginLog : IDisposable
         }
     }
 
-    private static string Stamp() => DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
     private static string Short(Guid id) => id.ToString("N")[..8];
 
     public void Dispose()
@@ -238,8 +282,11 @@ public sealed class PluginLog : IDisposable
         snapshotTimer = null;
         lock (writeGate)
         {
+            try { if (enabled) readings?.Flush(NowForTest(), closeMinute: true); } catch { }
             try { writer?.Dispose(); } catch { }
+            try { readingsWriter?.Dispose(); } catch { }
             writer = null;
+            readingsWriter = null;
         }
     }
 }

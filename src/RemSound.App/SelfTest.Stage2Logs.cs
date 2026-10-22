@@ -97,7 +97,8 @@ internal static partial class SelfTest
                 var sendFrames = System.Text.RegularExpressions.Regex.Match(line, @"send frames=(\d+)/s");
                 Check(sendFrames.Success && long.Parse(sendFrames.Groups[1].Value) > 0,
                     $"on a send-only machine the long-run report must count the frames sent - it read \"send frames=0/s\" on every one of them (got: {line})");
-                lock (captured) Check(captured.Any(l => l.StartsWith("sender-diag ", StringComparison.Ordinal)), "premise: the tick must have taken the send-only branch");
+                // The send-only branch is the one that reads the capture callbacks into the readings (2026-10-22).
+                Check(form.LastReadingsForTest?.Cell("captureCallbacks") is not null, "premise: the tick must have taken the send-only branch");
                 return $"the real tick on a send-only machine hands its frames to the long-run report ({sendFrames.Groups[1].Value}/s)";
             }
             finally

@@ -1333,7 +1333,9 @@ internal static partial class SelfTest
             {
                 var dir = AppConfig.LogsDirectory;
                 if (!Directory.Exists(dir)) return 0;
-                return Directory.GetFiles(dir, "*.log", SearchOption.AllDirectories).Sum(f => new FileInfo(f).Length);
+                // The log and its readings file both (2026-10-22): off has to mean neither grows.
+                return Directory.GetFiles(dir, "*.*", SearchOption.AllDirectories).Where(f => f.EndsWith(".log", StringComparison.OrdinalIgnoreCase)
+                    || f.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)).Sum(f => new FileInfo(f).Length);
             }
             catch { return 0; }
         }
@@ -1341,11 +1343,11 @@ internal static partial class SelfTest
         static void DriveEveryWritePath(RemSoundLog log, string marker)
         {
             log.Event($"{marker} event");
-            log.Snapshot(true, true, true, "Opus", 30, 30, 20, 1, 2, $"{marker} sender", 3, 4, 0, 0,
-                $"{marker} receive", "ok", 0, 0, 30, 30);
-            // The lines made every second, and the problem that writes the ones waiting (2026-10-19).
-            log.Detail($"{marker} detail");
-            log.Trouble($"{marker} trouble", evenInsideTheGap: true);
+            // The readings made every second, a problem that keeps the ones waiting, and writing them out (2026-10-22).
+            log.Readings(new ReadingsRow(AppReadings.Schema, []).Text("codec", $"{marker} readings").Set("cpuPercent", 1));
+            log.Event(LogLevel.Warn, "Peer", $"{marker} said its own level");
+            log.Capture($"{marker} capture", TimeSpan.FromMinutes(5));
+            log.FlushReadings();
         }
 
         var tapped = new List<string>();

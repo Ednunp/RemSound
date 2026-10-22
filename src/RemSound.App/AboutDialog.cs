@@ -21,6 +21,10 @@ internal sealed class AboutDialog : Form
     /// compiled into the exe until 2026-09-13 and never shown.)</summary>
     private const string ReleaseNotes =
         """
+        RemSound v6.2.3
+
+        Further logging improvements. The log now holds just what happened, and every line starts with INFO, WARN or ERROR and a category, so you can search for the problems. A peer disconnecting says why, and each connection ends with a short summary. A run of audible gaps is one line when it starts and one when it ends. Everything RemSound measures goes into a spreadsheet file beside the log, with a row for every minute, and every second around a problem.
+
         RemSound v6.2.2
 
         Logs are now much smaller and easier to read: RemSound writes a short summary once a minute, keeps full detail only around a moment when something goes wrong, and names each file by date. The Logging tab in Preferences can open the current log or the logs folder for you, and the manual now links to the Mac version of RemSound.
@@ -78,27 +82,6 @@ internal sealed class AboutDialog : Form
         - A third RemSound plugin no longer crashes REAPER.
 
         Server status and hearing yourself need server-v2.16 or later.
-
-        RemSound v6.0
-
-        RemSound now works inside your music software.
-
-        The DAW plugin. Put RemSound on a track in your music software, such as Reaper. The track can send its sound to your peers, or bring peers onto the track to record and mix. Install it from the new DAW plugin menu.
-
-        Context help. Press F1 on any control, menu item or tab to open that part of the manual. Shift+F1 opens the whole manual.
-
-        Accepting connections. When someone with your password connects to you first, RemSound can ask you, accept them automatically, or leave it to you. Choose on the new Connectivity tab in Preferences.
-
-        Servers for more than two. Connect to a server and everyone there with your password is listed. Tick who you want, and each person gets their own volume, pan, EQ and recording track.
-
-        Also new:
-        - A Total latency box shows the delay from their microphone to your ears.
-        - Auto-tune finds the right jitter buffer faster.
-        - Uninstalling can remove the plugin and the lock-screen service too.
-        - Double-click scripts install or remove the plugin and the service.
-        - With logging on, the log records every change you make.
-
-        And lots of little fixes under the hood.
 
         Older releases, back to v1.0, are on the RemSound releases page on GitHub.
         """;

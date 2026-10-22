@@ -775,7 +775,7 @@ ul, ol { padding-left: 1.4em; }
 
 <p>Most people only need to pick a codec and a smoothness level, and leave everything else at its default.</p>
 
-<p>To compare settings, tick <strong>Enable logs for this profile</strong> on the Logging tab of Preferences. The log then has a line starting <code>streams</code> once a minute, and every second around a dropout (see <a href="#logs-detail">how often the log writes</a>): which audio setup is in use, how many dropouts each output had that second, what the ASIO side is sending (Jamulus-style frames, and to how many), and, for every stream you are hearing, how its packets are arriving and how deep a buffer it is playing at. A line starting <code>Jamulus-style Opus:</code> says whenever this computer starts or stops asking for the frames.</p>
+<p>To compare settings, tick <strong>Enable logs for this profile</strong> on the Logging tab of Preferences. The <a href="#logs-detail">readings file</a> then has a row for each stream on each output, every minute and every second around a run of gaps, saying which audio setup is in use, how many dropouts each output had that second, what the ASIO side is sending (Jamulus-style frames, and to how many), and, for every stream you are hearing, how its packets are arriving and how deep a buffer it is playing at. A line starting <code>Jamulus-style Opus:</code> says whenever this computer starts or stops asking for the frames.</p>
 
 <h2 id="pan-eq">9. Volume, pan and EQ for peers tab</h2>
 
@@ -1914,19 +1914,39 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <p>Everything to do with logging lives on its own <strong>Logging</strong> tab in the Preferences dialog (Options &rarr; Preferences, or Ctrl+P). If logging is turned on for the profile you are using (the <strong>Enable logs for this profile</strong> checkbox there, off in a new profile), RemSound writes a log file each session into a <code>logs</code> folder inside <strong>user settings and logs</strong> &mdash; the same folder your settings and profiles live in. A new file each time RemSound starts or you switch profile, and a fresh one whenever a file reaches 50 MB.</p>
 
-<p>Each file is named by when it started and then your computer&rsquo;s name &mdash; for example <code>RemSound-2026-10-19-0849-ED_DT.log</code> &mdash; so the folder lists them in the order they started and the newest is last. A later file in the same session ends <code>-part2</code>, <code>-part3</code> and so on. If two copies of RemSound start in the same minute, the second one&rsquo;s name also carries its process number, so they never share a file.</p>
+<p>Each file is named by when it started and then your computer&rsquo;s name &mdash; for example <code>RemSound-2026-10-19-0849-ED_DT.log</code> &mdash; so the folder lists them in the order they started and the newest is last. A later file in the same session ends <code>-part2</code>, <code>-part3</code> and so on. If two copies of RemSound start in the same minute, the second one&rsquo;s name also carries its process number, so they never share a file. Beside each log is its readings file, with the same name and <code>-readings.csv</code> on the end.</p>
 
-<p>The file contains two kinds of rows:</p>
+<h3 id="logs-what">What the log says</h3>
 
-<table>
-<tr><th>Kind</th><th>Contents</th></tr>
-<tr><td>EVT</td><td>Event lines &mdash; startup, a peer being selected, capture starting, errors, and so on.</td></tr>
-<tr><td>SNAP</td><td>Snapshots of running figures: codec, jitter buffer, how much sound is buffered, packets sent, packets received, drop-outs, drops, and peer round-trip times. Written as the next paragraph says.</td></tr>
-</table>
+<p>The log is a plain text file of what happened, one line each: peers connecting and disconnecting, the server, devices, settings you change, updates and errors. Every line starts with a <strong>severity word</strong>, then the time, then a <strong>category</strong>:</p>
+<ul>
+<li><code>INFO</code> &mdash; something happened.</li>
+<li><code>WARN</code> &mdash; something went wrong, or nearly: a peer disconnecting, a run of audible gaps, this computer&rsquo;s network changing.</li>
+<li><code>ERROR</code> &mdash; something failed.</li>
+</ul>
+<p>For example: <code>WARN 14:02:31.250 Peer: LAPTOP disconnected: it stopped answering - no reply to its pings for 6 seconds</code>. So you can search the file for WARN or ERROR to find just the problems, or for a category such as Peer, Server or Gaps. The first line says which version of RemSound and which computer wrote it, the date, and where the readings are; the date is said again whenever it changes.</p>
 
-<p id="logs-detail"><strong>How often.</strong> Events are always written as they happen. The lines RemSound makes every second &mdash; the snapshot, a diagnostic line, a line for each stream of sound and the delay estimate &mdash; are written once a minute, which is enough to show anything that changes slowly, such as memory or a buffer drifting. When something goes wrong &mdash; an audible gap, or a peer disconnecting &mdash; RemSound writes every second&rsquo;s lines from the 30 seconds before it, under a line starting <code>detail:</code> that says what happened, then the next 30 seconds as they come. That happens at most once every ten minutes, so a computer that keeps breaking up doesn&rsquo;t fill the file; the next <code>detail:</code> line says how many problems were left out in between. When a peer comes back after disconnecting, its line says how long it was gone. So a session of several hours makes a file you can read, rather than tens of megabytes.</p>
+<p id="logs-problems"><strong>The lines about problems.</strong></p>
+<ul>
+<li><strong>A peer disconnecting</strong> says who and why: it stopped answering its pings, and for how long, or it left the server &mdash; and whether this computer&rsquo;s network had changed, or it had woken from sleep, just before. When it comes back, its line says how long it was gone.</li>
+<li><strong>A connection ending</strong> gets one summary line: how long it lasted, its audible gaps, how many packets were lost, how low its buffer got, and its ping on average and at worst.</li>
+<li><strong>A run of audible gaps</strong> is one line when it starts and one when it ends, a minute after the last gap: how long it went on, how many gaps, the longest, and the stream most of them were on &mdash; for example <code>gaps ended after 14 minutes: 312 gaps, the longest 40 ms, on the stream from ... on ASIO</code>. A gap much longer than any before it gets a line of its own, and a run that goes on for hours says so once an hour.</li>
+<li><strong>This computer&rsquo;s network changing</strong> is a line of its own, saying what is connected now.</li>
+</ul>
 
-<p id="help-prefs.logging.write-logs-now">The <strong>Write logs now</strong> button on the Logging tab (Alt+W within the dialog) writes a &ldquo;user requested write logs now&rdquo; marker into the log, so you can find that moment in the file afterwards, and with it every second&rsquo;s lines from the 30 seconds before and the 30 after &mdash; even if RemSound has just done that for a problem of its own. Press it straight after you hear something go wrong. It only writes anything while <strong>Enable logs for this profile</strong> is ticked.</p>
+<h3 id="logs-detail">The readings file</h3>
+
+<p>What RemSound measures every second &mdash; how much sound is waiting to be played, packets and gaps, each stream&rsquo;s arrivals, the delay estimate, CPU and memory &mdash; goes into a second file beside the log, with the same name and <code>-readings.csv</code> on the end. It is a spreadsheet file: it opens in Excel, with a header row naming each column.</p>
+<ul>
+<li><strong>A row for every minute</strong> (Kind <code>minute</code>) sums the whole minute up: counts added up, peaks at their highest, low points at their lowest, levels averaged, and running totals as they ended. Its time is when the minute ended.</li>
+<li><strong>A row for every second</strong> (Kind <code>second</code>) is kept only around a problem: the 30 seconds before a run of gaps starts and the 30 after; the five minutes before each disconnect and the 30 seconds after, however many there are; and the five minutes before you press Write logs now.</li>
+<li>Rows with a <strong>Stream</strong> and an <strong>Output</strong> are one stream of sound on one output: its packets, lost packets, arrival gaps, buffer depth and audible gaps.</li>
+<li>A reading is only filled in while the thing it measures is in use: the WASAPI output&rsquo;s while a WASAPI output is ticked, the ASIO output&rsquo;s while an ASIO one is, a send lane&rsquo;s while it is sending, and so on. An empty cell means not in use; a 0 means measured, and none.</li>
+<li>The file is written five minutes behind, so that a disconnect can still keep the five minutes before it. It catches up when RemSound closes, when logging is switched off, and when you press Write logs now.</li>
+</ul>
+<p>The most useful columns when something feels wrong: <code>gaps</code> and <code>longestGapMs</code> (audible gaps, and how long the longest lasted), <code>bufferMs</code> (how much sound is waiting to be played, which should sit near your jitter buffer setting), <code>wireMissed</code> and <code>lostPackets</code> (packets that never arrived), <code>peers</code> (each peer&rsquo;s round trip, or how long it has been unreachable) and <code>latencyMs</code> (the estimated delay one way).</p>
+
+<p id="help-prefs.logging.write-logs-now">The <strong>Write logs now</strong> button on the Logging tab (Alt+W within the dialog) writes a &ldquo;user requested write logs now&rdquo; marker into the log, so you can find that moment afterwards, and keeps every second of the five minutes before it and the 30 seconds after in the readings file, writing it out at once. Press it straight after you hear something go wrong. It only writes anything while <strong>Enable logs for this profile</strong> is ticked.</p>
 
 <p id="help-prefs.logging.open-current-log">The <strong>Open current log</strong> button on the Logging tab (Alt+O within the dialog) opens the log RemSound is writing right now, in the program Windows uses for .log files (usually Notepad). If logging is off for this profile there is no current log, and it says so.</p>
 
@@ -1949,7 +1969,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 
 <p>You get one file per plugin instance, so two tracks each running RemSound produce two files. Between them the app's log and the plugin's cover both halves of the conversation, which is why sending both is worth doing if something needs looking at.</p>
 
-<p>The plugin's file has the same two kinds of rows. Its snapshot line is written once a minute, and every second for the 30 seconds either side of sound arriving late or RemSound stopping answering, as the app&rsquo;s lines are. It records what that track was doing, whether RemSound was answering, what your music software was set to, whether RemSound had to convert the sound to match it, whether any sound arrived late, and how much sound was waiting to be played. If a track ever sounds wrong, that line is usually where the reason is.</p>
+<p>The plugin&rsquo;s log reads the same way, every line starting with a severity word, and its readings file sits beside it the same way: a row for every minute, and every second around a run of sound arriving late on that track, or RemSound no longer answering. The readings say what that track was doing, whether RemSound was answering, what your music software was set to, whether RemSound had to convert the sound to match it, whether any sound arrived late, and how much sound was waiting to be played. If a track ever sounds wrong, that line is usually where the reason is.</p>
 
 <p>You can turn logging on while your music software is already open &mdash; the plugin notices within a second and starts a file, so you do not have to reload anything to catch a fault that has already begun.</p>
 
@@ -1960,17 +1980,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <ul>
 <li><strong>Warn at startup if the logs folder is larger than&hellip; megabytes</strong> (Alt+S) &mdash; tick this and pick a size, and the next time RemSound starts it checks the folder and pops up a friendly notice if it has grown past that size. It only warns; it never deletes anything itself. The size box (Alt+M) starts at 100 megabytes and stays greyed out until you tick the box.</li>
 <li><strong>Delete logs older than&hellip; days old</strong> (Alt+D) &mdash; tick this and pick a number of days, from 1 to 30, and each time RemSound starts it quietly clears out any log older than that. The log it's writing right now is never touched. The days box (Alt+Y) starts at 14 and stays greyed out until you tick the box.</li>
-<li id="help-prefs.logging.delete-all"><strong>Delete all logs</strong> (Alt+A) &mdash; a button that permanently deletes every log file in the logs folder in one go. It asks you to confirm first, Yes or No (No is the default), then tells you how many it removed. The log RemSound is writing right now is kept; everything else goes, and it cannot be undone.</li>
-</ul>
-
-<p>Logs are plain text and can be opened in any text editor, or in a spreadsheet. The most useful figures when something feels wrong:</p>
-<ul>
-<li><strong>BufferMs</strong> &mdash; how much sound is queued up ready to play. It should sit close to your jitter buffer setting.</li>
-<li><strong>Underruns</strong> &mdash; how many times the playback reserve ran dry. Each one is a tiny click. A few per minute is normal over the internet; hundreds per second means something is broken.</li>
-<li><strong>Drops</strong> &mdash; packets thrown away because the reserve overflowed. This should stay near zero in normal use.</li>
-<li><strong>Heartbeat</strong> &mdash; the round-trip time to each connected peer. <code>pending</code> / <code>unreachable</code> / <code>stale</code> mean there's a problem.</li>
-<li><strong>OpusFecRecoveries</strong> &mdash; a running total of single missing packets that Opus quietly repaired. A number that's growing means Opus is saving you from clicks. Only meaningful when an Opus codec is in use.</li>
-<li><strong>OpusUnrecoveredGaps</strong> &mdash; a running total of multi-packet losses that Opus couldn't repair. Each one is an audible click. It stays at 0 on a clean connection; small numbers are normal over the internet.</li>
+<li id="help-prefs.logging.delete-all"><strong>Delete all logs</strong> (Alt+A) &mdash; a button that permanently deletes every log file in the logs folder in one go, readings files included. It asks you to confirm first, Yes or No (No is the default), then tells you how many it removed. The log RemSound is writing right now is kept; everything else goes, and it cannot be undone.</li>
 </ul>
 
 <p>Networks now and then deliver a packet twice, or let one packet overtake another. RemSound drops a packet that turns up after a newer one has already been played, because its moment has passed and the gap it left has already been filled; playing it anyway would be heard as a click and a small jump in the delay. And when a packet seems to be missing, RemSound waits for one more packet before covering the gap, as long as the buffer holds enough sound to cover the wait, so a packet that was only overtaken slots back into place instead of being treated as lost. A sender that starts counting its packets again, as one does when its program restarts, is recognised and followed, so it keeps playing. With logs on, the once-a-second <code>streams</code> line shows how many were dropped as <code>late-dropped</code>.</p>
@@ -1997,7 +2007,7 @@ Use whatever key combinations you prefer (for example Ctrl+Shift+Up / Ctrl+Shift
 <tr><td><code>--list-named-peers</code></td><td>Lists the friendly names you've given peers, with each one's machine name and where and when it was last seen. It only reads them and changes nothing.</td></tr>
 <tr><td><code>--selftest</code><br>(or <code>--smoke-test</code>)</td><td>Runs RemSound's built-in self-test and reports <strong>PASS</strong> or <strong>FAIL</strong>. It works through a list of named checks. It passes a test sound through RemSound's whole path on this computer alone &mdash; picking it up, packing it, sending it to itself, receiving it and unpacking it &mdash; once with PCM and once with Opus. It also checks the encryption, the format of the messages sent over the network, saving and loading settings and profiles, that a support report never contains a password, and that the built-in sounds and this manual are present. Nothing is played out loud, so it is safe to run silently. Add <code>--seconds N</code> to make the sound part run for longer than the default. For developers, <code>--pack feature</code> runs only the core checks and the ones for what has changed since the last commit; it always says it is not a full pass.</td></tr>
 <tr><td><code>--perftest</code><br>[<code>--seconds N</code>]</td><td>Runs the audio path through several short cycles and checks that RemSound doesn't keep using more and more of the computer's memory and resources as it runs. Prints the numbers each cycle so two versions can be compared. Nothing is played out loud.</td></tr>
-<tr><td><code>--diagnostics</code></td><td>Writes a single plain-text report file holding the version, the operating system, the current settings, the list of profiles, the full device list, a check of the Windows microphone-privacy permission, a quick live audio self-check, the most recent session snapshot and recent warnings from the log, and the tail of the most recent log. With no path it saves into the <strong>user settings and logs</strong> folder and prints where it put it; you can also give a path, for example <code>--diagnostics C:\Users\you\Desktop\report.txt</code>. This is the file to send when asking for help &mdash; it answers most questions in one go.</td></tr>
+<tr><td><code>--diagnostics</code></td><td>Writes a single plain-text report file holding the version, the operating system, the current settings, the list of profiles, the full device list, a check of the Windows microphone-privacy permission, a quick live audio self-check, the last row of the most recent readings file and the recent warnings and errors from the log, and the tail of the most recent log. With no path it saves into the <strong>user settings and logs</strong> folder and prints where it put it; you can also give a path, for example <code>--diagnostics C:\Users\you\Desktop\report.txt</code>. This is the file to send when asking for help &mdash; it answers most questions in one go.</td></tr>
 </table>
 
 <h3>Options that change a setting or control a running copy, then exit</h3>
