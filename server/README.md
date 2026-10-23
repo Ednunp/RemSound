@@ -43,6 +43,7 @@ has reached a relay and can join its group.
 | `install.sh`                          | sets up the relay AND the auto-updater                                                             |
 | `uninstall.sh`                        | removes everything this bundle installed                                                           |
 | `smoke-test.sh`                       | install-time check (v1 + v2 paths + updater scaffolding). Install time only: see below             |
+| `Dockerfile`, `compose.yaml`          | to run the relay in Docker instead (see below)                                                     |
 | `VERSION`                             | the release tag this bundle represents (`server-vX.Y`)                                             |
 | `README.md`                           | this file                                                                                          |
 
@@ -114,6 +115,20 @@ To uninstall everything cleanly:
 cd "/tmp/remsound-$TAG"   # or wherever the bundle is
 sudo ./uninstall.sh
 ```
+
+## Running in Docker
+
+Instead of `install.sh`, from the bundle folder:
+
+```bash
+docker compose up -d
+```
+
+The relay listens on UDP 47830 (open it as in step 3 above). `docker compose
+logs` shows the log, which is also kept in the `logs` volume. Tunables below
+go in `compose.yaml` as `environment:` entries or `command:` flags. There is no
+auto-updater in the container: to update, get the new bundle and run
+`docker compose up -d --build`.
 
 ## The smoke test is for install time only
 
