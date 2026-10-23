@@ -88,7 +88,12 @@ internal static partial class SelfTest
             Thread.Sleep(200);
             Application.DoEvents();
             Check(server.Equals(main.RelayGroupForTest.ConnectedRelay), "a server silent for only a few seconds must not be looked up again yet");
-            // Silent for longer: looked up, and followed.
+            // Silent for longer: looked up, and followed. A look-up made already is let finish and counted as long ago, so the
+            // 30 s between look-ups is not what decides this: the tick's retry above can still be looking the name up when the
+            // fake address is put in, connect with it, and the network change then looks the server up again at once - and the
+            // next look-up waits 30 s. 2026-10-23: a full gate run under load did exactly that (5 s, then THE MOVE failed).
+            Check(Pumped(() => !main.RelayRecheckRunningForTest), "premise: no look-up of the server may still be running");
+            main.RelayLastRecheckedLongAgoForTest();
             main.RelaySilentSinceForTest(DateTime.UtcNow - MainForm.RelayMovedAfter - TimeSpan.FromSeconds(1));
             main.RetryNameLookupsForTest(networkChanged: false);
             Check(Pumped(() => moved.Equals(main.RelayGroupForTest.ConnectedRelay)),

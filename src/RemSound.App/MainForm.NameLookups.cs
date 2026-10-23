@@ -146,6 +146,8 @@ public sealed partial class MainForm
     internal void ReconnectSavedPeersForTest(IReadOnlyList<string> entries) => ReconnectSavedPeers(entries);
     internal void RelaySilentSinceForTest(DateTime since) => relayNotAnsweringSinceUtc = since;
     internal DateTime? RelayNotAnsweringSinceForTest => relayNotAnsweringSinceUtc;
+    internal bool RelayRecheckRunningForTest => relayRecheckRunning;
+    internal void RelayLastRecheckedLongAgoForTest() => nextRelayRecheckUtc = DateTime.MinValue;
     internal List<string> GatherSelectedPeerEntriesForTest() => GatherSelectedPeerEntries();
     internal void GatherRelayProfileForTest(RemSound.Core.Profile profile) => GatherRelayProfile(profile);
 }
