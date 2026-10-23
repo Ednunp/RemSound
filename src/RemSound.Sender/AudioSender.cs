@@ -337,6 +337,11 @@ public sealed class AudioSender : IDisposable
         //      this; LAN peer-to-peer is unaffected (we still send from this port, peer just
         //      sends to its own well-known port as before).
         udp.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
+        // This is the socket that pings and sends audio to every ticked peer, and the one their pongs come back on. An
+        // offline peer's ICMP port-unreachable must not turn into errors on the receives meant for the live ones: a
+        // 2-hour Tailscale session logged "sender inbound socket error x2048: ConnectionReset" and dropped live peers
+        // for not answering. See UdpResets. 2026-10-23, issue #36.
+        UdpResets.IgnoreIcmpResets(udp.Client);
         // Attach the bound socket to qWAVE Voice flow. Must happen after Bind — qWAVE
         // inspects the local endpoint when it registers the flow. Diagnostics route through
         // the same sink as everything else; if Diagnostic hasn't been wired yet (typical at
@@ -1088,6 +1093,12 @@ public sealed class AudioSender : IDisposable
         // loop as fast as the CPU allowed, with no log line anywhere, so "the socket is broken and we
         // are receiving nothing" looked exactly like "nobody is sending". Back off and say so.
         // 2026-08-23 audit, finding S9.
+        //
+        // But a reset is never "persistent" in that sense: each one is a single datagram's ICMP, and the socket is fine.
+        // Counting them sent this loop into the backoff for a whole session whenever a ticked peer was offline - a steady
+        // trickle of resets, never one alone - so pongs from the live peers sat behind sleeps of up to a second each and
+        // those peers were dropped for not answering. Resets (and an oversize datagram) are skipped without a count;
+        // everything else still backs off. See UdpResets. 2026-10-23, issue #36.
         var consecutiveErrors = 0;
         while (!token.IsCancellationRequested)
         {
@@ -1100,10 +1111,11 @@ public sealed class AudioSender : IDisposable
             catch (SocketException ex) when (ex.SocketErrorCode == SocketError.Interrupted) { break; }
             catch (ObjectDisposedException) { break; }
             catch (OperationCanceledException) { break; }
+            catch (SocketException ex) when (UdpResets.IsPerDatagramNoise(ex.SocketErrorCode)) { continue; }
             catch (SocketException ex)
             {
                 consecutiveErrors++;
-                if (consecutiveErrors == 1) continue;   // the routine single reset — no cost, no noise
+                if (consecutiveErrors == 1) continue;   // a single one-off error — no cost, no noise
                 // Report on a power-of-two ladder so a stuck socket is visible without flooding.
                 if ((consecutiveErrors & (consecutiveErrors - 1)) == 0)
                 {

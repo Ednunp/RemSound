@@ -332,6 +332,7 @@ internal static partial class SelfTest
         ["ECHO AND FLOODS: an address check answered only for somebody we talk to, and junk control packets stopped early"] = (StepTier.Area, "relay-server", "SelfTest.EchoAndFloods.cs"),
         ["UPNP: unticking it holds, even while a renewal is waiting on the router"] = (StepTier.Area, "other", "SelfTest.UpnpOffHolds.cs"),
         ["NETWORK TIDY: discovery's list capped, server lists quiet, the tick list keeps who is there"] = (StepTier.Area, "peers-heartbeat", "SelfTest.NetworkTidy.cs"),
+        ["OFFLINE PEER: its ICMP resets never stall the sender's receive loop, and real socket errors still back off"] = (StepTier.Area, "send", "SelfTest.UdpResets.cs"),
         ["WAITING: the password warning keeps the tick running, the quick switch waits, a silent copy asks nobody"] = (StepTier.Area, "dialogs-ui", "SelfTest.WaitingProperly.cs"),
         ["PASSWORDS: auto-connecting and prompts only on the same password; a peer the profile ticked on another is held quietly, one you tick is warned about"] = (StepTier.Area, "dialogs-ui", "SelfTest.PasswordRule.cs"),
         ["KEY CLICKS: the output open only while clicks are on, and opened again after its device goes"] = (StepTier.Area, "cues-sounds", "SelfTest.AppSweepFixes.cs"),

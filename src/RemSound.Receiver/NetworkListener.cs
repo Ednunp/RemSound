@@ -75,6 +75,9 @@ internal sealed class NetworkListener : IDisposable
         // thread can saturate during a long-tail GC pause.
         socket.ReceiveBufferSize = 1024 * 1024;
         socket.Bind(new IPEndPoint(IPAddress.Any, udpPort));
+        // Nothing is sent from this socket today (pongs and audio go out on the sender's), so no ICMP reset should land
+        // here - but if one ever does, it must not cost the audio a receive. See UdpResets. 2026-10-23.
+        UdpResets.IgnoreIcmpResets(socket);
 
         var startedSocket = socket;
         var token = cts.Token;
@@ -117,6 +120,8 @@ internal sealed class NetworkListener : IDisposable
         // next receive); a PERSISTENT one used to spin this loop flat out with nothing written to the
         // log at all, so a dead receive socket looked exactly like a quiet one.
         // 2026-08-23 audit, finding S9.
+        // Resets and oversize datagrams are one datagram's trouble, not the socket's: skipped without a count, so a
+        // trickle of them can never put this loop into the backoff. See UdpResets. 2026-10-23, issue #36.
         var consecutiveErrors = 0;
         while (!token.IsCancellationRequested)
         {
@@ -129,10 +134,11 @@ internal sealed class NetworkListener : IDisposable
             catch (SocketException ex) when (ex.SocketErrorCode == SocketError.Interrupted) { break; }
             catch (ObjectDisposedException) { break; }
             catch (OperationCanceledException) { break; }
+            catch (SocketException ex) when (UdpResets.IsPerDatagramNoise(ex.SocketErrorCode)) { continue; }
             catch (SocketException ex)
             {
                 consecutiveErrors++;
-                if (consecutiveErrors == 1) continue;   // the routine single reset — no cost, no noise
+                if (consecutiveErrors == 1) continue;   // a single one-off error — no cost, no noise
                 // Report on a power-of-two ladder so a stuck socket is visible without flooding.
                 if ((consecutiveErrors & (consecutiveErrors - 1)) == 0)
                 {

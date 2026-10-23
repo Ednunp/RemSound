@@ -546,6 +546,8 @@ internal static partial class SelfTest
         RunStep(results, "ECHO AND FLOODS: an address check answered only for somebody we talk to, and junk control packets stopped early", NoEchoLoopAndNoFloodReachesTheWindow);
         RunStep(results, "UPNP: unticking it holds, even while a renewal is waiting on the router", UnTickingUpnpHoldsEvenMidRenewal);
         RunStep(results, "NETWORK TIDY: discovery's list capped, server lists quiet, the tick list keeps who is there", NetworkTidyHolds);
+        // 2026-10-23, a Tailscale session with an offline peer ticked: its ICMP resets stalled the live peers' pongs.
+        RunStep(results, "OFFLINE PEER: its ICMP resets never stall the sender's receive loop, and real socket errors still back off", OfflinePeerResetsDoNotStallTheServerPath);
         RunStep(results, "WAITING: the password warning keeps the tick running, the quick switch waits, a silent copy asks nobody", WarningsAndQuestionsWaitProperly);
         RunStep(results, "PASSWORDS: auto-connecting and prompts only on the same password; a peer the profile ticked on another is held quietly, one you tick is warned about", PasswordsDecideConnecting);
         RunStep(results, "KEY CLICKS: the output open only while clicks are on, and opened again after its device goes", KeyClicksOpenOnlyWhileOnAndComeBack);
