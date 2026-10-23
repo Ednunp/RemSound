@@ -737,6 +737,10 @@ public sealed partial class MainForm : Form
     // Realtek ASIO drivers found installed at startup (name contains "Realtek"). Drives the
     // one-time compatibility warning and the Options-menu enable/disable toggle.
     private List<string> realtekAsioDriverNames = new();
+    // The gate's stand-in for the Realtek ASIO drivers found at startup, so the Options-menu toggle that exists only on a
+    // machine with one is built and checked on every machine. 2026-10-23: on Jonathan's computer, which has none, the
+    // context-help guard called the manual's entry for it stale ("menu.options.realtek belongs to nothing").
+    internal static IReadOnlyList<string>? RealtekAsioDriversForTest;
     private ToolStripMenuItem? realtekAsioToggleItem;
     // True while we're rebuilding a CheckedListBox programmatically — suppresses the per-item
     // ItemCheck handler so re-adding pre-checked items doesn't fire ApplyAudioRuntime per item.
@@ -1203,7 +1207,7 @@ public sealed partial class MainForm : Form
         foreach (var d in realtekStartupConfig.DisabledAsioDrivers) disabledAsioDrivers.Add(d);
         // Realtek's bundled ASIO driver leaks OS handles on every open — flag any installed Realtek
         // ASIO driver so OnShown can offer to disable it and the Options menu can toggle it.
-        realtekAsioDriverNames = asioDriverNames.Where(n => AppConfig.IsRealtekAsioDriver(n)).ToList();
+        realtekAsioDriverNames = RealtekAsioDriversForTest?.ToList() ?? asioDriverNames.Where(n => AppConfig.IsRealtekAsioDriver(n)).ToList();
         logFile.Event($"asio drivers enumerated at startup: [{string.Join(", ", asioDriverNames.Select(n => $"\"{n}\""))}]"
             + (disabledAsioDrivers.Count > 0 ? $"; disabled in RemSound: [{string.Join(", ", disabledAsioDrivers)}]" : "")
             + (realtekAsioDriverNames.Count > 0 ? $"; realtek detected: [{string.Join(", ", realtekAsioDriverNames)}]" : ""));

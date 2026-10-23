@@ -148,6 +148,9 @@ internal static partial class SelfTest
 
         var restoreMuted = CuePlayer.GloballyMuted;
         CuePlayer.GloballyMuted = true;
+        // The Realtek ASIO toggle is only in the Options menu when such a driver is installed. Built here on every machine,
+        // so its manual entry is checked everywhere, and never called stale where there is none (2026-10-23, Jonathan).
+        MainForm.RealtekAsioDriversForTest = ["Realtek ASIO (the gate's stand-in)"];
         MainForm? form = null;
         try
         {
@@ -177,10 +180,13 @@ internal static partial class SelfTest
             if (form.MainMenuStrip is { } menuBar)
                 foreach (var item in EveryMenuItem(menuBar.Items)) NeedItem(item, "main window's");
             foreach (var item in EveryMenuItem(form.TrayControllerForTest.TrayMenuForTest.Items)) NeedItem(item, "tray");
+            Check(used.Contains("menu.options.realtek"),
+                "premise: the Realtek ASIO toggle must be in the Options menu for this check, whether or not this computer has a Realtek ASIO driver");
         }
         finally
         {
             try { form?.Dispose(); } catch { /* teardown */ }
+            MainForm.RealtekAsioDriversForTest = null;
             CuePlayer.GloballyMuted = restoreMuted;
         }
 
